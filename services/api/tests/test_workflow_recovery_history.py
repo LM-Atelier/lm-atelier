@@ -1,6 +1,7 @@
 """Permanent workflow deletion retains immutable identities needed by completed history."""
 
 import copy
+from typing import Any
 
 import pytest
 from httpx2 import AsyncClient
@@ -21,7 +22,7 @@ from local_lm.models import (
 )
 
 
-def _history() -> dict[str, list[dict]]:
+def _history() -> dict[str, list[dict[str, Any]]]:
     with SessionLocal() as session:
         return {
             name: [
@@ -40,6 +41,7 @@ async def test_permanent_workflow_deletion_keeps_only_identity_and_completed_his
     with SessionLocal() as session:
         _consumer(session, kind, revision_id, "complete")
         revision = session.get(WorkflowRevision, revision_id)
+        assert revision is not None
         revision.trusted = True
         revision.ui_graph_json = {"nodes": [{"id": 1}]}
         revision.dependencies_json = {"note": "Garden layout configuration"}
@@ -82,6 +84,7 @@ async def test_permanent_workflow_deletion_keeps_only_identity_and_completed_his
             select(WorkflowPreference).where(WorkflowPreference.workflow_family_id == family_id)
         ).all()
         recovery = session.get(RecoveryItem, item["deletion_id"])
+        assert recovery is not None
         assert recovery.state == "purged"
         with pytest.raises(IntegrityError, match="workflow-recovery-write-refused"):
             session.execute(
@@ -134,4 +137,6 @@ async def test_saved_workflow_configuration_still_prevents_permanent_deletion(
     )
     assert response.status_code == 409
     with SessionLocal() as session:
-        assert session.get(WorkflowRevision, revision_id).api_graph_json == graph
+        revision = session.get(WorkflowRevision, revision_id)
+        assert revision is not None
+        assert revision.api_graph_json == graph

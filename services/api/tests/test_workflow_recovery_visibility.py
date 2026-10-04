@@ -19,7 +19,9 @@ from local_lm.workflow_selection import (
 async def _trashed(client: AsyncClient) -> tuple[str, str, str]:
     family_id, definition_id, revision_id, _graph = _seed()
     with SessionLocal() as session:
-        session.get(WorkflowRevision, revision_id).trusted = True
+        revision = session.get(WorkflowRevision, revision_id)
+        assert revision is not None
+        revision.trusted = True
         session.commit()
     preview = await _impact(client, f"/api/workflow-families/{family_id}/deletion-impact")
     response = await client.post(
@@ -74,6 +76,7 @@ async def test_a_permanently_deleted_historical_workflow_is_hidden_and_not_ready
     family_id, definition_id, revision_id, _graph = _seed()
     with SessionLocal() as session:
         revision = session.get(WorkflowRevision, revision_id)
+        assert revision is not None
         revision.trusted = True
         revision.artifact_sha256 = "a" * 64
         _consumer(session, "run", revision_id, "complete")
@@ -115,7 +118,9 @@ async def test_a_restored_disabled_workflow_is_not_accepted_through_its_exact_re
 ) -> None:
     family_id, _definition_id, revision_id, _graph = _seed()
     with SessionLocal() as session:
-        session.get(WorkflowRevision, revision_id).trusted = True
+        revision = session.get(WorkflowRevision, revision_id)
+        assert revision is not None
+        revision.trusted = True
         session.commit()
     with SessionLocal() as reader:
         old_family = reader.get(WorkflowFamily, family_id) if cached else None
@@ -153,6 +158,7 @@ async def test_a_restored_workflow_record_remains_inactive_until_the_family_is_e
     family_id, _definition_id, revision_id, _graph = _seed()
     with SessionLocal() as session:
         revision = session.get(WorkflowRevision, revision_id)
+        assert revision is not None
         revision.trusted = True
         revision.artifact_sha256 = "b" * 64
         session.commit()
@@ -175,7 +181,9 @@ async def test_a_restored_workflow_record_remains_inactive_until_the_family_is_e
         assert family is not None and not family.enabled
         assert _workflow_state(reader, "b" * 64) == "inactive"
         with SessionLocal() as writer:
-            writer.get(WorkflowFamily, family_id).enabled = True
+            stored_family = writer.get(WorkflowFamily, family_id)
+            assert stored_family is not None
+            stored_family.enabled = True
             writer.commit()
         assert not family.enabled
         assert _workflow_state(reader, "b" * 64) == "present"

@@ -1,9 +1,11 @@
 """Deleted workflows do not supply inspections or graphs to an engine."""
 
+from typing import Any
+
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
-from sqlalchemy import select, update
+from sqlalchemy import Table, select, update
 from sqlalchemy.exc import IntegrityError
 from test_chat_recovery import _command, _impact
 from test_prompt_library_api import _contract, _create_payload
@@ -22,7 +24,7 @@ from local_lm.models import (
 from local_lm.prompt_library import prompt_template_workflow_revision_is_ready
 
 
-def _fixed_contract(revision_id: str) -> dict:
+def _fixed_contract(revision_id: str) -> dict[str, Any]:
     return _contract(
         resource_policy={
             "mode": "fixed",
@@ -37,7 +39,9 @@ async def test_saved_template_reference_prevents_workflow_purge_without_changing
 ) -> None:
     family_id, _definition_id, revision_id, graph = _seed()
     with SessionLocal() as session:
-        session.get(WorkflowRevision, revision_id).trusted = True
+        revision = session.get(WorkflowRevision, revision_id)
+        assert revision is not None
+        revision.trusted = True
         session.commit()
     contract = _fixed_contract(revision_id)
     created = await client.post(
@@ -51,6 +55,7 @@ async def test_saved_template_reference_prevents_workflow_purge_without_changing
     assert created.status_code == 201
     with SessionLocal() as session:
         saved = session.scalar(select(PromptTemplateRevision))
+        assert saved is not None
         saved_id, saved_contract, saved_digest = (
             saved.id,
             saved.contract_json,
@@ -75,8 +80,11 @@ async def test_saved_template_reference_prevents_workflow_purge_without_changing
     assert refused.status_code == 409
     with SessionLocal() as session:
         saved = session.get(PromptTemplateRevision, saved_id)
+        assert saved is not None
         assert (saved.contract_json, saved.contract_sha256) == (saved_contract, saved_digest)
-        assert session.get(WorkflowRevision, revision_id).api_graph_json == graph
+        revision = session.get(WorkflowRevision, revision_id)
+        assert revision is not None
+        assert revision.api_graph_json == graph
 
 
 async def test_sql_template_writer_cannot_add_a_reference_after_workflow_trash(
@@ -94,9 +102,11 @@ async def test_sql_template_writer_cannot_add_a_reference_after_workflow_trash(
         )
     ).status_code == 200
     with SessionLocal() as session:
+        table = PromptTemplateRevision.__table__
+        assert isinstance(table, Table)
         with pytest.raises(IntegrityError, match="workflow-recovery-write-refused"):
             session.execute(
-                PromptTemplateRevision.__table__.insert().values(
+                table.insert().values(
                     id="garden-template-revision",
                     prompt_template_id="garden-template",
                     version=1,
@@ -122,9 +132,9 @@ async def test_deleted_workflow_inspections_refuse_before_engine_or_source_acces
     with SessionLocal() as session:
         _consumer(session, "run", revision_id, "complete")
         session.commit()
-    calls = []
+    calls: list[dict[str, Any]] = []
 
-    async def validate(value: dict) -> list[str]:
+    async def validate(value: dict[str, Any]) -> list[str]:
         calls.append(value)
         return []
 
@@ -161,9 +171,9 @@ async def test_deleted_workflow_inspections_refuse_before_engine_or_source_acces
     assert response.json()["code"] == "workflow-not-found"
     assert calls == []
     with SessionLocal() as session:
-        assert session.get(WorkflowRevision, revision_id).api_graph_json == (
-            graph if action == "trash" else {}
-        )
+        revision = session.get(WorkflowRevision, revision_id)
+        assert revision is not None
+        assert revision.api_graph_json == (graph if action == "trash" else {})
 
 
 @pytest.mark.parametrize("include_archived", [False, True])
@@ -174,7 +184,9 @@ async def test_operation_filters_hide_deleted_workflows_and_restore_the_original
     family_id, definition_id, _revision_id, _graph = _seed()
     with SessionLocal() as session:
         session.execute(update(WorkflowDefinition).values(operation="text"))
-        session.get(WorkflowDefinition, definition_id).operation = "image_to_video"
+        definition = session.get(WorkflowDefinition, definition_id)
+        assert definition is not None
+        definition.operation = "image_to_video"
         session.commit()
     params = {"include_archived": include_archived}
     path = "/api/workflow-family-operations"
@@ -207,7 +219,9 @@ async def test_unavailable_workflow_cannot_be_admitted_as_a_fixed_template_resou
 ) -> None:
     family_id, _definition_id, revision_id, _graph = _seed()
     with SessionLocal() as session:
-        session.get(WorkflowRevision, revision_id).trusted = True
+        stored_revision = session.get(WorkflowRevision, revision_id)
+        assert stored_revision is not None
+        stored_revision.trusted = True
         session.commit()
     with SessionLocal() as reader:
         revision = reader.get(WorkflowRevision, revision_id) if cached else None
@@ -231,6 +245,7 @@ async def test_unavailable_workflow_cannot_be_admitted_as_a_fixed_template_resou
                 )
             ).status_code == 200
         revision = revision or reader.get(WorkflowRevision, revision_id)
+        assert revision is not None
         assert not prompt_template_workflow_revision_is_ready(
             reader, revision, expected_engine="mock"
         )
@@ -273,7 +288,9 @@ async def test_project_revision_selection_refuses_a_deleted_workflow_without_par
     assert response.status_code == 404
     assert response.json()["code"] == "workflow-revision-not-found"
     with SessionLocal() as session:
-        assert session.get(Project, project_id).image_workflow_revision_id is None
+        project = session.get(Project, project_id)
+        assert project is not None
+        assert project.image_workflow_revision_id is None
         assert (
             session.scalar(
                 select(ProjectWorkflowSelection).where(
