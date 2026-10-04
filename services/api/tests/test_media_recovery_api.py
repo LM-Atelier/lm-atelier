@@ -1,5 +1,8 @@
 """Recovery routes hide only library membership and retain independently used files."""
 
+from collections.abc import Awaitable, Callable
+from typing import Any
+
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
@@ -9,6 +12,7 @@ from test_media_recovery import CONTENT, _seed
 
 from local_lm.db import SessionLocal
 from local_lm.models import Artifact, ArtifactLibraryEntry, RecoveryItem, RecoveryPreviewRecord
+from local_lm.schemas import EventOut
 
 
 def _media(app: FastAPI) -> tuple[str, str]:
@@ -23,9 +27,13 @@ async def test_media_recovery_routes_keep_identity_replay_and_publish_after_comm
 ) -> None:
     entry_id, artifact_id = _media(app)
     observed: list[tuple[str, str | None]] = []
-    publish = app.state.services.events.publish
+    publish: Callable[[str, str | None, dict[str, Any] | None], Awaitable[EventOut]] = (
+        app.state.services.events.publish
+    )
 
-    async def observe(event_type: str, entity_id: str | None = None, payload: dict | None = None):
+    async def observe(
+        event_type: str, entity_id: str | None = None, payload: dict[str, Any] | None = None
+    ) -> EventOut:
         if event_type == "recovery.updated":
             assert entity_id is not None and payload == {}
             with SessionLocal() as session:
@@ -135,5 +143,7 @@ async def test_media_route_missing_subject_and_unknown_payload_are_inert(
         await client.post(f"/api/artifact-library/{entry_id}/trash", json=invalid)
     ).status_code == 422
     with SessionLocal() as session:
-        assert session.get(ArtifactLibraryEntry, entry_id).state == "visible"
+        entry = session.get(ArtifactLibraryEntry, entry_id)
+        assert entry is not None
+        assert entry.state == "visible"
         assert session.scalar(select(RecoveryItem)) is None
