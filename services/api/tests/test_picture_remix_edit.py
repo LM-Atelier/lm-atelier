@@ -409,8 +409,12 @@ async def test_a_prompt_with_space_around_it_is_queued_as_the_words_a_turn_takes
 ) -> None:
     revision_id, profile_id = await _edit_workflow(app, client, monkeypatch)
     graph = _file_graph()
-    graph["6"]["inputs"]["text"] = f"{PROMPT}, \n"
-    graph["5"]["inputs"].update({"width": 512, "height": 768})
+    text_inputs = graph["6"]["inputs"]
+    size_inputs = graph["5"]["inputs"]
+    assert isinstance(text_inputs, dict)
+    assert isinstance(size_inputs, dict)
+    text_inputs["text"] = f"{PROMPT}, \n"
+    size_inputs.update({"width": 512, "height": 768})
     artifact_id = await _uploaded(client, _picture(graph=graph))
     preview = (await _preview(client, artifact_id, revision_id, profile_id)).json()
     chat_id = await _new_chat(client)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 
 import pytest
@@ -43,7 +44,7 @@ async def test_acceptance_returns_the_complete_output_chain_in_transcript_order(
             _accept_replay(original, current)
 
 
-def _accept_replay(original: dict[str, object], current: dict[str, object]) -> None:
+def _accept_replay(original: Mapping[str, object], current: Mapping[str, object]) -> None:
     """Compare replay time as an instant, then require every other field to match."""
 
     assert datetime.fromisoformat(str(current["updated_at"])) >= datetime.fromisoformat(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from collections.abc import Sequence
 from typing import Any
 
 from httpx2 import AsyncClient, Response
@@ -28,11 +29,11 @@ LORA = {"sha256": "3" * 64, "position": 0, "model_strength": 1.0, "clip_strength
 
 
 async def _adapt(
-    client: AsyncClient, chat_id: str, content: bytes, choices: list[tuple[str, str]]
+    client: AsyncClient, chat_id: str, content: bytes, choices: Sequence[tuple[str, str]]
 ) -> Response:
     return await client.post(
         f"/api/chats/{chat_id}/adaptations",
-        params=choices,
+        params=tuple(choices),
         content=content,
         headers={"content-type": "application/octet-stream"},
     )

@@ -30,6 +30,7 @@ from local_lm.models import (
     WorkflowUseCasePreset,
     WorkPlan,
 )
+from local_lm.picture_remix import preview_remix
 
 PROMPT = "a ceramic cup on a wooden table"
 NEGATIVE = "blurry, low contrast"
@@ -676,7 +677,7 @@ async def test_a_remix_that_would_not_run_as_shown_is_never_committed(
     artifact_id = await _uploaded(client, _png(("parameters", SETTINGS)))
     profile_id, revision_id = _profile("Ceramic model"), _revision("Ceramic workflow")
     preview = (await _preview(client, artifact_id, revision_id, profile_id, ["steps"])).json()
-    real = api_module.preview_remix
+    real = preview_remix
 
     async def shown_otherwise(*args: Any, **kwargs: Any) -> Any:
         # Same digest, but what was shown no longer matches what would run.
