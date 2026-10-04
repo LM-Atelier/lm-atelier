@@ -277,8 +277,10 @@ def test_a_writer_that_read_before_trash_cannot_commit_after_it(
         session.add(RecoveryItem(**record))
         session.commit()
         if target == "composer":
+            assert draft is not None
             draft.text = "Changed after deletion"
         else:
+            assert message is not None
             message.status = "pending"
         with pytest.raises(IntegrityError, match="chat-recovery-write-refused"):
             writer.commit()

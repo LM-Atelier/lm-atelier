@@ -6,6 +6,7 @@ import hashlib
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NoReturn, TypedDict
 
 import pytest
 from sqlalchemy import select, update
@@ -15,9 +16,24 @@ from sqlalchemy.orm import Session
 from local_lm.config import Settings
 from local_lm.db import Base, create_database_engine, database_is_contended
 from local_lm.models import Chat, RecoveryPreviewRecord
-from local_lm.recovery_v1 import RecoveryAction, RecoveryCommandV1, RecoveryCountsV1, RecoveryKind
+from local_lm.recovery_previews import RecoveryInspector, RecoverySnapshot
+from local_lm.recovery_v1 import (
+    RecoveryAction,
+    RecoveryCommandV1,
+    RecoveryCountsV1,
+    RecoveryImpactV1,
+    RecoveryKind,
+)
 
 NOW = datetime(2026, 10, 2, tzinfo=UTC)
+
+
+class PreviewChanges(TypedDict, total=False):
+    kind: RecoveryKind
+    subject_id: str
+    deletion_id: str | None
+    delete_generated_media: bool
+    now: datetime
 
 
 @pytest.fixture
@@ -33,9 +49,7 @@ def preview_session(tmp_path: Path) -> Iterator[Session]:
     engine.dispose()
 
 
-def _snapshot(session: Session):
-    from local_lm.recovery_previews import RecoverySnapshot
-
+def _snapshot(session: Session) -> RecoverySnapshot:
     chat = session.get(Chat, "chat-garden")
     assert chat is not None
     return RecoverySnapshot(
@@ -45,7 +59,7 @@ def _snapshot(session: Session):
     )
 
 
-def _preview(session: Session, *, now: datetime = NOW):
+def _preview(session: Session, *, now: datetime = NOW) -> RecoveryImpactV1:
     from local_lm.recovery_previews import issue_recovery_preview
 
     return issue_recovery_preview(
@@ -58,22 +72,32 @@ def _preview(session: Session, *, now: datetime = NOW):
     )
 
 
-def _require(session: Session, command: RecoveryCommandV1, **changes: object):
+def _require(
+    session: Session,
+    command: RecoveryCommandV1,
+    *,
+    kind: RecoveryKind = RecoveryKind.CHAT,
+    subject_id: str = "chat-garden",
+    deletion_id: str | None = None,
+    inspect: RecoveryInspector = _snapshot,
+    now: datetime = NOW,
+    delete_generated_media: bool = False,
+) -> RecoverySnapshot:
     from local_lm.recovery_previews import require_current_recovery_preview
 
-    arguments = {
-        "kind": RecoveryKind.CHAT,
-        "subject_id": "chat-garden",
-        "deletion_id": None,
-        "inspect": _snapshot,
-        "now": NOW,
-        "command": command,
-    }
-    arguments.update(changes)
-    return require_current_recovery_preview(session, **arguments)
+    return require_current_recovery_preview(
+        session,
+        kind=kind,
+        subject_id=subject_id,
+        deletion_id=deletion_id,
+        inspect=inspect,
+        now=now,
+        command=command,
+        delete_generated_media=delete_generated_media,
+    )
 
 
-def _command(impact) -> RecoveryCommandV1:
+def _command(impact: RecoveryImpactV1) -> RecoveryCommandV1:
     return RecoveryCommandV1(
         expected_revision=impact.revision,
         impact_sha256=impact.impact_sha256,
@@ -126,7 +150,7 @@ def test_a_changed_private_value_refuses_an_unchanged_public_count(
     ],
 )
 def test_a_preview_refuses_a_different_resource_intent_or_expired_deadline(
-    preview_session: Session, changes: dict[str, object]
+    preview_session: Session, changes: PreviewChanges
 ) -> None:
     from local_lm.recovery_previews import RecoveryPreviewConflict
 
@@ -141,7 +165,7 @@ def test_a_forged_public_digest_is_refused_before_inspection(preview_session: Se
 
     impact = _preview(preview_session)
 
-    def must_not_read(_session: Session):
+    def must_not_read(_session: Session) -> NoReturn:
         pytest.fail("A forged preview must be refused before reading the resource.")
 
     with pytest.raises(RecoveryPreviewConflict, match="^recovery-impact-stale$"):
@@ -165,7 +189,7 @@ def test_preview_creation_does_not_commit_the_callers_transaction(
 def test_the_writer_is_reserved_before_the_inspector_reads(preview_session: Session) -> None:
     from local_lm.recovery_previews import issue_recovery_preview
 
-    def inspect_under_reservation(session: Session):
+    def inspect_under_reservation(session: Session) -> RecoverySnapshot:
         with Session(session.get_bind()) as contender:
             contender.connection().exec_driver_sql("PRAGMA busy_timeout=0")
             with pytest.raises(OperationalError) as failure:

@@ -47,8 +47,9 @@ def test_a_recovery_item_keeps_its_identity_location_and_original_deadline() -> 
     assert copied.original_location.project_id == "project-garden"
     assert copied.purge_after == datetime(2026, 11, 1, tzinfo=UTC)
     assert copied.counts.messages == 4 and copied.counts.retained_bytes == 1024
+    identity_field = "subject_id"
     with pytest.raises(ValidationError):
-        copied.subject_id = "chat-substitute"
+        setattr(copied, identity_field, "chat-substitute")
 
 
 def test_sqlite_utc_dates_and_explicit_offsets_keep_the_same_recovery_clock() -> None:
