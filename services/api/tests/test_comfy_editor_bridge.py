@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -354,7 +355,8 @@ def test_a_briefly_held_staging_directory_is_renamed_once_it_is_released(
     calls: list[str] = []
     waits: list[float] = []
     monkeypatch.setattr(os, "rename", _rename_refused(2, calls))
-    monkeypatch.setattr(editor_bridge.time, "sleep", waits.append)
+    assert vars(editor_bridge)["time"] is time
+    monkeypatch.setattr(time, "sleep", waits.append)
 
     staged = _stage(custom_nodes)
 
@@ -372,7 +374,8 @@ def test_a_staging_directory_held_too_long_fails_and_leaves_nothing(
     calls: list[str] = []
     waits: list[float] = []
     monkeypatch.setattr(os, "rename", _rename_refused(99, calls))
-    monkeypatch.setattr(editor_bridge.time, "sleep", waits.append)
+    assert vars(editor_bridge)["time"] is time
+    monkeypatch.setattr(time, "sleep", waits.append)
 
     with pytest.raises(ComfyEditorBridgeError) as refused:
         _stage(custom_nodes)
@@ -395,7 +398,8 @@ def test_only_a_refusal_of_access_is_tried_again(
         raise OSError(5, "input/output error")
 
     monkeypatch.setattr(os, "rename", fail_rename)
-    monkeypatch.setattr(editor_bridge.time, "sleep", lambda _seconds: None)
+    assert vars(editor_bridge)["time"] is time
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
 
     with pytest.raises(ComfyEditorBridgeError) as refused:
         _stage(custom_nodes)
@@ -422,7 +426,8 @@ def test_a_destination_that_appears_while_held_is_checked_not_waited_on(
         raise PermissionError(13, "held by another process")
 
     monkeypatch.setattr(os, "rename", rename)
-    monkeypatch.setattr(editor_bridge.time, "sleep", waits.append)
+    assert vars(editor_bridge)["time"] is time
+    monkeypatch.setattr(time, "sleep", waits.append)
 
     staged = _stage(custom_nodes)
 
