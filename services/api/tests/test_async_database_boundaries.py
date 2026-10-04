@@ -70,6 +70,7 @@ def _binds_database_session(statement: ast.With) -> bool:
 def _assigned_session(statement: ast.AST) -> str | None:
     """The name a statement assigns a newly opened session to, if it opens one."""
 
+    value: ast.expr | None
     if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
         target, value = statement.targets[0], statement.value
     elif isinstance(statement, ast.AnnAssign):
@@ -100,11 +101,12 @@ def _awaits_inside_database_sessions() -> set[tuple[str, str, str]]:
                 functions[node] = parent
         # A session opened by assignment is open from that line until the
         # function closes it by name, or to the end of the function.
-        assigned_spans: list[tuple[ast.AST, int, int]] = []
+        assigned_spans: list[tuple[ast.AsyncFunctionDef | ast.FunctionDef, int, int]] = []
         for node, function in functions.items():
             name = _assigned_session(node)
             if name is None:
                 continue
+            assert isinstance(node, ast.Assign | ast.AnnAssign)
             closes = [
                 call.lineno
                 for call in ast.walk(function)
@@ -113,13 +115,13 @@ def _awaits_inside_database_sessions() -> set[tuple[str, str, str]]:
             end = max(closes) if closes else function.end_lineno or node.lineno
             assigned_spans.append((function, node.lineno, end))
         for awaited in (node for node in ast.walk(tree) if isinstance(node, ast.Await)):
-            function = functions.get(awaited)
+            containing_function = functions.get(awaited)
             nested_in_session = any(
-                function is owner and start < awaited.lineno <= end
+                containing_function is owner and start < awaited.lineno <= end
                 for owner, start, end in assigned_spans
             )
             parent = parents.get(awaited)
-            while parent is not None and parent is not function:
+            while parent is not None and parent is not containing_function:
                 if isinstance(parent, ast.With) and _binds_database_session(parent):
                     nested_in_session = True
                 parent = parents.get(parent)
@@ -127,7 +129,7 @@ def _awaits_inside_database_sessions() -> set[tuple[str, str, str]]:
                 findings.add(
                     (
                         path.relative_to(SOURCE_ROOT).as_posix(),
-                        function.name if function else "",
+                        containing_function.name if containing_function else "",
                         _expression_name(awaited.value),
                     )
                 )
