@@ -199,6 +199,16 @@ class BackupManager:
             daily.setdefault(created.date().isoformat(), path)
         keep = set(list(daily.values())[: self.settings.backup_daily_count])
         daily_dates = sorted(daily, reverse=True)[: self.settings.backup_daily_count]
+        # A backup with media holds the only backed-up copy of its pictures and
+        # videos, so a later backup that day without media must not replace it.
+        # The hourly check makes exactly such a backup whenever the day's only
+        # one has media. Each retained day keeps its newest media backup too.
+        media_days: set[str] = set()
+        for path, created in parsed:
+            day = created.date().isoformat()
+            if day in daily_dates and day not in media_days and self._has_media(path):
+                media_days.add(day)
+                keep.add(path)
         oldest_daily = daily_dates[-1] if daily_dates else None
         weekly: set[tuple[int, int]] = set()
         if self.settings.backup_weekly_count:
@@ -224,6 +234,10 @@ class BackupManager:
         self._prune_verification_receipts_locked(min(retained) if retained else None)
         return removed
 
+    def _has_media(self, path: Path) -> bool:
+        media_path = self._media_path(path)
+        return media_path.exists() or self._is_link(media_path)
+
     def _verified_metadata_backup_for_day_locked(
         self,
         current: datetime,
@@ -242,8 +256,7 @@ class BackupManager:
                 continue
             if created.date() != current.date():
                 continue
-            media_path = self._media_path(path)
-            if media_path.exists() or self._is_link(media_path):
+            if self._has_media(path):
                 continue
             candidates.append((path, created, modified))
         candidates.sort(key=lambda item: (item[1], item[2]), reverse=True)
