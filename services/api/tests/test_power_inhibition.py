@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ctypes
+import importlib
+import os
 import sys
 import threading
 from datetime import UTC, datetime
@@ -261,8 +263,12 @@ def test_windows_refusing_to_end_the_request_still_closes_it() -> None:
 
 
 def test_each_platform_gets_its_own_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(power_inhibition.sys, "platform", "linux")
+    monkeypatch.setattr(power_inhibition.sys, "platform", "darwin")
     assert isinstance(power_inhibition.default_power_backend(), UnsupportedPowerBackend)
+    monkeypatch.setattr(power_inhibition.sys, "platform", "linux")
+    assert isinstance(
+        power_inhibition.default_power_backend(), power_inhibition.LinuxLogindPowerBackend
+    )
     monkeypatch.setattr(power_inhibition.sys, "platform", "win32")
     monkeypatch.setattr(power_inhibition, "_kernel32", lambda: _kernel([]))
     assert isinstance(
@@ -279,3 +285,129 @@ def test_a_real_windows_power_request_is_made_and_ended() -> None:
 
     assert (state.active, state.last_error, state.backend) == (True, None, "windows-power-request")
     assert inhibitor.state().active is False and inhibitor.state().last_error is None
+
+
+def test_linux_holds_the_inhibitor_as_a_descriptor_and_closes_it() -> None:
+    read_end, write_end = os.pipe()
+    reasons: list[str] = []
+
+    def inhibit(reason: str) -> int:
+        reasons.append(reason)
+        return read_end
+
+    inhibitor = PowerInhibitor(power_inhibition.LinuxLogindPowerBackend(inhibit))
+    try:
+        with inhibitor.hold("job_a", SleepJobKind.DOWNLOAD):
+            os.fstat(read_end)
+            assert inhibitor.state().active
+        with pytest.raises(OSError):
+            os.fstat(read_end)
+    finally:
+        os.close(write_end)
+
+    assert reasons == [POWER_REASON]
+
+
+def test_linux_refusing_the_inhibitor_never_fails_the_work() -> None:
+    def refusing(reason: str) -> int:
+        raise OSError("systemd-logind refused an idle inhibitor.")
+
+    inhibitor = PowerInhibitor(power_inhibition.LinuxLogindPowerBackend(refusing))
+
+    with inhibitor.hold("job_a", SleepJobKind.GENERATION):
+        state = inhibitor.state()
+
+    assert (state.active, state.last_error) == (False, "systemd-logind refused an idle inhibitor.")
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="systemd-logind exists only on Linux"
+)
+def test_a_real_logind_request_is_held_or_refused_but_never_breaks_the_work() -> None:
+    wrappers = importlib.import_module("jeepney.wrappers")
+    try:
+        os.close(power_inhibition._logind_inhibit(POWER_REASON))
+    except OSError as error:
+        # No system bus, or logind said no. Any other cause would mean the
+        # request itself was built wrong, which must not pass as a refusal.
+        assert error.__cause__ is None or isinstance(error.__cause__, wrappers.DBusErrorResponse)
+    inhibitor = PowerInhibitor(power_inhibition.LinuxLogindPowerBackend())
+
+    with inhibitor.hold("job_a", SleepJobKind.GENERATION):
+        state = inhibitor.state()
+
+    # A machine without logind, or a session it will not inhibit for, refuses
+    # as a platform refusal; either way the work ran and nothing is held after.
+    assert state.active or state.last_error is not None
+    assert inhibitor.state().active is False
+
+
+def _fake_jeepney(recorded: dict[str, object], *, refuse: bool = False) -> dict[str, object]:
+    """Just enough of jeepney to see the call that would go to systemd-logind."""
+
+    class _Descriptor:
+        def to_raw_fd(self) -> int:
+            return 7
+
+    class _Connection:
+        def __enter__(self) -> _Connection:
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+        def send_and_get_reply(self, message: object, timeout: float) -> object:
+            recorded["sent"], recorded["timeout"] = message, timeout
+            return "reply"
+
+    def unwrap(reply: object) -> tuple[object, ...]:
+        if refuse:
+            raise RuntimeError("org.freedesktop.DBus.Error.AccessDenied")
+        return (_Descriptor(),)
+
+    def method_call(address: object, method: str, signature: str, body: tuple[str, ...]) -> str:
+        recorded.update(address=address, method=method, signature=signature, body=body)
+        return "message"
+
+    def connect(bus: str, enable_fds: bool) -> _Connection:
+        recorded.update(bus=bus, enable_fds=enable_fds)
+        return _Connection()
+
+    return {
+        "jeepney": SimpleNamespace(
+            DBusAddress=lambda path, bus_name, interface: (path, bus_name, interface),
+            new_method_call=method_call,
+        ),
+        "jeepney.io.blocking": SimpleNamespace(open_dbus_connection=connect),
+        "jeepney.wrappers": SimpleNamespace(unwrap_msg=unwrap),
+    }
+
+
+def test_linux_asks_logind_to_hold_off_only_the_idle_timer(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: dict[str, object] = {}
+    fake = _fake_jeepney(recorded)
+    monkeypatch.setattr(power_inhibition.importlib, "import_module", lambda name: fake[name])
+
+    assert power_inhibition._logind_inhibit(POWER_REASON) == 7
+    assert recorded == {
+        "address": (
+            "/org/freedesktop/login1",
+            "org.freedesktop.login1",
+            "org.freedesktop.login1.Manager",
+        ),
+        "method": "Inhibit",
+        "signature": "ssss",
+        "body": ("idle", "LM Atelier", POWER_REASON, "block"),
+        "bus": "SYSTEM",
+        "enable_fds": True,
+        "sent": "message",
+        "timeout": 5,
+    }
+
+
+def test_a_logind_error_is_a_platform_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _fake_jeepney({}, refuse=True)
+    monkeypatch.setattr(power_inhibition.importlib, "import_module", lambda name: fake[name])
+
+    with pytest.raises(OSError):
+        power_inhibition._logind_inhibit(POWER_REASON)
