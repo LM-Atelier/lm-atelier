@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 
 from .config import Settings
 from .filesystem_links import is_link_or_reparse
+from .schema_revisions import known_revisions
 from .schemas import BackupInfo
 
 _VERIFICATION_RECEIPT_SCHEMA = "lm-atelier-backup-verification-v1"
@@ -136,6 +137,7 @@ class BackupManager:
     def request_restore(self, name: str) -> BackupInfo:
         with self._lock:
             result = self._verify_locked(name)
+            self._require_known_revision(self._path(name))
             marker = self.settings.state_dir / "restore-on-next-start.json"
             fd, temporary_name = tempfile.mkstemp(
                 prefix="restore-marker-",
@@ -506,6 +508,9 @@ class BackupManager:
         payload = json.loads(marker.read_text(encoding="utf-8"))
         source_path = self._path(str(payload["backup"]))
         self._verify_path(source_path)
+        # Checked again here, not only when the restore was asked for: a build
+        # that cannot open the backup must not put it in place of data it can.
+        self._require_known_revision(source_path)
         media_path = self._media_path(source_path)
         if media_path.is_file():
             self._verify_media_archive(media_path, source_path)
@@ -532,13 +537,68 @@ class BackupManager:
             destination.parent.mkdir(parents=True, exist_ok=True)
             # A restored database must never inherit WAL pages from the
             # database it replaces. This runs before SQLAlchemy is configured.
-            Path(f"{destination}-wal").unlink(missing_ok=True)
-            Path(f"{destination}-shm").unlink(missing_ok=True)
-            os.replace(restored_database, destination)
+            # The live log is only set aside until the replace succeeds: it may
+            # hold writes not yet in the database file, and a replace that fails
+            # leaves that database in use.
+            set_aside = self._set_aside_live_log(destination)
+            try:
+                os.replace(restored_database, destination)
+            except BaseException:
+                self._put_back_live_log(set_aside)
+                raise
+            for _live, aside in set_aside:
+                aside.unlink(missing_ok=True)
             marker.unlink()
             return True
         finally:
             restored_database.unlink(missing_ok=True)
+
+    @staticmethod
+    def _set_aside_live_log(database: Path) -> tuple[tuple[Path, Path], ...]:
+        """Move the live database's WAL and shared-memory files out of SQLite's sight.
+
+        Returns each moved file with the name it was moved to. If one cannot be
+        moved, the ones already moved are put back before the failure is raised.
+        """
+
+        moved: list[tuple[Path, Path]] = []
+        try:
+            for suffix in ("-wal", "-shm"):
+                live = database.with_name(f"{database.name}{suffix}")
+                if not live.exists():
+                    continue
+                aside = live.with_name(f"{live.name}.restore-aside")
+                os.replace(live, aside)
+                moved.append((live, aside))
+        except BaseException:
+            BackupManager._put_back_live_log(tuple(moved))
+            raise
+        return tuple(moved)
+
+    @staticmethod
+    def _put_back_live_log(moved: tuple[tuple[Path, Path], ...]) -> None:
+        for live, aside in reversed(moved):
+            os.replace(aside, live)
+
+    @staticmethod
+    def _require_known_revision(path: Path) -> None:
+        """Refuse a backup that records any schema revision this build's migrations do not know.
+
+        Data on more than one migration branch records one revision for each,
+        and every one of them must be known for this build to open it.
+        """
+
+        try:
+            with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
+                rows = connection.execute("SELECT version_num FROM alembic_version").fetchall()
+        except sqlite3.Error as exc:
+            raise ValueError("backup failed SQLite integrity verification") from exc
+        recorded = {row[0] for row in rows}
+        if not recorded or not recorded <= known_revisions():
+            raise ValueError(
+                "backup uses a database schema revision this version does not recognize; "
+                "it was likely made by a newer version of LM Atelier"
+            )
 
     def _path(self, name: str) -> Path:
         if not _BACKUP_NAME.fullmatch(name):
