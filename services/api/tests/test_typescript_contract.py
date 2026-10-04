@@ -91,6 +91,7 @@ CHECKED_CONTRACTS = {
     "WebSearchConfiguration": "WebSearchConfiguration",
     "ChatItemRemovalReference": "ChatItemRemovalReferenceOut",
     "CredentialStatus": "CredentialStatus",
+    "BackupRestoreState": "BackupRestoreStateOut",
     "DraftClassification": "DraftClassification",
     "DeviceInfo": "DeviceInfo",
     "EditTemplate": "EditTemplateOut",

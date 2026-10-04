@@ -1,4 +1,5 @@
 export type * from "./queueOrderTypes";
+export type * from "./backupRestoreTypes";
 export type * from "./workflowReadTypes";
 export type * from "./chatEditLineageTypes";
 export type * from "./acceptedTurnTypes";

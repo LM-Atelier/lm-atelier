@@ -54,6 +54,14 @@ fails if a required file is missing or changed. Use **Verify** to check the
 backup before relying on it, and keep its database snapshot and media archive
 together when copying it elsewhere.
 
+A restore is applied the next time LM Atelier starts. If a restore you asked for
+cannot be applied then, for example because the backup was removed or no longer
+passes its checks, LM Atelier starts with your data exactly as it was, and
+Settings says that the restore was not applied and why until you dismiss it.
+The copy LM Atelier takes before upgrading its data is different: if that one
+cannot be put back after a failed upgrade, LM Atelier does not start, because
+the data it would open may be half upgraded.
+
 The **Generation record** control beside a generated picture or video saves a
 small JSON file describing how it was made: the output's file hash, the
 operation, the seed and settings, the workflow, model and LoRA files by hash,

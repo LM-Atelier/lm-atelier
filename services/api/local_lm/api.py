@@ -482,6 +482,7 @@ from .schemas import (
     ArtifactStorageInfo,
     ArtifactUpdate,
     BackupInfo,
+    BackupRestoreStateOut,
     BoundWorkflowAssetOut,
     CatalogDetail,
     CatalogFileVariant,
@@ -1313,6 +1314,18 @@ async def create_backup(request: Request, include_media: bool = False) -> Backup
     )
 
 
+@router.get("/backups/restore-state", response_model=BackupRestoreStateOut)
+async def backup_restore_state(request: Request) -> BackupRestoreStateOut:
+    state = await asyncio.to_thread(_services(request).backups.restore_state)
+    return BackupRestoreStateOut.model_validate(dataclasses.asdict(state))
+
+
+@router.post("/backups/restore-state/dismiss", status_code=204)
+async def dismiss_failed_restore(request: Request) -> Response:
+    await asyncio.to_thread(_services(request).backups.dismiss_failed_restore)
+    return Response(status_code=204)
+
+
 @router.post("/backups/{name}/verify", response_model=BackupInfo)
 async def verify_backup(name: str, request: Request) -> BackupInfo:
     try:
@@ -1326,7 +1339,11 @@ async def verify_backup(name: str, request: Request) -> BackupInfo:
 @router.post("/backups/{name}/restore", response_model=BackupInfo)
 async def restore_backup(name: str, request: Request) -> BackupInfo:
     try:
-        return await asyncio.to_thread(_services(request).backups.request_restore, name)
+        # Asked for by a person, so if it cannot be applied the next start
+        # keeps the current data and says why instead of failing.
+        return await asyncio.to_thread(
+            _services(request).backups.request_restore, name, requested=True
+        )
     except FileNotFoundError as exc:
         raise api_error(404, "backup-not-found", "That backup no longer exists.") from exc
     except ValueError as exc:

@@ -3840,6 +3840,17 @@ class BackupInfo(ApiModel):
     media_size_bytes: int = 0
 
 
+class BackupRestoreStateOut(ApiModel):
+    """A restore waiting for the next start, or why the last one asked for was not applied."""
+
+    state: Literal["none", "pending", "failed"]
+    backup: str | None = None
+    reason: Literal["backup-missing", "backup-invalid", "backup-newer", "restore-failed"] | None = (
+        None
+    )
+    failed_at: datetime | None = None
+
+
 def _utc_instant(value: datetime) -> str:
     """SQLite keeps these naive and they are UTC; say so at the browser boundary."""
 

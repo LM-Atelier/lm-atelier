@@ -13,6 +13,7 @@ import { workflowFamilyQuery, workflowReadQuery, type WorkflowFamilyReadOptions,
 import type { WorkflowRecipeTarget, WorkflowUseCase, WorkflowUseCaseChoice, WorkflowUseCaseDefault, WorkflowUseCasePreset, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
 import type { EnlargementPreview } from "./studioEnlargement";
 import type { EditRecipeDraft, OutputRecipeDraft } from "./recipeDraftTypes";
+import type { BackupRestoreState } from "./backupRestoreTypes";
 import { buildTurnRequest, SOURCE_FIT_BINDING_ERROR, type TurnRequestPayload } from "./turnRequest";
 import { defaultOutputShapes } from "./outputShapePreferences";
 export { buildTurnRequest } from "./turnRequest";
@@ -1170,6 +1171,8 @@ export const api = {
       body: JSON.stringify(body),
     }),
   backups: () => request<BackupInfo[]>("/api/backups"),
+  backupRestoreState: () => request<BackupRestoreState>("/api/backups/restore-state"),
+  dismissFailedRestore: () => request<void>("/api/backups/restore-state/dismiss", { method: "POST" }),
   createBackup: (includeMedia = false) =>
     request<BackupInfo>(`/api/backups?${new URLSearchParams({ include_media: String(includeMedia) })}`, { method: "POST" }),
   verifyBackup: (name: string) =>
