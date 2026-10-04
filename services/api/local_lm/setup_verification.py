@@ -5,11 +5,13 @@ import json
 import struct
 import zlib
 from collections.abc import Sequence
+from contextlib import suppress
 from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .artifact_library import ArtifactReferenceDataError
 from .domain import ArtifactKind, JobStatus, utcnow
 from .models import (
     Artifact,
@@ -232,12 +234,14 @@ def recover_terminal_setup_verifications(
             JobStatus.CANCELLED.value,
             JobStatus.INTERRUPTED.value,
         }:
-            finalize_setup_verification(
-                session,
-                artifacts,
-                verification.chat_id,
-                job,
-            )
+            # Recovery is complete; keep bytes whose deletion cannot be proven.
+            with suppress(ArtifactReferenceDataError):
+                finalize_setup_verification(
+                    session,
+                    artifacts,
+                    verification.chat_id,
+                    job,
+                )
         elif not job:
             verification.state = "failed"
             verification.failure_code = "application_restarted"
@@ -253,7 +257,9 @@ def recover_terminal_setup_verifications(
             verification.chat_id = None
             verification.input_artifact_id = None
             session.flush()
-            delete_setup_artifacts(session, artifacts, artifact_ids)
+            # Recovery is complete; keep bytes whose deletion cannot be proven.
+            with suppress(ArtifactReferenceDataError):
+                delete_setup_artifacts(session, artifacts, artifact_ids)
 
 
 def _setup_artifact_ids(
