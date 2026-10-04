@@ -1,11 +1,12 @@
 """Keeping the computer from sleeping while durable work runs, and only then.
 
-Each running job that should keep the machine awake holds the inhibitor under
-its durable job id. The operating system is asked to stay awake when the
-first holder arrives and told it may sleep when the last one leaves, however
-the holders overlap, so the request starts and ends exactly once per busy
-stretch. Turning the setting off lets the machine sleep at once without
-touching the work; turning it back on asks again for the work still running.
+Each running attempt at a job that should keep the machine awake holds the
+inhibitor under its own key; the scheduler uses the attempt's claim. The
+operating system is asked to stay awake when the first holder arrives and told
+it may sleep when the last one leaves, however the holders overlap, so the
+request starts and ends exactly once per busy stretch. Turning the setting off
+lets the machine sleep at once without touching the work; turning it back on
+asks again for the work still running.
 
 Nothing here can fail the work it protects. A platform that cannot keep the
 machine awake, or refuses to, is recorded and reported, and the job goes on.
@@ -246,30 +247,30 @@ class PowerInhibitor:
         self._since: datetime | None = None
         self._last_error: str | None = None
 
-    def acquire(self, job_id: str, kind: SleepJobKind) -> None:
-        """Hold the machine awake for one job; holding again under the same id changes nothing."""
+    def acquire(self, holder: str, kind: SleepJobKind) -> None:
+        """Hold the machine awake for one holder; holding again under one key changes nothing."""
 
         with self._lock:
-            self._holders.setdefault(job_id, kind)
+            self._holders.setdefault(holder, kind)
             self._ask()
 
-    def release(self, job_id: str) -> None:
-        """Stop holding for one job; releasing a job that holds nothing changes nothing."""
+    def release(self, holder: str) -> None:
+        """Stop holding for one holder; releasing one that holds nothing changes nothing."""
 
         with self._lock:
-            self._holders.pop(job_id, None)
+            self._holders.pop(holder, None)
             if not self._holders:
                 self._let_sleep()
 
     @contextmanager
-    def hold(self, job_id: str, kind: SleepJobKind) -> Iterator[None]:
+    def hold(self, holder: str, kind: SleepJobKind) -> Iterator[None]:
         """Hold for the duration of a block, released however the block ends."""
 
-        self.acquire(job_id, kind)
+        self.acquire(holder, kind)
         try:
             yield
         finally:
-            self.release(job_id)
+            self.release(holder)
 
     def set_enabled(self, enabled: bool) -> None:
         """Turn the setting on or off; running work is never cancelled either way."""

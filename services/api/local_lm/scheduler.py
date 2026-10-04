@@ -156,9 +156,11 @@ class ResourceScheduler:
             name=f"job-heartbeat-{job_id}",
         )
         # Held only once the claim is real, never while the job waits its turn.
+        # Held under the claim rather than the job: an older attempt that ends
+        # after the job was claimed again must not end the newer attempt's hold.
         sleep_kind = _SLEEP_KINDS.get(resource)
         if self._power is not None and sleep_kind is not None:
-            self._power.acquire(job_id, sleep_kind)
+            self._power.acquire(claim.token, sleep_kind)
         try:
             # The claim identity is YIELDED so the execution can bind its
             # engine-provenance writes to the attempt it was claimed for; a
@@ -167,7 +169,7 @@ class ResourceScheduler:
         finally:
             # First, so the hold ends with the work even if releasing the claim fails.
             if self._power is not None:
-                self._power.release(job_id)
+                self._power.release(claim.token)
             heartbeat.cancel()
             stopped: BaseException | None = None
             try:
@@ -677,6 +679,14 @@ class ResourceScheduler:
                 )
                 session.commit()
                 if result.rowcount != 1:
+                    owner = session.execute(
+                        select(Job.claim_owner).where(Job.id == job_id)
+                    ).scalar_one_or_none()
+                    if owner != token and self._power is not None:
+                        # The claim moved to another attempt or was cleared, so
+                        # this one no longer keeps the computer awake, however
+                        # long its own work takes to stop.
+                        self._power.release(token)
                     return
 
     def _expire_foreign_claims(self, group: str) -> list[str]:
