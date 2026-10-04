@@ -21,6 +21,8 @@ import {
   type MediaOrigin,
 } from "./messageMedia";
 import { sizeDisagreement, sizeDisagreementMessage } from "./outputSizeAgreement";
+import { useSensitiveMediaChoice } from "./sensitiveMedia";
+import { ShieldedMedia } from "./ShieldedMedia";
 import { sourcePixelsChanged } from "./sourceFitAgreement";
 import type { MessagePart } from "./types";
 
@@ -52,6 +54,7 @@ export function ArtifactPart({
   /** The run that made this output, which names it in its generation record. */
   generationRunId?: string;
 }) {
+  const shielding = useSensitiveMediaChoice() !== "show";
   const proxyId = typeof part.metadata_json.browser_proxy_artifact_id === "string" ? part.metadata_json.browser_proxy_artifact_id : null;
   const posterId = typeof part.metadata_json.poster_artifact_id === "string"
     ? part.metadata_json.poster_artifact_id
@@ -65,7 +68,8 @@ export function ArtifactPart({
     return <div className="submission-progress"><LoaderCircle size={16} />Loading media</div>;
   }
   if (part.type === "attachment") {
-    const name = part.artifact?.original_name || "Attachment";
+    // A file name can say as much as the picture would, so it is covered too.
+    const name = shielding ? "Attachment" : part.artifact?.original_name || "Attachment";
     return <a className="message-attachment" href={source} download><Paperclip size={14} />{name}</a>;
   }
   const kind = part.type === "video" ? "video" : "image";
@@ -91,10 +95,12 @@ export function ArtifactPart({
             the frame reads as full without cropping anything or pretending
             the image is a shape it is not. Decorative, so it is hidden from
             assistive technology - the real image carries the description. */}
-        <div className="media-frame">
-          <img className="media-backdrop" src={source} alt="" aria-hidden="true" loading="lazy" />
-          <img src={source} alt={label} loading="lazy" />
-        </div>
+        <ShieldedMedia kind="image">
+          <div className="media-frame">
+            <img className="media-backdrop" src={source} alt="" aria-hidden="true" loading="lazy" />
+            <img src={source} alt={label} loading="lazy" />
+          </div>
+        </ShieldedMedia>
         <figcaption>
           <ImageIcon size={14} /> {label}
           {/* Icons, not labels - but each operation stays distinct: Edit
@@ -185,9 +191,11 @@ export function ArtifactPart({
   }
   return (
     <figure className="media-card">
-      {/* Generated media has no caption track to point at, and an empty one would claim an affordance that is not there. */}
-      {/* eslint-disable-next-line jsx-a11y-x/media-has-caption */}
-      <video src={source} poster={poster} controls preload="metadata" aria-label={label} />
+      <ShieldedMedia kind="video">
+        {/* Generated media has no caption track to point at, and an empty one would claim an affordance that is not there. */}
+        {/* eslint-disable-next-line jsx-a11y-x/media-has-caption */}
+        <video src={source} poster={poster} controls preload="metadata" aria-label={label} />
+      </ShieldedMedia>
       <figcaption>
         <Film size={14} /> {label}
         <a href={source} download>Download</a>

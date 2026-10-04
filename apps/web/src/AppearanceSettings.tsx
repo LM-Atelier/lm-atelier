@@ -2,6 +2,7 @@ import { Monitor, Moon, Sun } from "lucide-react";
 import { useId } from "react";
 import { clockOptions, setClockChoice, useClockChoice, type ClockChoice } from "./clockPreference";
 import { InterfaceDensitySetting } from "./InterfaceDensitySetting";
+import { SensitiveMediaSetting } from "./SensitiveMediaSetting";
 import { DEFAULT_SIDEBAR_WIDTH, resetSidebarLayout, useSidebarState } from "./sidebarLayout";
 import {
   ROOMS,
@@ -278,6 +279,7 @@ export function AppearanceSettings({ appearance }: { appearance: Appearance }) {
         <SidebarSetting id={id} />
       </section>
       <ClockSetting />
+      <SensitiveMediaSetting />
     </>
   );
 }
