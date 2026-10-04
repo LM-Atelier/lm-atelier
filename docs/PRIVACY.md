@@ -117,6 +117,24 @@ changes on this computer, and it is kept for as long as the remix is.
 Before sharing issue details, inspect them and remove tokens, private prompts,
 chats, media, model inputs, and identifying file paths.
 
+## Privacy on screen
+
+**Settings > Appearance**, under Privacy on screen, sets how pictures and videos
+appear in this browser: **Show**, **Blur** or **Hide**. A blurred one keeps its
+place but cannot be made out, and a hidden one is not loaded at all. Either way,
+**Show** on one reveals it until you leave it, and the choice is saved in that
+browser only. Notifications about finished work say only "A result is ready." or
+"A request did not finish." under the name LM Atelier. They never name a chat,
+project, prompt or file, and never show a picture.
+
+These choices, and the workspace lock below, keep what is on the screen from
+someone glancing at it or watching a shared screen. LM Atelier runs in your web
+browser, including when you start it from the installed app, so it cannot keep
+its pages out of screenshots or screen recordings, out of the window previews
+the operating system shows when switching windows, or out of the browser's own
+history and cache. Anything shown before it was covered, or before the
+workspace was locked, may remain in any of these.
+
 ## Workspace lock
 
 **Settings > Privacy** can turn on a workspace lock. While it is on, **Lock
