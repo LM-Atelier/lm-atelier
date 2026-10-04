@@ -156,6 +156,7 @@ CHECKED_CONTRACTS = {
     "WorkerLogTail": "WorkerLogTail",
     "WorkerResetResult": "WorkerResetResult",
     "WorkerSettings": "WorkerSettings",
+    "KeepAwakeStatus": "KeepAwakeStatus",
     "CustomNodeContainmentStatus": "CustomNodeContainmentStatus",
     "WorkerStatus": "WorkerStatus",
     "WorkflowAssetReference": "WorkflowAssetReferenceOut",

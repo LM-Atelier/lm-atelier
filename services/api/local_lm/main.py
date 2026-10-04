@@ -334,6 +334,7 @@ class Services:
     credentials: CredentialStore
     workflow_editor_sessions: WorkflowEditorSessions
     workspace_lock: WorkspaceLock
+    power: PowerInhibitor
 
     @property
     def catalog(self) -> HuggingFaceCatalog:
@@ -359,10 +360,8 @@ def build_services(settings: Settings) -> Services:
     artifacts = ArtifactStore(settings)
     runtimes = RuntimeProvisioner(settings)
     engines = EngineRegistry(settings)
-    scheduler = ResourceScheduler(
-        events,
-        power=PowerInhibitor(default_power_backend(), enabled=settings.keep_awake_during_work),
-    )
+    power = PowerInhibitor(default_power_backend(), enabled=settings.keep_awake_during_work)
+    scheduler = ResourceScheduler(events, power=power)
     processes = ProcessSupervisor(settings, runtimes, events)
     orchestrator = ConversationOrchestrator(engines, artifacts, events, scheduler, processes)
     catalog = HuggingFaceCatalog(settings)
@@ -394,6 +393,7 @@ def build_services(settings: Settings) -> Services:
         workflow_editor_sessions=WorkflowEditorSessions(),
         # Built locked; the lifespan settles it from the saved setting.
         workspace_lock=WorkspaceLock(),
+        power=power,
     )
     return services
 
