@@ -45,7 +45,7 @@ export function WorkerStatusCard({
   // manages nothing of can still have something serving on its port, which
   // the backend now reports; gating on the exited state alone would keep
   // that explanation off the card it belongs on.
-  const failed = worker.state === "exited" || Boolean(worker.failure_code);
+  const failed = worker.state === "exited" || Boolean(worker.failure_code || worker.failure_detail);
   // Chat restarts with the model it ran last, so the record must know one;
   // media's stopped state is covered by the Start button instead.
   const restartable = worker.name === "chat" ? Boolean(worker.profile_id) : worker.running;

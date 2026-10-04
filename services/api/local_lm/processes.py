@@ -82,6 +82,13 @@ class ProcessStateError(RuntimeError):
     """State beneath the data folder could not be reached or published safely."""
 
 
+class WorkerStopIncomplete(ValueError):
+    """Shutdown could not confirm that every owned worker process stopped."""
+
+    def __init__(self) -> None:
+        super().__init__("Worker shutdown did not complete. Its process ownership is retained.")
+
+
 @contextlib.contextmanager
 def _held_state(state_dir: Path, *children: str) -> Iterator[AnchoredDirectory]:
     """Hold the state folder, and any child, for a whole operation.
@@ -387,6 +394,7 @@ class WorkerRecord:
     editor_bridge_launch_id: str | None = None
     editor_bridge_support: ComfyEditorBridgeSupport | None = None
     stopping: bool = False
+    shutdown_incomplete: bool = False
 
 
 def _media_containment_status(name: str) -> CustomNodeContainmentStatus | None:
@@ -467,7 +475,13 @@ class ProcessSupervisor:
                         f"running and holding its port: {orphan}."
                     )
                     failure = worker_failure(WorkerFailureCode.PORT_IN_USE)
-            if record and not running and not record.stopping:
+            if record and record.shutdown_incomplete:
+                failure_detail = str(WorkerStopIncomplete())
+                failure = WorkerFailure(
+                    WorkerFailureCode.UNKNOWN,
+                    "Try stopping the worker again. If it still cannot stop, restart the computer.",
+                )
+            elif record and not running and not record.stopping:
                 exit_code = (
                     record.process.returncode
                     if record.process.returncode is not None
@@ -1472,7 +1486,12 @@ class ProcessSupervisor:
         return next(item for item in self.statuses() if item.name == name)
 
     async def close(self) -> None:
-        await asyncio.gather(*(self.stop(name) for name in tuple(self._locks)))
+        results = await asyncio.gather(
+            *(self.stop(name) for name in tuple(self._locks)), return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     async def _replace(
         self,
@@ -1585,7 +1604,12 @@ class ProcessSupervisor:
                 except Exception:
                     logger.exception("Could not clean up cancelled %s worker start", name)
                 finally:
-                    if self._workers.get(name) is record:
+                    if (
+                        cleanup.done()
+                        and not cleanup.cancelled()
+                        and cleanup.exception() is None
+                        and self._workers.get(name) is record
+                    ):
                         self._workers.pop(name)
                 raise
             except Exception as exc:
@@ -2379,11 +2403,15 @@ class ProcessSupervisor:
                 process = self._matching_process(identity)
                 if process is not None:
                     matches.append(process)
-        if matches:
-            self._terminate_processes(matches, self.settings.worker_shutdown_seconds)
-            logger.info("Attempted cleanup of %s persisted worker process(es)", len(matches))
-        for name in tuple(self._worker_identities):
-            self._refresh_worker_identities_after_stop(name)
+        try:
+            if matches:
+                self._terminate_processes(matches, self.settings.worker_shutdown_seconds)
+                logger.info("Attempted cleanup of %s persisted worker process(es)", len(matches))
+        except WorkerStopIncomplete:
+            logger.warning("Persisted worker shutdown did not complete; identities are retained")
+        finally:
+            for name in tuple(self._worker_identities):
+                self._refresh_worker_identities_after_stop(name)
 
     @staticmethod
     def _terminate_processes(
@@ -2391,23 +2419,32 @@ class ProcessSupervisor:
         timeout_seconds: float,
     ) -> None:
         by_pid = {process.pid: process for process in processes}
+        tree_unavailable = False
         for process in tuple(by_pid.values()):
-            with contextlib.suppress(psutil.AccessDenied, psutil.NoSuchProcess):
+            try:
                 for child in process.children(recursive=True):
                     by_pid.setdefault(child.pid, child)
+            except psutil.AccessDenied:
+                tree_unavailable = True
+            except psutil.NoSuchProcess:
+                pass
         live: list[psutil.Process] = []
         for process in by_pid.values():
             try:
                 process.terminate()
                 live.append(process)
-            except (psutil.AccessDenied, psutil.NoSuchProcess):
+            except psutil.AccessDenied:
+                live.append(process)
+            except psutil.NoSuchProcess:
                 continue
         _gone, remaining = psutil.wait_procs(live, timeout=timeout_seconds)
         for process in remaining:
             with contextlib.suppress(psutil.AccessDenied, psutil.NoSuchProcess):
                 process.kill()
         if remaining:
-            psutil.wait_procs(remaining, timeout=timeout_seconds)
+            _gone, remaining = psutil.wait_procs(remaining, timeout=timeout_seconds)
+        if remaining or tree_unavailable:
+            raise WorkerStopIncomplete()
 
     @staticmethod
     def _descendant_processes(pid: int) -> list[psutil.Process]:
@@ -2468,21 +2505,23 @@ class ProcessSupervisor:
         """
 
         persisted = await asyncio.to_thread(self._matching_worker_processes, name)
-        if not persisted:
-            return
-        logger.info(
-            "Stopping %s orphaned %s worker process(es) with no live record",
-            len(persisted),
-            name,
-        )
         try:
-            await asyncio.to_thread(
-                self._terminate_processes,
-                persisted,
-                self.settings.worker_shutdown_seconds,
-            )
+            if persisted:
+                logger.info(
+                    "Stopping %s orphaned %s worker process(es) with no live record",
+                    len(persisted),
+                    name,
+                )
+                await asyncio.to_thread(
+                    self._terminate_processes,
+                    persisted,
+                    self.settings.worker_shutdown_seconds,
+                )
         finally:
             self._refresh_worker_identities_after_stop(name)
+        with self._identity_lock:
+            if self._worker_identities.get(name):
+                raise WorkerStopIncomplete()
 
     async def _terminate_record(
         self,
@@ -2491,6 +2530,7 @@ class ProcessSupervisor:
         cancel_monitor: bool = True,
     ) -> None:
         record.stopping = True
+        record.shutdown_incomplete = False
         current_task = asyncio.current_task()
         if cancel_monitor and record.monitor_task and record.monitor_task is not current_task:
             if not record.monitor_task.done():
@@ -2513,12 +2553,13 @@ class ProcessSupervisor:
                 except TimeoutError:
                     with contextlib.suppress(ProcessLookupError):
                         record.process.kill()
-                    await record.process.wait()
-            remaining = {
-                process.pid: process
-                for process in [*descendants, *persisted]
-                if process.pid != record.process.pid
-            }
+                    try:
+                        await asyncio.wait_for(
+                            record.process.wait(), timeout=self.settings.worker_shutdown_seconds
+                        )
+                    except TimeoutError as exc:
+                        raise WorkerStopIncomplete() from exc
+            remaining = {process.pid: process for process in [*descendants, *persisted]}
             if remaining:
                 await asyncio.to_thread(
                     self._terminate_processes,
@@ -2527,8 +2568,16 @@ class ProcessSupervisor:
                 )
             if record.output_task:
                 await asyncio.shield(record.output_task)
+        except (WorkerStopIncomplete, OSError) as exc:
+            record.shutdown_incomplete = True
+            raise WorkerStopIncomplete() from exc
         finally:
             self._refresh_worker_identities_after_stop(record.name)
+        with self._identity_lock:
+            outstanding = bool(self._worker_identities.get(record.name))
+        if outstanding:
+            record.shutdown_incomplete = True
+            raise WorkerStopIncomplete()
         record.log.close()
         record.stopping = False
 
