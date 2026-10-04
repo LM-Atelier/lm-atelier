@@ -387,7 +387,7 @@ def build_services(settings: Settings) -> Services:
         runtimes=runtimes,
         backups=BackupManager(settings),
         exports=ProjectExporter(settings, artifacts),
-        diagnostics=DiagnosticBundleBuilder(settings, artifacts, processes),
+        diagnostics=DiagnosticBundleBuilder(settings, artifacts, processes, power=power),
         custom_nodes=CustomNodeManager(settings),
         credentials=credentials,
         workflow_editor_sessions=WorkflowEditorSessions(),
