@@ -1,11 +1,13 @@
 """A materialized recovery selection changes every member or none of them."""
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
-from httpx2 import AsyncClient
+from httpx2 import AsyncClient, Response
 from sqlalchemy import delete, select, update
+from sqlalchemy.orm import Session
 from test_chat_deletion import _text_exchange
 from test_chat_recovery import _chat, _command, _history, _impact
 from test_media_recovery_api import _media
@@ -14,6 +16,7 @@ from test_recovery_expiry import manual_expiry as manual_expiry
 from test_workflow_recovery_api import _seed as _workflow
 
 from local_lm.db import SessionLocal
+from local_lm.events import EventBroker
 from local_lm.models import (
     Artifact,
     ArtifactLibraryEntry,
@@ -23,17 +26,23 @@ from local_lm.models import (
     RecoveryOperation,
     WorkflowFamily,
 )
+from local_lm.recovery_bulk_v1 import RecoveryBatchMemberV1, RecoveryBatchSelectionV1
 from local_lm.recovery_previews import RecoveryPreviewConflict
+from local_lm.recovery_v1 import RecoveryResultV1
+from local_lm.schemas import EventOut
 
 
-async def _trash(client: AsyncClient, path: str, key: str) -> dict:
+async def _trash(client: AsyncClient, path: str, key: str) -> dict[str, Any]:
     preview = await _impact(client, path + "/deletion-impact")
     response = await client.post(path + "/trash", json=_command(preview, key))
     assert response.status_code == 200, response.text
-    return response.json()
+    result: dict[str, Any] = response.json()
+    return result
 
 
-async def _batch(client: AsyncClient, items: list[dict], action: str, **options) -> dict:
+async def _batch(
+    client: AsyncClient, items: list[dict[str, Any]], action: str, **options: object
+) -> dict[str, Any]:
     response = await client.post(
         "/api/recovery-items/batches",
         json={
@@ -44,7 +53,7 @@ async def _batch(client: AsyncClient, items: list[dict], action: str, **options)
     )
     assert response.status_code == 200, response.text
     assert response.headers["cache-control"] == "no-store"
-    preview = response.json()
+    preview: dict[str, Any] = response.json()
     assert preview["policy"] == "all-or-nothing"
     assert {member["deletion_id"] for member in preview["items"]} == {
         item["deletion_id"] for item in items
@@ -52,7 +61,9 @@ async def _batch(client: AsyncClient, items: list[dict], action: str, **options)
     return preview
 
 
-async def _apply(client: AsyncClient, preview: dict, key: str, **changes):
+async def _apply(
+    client: AsyncClient, preview: dict[str, Any], key: str, **changes: object
+) -> Response:
     command = _command(preview, key)
     if preview["action"] == "purge":
         command["acknowledgement"] = "permanently-delete"
@@ -78,10 +89,13 @@ async def test_a_mixed_batch_keeps_shared_bytes_and_exact_replay_with_one_commit
     preview = await _batch(client, items, action)
     assert preview["available"] is True
     assert len(preview["items"]) == 4
-    observed: list[str] = []
-    publish = app.state.services.events.publish
+    observed: list[str | None] = []
+    broker: EventBroker = app.state.services.events
+    publish = broker.publish
 
-    async def observe(event_type, entity_id=None, payload=None):
+    async def observe(
+        event_type: str, entity_id: str | None = None, payload: dict[str, Any] | None = None
+    ) -> EventOut:
         if event_type == "recovery.updated":
             with SessionLocal() as session:
                 states = [session.get(RecoveryItem, item["deletion_id"]) for item in items]
@@ -111,7 +125,9 @@ async def test_a_mixed_batch_keeps_shared_bytes_and_exact_replay_with_one_commit
         assert artifact is not None
         assert app.state.services.artifacts.verified_path(artifact).is_file()
         if action == "restore":
-            assert session.get(ArtifactLibraryEntry, entry_id).favorite
+            entry = session.get(ArtifactLibraryEntry, entry_id)
+            assert entry is not None
+            assert entry.favorite
             family = session.get(WorkflowFamily, family_id)
             assert family is not None and not family.enabled
     if action == "restore":
@@ -140,7 +156,9 @@ async def test_a_changed_later_member_refuses_the_entire_batch(
     assert response.status_code == 409
     assert (await client.get(f"/api/chats/{ids[0]}")).status_code == 404
     with SessionLocal() as session:
-        assert session.get(RecoveryItem, items[0]["deletion_id"]).state == "recoverable"
+        remaining = session.get(RecoveryItem, items[0]["deletion_id"])
+        assert remaining is not None
+        assert remaining.state == "recoverable"
         assert not session.scalars(
             select(RecoveryOperation).where(RecoveryOperation.operation_key.startswith("batch_"))
         ).all()
@@ -164,10 +182,9 @@ async def test_expiry_refuses_every_restore_without_extending_the_original_clock
     assert response.status_code == 409
     with SessionLocal() as session:
         assert all(session.get(RecoveryItem, item["deletion_id"]) is not None for item in items)
-        assert (
-            session.get(RecoveryItem, items[1]["deletion_id"]).purge_after.replace(tzinfo=UTC)
-            == expired
-        )
+        expired_item = session.get(RecoveryItem, items[1]["deletion_id"])
+        assert expired_item is not None
+        assert expired_item.purge_after.replace(tzinfo=UTC) == expired
 
 
 async def test_missing_project_requires_an_explicit_materialized_unfiled_choice(
@@ -212,10 +229,9 @@ async def test_purge_requires_exact_acknowledgement_and_does_not_accept_a_differ
     response = await _apply(client, preview, "change-selection-batch", deletion_ids=[])
     assert response.status_code == 422
     with SessionLocal() as session:
-        assert (
-            session.get(Chat, chat_id) is not None
-            and session.get(RecoveryItem, item["deletion_id"]).state == "recoverable"
-        )
+        retained = session.get(RecoveryItem, item["deletion_id"])
+        assert retained is not None
+        assert session.get(Chat, chat_id) is not None and retained.state == "recoverable"
 
 
 @pytest.mark.parametrize("action", ["restore", "purge"])
@@ -243,7 +259,7 @@ async def test_failure_after_real_member_transitions_rolls_back_every_row_and_re
         "recovery_batches",
     )
 
-    def rows():
+    def rows() -> dict[str, list[tuple[object, ...]]]:
         with SessionLocal() as session:
             return {
                 table: sorted(
@@ -257,18 +273,26 @@ async def test_failure_after_real_member_transitions_rolls_back_every_row_and_re
     transition = recovery_bulk._transition
     calls = 0
 
-    def fail_after_transition(*args, **kwargs):
+    def fail_after_transition(
+        session: Session,
+        member: RecoveryBatchMemberV1,
+        selection: RecoveryBatchSelectionV1,
+        batch_id: str,
+        operation_key: str,
+        now: datetime,
+    ) -> RecoveryResultV1:
         nonlocal calls
-        value = transition(*args, **kwargs)
+        value = transition(session, member, selection, batch_id, operation_key, now)
         calls += 1
         if calls == 2:
             raise RecoveryPreviewConflict("recovery-batch-unavailable")
         return value
 
-    events = []
-    publish = app.state.services.events.publish
+    events: list[tuple[Any, ...]] = []
+    broker: EventBroker = app.state.services.events
+    publish = broker.publish
 
-    async def observe(*args, **kwargs):
+    async def observe(*args: Any, **kwargs: Any) -> EventOut:
         events.append(args)
         return await publish(*args, **kwargs)
 
@@ -323,5 +347,8 @@ async def test_a_corrupt_or_expired_materialized_selection_is_inert(
     response = await _apply(client, preview, "invalid-materialization")
     assert response.status_code == 409
     with SessionLocal() as session:
-        assert session.get(RecoveryItem, item["deletion_id"]).state == "recoverable"
-        assert session.get(RecoveryBatchRecord, preview["batch_id"]).operation_key is None
+        remaining = session.get(RecoveryItem, item["deletion_id"])
+        record = session.get(RecoveryBatchRecord, preview["batch_id"])
+        assert remaining is not None and record is not None
+        assert remaining.state == "recoverable"
+        assert record.operation_key is None
