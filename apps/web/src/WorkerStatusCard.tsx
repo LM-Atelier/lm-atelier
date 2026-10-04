@@ -60,9 +60,11 @@ export function WorkerStatusCard({
               ? `Ready · PID ${worker.pid}`
               : worker.state === "starting"
                 ? "Starting and checking health"
-                : failed
-                  ? `Exited · code ${worker.exit_code ?? "unknown"}`
-                  : "Stopped or externally managed"}
+                : worker.state === "stopping"
+                  ? "Stopping and releasing resources"
+                  : failed
+                    ? `Exited · code ${worker.exit_code ?? "unknown"}`
+                    : "Stopped or externally managed"}
           </p>
         </div>
         <StatusDot healthy={worker.state === "ready"} />

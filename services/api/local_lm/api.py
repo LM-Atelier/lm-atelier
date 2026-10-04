@@ -9213,7 +9213,9 @@ async def update_model_asset(
         async with services.scheduler.lease("primary"):
             previous_values = {field: getattr(asset, field) for field in values}
             was_running = next(
-                worker.running for worker in services.processes.statuses() if worker.name == "media"
+                worker.running or worker.state == "stopping"
+                for worker in services.processes.statuses()
+                if worker.name == "media"
             )
             apply_values()
             if was_running:
@@ -9244,7 +9246,9 @@ async def delete_model_asset(
         if not asset:
             raise api_error(404, "model-asset-not-found", "model asset not found")
         was_running = next(
-            worker.running for worker in services.processes.statuses() if worker.name == "media"
+            worker.running or worker.state == "stopping"
+            for worker in services.processes.statuses()
+            if worker.name == "media"
         )
         deletion_error: BaseException | None = None
         try:
@@ -9263,9 +9267,7 @@ async def delete_model_asset(
             deletion_error = exc
             raise
         finally:
-            if was_running and not next(
-                worker.running for worker in services.processes.statuses() if worker.name == "media"
-            ):
+            if was_running and _media_worker_truly_stopped(services):
                 try:
                     await services.processes.start_media()
                 except Exception:
@@ -9578,7 +9580,8 @@ async def delete_model(
         worker_name = "chat" if install.role == ModelRole.CHAT.value else "media"
         _ensure_worker_idle(session, worker_name)
         if worker_name == "media" and any(
-            worker.name == "media" and worker.running for worker in services.processes.statuses()
+            worker.name == "media" and (worker.running or worker.state == "stopping")
+            for worker in services.processes.statuses()
         ):
             raise api_error(
                 409, "media-worker-running", "stop the media worker before deleting this model"
@@ -9648,7 +9651,7 @@ def _delete_model_locked(
             "Restore or permanently delete items in Recently Deleted before deleting this model.",
         )
     if profile_ids and any(
-        worker.running and worker.profile_id in profile_ids
+        (worker.running or worker.state == "stopping") and worker.profile_id in profile_ids
         for worker in _services(request).processes.statuses()
     ):
         raise api_error(
@@ -10028,7 +10031,7 @@ async def delete_profile(profile_id: str, request: Request, session: SessionDep)
         worker_name = "chat" if profile.role == ModelRole.CHAT.value else "media"
         _ensure_worker_idle(session, worker_name)
         if any(
-            worker.running and worker.profile_id == profile.id
+            (worker.running or worker.state == "stopping") and worker.profile_id == profile.id
             for worker in services.processes.statuses()
         ):
             raise api_error(
@@ -10370,10 +10373,7 @@ async def import_preset(
 
 
 def _require_media_worker_stopped(request: Request) -> None:
-    if any(
-        worker.name == "media" and worker.running
-        for worker in _services(request).processes.statuses()
-    ):
+    if not _media_worker_truly_stopped(_services(request)):
         raise api_error(
             409, "media-worker-running", "stop the media worker before changing custom nodes"
         )
@@ -13791,7 +13791,7 @@ def _media_worker_truly_stopped(services: Services) -> bool:
         (status for status in services.processes.statuses() if status.name == "media"),
         None,
     )
-    return media is None or (not media.running and media.state != "starting")
+    return media is None or (not media.running and media.state not in {"starting", "stopping"})
 
 
 def _registry_activation_context(services: Services) -> PreparationContext:

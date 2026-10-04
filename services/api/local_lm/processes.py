@@ -386,6 +386,7 @@ class WorkerRecord:
     launch_scope_sha256: str | None = None
     editor_bridge_launch_id: str | None = None
     editor_bridge_support: ComfyEditorBridgeSupport | None = None
+    stopping: bool = False
 
 
 def _media_containment_status(name: str) -> CustomNodeContainmentStatus | None:
@@ -451,7 +452,11 @@ class ProcessSupervisor:
             )
             if record and current_memory is not None:
                 record.peak_memory_bytes = max(record.peak_memory_bytes, current_memory)
-            stderr_tail = self._stderr_tail(record) if record and not running else None
+            stderr_tail = (
+                self._stderr_tail(record)
+                if record and not running and not record.stopping
+                else None
+            )
             failure_detail = None
             failure = WorkerFailure(WorkerFailureCode.UNKNOWN, None)
             if record is None:
@@ -462,7 +467,7 @@ class ProcessSupervisor:
                         f"running and holding its port: {orphan}."
                     )
                     failure = worker_failure(WorkerFailureCode.PORT_IN_USE)
-            if record and not running:
+            if record and not running and not record.stopping:
                 exit_code = (
                     record.process.returncode
                     if record.process.returncode is not None
@@ -484,7 +489,13 @@ class ProcessSupervisor:
                 WorkerStatus(
                     name=name,
                     state=(
-                        record.state if running and record else "exited" if record else "stopped"
+                        "stopping"
+                        if record and record.stopping
+                        else record.state
+                        if running and record
+                        else "exited"
+                        if record
+                        else "stopped"
                     ),
                     managed=record is not None,
                     running=running,
@@ -512,7 +523,12 @@ class ProcessSupervisor:
         """Return the live ready worker's exact activation scope, if it has one."""
 
         record = self._workers.get(name)
-        if record is None or record.process.returncode is not None or record.state != "ready":
+        if (
+            record is None
+            or record.stopping
+            or record.process.returncode is not None
+            or record.state != "ready"
+        ):
             return None
         return record.launch_scope_sha256
 
@@ -520,7 +536,12 @@ class ProcessSupervisor:
         """Return authority for the ready launch that whitelisted the verified bridge."""
 
         record = self._workers.get("media")
-        if record is None or record.process.returncode is not None or record.state != "ready":
+        if (
+            record is None
+            or record.stopping
+            or record.process.returncode is not None
+            or record.state != "ready"
+        ):
             return None
         support = record.editor_bridge_support
         if support is None or not support.supported:
@@ -531,7 +552,12 @@ class ProcessSupervisor:
         """Return the exact editor support fact bound to the live ready media launch."""
 
         record = self._workers.get("media")
-        if record is None or record.process.returncode is not None or record.state != "ready":
+        if (
+            record is None
+            or record.stopping
+            or record.process.returncode is not None
+            or record.state != "ready"
+        ):
             return None
         support = record.editor_bridge_support
         if support is None:
@@ -1474,6 +1500,7 @@ class ProcessSupervisor:
                 and current is not None
                 and current.process.returncode is None
                 and current.state == "ready"
+                and not current.stopping
                 and current.command == command
                 and current.launch_scope_sha256 == launch_scope_sha256
                 and current.editor_bridge_support == editor_bridge_support
@@ -1720,13 +1747,13 @@ class ProcessSupervisor:
             if self._workers.get(record.name) is not record:
                 return
             record.failure_detail = f"{record.name} worker exited with code {exit_code}."
+            await self._terminate_record(record, cancel_monitor=False)
             await self._publish_worker_event(
                 "worker.exited",
                 record,
                 state="exited",
                 exit_code=exit_code,
             )
-            await self._terminate_record(record, cancel_monitor=False)
 
     async def _publish_worker_event(
         self,
@@ -2409,9 +2436,11 @@ class ProcessSupervisor:
             psutil.wait_procs(remaining, timeout=timeout_seconds)
 
     async def _stop_unlocked(self, name: str) -> None:
-        record = self._workers.pop(name, None)
+        record = self._workers.get(name)
         if record:
             await self._terminate_record(record)
+            if self._workers.get(name) is record:
+                self._workers.pop(name)
             return
         # No in-memory record does NOT mean nothing is running, and treating it
         # that way is what made this unrecoverable from inside the product.
@@ -2461,6 +2490,7 @@ class ProcessSupervisor:
         *,
         cancel_monitor: bool = True,
     ) -> None:
+        record.stopping = True
         current_task = asyncio.current_task()
         if cancel_monitor and record.monitor_task and record.monitor_task is not current_task:
             if not record.monitor_task.done():
@@ -2496,10 +2526,11 @@ class ProcessSupervisor:
                     self.settings.worker_shutdown_seconds,
                 )
             if record.output_task:
-                await record.output_task
+                await asyncio.shield(record.output_task)
         finally:
             self._refresh_worker_identities_after_stop(record.name)
-            record.log.close()
+        record.log.close()
+        record.stopping = False
 
     async def _capture_process_output(self, record: WorkerRecord) -> None:
         log_failed = False

@@ -44,6 +44,14 @@ function renderCard(status: WorkerStatus) {
 afterEach(cleanup);
 
 describe("WorkerStatusCard reported faults", () => {
+  it.each([true, false])("shows cleanup in progress while the process is running: %s", (running) => {
+    renderCard(worker({ state: "stopping", running, active_jobs: 0 }));
+
+    expect(screen.getByText("Stopping and releasing resources")).toBeInTheDocument();
+    expect(screen.queryByText(/Ready ·|Stopped or externally managed|Exited ·/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("explains a stopped worker whose port something else is holding", () => {
     // The backend reports this without claiming a worker is running, because
     // none is: what it knows is that the port answers. Gating the explanation
