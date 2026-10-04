@@ -118,7 +118,7 @@ def test_job_visibility_covers_every_current_owner_and_runless_source(
     graph_session: Session, binding: str
 ) -> None:
     session = graph_session
-    values = {
+    values: dict[str, dict[str, object]] = {
         "run": {"run_id": "run-garden"},
         "plan": {"work_plan_id": "plan-garden"},
         "step": {"work_step_id": "step-garden"},

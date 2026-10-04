@@ -1,6 +1,7 @@
 """Deleted workflow families retain revision identity without regaining execution authority."""
 
 import copy
+from typing import Any
 
 import pytest
 from httpx2 import AsyncClient
@@ -18,7 +19,7 @@ from local_lm.models import (
 )
 
 
-def _seed(archived: bool = False) -> tuple[str, str, str, dict]:
+def _seed(archived: bool = False) -> tuple[str, str, str, dict[str, Any]]:
     with SessionLocal() as session:
         family, definition, revision, preference, *_ = _family(name="Garden layout")
         family.archived = archived
@@ -59,8 +60,10 @@ async def test_workflow_recovery_preserves_archive_and_never_retrusts_or_execute
     assert page.status_code == 200 and page.json()["items"] == [item]
     with SessionLocal() as session:
         family = session.get(WorkflowFamily, family_id)
+        assert family is not None
         assert family.archived == archived and not family.enabled
         revision = session.get(WorkflowRevision, revision_id)
+        assert revision is not None
         assert revision.api_graph_json == graph and not revision.trusted
     impact = await _impact(client, f"/api/recovery-items/{item['deletion_id']}/impact")
     transition = _command(impact, f"{action}-garden-workflow")
@@ -78,9 +81,12 @@ async def test_workflow_recovery_preserves_archive_and_never_retrusts_or_execute
     with SessionLocal() as session:
         family = session.get(WorkflowFamily, family_id)
         if action == "restore":
+            assert family is not None
             assert family.archived == archived and not family.enabled
-            assert session.get(WorkflowRevision, revision_id).api_graph_json == graph
-            assert not session.get(WorkflowRevision, revision_id).trusted
+            revision = session.get(WorkflowRevision, revision_id)
+            assert revision is not None
+            assert revision.api_graph_json == graph
+            assert not revision.trusted
             preferences = session.scalars(
                 select(WorkflowPreference).where(WorkflowPreference.workflow_family_id == family_id)
             ).all()
@@ -109,6 +115,7 @@ async def test_workflow_trash_refuses_an_active_default_without_changing_it(
         preference = session.scalar(
             select(WorkflowPreference).where(WorkflowPreference.workflow_family_id == family_id)
         )
+        assert preference is not None
         preference.is_default = True
         session.commit()
     preview = await _impact(client, f"/api/workflow-families/{family_id}/deletion-impact")
@@ -120,10 +127,13 @@ async def test_workflow_trash_refuses_an_active_default_without_changing_it(
     )
     assert refused.status_code == 409
     with SessionLocal() as session:
-        assert session.get(WorkflowFamily, family_id).enabled
+        family = session.get(WorkflowFamily, family_id)
+        assert family is not None
+        assert family.enabled
         preference = session.scalar(
             select(WorkflowPreference).where(WorkflowPreference.workflow_family_id == family_id)
         )
+        assert preference is not None
         assert preference.is_default and preference.enabled
         assert (
             session.scalar(
