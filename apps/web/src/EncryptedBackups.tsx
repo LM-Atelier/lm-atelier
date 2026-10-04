@@ -1,10 +1,11 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useRef, useState } from "react";
 import { api } from "./api";
 import { ErrorCallout } from "./ErrorCallout";
 import { formatBytes } from "./format";
 import { ENCRYPTED_BACKUP_KIND, encryptedArchiveKind } from "./projectArchiveFiles";
 import type { EncryptedBackupCheck } from "./types";
+import { useConfirm } from "./useConfirm";
 
 // Each refusal in this page's own words, so a message never depends on the server's.
 const PROBLEMS: Record<string, string> = {
@@ -25,6 +26,9 @@ const PROBLEMS: Record<string, string> = {
   "backup-invalid": "The file opened, but it does not hold a complete LM Atelier backup.",
   "backup-export-unverified":
     "The encrypted backup did not open again after it was written, so it was not kept. Try again.",
+  "backup-newer": "This backup was made by a newer version of LM Atelier, so this version cannot restore it.",
+  "restore-needs-key-vault":
+    "Restoring an encrypted backup needs this computer's credential vault, which is not available. Nothing was scheduled.",
 };
 
 function problem(error: Error, fallback: string): string {
@@ -59,9 +63,13 @@ function CheckReport({ report }: { report: EncryptedBackupCheck }) {
  * checked on the server before it is offered for download, and the passphrase,
  * typed twice so a slip of the keyboard does not lock it for good, is kept
  * nowhere but this page. Checking a copy later opens it and checks it the same
- * way, and restores and changes nothing.
+ * way, and restores and changes nothing. Restoring one checks it the same way
+ * too, then puts it in place of the current data the next time LM Atelier
+ * starts; until then that can be cancelled here.
  */
 export function EncryptedBackups() {
+  const client = useQueryClient();
+  const [confirmDialog, confirm] = useConfirm();
   const [passphrase, setPassphrase] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const hint = useId();
@@ -89,6 +97,23 @@ export function EncryptedBackups() {
     mutationFn: ({ file, secret }: { file: File; secret: string }) => api.checkEncryptedBackup(file, secret),
     onSuccess: () => setUnlock(""),
   });
+  const restoreState = useQuery({ queryKey: ["backups", "restore-state"], queryFn: () => api.backupRestoreState() });
+  const restore = useMutation({
+    gcTime: 0,
+    mutationFn: ({ file, secret }: { file: File; secret: string }) => api.restoreEncryptedBackup(file, secret),
+    onSuccess: () => {
+      setUnlock("");
+      // A restore waiting for the next start is one at a time, so this one
+      // replaced any backup that was waiting.
+      void client.invalidateQueries({ queryKey: ["backups"] });
+    },
+  });
+  const cancel = useMutation({
+    mutationFn: () => api.cancelRestore(),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["backups"] }),
+  });
+  const busy = check.isPending || restore.isPending;
+  const waiting = restoreState.data?.state === "pending" && restoreState.data.encrypted;
   const ready = passphrase.length > 0 && passphrase === confirmation;
   useEffect(() => {
     if (chosen) unlockField.current?.focus();
@@ -100,6 +125,7 @@ export function EncryptedBackups() {
   };
   const choose = async (file: File) => {
     check.reset();
+    restore.reset();
     setUnlock("");
     if ((await encryptedArchiveKind(file).catch(() => null)) !== ENCRYPTED_BACKUP_KIND) {
       setChosen(null);
@@ -110,13 +136,31 @@ export function EncryptedBackups() {
     setChosen(file);
   };
   const runCheck = () => {
-    if (!chosen || !unlock || check.isPending) return;
+    if (!chosen || !unlock || busy) return;
+    restore.reset();
     check.mutate({ file: chosen, secret: unlock });
+  };
+  const runRestore = async () => {
+    if (!chosen || !unlock || busy) return;
+    const file = chosen;
+    const secret = unlock;
+    const ok = await confirm({
+      title: "Restore this encrypted backup on restart?",
+      question:
+        "The backup is checked first. The next time LM Atelier starts it replaces the current data, and anything " +
+        "created since the backup was made is lost. Until then the key that opens it waits in this computer's " +
+        "credential vault; the passphrase itself is not kept.",
+      confirmLabel: "Restore on restart",
+    });
+    if (!ok) return;
+    check.reset();
+    restore.mutate({ file, secret });
   };
   const close = () => {
     setChosen(null);
     setUnlock("");
     check.reset();
+    restore.reset();
   };
 
   return (
@@ -134,7 +178,7 @@ export function EncryptedBackups() {
             ref={picker}
             hidden
             type="file"
-            aria-label="Encrypted backup to check"
+            aria-label="Encrypted backup to check or restore"
             accept=".lm-atelier.encrypted,.encrypted,application/octet-stream"
             onChange={(event) => {
               const file = event.target.files?.[0];
@@ -145,15 +189,31 @@ export function EncryptedBackups() {
           <button
             type="button"
             className="secondary"
-            aria-disabled={check.isPending}
+            aria-disabled={busy}
             onClick={() => {
-              if (!check.isPending) picker.current?.click();
+              if (!busy) picker.current?.click();
             }}
           >
-            Check an encrypted backup
+            Check or restore an encrypted backup
           </button>
         </div>
       </div>
+      {waiting && (
+        <div className="callout warning action-callout" role="status">
+          <span>An encrypted backup will replace the current data the next time LM Atelier starts.</span>
+          <button
+            type="button"
+            className="secondary compact-button"
+            aria-disabled={cancel.isPending}
+            onClick={() => {
+              if (!cancel.isPending) cancel.mutate();
+            }}
+          >
+            Cancel restore
+          </button>
+          {cancel.isError && <span role="alert">The restore could not be cancelled. Try again.</span>}
+        </div>
+      )}
       <span className="row-actions">
         <label>
           Encrypted backup passphrase
@@ -220,15 +280,18 @@ export function EncryptedBackups() {
       {chosen && (
         <form
           className="callout"
-          aria-label="Check an encrypted backup"
+          aria-label="Check or restore an encrypted backup"
           onSubmit={(event) => {
             event.preventDefault();
             runCheck();
           }}
         >
-          <p>Enter the passphrase for {chosen.name} to check that it opens. Nothing is restored or changed.</p>
+          <p>
+            Enter the passphrase for {chosen.name}. Check opens it and changes nothing. Restore on restart checks it
+            the same way, then puts it in place of the current data the next time LM Atelier starts.
+          </p>
           <label>
-            Passphrase of the backup to check
+            Passphrase of the backup
             <input
               ref={unlockField}
               type="password"
@@ -237,7 +300,7 @@ export function EncryptedBackups() {
               onChange={(event) => setUnlock(event.target.value)}
             />
           </label>
-          {check.isPending && (
+          {busy && (
             <p className="muted" role="status">
               Opening and checking the backup. A large one can take several minutes.
             </p>
@@ -245,17 +308,31 @@ export function EncryptedBackups() {
           {check.error && (
             <ErrorCallout message={problem(check.error, "The backup could not be checked. Try again.")} />
           )}
+          {restore.error && (
+            <ErrorCallout message={problem(restore.error, "The restore could not be scheduled. Try again.")} />
+          )}
           {check.data && <CheckReport report={check.data} />}
+          {restore.data && (
+            <>
+              <CheckReport report={restore.data} />
+              <div className="callout success" role="status">
+                It will replace the current data the next time LM Atelier starts. Restart LM Atelier to apply it.
+              </div>
+            </>
+          )}
           <span className="row-actions">
-            <button type="submit" aria-disabled={!unlock || check.isPending}>
+            <button type="submit" aria-disabled={!unlock || busy}>
               Check
+            </button>
+            <button type="button" className="secondary" aria-disabled={!unlock || busy} onClick={() => void runRestore()}>
+              Restore on restart
             </button>
             <button
               type="button"
               className="secondary"
-              aria-disabled={check.isPending}
+              aria-disabled={busy}
               onClick={() => {
-                if (!check.isPending) close();
+                if (!busy) close();
               }}
             >
               Close
@@ -263,6 +340,7 @@ export function EncryptedBackups() {
           </span>
         </form>
       )}
+      {confirmDialog}
     </section>
   );
 }

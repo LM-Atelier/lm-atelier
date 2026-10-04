@@ -60,10 +60,16 @@ The copy is opened again and checked before it is offered for download, and it
 is not added to the recovery backups. While it is made, its unencrypted form is
 written only to a folder private to your account and is deleted as soon as the
 sealed file has been checked. The sealed file is then kept in the workspace like
-an exported archive until it expires. **Check an encrypted backup** opens a
-chosen file with its passphrase, checks it the same way, and deletes what it
-opened; it restores nothing. The passphrase is never stored, and a forgotten
-passphrase cannot be recovered.
+an exported archive until it expires. **Check or restore an encrypted backup**
+opens a chosen file with its passphrase and checks it the same way. **Check**
+then deletes what it opened and restores nothing. **Restore on restart** also
+deletes what it opened, keeps the file itself, still encrypted, until the next
+start, and holds the key that opens that one file, never the passphrase, in the
+operating system's credential vault. The next start opens the file with that
+key, puts it in place of the current data, and removes both the file and the
+key, whether or not the restore could be applied. Without a credential vault an
+encrypted backup cannot be restored this way. The passphrase is never stored,
+and a forgotten passphrase cannot be recovered.
 
 A restore is applied the next time LM Atelier starts. If a restore you asked for
 cannot be applied then, for example because the backup was removed or no longer
