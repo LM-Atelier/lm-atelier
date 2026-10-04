@@ -1,12 +1,15 @@
 """Project recovery routes preserve conversations and commit before live updates."""
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 from run_waits import wait_until
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 from test_chat_deletion import _text_exchange
 from test_chat_recovery import _command, _history, _impact
 from test_media_recovery_restart import _open
@@ -24,9 +27,10 @@ from local_lm.models import (
     RecoveryOperation,
     RecoveryPreviewRecord,
 )
-from local_lm.project_recovery import preview_project_trash, trash_project
+from local_lm.project_recovery import preview_project_trash, purge_project, trash_project
 from local_lm.recovery_previews import RecoveryPreviewConflict
-from local_lm.recovery_v1 import RecoveryCommandV1
+from local_lm.recovery_v1 import PurgeRecoveryV1, RecoveryCommandV1, RecoveryItemV1
+from local_lm.schemas import EventOut
 
 
 async def _project(client: AsyncClient, name: str = "Garden layout") -> tuple[str, str]:
@@ -38,7 +42,7 @@ async def _project(client: AsyncClient, name: str = "Garden layout") -> tuple[st
     return project_id, chat.json()["id"]
 
 
-def _stored_trash(project_id: str, now: datetime):
+def _stored_trash(project_id: str, now: datetime) -> RecoveryItemV1:
     with SessionLocal() as session:
         preview = preview_project_trash(session, project_id, now)
         item = trash_project(
@@ -62,10 +66,14 @@ async def test_project_routes_replay_exactly_and_keep_child_history_after_later_
         await client.patch(f"/api/chats/{moved_id}", json={"project_id": project_id})
     ).status_code == 200
     history = _history(chat_id)
-    observed = []
-    publish = app.state.services.events.publish
+    observed: list[tuple[str, str | None, str | None]] = []
+    publish: Callable[[str, str | None, dict[str, Any] | None], Awaitable[EventOut]] = (
+        app.state.services.events.publish
+    )
 
-    async def observe(event_type, entity_id=None, payload=None):
+    async def observe(
+        event_type: str, entity_id: str | None = None, payload: dict[str, Any] | None = None
+    ) -> EventOut:
         if event_type in ("project.updated", "recovery.updated"):
             assert payload == {}
             with SessionLocal() as session:
@@ -206,10 +214,14 @@ async def test_project_expiry_keeps_child_history_and_rolls_back_failed_cascades
     with SessionLocal() as session:
         job_count = session.scalar(select(func.count()).select_from(Job))
     if fail:
-        original = recovery_maintenance.purge_project
+        original = purge_project
+        observed_purge: object = vars(recovery_maintenance)["purge_project"]
+        assert observed_purge is original
 
-        def refuse(*args, **kwargs):
-            original(*args, **kwargs)
+        def refuse(
+            session: Session, deletion_id: str, command: PurgeRecoveryV1, now: datetime
+        ) -> None:
+            original(session, deletion_id, command, now)
             raise RecoveryPreviewConflict("recovery-impact-stale")
 
         monkeypatch.setattr(recovery_maintenance, "purge_project", refuse)
@@ -258,9 +270,11 @@ async def test_project_recovery_restart_keeps_the_original_deadline_and_child_hi
     async with _open(settings) as (app, client):
         if expired:
 
-            async def read_state():
+            async def read_state() -> str:
                 with SessionLocal() as session:
-                    return session.get(RecoveryItem, item.deletion_id).state
+                    retained = session.get(RecoveryItem, item.deletion_id)
+                    assert retained is not None
+                    return retained.state
 
             await wait_until(read_state, lambda state: state == "purged", what="project expiry")
             expected = dict(history)

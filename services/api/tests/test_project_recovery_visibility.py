@@ -1,11 +1,13 @@
 """Deleted projects appear unfiled without rewriting canonical chat links."""
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from httpx2 import AsyncClient
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 from test_chat_recovery import _command, _history, _impact
 from test_project_recovery_api import _project, _stored_trash
 from test_recovery_expiry import manual_expiry as manual_expiry
@@ -23,7 +25,11 @@ async def test_deleted_project_is_absent_from_normal_reads_but_child_links_resto
     before = _history(chat_id)
     item = _stored_trash(project_id, datetime.now(UTC))
     assert all(row["id"] != project_id for row in (await client.get("/api/projects")).json())
-    for params in ({"project_id": project_id}, {"query": "Unique garden", "literal_search": True}):
+    queries: tuple[dict[str, str | bool], ...] = (
+        {"project_id": project_id},
+        {"query": "Unique garden", "literal_search": True},
+    )
+    for params in queries:
         assert (await client.get("/api/projects", params=params)).json() == []
     assert (await client.get(f"/api/projects/{project_id}")).status_code == 404
     for suffix in ("", "/metadata"):
@@ -92,7 +98,7 @@ async def test_project_admission_rechecks_deletion_after_async_settings_validati
     before = _history(chat_id)
     original = api._validate_generation_defaults
 
-    async def delayed(request, session, values):
+    async def delayed(request: Request, session: Session, values: dict[str, Any]) -> None:
         await original(request, session, values)
         _stored_trash(project_id, datetime.now(UTC))
 

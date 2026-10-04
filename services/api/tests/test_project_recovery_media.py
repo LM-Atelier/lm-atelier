@@ -1,6 +1,8 @@
 """Project recovery preserves accepted media work and independently referenced bytes."""
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -12,6 +14,7 @@ from test_explicit_revision_model_binding import _png
 from test_project_recovery_api import _project
 from test_recovery_expiry import manual_expiry as manual_expiry
 
+from local_lm.adapters.base import MediaEvent, MediaRequest
 from local_lm.artifact_library import ensure_library_entry, set_library_favorite
 from local_lm.db import SessionLocal
 from local_lm.domain import ArtifactKind
@@ -94,10 +97,10 @@ async def test_queued_media_keeps_settings_inputs_and_outputs_through_project_re
         session.commit()
         input_id, entry_id, other_id = artifact.id, entry.id, other.id
         input_path = store.resolve(artifact)
-    seen = []
+    seen: list[MediaRequest] = []
     original = app.state.services.engines.media.generate
 
-    async def observe(request):
+    async def observe(request: MediaRequest) -> AsyncIterator[MediaEvent]:
         seen.append(request)
         async for event in original(request):
             yield event
@@ -137,12 +140,19 @@ async def test_queued_media_keeps_settings_inputs_and_outputs_through_project_re
         assert result.status_code == 200 and result.json()["reclaimed_bytes"] == 0
         assert input_path.read_bytes() == content and seen == []
         with SessionLocal() as session:
-            assert session.get(RunContextSnapshot, run_id).payload_json == snapshot
-            assert session.get(ArtifactLibraryEntry, entry_id).favorite
-            assert session.get(Chat, other_id).archived
+            retained_snapshot = session.get(RunContextSnapshot, run_id)
+            assert retained_snapshot is not None
+            assert retained_snapshot.payload_json == snapshot
+            retained_entry = session.get(ArtifactLibraryEntry, entry_id)
+            assert retained_entry is not None
+            assert retained_entry.favorite
+            retained_chat = session.get(Chat, other_id)
+            assert retained_chat is not None
+            assert retained_chat.archived
 
-    async def read():
-        return (await client.get(f"/api/runs/{run_id}")).json()
+    async def read() -> dict[str, Any]:
+        payload: dict[str, Any] = (await client.get(f"/api/runs/{run_id}")).json()
+        return payload
 
     completed = await wait_for_terminal_status(read, what="accepted garden media")
     assert seen and seen[-1].parameters["seed"] == 17
@@ -177,7 +187,9 @@ async def test_queued_media_keeps_settings_inputs_and_outputs_through_project_re
         assert retained.reclaimed_bytes == sum(temporaries.values())
         assert all(session.get(Artifact, identity) is None for identity in temporaries)
         assert all(session.get(Artifact, identity) is not None for identity in protected)
-        assert session.get(RunContextSnapshot, run_id).payload_json == snapshot
+        retained_snapshot = session.get(RunContextSnapshot, run_id)
+        assert retained_snapshot is not None
+        assert retained_snapshot.payload_json == snapshot
     assert [path.read_bytes() for path in paths] == original_bytes
     assert input_path.read_bytes() == content
     response = await client.get(f"/api/artifacts/{input_id}/content")
