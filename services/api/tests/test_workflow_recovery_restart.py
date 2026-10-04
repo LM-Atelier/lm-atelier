@@ -41,6 +41,7 @@ async def test_restart_leaves_deleted_compatibility_workflows_and_their_deadline
                         WorkflowDefinition.variant_key == "create",
                     )
                 )
+                assert definition is not None
                 revision = WorkflowRevision(
                     definition=definition,
                     version=1,
@@ -73,9 +74,12 @@ async def test_restart_leaves_deleted_compatibility_workflows_and_their_deadline
             assert response.status_code == 200, response.text
             expected_replay["display_label"] = "Deleted item"
         with SessionLocal() as session:
-            session.get(ModelProfile, profile_id).name = "Renamed garden renderer"
+            stored_profile = session.get(ModelProfile, profile_id)
+            assert stored_profile is not None
+            stored_profile.name = "Renamed garden renderer"
             session.commit()
             recovery = session.get(RecoveryItem, item["deletion_id"])
+            assert recovery is not None
             identity = (
                 recovery.deleted_at,
                 recovery.purge_after,
@@ -97,6 +101,7 @@ async def test_restart_leaves_deleted_compatibility_workflows_and_their_deadline
         assert repeated.status_code == 200 and repeated.json() == expected_replay
         with SessionLocal() as session:
             recovery = session.get(RecoveryItem, item["deletion_id"])
+            assert recovery is not None
             assert (
                 recovery.deleted_at,
                 recovery.purge_after,
