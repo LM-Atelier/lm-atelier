@@ -20,6 +20,10 @@ from .media_organization import (
 )
 from .media_organization import create_media_tag as _create_stored_tag
 from .media_organization import list_media_tags as _list_stored_tags
+from .media_organization_creations import (
+    MediaCreationConflict,
+    create_catalog_choice,
+)
 from .models import MediaCollection, MediaTag
 
 router = APIRouter()
@@ -41,12 +45,16 @@ def _create_collection(payload: object) -> dict[str, object]:
     if type(payload) is not dict:
         raise MediaOrganizationError(MEDIA_ORGANIZATION_INVALID)
     with SessionLocal() as session:
-        collection = create_manual_collection(
+        body = create_catalog_choice(
             session,
-            name=payload.get("name"),
-            description=payload.get("description", ""),
+            kind="albums",
+            payload=payload,
+            create=lambda: _collection_body(
+                create_manual_collection(
+                    session, name=payload.get("name"), description=payload.get("description", "")
+                )
+            ),
         )
-        body = _collection_body(collection)
         session.commit()
         return body
 
@@ -68,6 +76,8 @@ async def create_media_collection(request: Request) -> JSONResponse:
         raise api_error(422, "media-collection-invalid", MEDIA_ORGANIZATION_INVALID) from exc
     try:
         body = await run_in_threadpool(_create_collection, payload)
+    except MediaCreationConflict as exc:
+        raise api_error(409, "media-creation-conflict", str(exc)) from exc
     except MediaOrganizationError as exc:
         raise api_error(422, "media-collection-invalid", str(exc)) from exc
     return JSONResponse(body, status_code=201)
@@ -92,8 +102,14 @@ def _create_tag(payload: object) -> dict[str, object]:
     if type(payload) is not dict:
         raise MediaOrganizationError(MEDIA_ORGANIZATION_INVALID)
     with SessionLocal() as session:
-        tag = _create_stored_tag(session, label=payload.get("label"), color=payload.get("color"))
-        response = _tag_body(tag)
+        response = create_catalog_choice(
+            session,
+            kind="tags",
+            payload=payload,
+            create=lambda: _tag_body(
+                _create_stored_tag(session, label=payload.get("label"), color=payload.get("color"))
+            ),
+        )
         session.commit()
         return response
 
@@ -111,6 +127,8 @@ async def create_media_tag(request: Request) -> JSONResponse:
         raise api_error(422, "media-tag-invalid", MEDIA_ORGANIZATION_INVALID) from exc
     try:
         body = await run_in_threadpool(_create_tag, payload)
+    except MediaCreationConflict as exc:
+        raise api_error(409, "media-creation-conflict", str(exc)) from exc
     except MediaOrganizationConflict as exc:
         raise api_error(409, "media-tag-conflict", str(exc)) from exc
     except MediaOrganizationError as exc:

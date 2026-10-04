@@ -460,6 +460,8 @@ from .schemas import (
     AdapterPromptGrammarOut,
     AdapterPromptGrammarReview,
     ApplicationInfo,
+    ArtifactAlbumEntrySummary,
+    ArtifactAlbumPage,
     ArtifactCleanupRequest,
     ArtifactCleanupResult,
     ArtifactDeleteResult,
@@ -6506,7 +6508,7 @@ def _artifact_generation_identity(
     return _generation_identity(run.provenance_json) if run is not None else None
 
 
-@router.get("/artifact-library", response_model=ArtifactLibraryPage)
+@router.get("/artifact-library", response_model=ArtifactAlbumPage | ArtifactLibraryPage)
 async def list_artifact_library(
     request: Request,
     session: ConversationSessionDep,
@@ -6516,7 +6518,9 @@ async def list_artifact_library(
     state: Literal["visible", "trashed"] = "visible",
     favorite: Literal["true", "false"] | None = None,
     query: str = Query(default="", max_length=200),
-) -> ArtifactLibraryPage:
+    collection_id: str | None = Query(default=None, pattern=r"^collection_[0-9a-f]{32}$"),
+    tag_id: str | None = Query(default=None, pattern=r"^mediatag_[0-9a-f]{32}$"),
+) -> ArtifactAlbumPage | ArtifactLibraryPage:
     """Return one bounded page of durable Media Library memberships."""
 
     favorite_value = None if favorite is None else favorite == "true"
@@ -6530,6 +6534,8 @@ async def list_artifact_library(
             state=state,
             favorite=favorite_value,
             query=query,
+            collection_id=collection_id,
+            tag_id=tag_id,
         )
     except ArtifactLibraryCursorError as exc:
         raise api_error(
@@ -6543,25 +6549,33 @@ async def list_artifact_library(
             "artifact-library-conflict",
             "The Media Library could not be read safely. Refresh and try again.",
         ) from exc
-    return ArtifactLibraryPage(
-        items=[
-            ArtifactLibraryEntrySummary(
-                id=row.entry.id,
-                artifact_id=row.artifact.id,
-                version=row.entry.version,
-                state=cast(Literal["visible", "trashed"], row.entry.state),
-                display_name=row.entry.display_name,
-                favorite=row.entry.favorite,
-                kind=cast(Literal["image", "video"], row.artifact.kind),
-                media_type=row.artifact.media_type,
-                size_bytes=row.artifact.size_bytes,
-                created_at=row.entry.created_at,
-                updated_at=row.entry.updated_at,
-            )
-            for row in rows
-        ],
-        next_cursor=next_cursor,
-    )
+    items = [
+        ArtifactLibraryEntrySummary(
+            id=row.entry.id,
+            artifact_id=row.artifact.id,
+            version=row.entry.version,
+            state=cast(Literal["visible", "trashed"], row.entry.state),
+            display_name=row.entry.display_name,
+            favorite=row.entry.favorite,
+            kind=cast(Literal["image", "video"], row.artifact.kind),
+            media_type=row.artifact.media_type,
+            size_bytes=row.artifact.size_bytes,
+            created_at=row.entry.created_at,
+            updated_at=row.entry.updated_at,
+        )
+        for row in rows
+    ]
+    if collection_id is not None:
+        return ArtifactAlbumPage(
+            items=[
+                ArtifactAlbumEntrySummary(
+                    **item.model_dump(), collection_position=cast(int, row.collection_position)
+                )
+                for item, row in zip(items, rows, strict=True)
+            ],
+            next_cursor=next_cursor,
+        )
+    return ArtifactLibraryPage(items=items, next_cursor=next_cursor)
 
 
 @router.get("/artifacts", response_model=list[ArtifactLibraryItem])

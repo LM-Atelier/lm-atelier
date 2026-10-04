@@ -30,6 +30,29 @@ const page = (items: unknown[], nextCursor: unknown = null) => ({
   next_cursor: nextCursor,
 });
 
+describe("saved album page order", () => {
+  it("uses exact album positions across pages instead of creation time", () => {
+    const first = parseArtifactLibraryPage(page([{ ...item("a"), collection_position: 0 }], cursor), 1, true);
+    const second = parseArtifactLibraryPage(page([{ ...item("b", "2026-08-12T12:01:00Z"), collection_position: 2 }]), 1, true);
+    expect(flattenArtifactLibraryPages([first, second], true).map((row) => row.id)).toEqual([
+      item("a").id, item("b").id,
+    ]);
+  });
+  it.each([undefined, null, true, "0", -1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+    "refuses an inexact album position %s", (position) => {
+      expect(() => parseArtifactLibraryPage(page([{ ...item(), collection_position: position }]), 20, true))
+        .toThrow(ARTIFACT_LIBRARY_PAGE_ERROR);
+    },
+  );
+  it("refuses duplicate and reversed album positions across page boundaries", () => {
+    const first = parseArtifactLibraryPage(page([{ ...item("a"), collection_position: 2 }], cursor), 1, true);
+    for (const position of [2, 1]) {
+      const second = parseArtifactLibraryPage(page([{ ...item("b"), collection_position: position }]), 1, true);
+      expect(() => flattenArtifactLibraryPages([first, second], true)).toThrow(ARTIFACT_LIBRARY_PAGE_ERROR);
+    }
+  });
+});
+
 function rejects(value: unknown, limit = 20) {
   expect(() => parseArtifactLibraryPage(value, limit)).toThrow(ARTIFACT_LIBRARY_PAGE_ERROR);
 }

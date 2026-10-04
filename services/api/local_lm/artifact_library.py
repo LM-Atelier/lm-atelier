@@ -18,6 +18,7 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import Select
 
 from .artifact_deletion_authority import (
     active_artifact_deletion_proof,
@@ -35,6 +36,10 @@ from .models import (
     ChatComposerDraftAttachment,
     ComfyRegistrySourceArtifactReview,
     Job,
+    MediaCollection,
+    MediaCollectionMembership,
+    MediaTag,
+    MediaTagAssignment,
     MessagePart,
     MessageReference,
     ReferenceAsset,
@@ -79,6 +84,7 @@ class ArtifactLibraryDataError(ValueError):
 class ArtifactLibraryPageRow:
     entry: ArtifactLibraryEntry
     artifact: Artifact
+    collection_position: int | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +92,14 @@ class _LibraryCursor:
     anchor_created_at: datetime
     anchor_id: str
     after_created_at: datetime
+    after_id: str
+
+
+@dataclass(frozen=True)
+class _AlbumLibraryCursor:
+    anchor_position: int
+    anchor_id: str
+    after_position: int
     after_id: str
 
 
@@ -110,32 +124,47 @@ def _b64decode(value: str) -> bytes:
 
 
 def _cursor_filters(
-    *, kind: str | None, state: str, favorite: bool | None, query: str, limit: int
+    *,
+    kind: str | None,
+    state: str,
+    favorite: bool | None,
+    query: str,
+    limit: int,
+    collection: MediaCollection | None = None,
+    tag: MediaTag | None = None,
 ) -> dict[str, object]:
-    return {
+    filters: dict[str, object] = {
         "favorite": favorite,
         "kind": kind,
         "limit": limit,
         "query": query,
         "state": state,
     }
+    if collection is not None:
+        filters.update(collection_id=collection.id, collection_version=collection.version)
+    if tag is not None:
+        filters.update(tag_id=tag.id, tag_version=tag.version)
+    return filters
 
 
 def _encode_cursor(
-    cursor: _LibraryCursor,
+    cursor: _LibraryCursor | _AlbumLibraryCursor,
     *,
     signing_key: bytes,
     filters: dict[str, object],
 ) -> str:
+    if isinstance(cursor, _AlbumLibraryCursor):
+        after: int | str = cursor.after_position
+        anchor: int | str = cursor.anchor_position
+    else:
+        after = cursor.after_created_at.isoformat(timespec="microseconds")
+        anchor = cursor.anchor_created_at.isoformat(timespec="microseconds")
     payload = json.dumps(
         {
-            "after": [cursor.after_created_at.isoformat(timespec="microseconds"), cursor.after_id],
-            "anchor": [
-                cursor.anchor_created_at.isoformat(timespec="microseconds"),
-                cursor.anchor_id,
-            ],
+            "after": [after, cursor.after_id],
+            "anchor": [anchor, cursor.anchor_id],
             "filters": filters,
-            "version": 1,
+            "version": 2 if isinstance(cursor, _AlbumLibraryCursor) else 1,
         },
         ensure_ascii=True,
         separators=(",", ":"),
@@ -171,12 +200,23 @@ def _decode_position(value: object) -> tuple[datetime, str]:
     return parsed, entry_id
 
 
+def _decode_album_position(value: object) -> tuple[int, str]:
+    if not isinstance(value, list) or len(value) != 2:
+        _cursor_fail()
+    position, entry_id = value
+    if type(position) is not int or not 0 <= position <= 9_007_199_254_740_991:
+        _cursor_fail()
+    if not isinstance(entry_id, str) or not _ENTRY_ID.fullmatch(entry_id):
+        _cursor_fail()
+    return position, entry_id
+
+
 def _decode_cursor(
     token: str,
     *,
     signing_key: bytes,
     filters: dict[str, object],
-) -> _LibraryCursor:
+) -> _LibraryCursor | _AlbumLibraryCursor:
     if not token or len(token) > 2_048 or token.count(".") != 1:
         _cursor_fail()
     if type(signing_key) is not bytes or len(signing_key) != hashlib.sha256().digest_size:
@@ -198,17 +238,33 @@ def _decode_cursor(
     raw_filters = raw["filters"]
     if (
         type(raw["version"]) is not int
-        or raw["version"] != 1
+        or raw["version"] != (2 if "collection_id" in filters else 1)
         or not isinstance(raw_filters, dict)
-        or set(raw_filters) != {"favorite", "kind", "limit", "query", "state"}
+        or set(raw_filters) != set(filters)
         or type(raw_filters["limit"]) is not int
         or type(raw_filters["favorite"]) not in {bool, type(None)}
         or not isinstance(raw_filters["query"], str)
         or not isinstance(raw_filters["state"], str)
         or (raw_filters["kind"] is not None and not isinstance(raw_filters["kind"], str))
+        or any(
+            type(raw_filters[key]) is not int
+            for key in ("collection_version", "tag_version")
+            if key in raw_filters
+        )
+        or any(
+            type(raw_filters[key]) is not str
+            for key in ("collection_id", "tag_id")
+            if key in raw_filters
+        )
         or raw_filters != filters
     ):
         _cursor_fail()
+    if "collection_id" in filters:
+        anchor_position, anchor_id = _decode_album_position(raw["anchor"])
+        after_position, after_id = _decode_album_position(raw["after"])
+        if (after_position, after_id) < (anchor_position, anchor_id):
+            _cursor_fail()
+        return _AlbumLibraryCursor(anchor_position, anchor_id, after_position, after_id)
     anchor_created_at, anchor_id = _decode_position(raw["anchor"])
     after_created_at, after_id = _decode_position(raw["after"])
     if (after_created_at, after_id) > (anchor_created_at, anchor_id):
@@ -276,6 +332,8 @@ def list_library_entries(
     state: str,
     favorite: bool | None,
     query: str,
+    collection_id: str | None = None,
+    tag_id: str | None = None,
 ) -> tuple[list[ArtifactLibraryPageRow], str | None]:
     """Read one stable, Entry-backed page without loading files or reference graphs."""
 
@@ -286,12 +344,51 @@ def list_library_entries(
     normalized_query = query.strip().lower()
     if len(normalized_query) > 200:
         _cursor_fail()
+    collection = None
+    tag = None
+    if collection_id is not None or tag_id is not None:
+        if (
+            collection_id is not None
+            and re.fullmatch(r"collection_[0-9a-f]{32}", collection_id) is None
+        ):
+            _cursor_fail()
+        if tag_id is not None and re.fullmatch(r"mediatag_[0-9a-f]{32}", tag_id) is None:
+            _cursor_fail()
+        _begin_library_read_snapshot(session)
+        if collection_id is not None:
+            collection = session.get(MediaCollection, collection_id)
+            if (
+                collection is None
+                or collection.kind != "manual"
+                or type(collection.version) is not int
+                or collection.version < 1
+            ):
+                _cursor_fail()
+        if tag_id is not None:
+            tag = session.get(MediaTag, tag_id)
+            if tag is None or type(tag.version) is not int or tag.version < 1:
+                _cursor_fail()
     filters = _cursor_filters(
-        kind=kind, state=state, favorite=favorite, query=normalized_query, limit=limit
+        kind=kind,
+        state=state,
+        favorite=favorite,
+        query=normalized_query,
+        limit=limit,
+        collection=collection,
+        tag=tag,
     )
     decoded = _decode_cursor(cursor, signing_key=signing_key, filters=filters) if cursor else None
     _begin_library_read_snapshot(session)
     conditions = [ArtifactLibraryEntry.state == state]
+    if tag is not None:
+        conditions.append(
+            select(MediaTagAssignment.entry_id)
+            .where(
+                MediaTagAssignment.tag_id == tag.id,
+                MediaTagAssignment.entry_id == ArtifactLibraryEntry.id,
+            )
+            .exists()
+        )
     if kind is not None:
         conditions.append(Artifact.kind == kind)
     if favorite is not None:
@@ -302,11 +399,33 @@ def list_library_entries(
                 normalized_query, autoescape=True
             )
         )
-    statement = select(ArtifactLibraryEntry, Artifact).join(
+    statement: Select[Any] = select(ArtifactLibraryEntry, Artifact).join(
         Artifact, Artifact.id == ArtifactLibraryEntry.artifact_id
     )
+    if collection is not None:
+        statement = statement.add_columns(MediaCollectionMembership.position).join(
+            MediaCollectionMembership,
+            and_(
+                MediaCollectionMembership.collection_id == collection.id,
+                MediaCollectionMembership.entry_id == ArtifactLibraryEntry.id,
+            ),
+        )
     statement = statement.where(*conditions)
-    if decoded is not None:
+    if isinstance(decoded, _AlbumLibraryCursor):
+        anchor_row = session.execute(
+            statement.where(
+                ArtifactLibraryEntry.id == decoded.anchor_id,
+                MediaCollectionMembership.position == decoded.anchor_position,
+            )
+        ).one_or_none()
+        if anchor_row is None:
+            _cursor_fail()
+        _validate_library_row(anchor_row[0], anchor_row[1])
+        statement = statement.where(
+            MediaCollectionMembership.position >= decoded.anchor_position,
+            MediaCollectionMembership.position > decoded.after_position,
+        )
+    elif decoded is not None:
         anchor_row = session.execute(
             select(ArtifactLibraryEntry, Artifact)
             .join(Artifact, Artifact.id == ArtifactLibraryEntry.artifact_id)
@@ -335,16 +454,42 @@ def list_library_entries(
                 ),
             ),
         )
-    rows = session.execute(
-        statement.order_by(
+    if collection is not None:
+        statement = statement.order_by(
+            MediaCollectionMembership.position.asc(), ArtifactLibraryEntry.id.asc()
+        )
+    else:
+        statement = statement.order_by(
             ArtifactLibraryEntry.created_at.desc(), ArtifactLibraryEntry.id.desc()
-        ).limit(limit + 1)
-    ).all()
-    for entry, artifact in rows:
+        )
+    rows = session.execute(statement.limit(limit + 1)).all()
+    page_rows = []
+    for row in rows:
+        entry, artifact = row[0], row[1]
         _validate_library_row(entry, artifact)
-    page_rows = [ArtifactLibraryPageRow(entry, artifact) for entry, artifact in rows[:limit]]
+        position = row[2] if collection is not None else None
+        if collection is not None and (
+            type(position) is not int or not 0 <= position <= 9_007_199_254_740_991
+        ):
+            raise ArtifactLibraryDataError(LIBRARY_DATA_INVALID)
+        page_rows.append(ArtifactLibraryPageRow(entry, artifact, position))
+    page_rows = page_rows[:limit]
     if len(rows) <= limit or not page_rows:
         return page_rows, None
+    if collection is not None:
+        first = page_rows[0]
+        last_row = page_rows[-1]
+        album_cursor = _AlbumLibraryCursor(
+            decoded.anchor_position
+            if isinstance(decoded, _AlbumLibraryCursor)
+            else cast(int, first.collection_position),
+            decoded.anchor_id if decoded is not None else first.entry.id,
+            cast(int, last_row.collection_position),
+            last_row.entry.id,
+        )
+        return page_rows, _encode_cursor(album_cursor, signing_key=signing_key, filters=filters)
+    if isinstance(decoded, _AlbumLibraryCursor):
+        _cursor_fail()
     anchor_created_at = (
         decoded.anchor_created_at if decoded is not None else page_rows[0].entry.created_at
     )
