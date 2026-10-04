@@ -13,6 +13,9 @@ export function workspaceLockApi(request: Request) {
         body: JSON.stringify(pin === undefined ? {} : { pin }),
       }),
     workspaceLockPolicy: () => request<WorkspaceLockPolicy>("/api/privacy/policy"),
+    // Only a key, a click or a touch is reported, and the server lets none of
+    // these through while locked, so this can never lift a lock.
+    noteWorkspaceUse: () => request<void>("/api/privacy/activity", { method: "POST" }),
     updateWorkspaceLockPolicy: (write: WorkspaceLockPolicyWrite) =>
       request<WorkspaceLockPolicy>("/api/privacy/policy", { method: "PUT", body: JSON.stringify(write) }),
   };

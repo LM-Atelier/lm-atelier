@@ -21,9 +21,11 @@ export interface WorkspaceLockView {
   requirePin: boolean | null;
   /** The lock epoch this window works under, sent with every request once known. */
   epoch: string | null;
+  /** How long the workspace may go unused before it locks itself, or null for never. */
+  idleSeconds: number | null;
 }
 
-const INITIAL: WorkspaceLockView = { phase: "unknown", enabled: false, requirePin: null, epoch: null };
+const INITIAL: WorkspaceLockView = { phase: "unknown", enabled: false, requirePin: null, epoch: null, idleSeconds: null };
 
 let view = INITIAL;
 // Answers can arrive out of order: a status read sent before a refusal said
@@ -39,6 +41,7 @@ function publish(next: WorkspaceLockView): void {
   if (
     next.phase === view.phase && next.enabled === view.enabled
     && next.requirePin === view.requirePin && next.epoch === view.epoch
+    && next.idleSeconds === view.idleSeconds
   ) return;
   view = next;
   for (const listener of [...listeners]) listener();
@@ -90,6 +93,7 @@ export function applyWorkspaceLockStatus(status: WorkspaceLockStatus, sentAt?: n
     enabled: status.enabled,
     requirePin: status.require_pin,
     epoch: status.lock_epoch,
+    idleSeconds: typeof status.idle_lock_seconds === "number" ? status.idle_lock_seconds : null,
   });
   return true;
 }

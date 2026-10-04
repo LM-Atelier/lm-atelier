@@ -58,7 +58,7 @@ describe("answers that arrive out of order", () => {
 
     expect(applyWorkspaceLockStatus(locked, sentAt)).toBe(true);
     const { result } = renderHook(() => useWorkspaceLock());
-    expect(result.current).toEqual({ phase: "locked", enabled: true, requirePin: true, epoch: "epoch-two" });
+    expect(result.current).toEqual({ phase: "locked", enabled: true, requirePin: true, epoch: "epoch-two", idleSeconds: null });
   });
 
   it("treats a superseded epoch as a change, and a lock as stronger than a change", () => {

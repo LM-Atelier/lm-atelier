@@ -188,6 +188,9 @@ class WorkspaceLockStatusOut(ApiModel):
     require_pin: bool
     # Changes with every lock and every restart; null while the lock is off.
     lock_epoch: str | None
+    # How long the workspace may go unused before it locks itself; null for never,
+    # and while the lock is off.
+    idle_lock_seconds: int | None = None
 
 
 class WorkspaceUnlockIn(ApiModel):
@@ -200,11 +203,15 @@ class WorkspaceLockPolicyOut(ApiModel):
     enabled: bool
     require_pin: bool
     revision: int = Field(ge=0)
+    idle_lock_minutes: int | None = None
 
 
 class WorkspaceLockPolicyWrite(ApiModel):
     expected_revision: StrictInt = Field(ge=0, le=9_223_372_036_854_775_807)
     enabled: StrictBool
+    # Minutes without use before the workspace locks itself; null for never.
+    # Left out, the saved choice is kept.
+    idle_lock_minutes: StrictInt | None = Field(default=None, ge=1, le=24 * 60)
     new_pin: StrictStr | None = Field(default=None, max_length=256)
     clear_pin: StrictBool = False
     # Needed when a PIN is set and the change replaces it, removes it, or

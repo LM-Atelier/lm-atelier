@@ -124,19 +124,26 @@ async def test_the_lock_starts_off_and_every_change_names_the_revision_it_read(
         "enabled": False,
         "require_pin": False,
         "revision": 0,
+        "idle_lock_minutes": None,
     }
     assert (await client.get("/api/privacy/status")).json() == {
         "locked": False,
         "enabled": False,
         "require_pin": False,
         "lock_epoch": None,
+        "idle_lock_seconds": None,
     }
     session = (await client.post("/api/session")).json()
     assert (session["workspace_locked"], session["lock_epoch"]) == (False, None)
 
     turned_on = await _choose(client, 0)
     assert turned_on.status_code == 200
-    assert turned_on.json() == {"enabled": True, "require_pin": False, "revision": 1}
+    assert turned_on.json() == {
+        "enabled": True,
+        "require_pin": False,
+        "revision": 1,
+        "idle_lock_minutes": None,
+    }
 
     late = await _choose(client, 0, enabled=False)
     assert late.status_code == 409
@@ -153,10 +160,15 @@ async def test_a_pin_is_kept_only_as_a_verifier(
 ) -> None:
     chosen = await _choose(client, 0, new_pin=PIN)
 
-    assert chosen.json() == {"enabled": True, "require_pin": True, "revision": 1}
+    assert chosen.json() == {
+        "enabled": True,
+        "require_pin": True,
+        "revision": 1,
+        "idle_lock_minutes": None,
+    }
     assert (await client.get("/api/privacy/policy")).json() == chosen.json()
     status = (await client.get("/api/privacy/status")).json()
-    assert set(status) == {"locked", "enabled", "require_pin", "lock_epoch"}
+    assert set(status) == {"locked", "enabled", "require_pin", "lock_epoch", "idle_lock_seconds"}
     assert status["require_pin"] is True
     with SessionLocal() as session:
         stored = session.get(AppSetting, "workspace_lock")
@@ -369,7 +381,12 @@ async def test_a_set_pin_guards_every_change_that_would_weaken_it(
 ) -> None:
     clock = _paced(app, monkeypatch)
     protected = await _choose(client, 0, new_pin=PIN)
-    assert protected.json() == {"enabled": True, "require_pin": True, "revision": 1}
+    assert protected.json() == {
+        "enabled": True,
+        "require_pin": True,
+        "revision": 1,
+        "idle_lock_minutes": None,
+    }
 
     for change in (
         {"new_pin": "8642"},
@@ -396,13 +413,28 @@ async def test_a_set_pin_guards_every_change_that_would_weaken_it(
     assert both.json()["code"] == "request-validation-invalid"
 
     changed = await _choose(client, 1, new_pin="8642", current_pin=PIN)
-    assert changed.json() == {"enabled": True, "require_pin": True, "revision": 2}
+    assert changed.json() == {
+        "enabled": True,
+        "require_pin": True,
+        "revision": 2,
+        "idle_lock_minutes": None,
+    }
     assert (await _choose(client, 2, clear_pin=True, current_pin=PIN)).status_code == 403
     removed = await _choose(client, 2, clear_pin=True, current_pin="8642")
-    assert removed.json() == {"enabled": True, "require_pin": False, "revision": 3}
+    assert removed.json() == {
+        "enabled": True,
+        "require_pin": False,
+        "revision": 3,
+        "idle_lock_minutes": None,
+    }
     assert (await _choose(client, 3, new_pin=PIN)).json()["require_pin"] is True
     turned_off = await _choose(client, 4, enabled=False, current_pin=PIN)
-    assert turned_off.json() == {"enabled": False, "require_pin": True, "revision": 5}
+    assert turned_off.json() == {
+        "enabled": False,
+        "require_pin": True,
+        "revision": 5,
+        "idle_lock_minutes": None,
+    }
 
 
 async def test_a_request_from_before_the_latest_lock_is_refused_as_a_change(
@@ -486,6 +518,7 @@ async def test_a_lock_that_is_on_is_locked_again_after_a_restart(settings: Setti
             "enabled": False,
             "require_pin": False,
             "revision": 2,
+            "idle_lock_minutes": None,
         }
 
 

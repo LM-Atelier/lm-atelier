@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { LockedWorkspace } from "./LockedWorkspace";
 import { useAppearance } from "./theme";
+import { useWorkspaceUse } from "./useWorkspaceUse";
 import { focusMainContent } from "./viewHelpers";
 import { applyWorkspaceLockStatus, useWorkspaceLock, workspaceLockGeneration } from "./workspaceLockState";
 
@@ -44,6 +45,7 @@ function OpeningWorkspace() {
 export function WorkspaceLockGate({ children }: { children: ReactNode }) {
   const client = useQueryClient();
   const lock = useWorkspaceLock();
+  useWorkspaceUse(lock.phase === "unlocked" && lock.enabled ? lock.idleSeconds : null);
   const [unreadable, setUnreadable] = useState(false);
   const blocked = lock.phase === "locked" || lock.phase === "changed";
   const wasBlocked = useRef(false);
