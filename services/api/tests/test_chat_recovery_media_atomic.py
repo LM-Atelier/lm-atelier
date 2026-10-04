@@ -14,6 +14,7 @@ from test_recovery_expiry import manual_expiry as manual_expiry
 
 from local_lm import chat_recovery
 from local_lm.artifact_library import ensure_library_entry, referenced_artifact_ids
+from local_lm.chat_media_purge import release_generated_membership
 from local_lm.db import SessionLocal
 from local_lm.domain import ArtifactKind, new_id
 from local_lm.models import (
@@ -98,7 +99,9 @@ async def test_chat_media_purge_rolls_back_library_removal_and_replays_exactly(
         **_command(preview, "purge-two-garden-images"),
         "acknowledgement": "permanently-delete",
     }
-    original = chat_recovery.release_generated_membership
+    collaborator: object = getattr(chat_recovery, "release_generated_membership", None)
+    assert collaborator is release_generated_membership
+    original = release_generated_membership
     rows = _rows()
     sequence = app.state.services.events.sequence
 

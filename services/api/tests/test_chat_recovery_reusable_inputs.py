@@ -115,7 +115,7 @@ async def test_regeneration_cannot_replay_a_deleted_response(
     regenerated = await _regenerate(client, message_id)
     deletion = await _trash(client, chat_id)
     before = _snapshot(chat_id)
-    request = {
+    request: dict[str, object] = {
         "settings": {},
         "idempotency_key": "garden-regeneration" if replay else "another-garden-regeneration",
     }
