@@ -5,6 +5,7 @@ import { MediaLibraryView } from "./MediaLibraryView";
 import { api } from "./api";
 import { parseArtifactLibraryPage, type ArtifactLibraryFilters } from "./artifactLibraryPage";
 import { CLOCK_KEY } from "./clockPreference";
+import { SENSITIVE_MEDIA_KEY } from "./sensitiveMedia";
 
 vi.mock("./api", async (original) => {
   const actual = await original<typeof import("./api")>();
@@ -208,5 +209,26 @@ it("writes when an item was added on the chosen clock", async () => {
     expect(added.textContent).not.toMatch(/\b(AM|PM)\b/i);
   } finally {
     localStorage.removeItem(CLOCK_KEY);
+  }
+});
+
+it("covers pictures and names items by place while covering is on", async () => {
+  localStorage.setItem(SENSITIVE_MEDIA_KEY, "hide");
+  try {
+    vi.mocked(api.artifactLibrary).mockResolvedValue(parsedPage([rawItem("b"), rawItem("a", { kind: "video" })]));
+    const onEdit = vi.fn();
+    renderLibrary(onEdit);
+
+    expect(await screen.findByText("Picture 1")).toBeVisible();
+    expect(screen.getByText("Video 2")).toBeVisible();
+    expect(screen.queryByText("Item b")).toBeNull();
+    expect(document.querySelector(".media-grid img, .media-grid video")).toBeNull();
+    expect(screen.getByRole("checkbox", { name: "Select Picture 1" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Edit Picture 1" }));
+    expect(onEdit).toHaveBeenCalledWith(`sha256:${digest("b")}`);
+    fireEvent.click(screen.getAllByRole("button", { name: "Show picture" })[0]);
+    expect(screen.getByRole("img", { name: "Picture 1" })).toBeVisible();
+  } finally {
+    localStorage.removeItem(SENSITIVE_MEDIA_KEY);
   }
 });

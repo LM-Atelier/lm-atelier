@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ShieldedThumbnail } from "./ShieldedThumbnail";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Star, Archive, Trash2 } from "lucide-react";
 import { api } from "./api";
@@ -145,11 +146,10 @@ export function ReferencesLibrary() {
                 without a cover would add a column of empty boxes and make the
                 list harder to scan, which is the opposite of the point. */}
             {subject.cover_artifact_id ? (
-              <img
+              <ShieldedThumbnail
                 className="reference-cover"
                 src={artifactSource(subject.cover_artifact_id) ?? undefined}
-                alt=""
-                loading="lazy"
+                kind="image"
               />
             ) : null}
             <div className="detail-title">

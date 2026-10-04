@@ -15,6 +15,8 @@ import { ErrorCallout } from "./ErrorCallout";
 import { formatBytes } from "./format";
 import { MediaLibraryRecovery } from "./MediaLibraryRecovery";
 import { PictureFileSettings } from "./PictureFileSettings";
+import { useSensitiveMediaChoice } from "./sensitiveMedia";
+import { ShieldedMedia } from "./ShieldedMedia";
 import { useMediaLibraryRecovery } from "./useMediaLibraryRecovery";
 import { useMediaOrganization } from "./useMediaOrganization";
 import { MediaOrganizationControls } from "./MediaOrganizationControls";
@@ -54,6 +56,9 @@ export function MediaLibraryView({
   });
   const [epoch, setEpoch] = useState(0);
   const clock = useClockChoice();
+  // While pictures are covered, a file name could say as much as the picture,
+  // so items are named by their place in the grid instead.
+  const shielding = useSensitiveMediaChoice() !== "show";
   const [favoriteFailed, setFavoriteFailed] = useState(false);
   const recovery = useMediaLibraryRecovery();
   const organization = useMediaOrganization((command) => {
@@ -170,26 +175,31 @@ export function MediaLibraryView({
       {!unavailable && !feed.isPending && entries.length > 0 && (
         <>
           <div className="media-grid">
-            {entries.map((entry) => {
+            {entries.map((entry, index) => {
               const source = `/api/artifacts/${encodeURIComponent(entry.artifact_id)}/content`;
-              const favoriteLabel = `${entry.favorite ? "Unfavorite" : "Favorite"} ${entry.display_name}`;
+              const name = shielding
+                ? `${entry.kind === "image" ? "Picture" : "Video"} ${index + 1}`
+                : entry.display_name;
+              const favoriteLabel = `${entry.favorite ? "Unfavorite" : "Favorite"} ${name}`;
               return (
                 <article className="gallery-card" key={entry.id}>
-                  <label><input type="checkbox" aria-label={`Select ${entry.display_name}`}
+                  <label><input type="checkbox" aria-label={`Select ${name}`}
                     checked={organization.selection.has(entry.id)}
                     onChange={() => organization.choose(entry)} />Select</label>
-                  {entry.kind === "image" ? (
-                    <img src={source} alt={entry.display_name} loading="lazy" />
-                  ) : (
-                    // Published videos have no caption track in EntryV1.
-                    // eslint-disable-next-line jsx-a11y-x/media-has-caption
-                    <video src={source} aria-label={entry.display_name} controls preload="metadata" />
-                  )}
+                  <ShieldedMedia kind={entry.kind === "image" ? "image" : "video"}>
+                    {entry.kind === "image" ? (
+                      <img src={source} alt={name} loading="lazy" />
+                    ) : (
+                      // Published videos have no caption track in EntryV1.
+                      // eslint-disable-next-line jsx-a11y-x/media-has-caption
+                      <video src={source} aria-label={name} controls preload="metadata" />
+                    )}
+                  </ShieldedMedia>
                   <div>
-                    <strong>{entry.display_name}</strong>
+                    <strong>{name}</strong>
                     <small>{formatBytes(entry.size_bytes)} · Added {new Date(Math.floor(entry.created_at_epoch_micros / 1000)).toLocaleString(undefined, clockOptions(clock))}</small>
                     <ArtifactGenerationDetails key={entry.artifact_id} artifactId={entry.artifact_id} />
-                    {entry.kind === "image" && <PictureFileSettings artifactId={entry.artifact_id} pictureName={entry.display_name} onOpenChat={onOpenChat} />}
+                    {entry.kind === "image" && <PictureFileSettings artifactId={entry.artifact_id} pictureName={name} onOpenChat={onOpenChat} />}
                     <span>
                       <button
                         className={`icon-button ${entry.favorite ? "favorite-active" : ""}`}
@@ -207,14 +217,14 @@ export function MediaLibraryView({
                       {entry.kind === "image" && onEditImage && (
                         <button
                           className="icon-button"
-                          aria-label={`Edit ${entry.display_name}`}
+                          aria-label={`Edit ${name}`}
                           title="Edit"
                           onClick={() => onEditImage(entry.artifact_id)}
                         >
                           <Pencil size={14} />
                         </button>
                       )}
-                      <button className="icon-button" aria-label={`Move ${entry.display_name} to Recently Deleted`}
+                      <button className="icon-button" aria-label={`Move ${name} to Recently Deleted`}
                         title="Move to Recently Deleted" aria-disabled={recovery.busy}
                         onClick={() => recovery.choose(entry)}><Trash2 size={14} /></button>
                     </span>

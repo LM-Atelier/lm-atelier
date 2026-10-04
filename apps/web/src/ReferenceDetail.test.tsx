@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { SENSITIVE_MEDIA_KEY } from "./sensitiveMedia";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReferenceDetail } from "./ReferenceDetail";
@@ -380,4 +381,18 @@ describe("reference detail", () => {
     });
     expect(screen.getByText("Save details").getAttribute("aria-disabled")).toBe("false");
   });
+});
+
+it("keeps a reference's images blurred until each is shown", async () => {
+  localStorage.setItem(SENSITIVE_MEDIA_KEY, "blur");
+  try {
+    show([asset(), asset({ id: "asset-2", artifact_id: "art-2", sort_order: 1 })]);
+
+    expect(await screen.findAllByRole("button", { name: "Show picture" })).toHaveLength(2);
+    expect(screen.queryAllByRole("img")).toHaveLength(0);
+    fireEvent.click(screen.getAllByRole("button", { name: "Show picture" })[0]);
+    expect(screen.getAllByRole("img")).toHaveLength(1);
+  } finally {
+    localStorage.removeItem(SENSITIVE_MEDIA_KEY);
+  }
 });

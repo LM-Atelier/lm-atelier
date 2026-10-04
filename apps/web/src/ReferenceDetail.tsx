@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ShieldedMedia } from "./ShieldedMedia";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ImageIcon, Plus, Trash2 } from "lucide-react";
 import { api } from "./api";
@@ -271,11 +272,13 @@ export function ReferenceDetail({
       <ul className="reference-asset-grid">
         {items.map((asset) => (
           <li key={asset.id}>
-            <img
-              src={artifactSource(asset.artifact_id) ?? undefined}
-              alt={asset.caption ?? `${subject.name}, ${asset.purpose}`}
-              loading="lazy"
-            />
+            <ShieldedMedia kind="image">
+              <img
+                src={artifactSource(asset.artifact_id) ?? undefined}
+                alt={asset.caption ?? `${subject.name}, ${asset.purpose}`}
+                loading="lazy"
+              />
+            </ShieldedMedia>
             <div className="detail-title">
               <span className="badge">{asset.purpose}</span>
               {/* Unchecked is not a synonym for usable: an image nobody has

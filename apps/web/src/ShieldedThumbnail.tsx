@@ -8,17 +8,22 @@ import { useSensitiveMediaChoice } from "./sensitiveMedia";
  * hidden it is replaced by a plain mark and never loaded. Either way it is
  * decoration to assistive technology; the control around it names what it does.
  */
-export function ShieldedThumbnail({ src, kind }: { src: string | undefined; kind: "image" | "video" }) {
+export function ShieldedThumbnail({ src, kind, className = "" }: {
+  src: string | undefined;
+  kind: "image" | "video";
+  /** The place's own class, kept on whatever stands in for the preview. */
+  className?: string;
+}) {
   const choice = useSensitiveMediaChoice();
   if (choice === "hide") {
     return (
-      <span className="shielded-thumbnail-hidden" aria-hidden="true">
+      <span className={`shielded-thumbnail-hidden ${className}`.trim()} aria-hidden="true">
         <EyeOff size={16} />
       </span>
     );
   }
-  const className = choice === "blur" ? "shielded-thumbnail-blur" : undefined;
+  const classes = `${className} ${choice === "blur" ? "shielded-thumbnail-blur" : ""}`.trim() || undefined;
   return kind === "video"
-    ? <video className={className} src={src} muted preload="metadata" aria-hidden="true" />
-    : <img className={className} src={src} alt="" loading="lazy" />;
+    ? <video className={classes} src={src} muted preload="metadata" aria-hidden="true" />
+    : <img className={classes} src={src} alt="" loading="lazy" />;
 }

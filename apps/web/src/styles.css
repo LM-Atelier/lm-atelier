@@ -682,6 +682,7 @@ html[data-text-size="larger"] { --text-scale: 1.25; font-size: 125%; }
 .reference-library .reference-list li { display: flex; align-items: center; justify-content: space-between; gap: calc(16px * var(--spacing-scale, 1)); padding: calc(12px * var(--spacing-scale, 1)) calc(14px * var(--spacing-scale, 1)); border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
 .reference-library .reference-list li.archived { opacity: .62; }
 .reference-library .reference-cover { width: 40px; height: 40px; object-fit: cover; border-radius: 10px; display: block; flex: none; }
+.reference-library .reference-cover.shielded-thumbnail-hidden { display: grid; min-height: 0; }
 .message-field { position: relative; display: block; }
 .mention-picker { position: absolute; bottom: 100%; left: 0; right: 0; z-index: 5; max-height: 240px; overflow-y: auto; margin-bottom: 6px; padding: calc(6px * var(--spacing-scale, 1)); display: flex; flex-direction: column; gap: calc(2px * var(--spacing-scale, 1)); border: 1px solid var(--border); border-radius: 14px; background: var(--panel-2); box-shadow: var(--lift); }
 .mention-option { display: flex; align-items: center; gap: calc(8px * var(--spacing-scale, 1)); width: 100%; padding: calc(6px * var(--spacing-scale, 1)) calc(8px * var(--spacing-scale, 1)); border: 0; border-radius: 10px; background: none; color: var(--ink-primary); text-align: left; cursor: pointer; }
