@@ -445,11 +445,12 @@ class ComfyUIAdapter:
             return
         cancel_event = asyncio.Event()
         self._cancel_events[request.run_id] = cancel_event
+        self._jobs.pop(request.run_id, None)
         prompt_id: str | None = None
         outputs_collected = False
         abandoned = False
         refused_after_acceptance = False
-        bound_after_timeout = False
+        bound_after_submission_failure = False
         try:
             yield MediaEvent(
                 type="progress",
@@ -501,7 +502,7 @@ class ComfyUIAdapter:
                         json=prompt_payload,
                         timeout=30,
                     )
-                except httpx.TimeoutException:
+                except (httpx.TimeoutException, asyncio.CancelledError):
                     # The request went out and no answer came back. Nothing
                     # here knows whether the backend took it, and the one
                     # thing that would say so is the identifier that never
@@ -512,8 +513,9 @@ class ComfyUIAdapter:
                     bound = await self._prompt_id_for_client(client_id)
                     if bound is not None:
                         prompt_id = bound
-                        self._jobs[request.run_id] = prompt_id
-                        bound_after_timeout = True
+                        if self._cancel_events.get(request.run_id) is cancel_event:
+                            self._jobs[request.run_id] = prompt_id
+                        bound_after_submission_failure = True
                     raise
                 response.raise_for_status()
                 payload = response.json()
@@ -529,7 +531,8 @@ class ComfyUIAdapter:
                     # and node_errors together. This identifier is the only
                     # handle that can stop it or clean up after it.
                     prompt_id = raw_prompt_id
-                    self._jobs[request.run_id] = prompt_id
+                    if self._cancel_events.get(request.run_id) is cancel_event:
+                        self._jobs[request.run_id] = prompt_id
                 if payload.get("node_errors"):
                     # Refusing a prompt the backend has ALREADY taken. The
                     # caller is told the generation failed, so the teardown has
@@ -673,6 +676,7 @@ class ComfyUIAdapter:
             abandoned = True
             raise
         except asyncio.CancelledError:
+            abandoned = True
             raise
         except WebSocketException:
             raise RuntimeError("ComfyUI generation connection failed") from None
@@ -687,11 +691,12 @@ class ComfyUIAdapter:
         except OSError:
             raise RuntimeError("ComfyUI could not access local generation files") from None
         finally:
-            self._jobs.pop(request.run_id, None)
-            self._cancel_events.pop(request.run_id, None)
-            self._cancelled.discard(request.run_id)
+            if self._cancel_events.get(request.run_id) is cancel_event:
+                self._jobs.pop(request.run_id, None)
+                self._cancel_events.pop(request.run_id, None)
+                self._cancelled.discard(request.run_id)
             if prompt_id and not outputs_collected:
-                if bound_after_timeout or (
+                if bound_after_submission_failure or (
                     (abandoned or refused_after_acceptance) and not cancel_event.is_set()
                 ):
                     # A prompt was submitted and the consumer walked away.
