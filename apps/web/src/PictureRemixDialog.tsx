@@ -15,6 +15,8 @@ import {
   type RemixRole,
 } from "./pictureRemix";
 import { useReadyWorkflowChoices } from "./useReadyWorkflowChoices";
+import { useProfileLibrary } from "./useProfileLibrary";
+import { ProfilePicker } from "./ProfilePicker";
 
 /** The settings a remix would run with, named the way the person reads them. */
 const SHOWN_SETTINGS: [string, string][] = [
@@ -104,7 +106,7 @@ export function PictureRemixDialog({
   const workflows = useReadyWorkflowChoices(
     revisionId ? [revisionId] : [], role === "edit" ? "image_to_image" : "text_to_image",
   );
-  const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
+  const profiles = useProfileLibrary("image", profileId);
   const apply = applied.flatMap(claimKeys);
   const preview = useQuery({
     queryKey: ["picture-remix-preview", artifactId, revisionId, profileId, apply, role],
@@ -217,17 +219,10 @@ export function PictureRemixDialog({
             ))}
           </select>
         </label>
-        <label>
-          <span>Model</span>
-          <select value={profileId} aria-disabled={make.isPending}
-            onChange={(event) => choose(setProfileId)(event.target.value)}>
-            <option value="">Choose a model</option>
-            {(profiles.data ?? []).filter((profile) => profile.role === "image").map((profile) => (
-              <option key={profile.id} value={profile.id}>{profile.name}</option>
-            ))}
-          </select>
-        </label>
-        {profiles.isError && <p role="alert">The models could not be read.</p>}
+        <ProfilePicker library={profiles} label="Model" searchLabel="Search models" value={profileId}
+          selectedId={profileId} onChange={choose(setProfileId)} disabled={make.isPending}>
+          <option value="">Choose a model</option>
+        </ProfilePicker>
         {checking && <p role="status">Checking these choices…</p>}
         {preview.isError && <p role="alert">These choices could not be checked.</p>}
         {data && !data.ready && data.refusals.map((refusal) => (
