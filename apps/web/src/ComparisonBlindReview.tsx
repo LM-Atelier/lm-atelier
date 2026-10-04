@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ShieldedMedia } from "./ShieldedMedia";
 import { ApiError, api } from "./api";
 import { ErrorCallout } from "./ErrorCallout";
 import { blindPictureSource, comparisonFailure, TRIAL_STATUS_TEXT, trialIsWorking } from "./generationComparison";
@@ -79,7 +80,7 @@ export function ComparisonBlindReview({ experiment }: { experiment: GenerationEx
     <p role="status">{ready === opened.positions.length ? "Both pictures are ready" : `${ready} of ${opened.positions.length} pictures ready`}</p>
     <div className="comparison-columns">{opened.positions.map((position) => <figure key={position.position} className="comparison-picture">
       {position.ready
-        ? <img src={blindPictureSource(experiment.id, opened.id, position.position)} alt={`Shown at position ${position.position}`} />
+        ? <ShieldedMedia kind="image"><img src={blindPictureSource(experiment.id, opened.id, position.position)} alt={`Shown at position ${position.position}`} /></ShieldedMedia>
         : <p>{position.status ? TRIAL_STATUS_TEXT[position.status] : "Not started"}</p>}
       <figcaption>Picture {position.position}</figcaption>
     </figure>)}</div>

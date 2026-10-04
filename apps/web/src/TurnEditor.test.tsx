@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import { SENSITIVE_MEDIA_KEY } from "./sensitiveMedia";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -440,6 +441,19 @@ describe("source canvas in the composer", () => {
     await screen.findByRole("img", { name: /Extension preview/ });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     expect(send.mock.calls[0][7].request).toEqual({ mode: "extend", width: 1200, height: 900 });
+  });
+
+  it("covers an attached picture and its file name while pictures are covered", () => {
+    localStorage.setItem(SENSITIVE_MEDIA_KEY, "hide");
+    try {
+      mount(<Harness initial={{ attachments: [{ id: "source-image", kind: "image", origin: "uploaded" }] }} />);
+
+      const preview = screen.getByLabelText("Preview Uploaded image");
+      expect(preview.querySelector("img")).toBeNull();
+      expect(screen.queryByText("source-image")).toBeNull();
+    } finally {
+      localStorage.removeItem(SENSITIVE_MEDIA_KEY);
+    }
   });
 
 });

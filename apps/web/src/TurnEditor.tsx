@@ -1,4 +1,6 @@
 import { SourceFitControl } from "./SourceFitControl";
+import { useSensitiveMediaChoice } from "./sensitiveMedia";
+import { ShieldedThumbnail } from "./ShieldedThumbnail";
 import { useComposerClearance } from "./composerClearance";
 import { SOURCE_FIT_PREVIEW_REQUIRED, sendWithSourceFit, turnPreviewContext, useTurnEditorSourceFit } from "./useTurnEditorSourceFit";
 import type { SourceFitPreviewContext } from "./useSourceFitCanvas";
@@ -94,12 +96,14 @@ function TurnEditorAttachments({ attachments, changeMode, onFocus, onAnimate, on
   onAnimate: () => void;
   onRemove: (id: string) => void;
 }) {
+  const shielding = useSensitiveMediaChoice() !== "show";
   return (
     <div className="attachment-strip">
       {attachments.map((attachment) => {
         const source = attachment.artifact?.url || artifactSource(attachment.id)!;
-        const name = attachment.artifact?.original_name || attachment.id;
         const label = mediaOriginLabel(attachment.origin, attachment.kind);
+        // A file name can say as much as the picture would, so it is covered too.
+        const name = shielding ? label : attachment.artifact?.original_name || attachment.id;
         return (
           <article className="attachment-card" key={attachment.id}>
             <a
@@ -109,9 +113,7 @@ function TurnEditorAttachments({ attachments, changeMode, onFocus, onAnimate, on
               rel="noreferrer"
               aria-label={`Preview ${name}`}
             >
-              {attachment.kind === "image"
-                ? <img src={source} alt="" />
-                : <video src={source} muted preload="metadata" />}
+              <ShieldedThumbnail src={source} kind={attachment.kind === "image" ? "image" : "video"} />
             </a>
             <span className="attachment-summary">
               <strong>{label}</strong>

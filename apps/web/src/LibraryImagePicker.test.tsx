@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { LibraryImagePicker } from "./LibraryImagePicker";
 import { api } from "./api";
 import type { ArtifactLibraryItem } from "./types";
+import { SENSITIVE_MEDIA_KEY } from "./sensitiveMedia";
 
 vi.mock("./api", () => ({ api: { artifacts: vi.fn() } }));
 
@@ -32,6 +33,7 @@ function show() {
 afterEach(() => {
   cleanup();
   vi.resetAllMocks();
+  localStorage.clear();
 });
 
 it("loads bounded pages and preserves selection order across them", async () => {
@@ -97,4 +99,17 @@ it("takes one picture when asked for one: choosing another replaces it", async (
   expect(screen.getByRole("button", { name: "Image 7" })).toHaveAttribute("aria-pressed", "true");
   fireEvent.click(screen.getByRole("button", { name: "Use this picture" }));
   expect(confirm).toHaveBeenCalledWith([firstPage[7]]);
+});
+
+it("names covered images by position, loads none that are hidden, and still picks them", async () => {
+  localStorage.setItem(SENSITIVE_MEDIA_KEY, "hide");
+  vi.mocked(api.artifacts).mockResolvedValueOnce(firstPage);
+  const view = show();
+
+  fireEvent.click(await screen.findByRole("button", { name: "Picture 5" }));
+
+  expect(screen.queryByRole("button", { name: "Image 4" })).toBeNull();
+  expect(view.container.querySelector("img")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Attach 1" }));
+  expect(view.confirm).toHaveBeenCalledWith([item(4)]);
 });
