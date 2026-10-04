@@ -24,7 +24,9 @@ POLICY_KEY = "generation_failure_retries"
 async def read_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
     response = await client.get(f"/api/runs/{run_id}")
     assert response.status_code == 200
-    return response.json()
+    run = response.json()
+    assert isinstance(run, dict)
+    return run
 
 
 async def choose_retries(client: AsyncClient, count: int) -> None:
@@ -45,7 +47,9 @@ async def start_media(client: AsyncClient, mode: str = "image") -> str:
         json={"text": "A blue geometric square", "mode": mode, "settings": {"seed": 17}},
     )
     assert turn.status_code == 202, turn.text
-    return turn.json()["run"]["id"]
+    run_id = turn.json()["run"]["id"]
+    assert isinstance(run_id, str)
+    return run_id
 
 
 def failing_media(
@@ -221,7 +225,9 @@ async def test_cancelling_a_reserved_retry_prevents_the_next_attempt(
 
     async def reserved() -> bool:
         run = await read_run(client, run_id)
-        return run["status"] == "queued" and run["provenance_json"]["failure_retries"]["pending"]
+        pending = run["status"] == "queued" and run["provenance_json"]["failure_retries"]["pending"]
+        assert isinstance(pending, bool)
+        return pending
 
     await wait_until(reserved, bool, what="reserved automatic retry")
     with SessionLocal() as session:
@@ -461,7 +467,9 @@ async def test_an_ordered_media_retry_preserves_its_predecessor_and_unblocks_its
     plan_id = response.json()["run"]["work_plan_id"]
 
     async def read_plan() -> dict[str, Any]:
-        return (await client.get(f"/api/work-plans/{plan_id}")).json()
+        plan = (await client.get(f"/api/work-plans/{plan_id}")).json()
+        assert isinstance(plan, dict)
+        return plan
 
     result = await wait_for_terminal_status(read_plan, what="ordered media retry")
     assert result["summary_json"]["status_counts"] == {"complete": 3}
