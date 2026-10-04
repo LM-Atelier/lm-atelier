@@ -4440,6 +4440,16 @@ class ConversationOrchestrator:
         verification_job = False
         queued_verification_job_id: str | None = None
         claim: JobClaim | None = None
+        claim_lost = False
+        execution = asyncio.current_task()
+        assert execution is not None
+
+        def stop_displaced_execution() -> None:
+            nonlocal claim_lost
+            claim_lost = True
+            # Stop this task; another execution can now own the same job.
+            execution.cancel()
+
         try:
             with self.session_factory() as session:
                 job = session.get(Job, job_id)
@@ -4462,6 +4472,7 @@ class ConversationOrchestrator:
                 resource=resource,
                 group=group,
                 priority=priority,
+                on_claim_lost=stop_displaced_execution,
             ) as claim:
                 if verification_job:
                     await self._execute_image_edit_verification(job_id, claim)
@@ -4548,13 +4559,14 @@ class ConversationOrchestrator:
                     media_failed = operation != Operation.TEXT.value
                     raise
                 finally:
-                    if operation == Operation.TEXT.value:
+                    if operation == Operation.TEXT.value and not claim_lost:
                         self._release_deferred_media_restart()
                         await self._settle_step_prewarm(job_id)
                         # `_ensure_chat_worker` loaded whatever this execution
                         # needed, so nothing is owed back any more.
-                        self._displaced_chat_profile_id = None
-                    else:
+                        if not claim_lost:
+                            self._displaced_chat_profile_id = None
+                    elif operation != Operation.TEXT.value and not claim_lost:
                         pending = self._pending_chat_restore(resume_chat_profile)
                         # Completing the handoff stops media, resumes chat or
                         # schedules a restart, and `_execute_media` raising
@@ -4573,9 +4585,11 @@ class ConversationOrchestrator:
                                 await self._hold_media_handoff_for_retry(pending)
                             else:
                                 await self._complete_media_handoff(pending)
-                if queued_verification_job_id:
+                if queued_verification_job_id and not claim_lost:
                     self.start(queued_verification_job_id, None)
         except asyncio.CancelledError:
+            if claim_lost:
+                raise
             with self.session_factory() as session:
                 job = session.get(Job, job_id)
                 owns = job is not None and job.status != JobStatus.CANCELLED.value
@@ -4619,6 +4633,8 @@ class ConversationOrchestrator:
                     session.commit()
             raise
         except Exception as exc:
+            if claim_lost:
+                return
             if verification_job:
                 logger.warning("Image edit verification dispatch failed", exc_info=True)
                 with self.session_factory() as session:
@@ -4656,7 +4672,7 @@ class ConversationOrchestrator:
             assert run_id is not None
             detail = str(exc).strip() or f"Generation failed ({type(exc).__name__})"
             await self._fail(job_id, run_id, detail, claim=claim)
-        if run_id is not None:
+        if run_id is not None and not claim_lost:
             await self._finalize_setup_verification_run(job_id, run_id, claim)
 
     async def _finalize_setup_verification_run(

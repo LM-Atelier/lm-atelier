@@ -236,6 +236,8 @@ async def test_verifier_starts_after_media_handoff_and_inside_primary_lease(
 
     @asynccontextmanager
     async def lease(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        on_claim_lost = kwargs.pop("on_claim_lost")
+        assert callable(on_claim_lost)
         assert kwargs == {"resource": "media_compute", "group": "primary", "priority": 0}
         order.append("lease entered")
         yield
