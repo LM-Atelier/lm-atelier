@@ -1224,6 +1224,8 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
 .workspace-lock-card h1 { font-size: calc(20px * var(--text-scale, 1)); }
 .workspace-lock-card p { margin: 0; line-height: 1.5; }
 .workspace-lock-pending { margin: 0; color: var(--ink-secondary); }
+/* The workspace under a hidden-tab cover keeps its own layout box until it is covered. */
+.hidden-tab-contents { display: contents; }
 .workspace-lock-form { display: grid; gap: calc(12px * var(--spacing-scale, 1)); max-width: 420px; }
 .workspace-lock-form label { display: grid; gap: calc(6px * var(--spacing-scale, 1)); font-weight: 600; }
 .workspace-lock-form input { width: 100%; color: var(--ink); border: 1px solid var(--line-control); border-radius: 10px; background: var(--panel-2); padding: calc(9px * var(--spacing-scale, 1)) calc(10px * var(--spacing-scale, 1)); }
