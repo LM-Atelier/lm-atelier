@@ -5,7 +5,6 @@ import json
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -48,46 +47,18 @@ from .workflow_dependencies import (
     workflow_dependency_contract_sha256,
     workflow_dependency_slot_sha256,
 )
-from .workflow_dependency_error_types import (
-    WorkflowAssetAliasErrorCode,
-    WorkflowDependencyErrorCode,
+from .workflow_install_offer_error_types import (
+    WorkflowInstallOfferErrorCode as WorkflowInstallOfferErrorCode,
 )
-from .workflow_graph_error_types import WorkflowGraphErrorCode
+from .workflow_install_offer_error_types import (
+    WorkflowInstallOfferInvalidationCode as WorkflowInstallOfferInvalidationCode,
+)
 from .workflow_revision_reviews import review_is_current
 
 WORKFLOW_INSTALL_OFFER_VERSION = 1
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _READY = "ready"
-
-
-WorkflowInstallOfferErrorCode = (
-    Literal[
-        "invalid-install-plan",
-        "invalid-workflow-install-offer",
-        "too-many-workflow-install-selections",
-        "unverified-install-artifact",
-        "workflow-artifact-drift",
-        "workflow-contract-drift",
-        "workflow-family-unavailable",
-        "workflow-install-not-needed",
-        "workflow-install-offer-changed",
-        "workflow-install-offer-incomplete",
-        "workflow-install-offer-not-actionable",
-        "workflow-install-offer-not-found",
-        "workflow-revision-needs-attention",
-        "workflow-revision-not-current",
-        "workflow-revision-unavailable",
-    ]
-    | WorkflowGraphErrorCode
-    | WorkflowAssetAliasErrorCode
-    | WorkflowDependencyErrorCode
-)
-
-
-WorkflowInstallOfferInvalidationCode = (
-    WorkflowInstallOfferErrorCode | Literal["asset-download-refused", "offer-superseded"]
-)
 
 
 class WorkflowInstallOfferError(ValueError):

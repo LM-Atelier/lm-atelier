@@ -26,6 +26,7 @@ from local_lm.workflow_install_offers import (
     create_workflow_install_offer,
     revalidate_workflow_install_offer,
 )
+from local_lm.workflow_revision_reviews import review_is_current, revision_identity
 
 REFERENCE = "styles/detail.safetensors"
 DIGEST = "a" * 64
@@ -200,6 +201,116 @@ def test_plan_drift_invalidates_before_returning_downloads(session: Session) -> 
     assert offer.status == "invalidated"
     assert offer.invalidated_at is not None
     assert offer.invalidation_code == "install_plan_not_pending"
+
+
+@pytest.mark.parametrize(
+    ("graph", "code"),
+    [
+        ({"version": 0.4, "nodes": [], "links": []}, "empty_workflow"),
+        ({"version": 0.5, "nodes": [], "links": []}, "unsupported_format"),
+        (
+            {"version": 0.4, "nodes": [], "links": [], "neutral_label": "\ud800"},
+            "invalid_json",
+        ),
+        (
+            {"version": 0.4, "nodes": [], "links": [], "neutral_label": "\udfff"},
+            "invalid_json",
+        ),
+    ],
+)
+def test_graph_refusal_invalidates_a_previously_actionable_offer(
+    session: Session,
+    graph: dict[str, object],
+    code: str,
+) -> None:
+    revision = _revision(session)
+    definition = session.get(WorkflowDefinition, revision.workflow_id)
+    assert definition is not None
+    plan = _plan(session)
+    offer = _create(session, revision, plan)
+    session.commit()
+    identity = revision_identity(definition, revision)
+    current, requests = revalidate_workflow_install_offer(
+        session,
+        offer.id,
+        available_node_types={"LoraLoader"},
+        available_asset_filenames=set(),
+        installed_package_versions={},
+    )
+    assert current.id == offer.id
+    assert len(requests) == 1
+    revision.ui_graph_json = graph
+    session.commit()
+    assert revision_identity(definition, revision) == identity
+    assert review_is_current(session, definition, revision)
+
+    with pytest.raises(WorkflowInstallOfferError) as refused:
+        revalidate_workflow_install_offer(
+            session,
+            offer.id,
+            available_node_types={"LoraLoader"},
+            available_asset_filenames=set(),
+            installed_package_versions={},
+        )
+    assert refused.value.code == code
+    session.commit()
+    session.expire_all()
+    stored = session.get(WorkflowInstallOffer, offer.id)
+    assert stored is not None
+    assert stored.status == "invalidated"
+    assert stored.invalidation_code == code
+    assert stored.invalidated_at is not None
+
+
+def test_a_changed_alias_filename_invalidates_the_original_offer(session: Session) -> None:
+    filename = "alias/runtime.safetensors"
+    revision = _revision(session)
+    revision.ui_graph_json = _graph(filename)
+    definition = session.get(WorkflowDefinition, revision.workflow_id)
+    assert definition is not None
+    plan = _plan(session)
+    offer = create_workflow_install_offer(
+        session,
+        workflow_id=revision.workflow_id,
+        revision_id=revision.id,
+        selections=[WorkflowAssetPlanSelection(filename, plan.id, REFERENCE)],
+        available_node_types={"LoraLoader"},
+        available_asset_filenames=set(),
+        installed_package_versions={},
+    )
+    session.commit()
+    assert offer.selections_json[0]["install_plan_id"] != plan.id
+    assert offer.selections_json[0]["artifact_path"] == filename
+    identity = revision_identity(definition, revision)
+    current, requests = revalidate_workflow_install_offer(
+        session,
+        offer.id,
+        available_node_types={"LoraLoader"},
+        available_asset_filenames=set(),
+        installed_package_versions={},
+    )
+    assert current.id == offer.id
+    assert len(requests) == 1
+    revision.ui_graph_json = _graph(filename.upper())
+    session.commit()
+    assert revision_identity(definition, revision) == identity
+    assert review_is_current(session, definition, revision)
+
+    with pytest.raises(WorkflowInstallOfferError) as refused:
+        revalidate_workflow_install_offer(
+            session,
+            offer.id,
+            available_node_types={"LoraLoader"},
+            available_asset_filenames=set(),
+            installed_package_versions={},
+        )
+    assert refused.value.code == "nested_asset_alias"
+    session.commit()
+    session.expire_all()
+    stored = session.get(WorkflowInstallOffer, offer.id)
+    assert stored is not None
+    assert stored.status == "invalidated"
+    assert stored.invalidation_code == "nested_asset_alias"
 
 
 def test_local_state_change_invalidates_an_obsolete_offer(session: Session) -> None:

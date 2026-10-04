@@ -49,6 +49,7 @@ CHECKED_CONTRACTS = {
     "ChatActivity": "ChatActivityOut",
     "ChatActivityReference": "ChatActivityReferenceOut",
     "WorkflowInstallProgress": "WorkflowInstallProgressOut",
+    "WorkflowInstallOffer": "WorkflowInstallOfferOut",
     "WorkflowSummary": "WorkflowSummaryOut",
     "WorkflowReadyRevision": "WorkflowReadyRevisionOut",
     "WorkflowRevisionChoice": "WorkflowRevisionChoiceOut",
@@ -583,7 +584,6 @@ VOCABULARY_TOKENS = frozenset(
 OPEN_VOCABULARY_BASELINE = frozenset(
     {
         "ReferenceSubjectCreate.kind",
-        "WorkflowInstallOfferOut.invalidation_code",
     }
 )
 
