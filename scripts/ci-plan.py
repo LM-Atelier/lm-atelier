@@ -40,6 +40,7 @@ INERT_DOCUMENTS = {
     "docs/architecture.md",
     "docs/artifact-library-entry-contract.md",
     "docs/decisions/0001-automatic-image-edit-strength.md",
+    "docs/decisions/0002-portable-archive-encryption.md",
     "docs/editing-studio.md",
     "docs/getting-started.md",
     "docs/merge-queue.md",

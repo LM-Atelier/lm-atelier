@@ -438,3 +438,23 @@ async def test_ready_probe_exposes_the_selected_data_root_identity(tmp_path: Pat
     assert response.status_code == 200
     assert response.json() == {"version": __version__}
     assert response.headers[INSTANCE_ID_HEADER] == expected
+
+
+@pytest.mark.parametrize(("available", "exit_code"), [(True, 0), (False, 1)])
+def test_the_runtime_self_test_fails_a_build_that_cannot_encrypt_archives(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    available: bool,
+    exit_code: int,
+) -> None:
+    from local_lm import credentials, portable_archive_v1
+
+    monkeypatch.setattr(sys, "argv", ["lm-atelier", "--runtime-self-test"])
+    monkeypatch.setattr(desktop, "configure_desktop_environment", lambda: None)
+    monkeypatch.setenv("LOCAL_LM_CHAT_ENGINE", "llama.cpp")
+    monkeypatch.setenv("LOCAL_LM_MEDIA_ENGINE", "comfyui")
+    monkeypatch.setattr(credentials.CredentialStore, "vault_available", lambda self: True)
+    monkeypatch.setattr(portable_archive_v1, "self_test", lambda: available)
+
+    assert desktop.main() == exit_code
+    assert f'"portable_archives_available": {str(available).lower()}' in capsys.readouterr().out
