@@ -17,7 +17,8 @@ export function useProjectMutations({
   });
   const deleteProject = useProjectDeletion(client);
   const exportProject = useMutation({
-    mutationFn: ({ id, includeMedia = true }: { id: string; includeMedia?: boolean }) => api.exportProject(id, includeMedia),
+    mutationFn: ({ id, includeMedia = true, passphrase }: { id: string; includeMedia?: boolean; passphrase?: string }) =>
+      passphrase === undefined ? api.exportProject(id, includeMedia) : api.exportProject(id, includeMedia, passphrase),
     onSuccess: (artifact) => {
       const link = document.createElement("a");
       link.href = artifact.url;
@@ -26,7 +27,9 @@ export function useProjectMutations({
     },
   });
   const importProject = useMutation({
-    mutationFn: api.importProject,
+    // A file alone is a plain archive; an encrypted one comes with its passphrase.
+    mutationFn: (archive: File | { file: File; passphrase: string }) =>
+      archive instanceof File ? api.importProject(archive) : api.importProject(archive.file, archive.passphrase),
     onSuccess: async (project) => {
       void client.invalidateQueries({ queryKey: ["projects"] });
       await client.invalidateQueries({ queryKey: ["chats"] });
