@@ -7,6 +7,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -1082,6 +1083,15 @@ async def test_runtime_exit_captures_only_a_bounded_stderr_tail(
 
     monkeypatch.setattr(supervisor, "_wait_healthy", healthy_immediately)
     monkeypatch.setattr(supervisor, "_ensure_port_available", AsyncMock())
+    real_matching = supervisor._matching_worker_processes
+
+    def slow_matching(name: str) -> list[psutil.Process]:
+        # The cleanup after an exit looks the worker's processes up in a
+        # thread; a slow lookup is what a busy machine gives it.
+        time.sleep(0.2)
+        return real_matching(name)
+
+    monkeypatch.setattr(supervisor, "_matching_worker_processes", slow_matching)
     await supervisor._replace(
         "chat",
         [
@@ -1091,12 +1101,17 @@ async def test_runtime_exit_captures_only_a_bounded_stderr_tail(
         ],
         "http://127.0.0.1:9/health",
     )
-    await supervisor._workers["chat"].process.wait()
-    output_task = supervisor._workers["chat"].output_task
+    record = supervisor._workers["chat"]
+    await record.process.wait()
+    output_task = record.output_task
     assert output_task is not None
     await output_task
+    # The exit is recorded by the worker's monitor, which cleans up after the
+    # process before it reports the exit, so its end, not the output's, is
+    # when the status is final.
+    assert record.monitor_task is not None
+    await asyncio.wait_for(record.monitor_task, timeout=30)
 
-    record = supervisor._workers["chat"]
     status = supervisor.statuses()[0]
     assert status.state == "exited"
     assert status.exit_code == 9
