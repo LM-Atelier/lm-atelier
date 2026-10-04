@@ -13,6 +13,7 @@ from alembic.util.exc import CommandError
 
 from .backups import BackupManager
 from .config import Settings
+from .schema_revisions import known_revisions
 
 logger = logging.getLogger(__name__)
 
@@ -77,15 +78,20 @@ def _upgrade_plan(config: Config, settings: Settings) -> tuple[bool, bool]:
     one fails verification - there is not yet an `alembic_version` table to
     verify - and the warning that follows is a traceback on the first launch of
     every new install, describing a loss that cannot happen.
+
+    Neither does a database recorded at a revision this build does not know. The
+    upgrade refuses it before applying anything, and a snapshot of it could not
+    be restored by this build anyway.
     """
 
     database = settings.state_dir / "local-lm.sqlite3"
     recorded = _recorded_revisions(database)
     try:
         heads = set(_script_heads(config))
+        recoverable = bool(recorded) and recorded <= known_revisions()
     except CommandError:
         return True, bool(recorded)
-    return recorded != heads, bool(recorded)
+    return recorded != heads, recoverable
 
 
 def upgrade_database(settings: Settings) -> None:
