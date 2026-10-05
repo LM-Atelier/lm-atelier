@@ -44,6 +44,19 @@ function renderCard(status: WorkerStatus) {
 afterEach(cleanup);
 
 describe("WorkerStatusCard reported faults", () => {
+  it("shows an incomplete shutdown while retaining the stopping state", () => {
+    renderCard(worker({
+      state: "stopping", active_jobs: 0,
+      failure_detail: "Worker shutdown did not complete. Its process ownership is retained.",
+      failure_remedy: "Try stopping the worker again. If it still cannot stop, restart the computer.",
+    }));
+
+    expect(screen.getByText("Stopping and releasing resources")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Worker shutdown did not complete");
+    expect(screen.getByRole("alert")).toHaveTextContent("Try stopping the worker again");
+    expect(screen.getByRole("button", { name: "Unload media worker" })).toBeEnabled();
+  });
+
   it.each([true, false])("shows cleanup in progress while the process is running: %s", (running) => {
     renderCard(worker({ state: "stopping", running, active_jobs: 0 }));
 
