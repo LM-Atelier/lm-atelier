@@ -546,10 +546,12 @@ async def test_installing_a_background_removal_model_installs_its_workflow(
         def statuses(self) -> list[object]:
             return [SimpleNamespace(name="media", running=False, profile_id=None)]
 
-        async def start_media(self, model_root: tuple[Path, dict[str, str]]) -> None:
+        async def start_media(
+            self, model_root: tuple[Path, dict[str, str]], **_kwargs: object
+        ) -> None:
             return None
 
-        async def stop(self, name: str) -> None:
+        async def stop(self, name: str, **_kwargs: object) -> None:
             return None
 
     class MediaAdapter:

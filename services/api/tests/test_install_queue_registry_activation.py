@@ -85,7 +85,7 @@ async def test_registry_activation_preserves_state_after_claim_replacement(
         running = True
         return next(worker for worker in statuses() if worker.name == "media")
 
-    async def stop(_name: str) -> Any:
+    async def stop(_name: str, **_kwargs: object) -> Any:
         nonlocal running, stops
         stops += 1
         running = False

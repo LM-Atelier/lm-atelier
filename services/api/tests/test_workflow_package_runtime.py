@@ -43,7 +43,7 @@ async def test_fresh_runtime_setup_restores_the_stopped_worker_on_every_exit(
             for worker in initial
         ]
 
-    async def stop(name: str) -> WorkerStatus:
+    async def stop(name: str, **_kwargs: object) -> WorkerStatus:
         nonlocal running
         stops.append(name)
         assert name == "media"

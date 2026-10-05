@@ -126,7 +126,10 @@ async def prepared_workflow_source_runtime(
         await _worker(lambda: require_workflow_source_attempt(offer_id, claim))
         if any(binding not in scope.registry_packages for binding in bindings):
             raise WorkflowOfferCompletionError("workflow-install-offer-changed")
-        await processes.start_media(activation_scope=scope)
+        await processes.start_media(
+            activation_scope=scope,
+            before_replace=lambda: require_workflow_source_attempt(offer_id, claim),
+        )
         await _worker(lambda: require_workflow_source_attempt(offer_id, claim))
         if processes.launch_scope_sha256("media") != scope.launch_sha256:
             raise WorkflowOfferCompletionError("workflow-install-offer-changed")
@@ -134,7 +137,7 @@ async def prepared_workflow_source_runtime(
 
     async def stop() -> bool:
         await _worker(require_retained_claim)
-        await processes.stop("media")
+        await processes.stop("media", before_stop=require_retained_claim)
         await _worker(require_retained_claim)
         return media_worker_stopped(processes)
 

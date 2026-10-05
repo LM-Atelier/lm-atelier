@@ -17,6 +17,7 @@ from local_lm.adapters.base import ChatEvent, ChatRequest
 from local_lm.db import SessionLocal
 from local_lm.models import Job, ModelInstall, ModelProfile
 from local_lm.queue_lane_policy import change_lane_policy, read_lane_policy
+from local_lm.scheduler import JobClaim
 from local_lm.schemas import QueueControlCommand
 
 pytestmark = pytest.mark.asyncio
@@ -54,12 +55,14 @@ async def test_standalone_activation_holds_a_claim_through_its_runtime_probe(
         default_settings: Any,
         component_hashes: dict[str, str],
         primary_lease_held: bool = False,
+        claim: JobClaim | None = None,
     ) -> str:
         assert install_id == "installed-chat-model"
         assert component_hashes == {model_path.name: hashlib.sha256(body).hexdigest()}
         with SessionLocal() as session:
             job = session.get(Job, job_id)
-            assert job is not None
+            assert job is not None and claim is not None
+            assert (job.claim_owner, job.attempt) == (claim.token, claim.attempt)
             observed.append((job.status, job.claim_owner, job.attempt))
         return "example-profile"
 
@@ -122,13 +125,15 @@ async def test_standalone_chat_activation_drains_through_runtime_restoration(
         def statuses(self) -> list[object]:
             return [SimpleNamespace(name="chat", running=False, profile_id=None)]
 
-        async def load_chat(self, _profile: ModelProfile, _install: ModelInstall) -> None:
+        async def load_chat(
+            self, _profile: ModelProfile, _install: ModelInstall, **_kwargs: object
+        ) -> None:
             with SessionLocal() as session:
                 job = session.get(Job, job_id)
                 assert job is not None and job.status == "running" and job.claim_owner is not None
                 claim_seen.append(job.claim_owner)
 
-        async def stop(self, name: str) -> None:
+        async def stop(self, name: str, **_kwargs: object) -> None:
             assert name == "chat"
             entered_cleanup.set()
             await release_cleanup.wait()

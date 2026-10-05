@@ -60,10 +60,12 @@ async def test_two_downloads_drain_through_complete_transfer_and_activation_life
         def statuses(self) -> list[SimpleNamespace]:
             return [SimpleNamespace(name="chat", running=False, profile_id=None)]
 
-        async def load_chat(self, _profile: ModelProfile, _install: ModelInstall) -> None:
+        async def load_chat(
+            self, _profile: ModelProfile, _install: ModelInstall, **_kwargs: object
+        ) -> None:
             return None
 
-        async def stop(self, _name: str) -> None:
+        async def stop(self, _name: str, **_kwargs: object) -> None:
             return None
 
     adapter = Mock(spec_set=["capabilities", "count_tokens", "stream"], wraps=ChatAdapter())

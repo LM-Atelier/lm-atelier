@@ -226,6 +226,7 @@ async def activate_comfy_registry_install(
     verification_target: ComfyRegistryVerificationTarget | None = None,
     write_guard: Callable[[Session], None] | None = None,
     cleanup_guard: Callable[[Session], None] | None = None,
+    restore_media: MediaStarter | None = None,
 ) -> ComfyRegistryActivationState:
     """Activate one trusted package and restore the prior runtime if startup fails.
 
@@ -255,12 +256,14 @@ async def activate_comfy_registry_install(
             read_node_inventory=read_node_inventory,
             write_guard=write_guard,
             cleanup_guard=cleanup_guard,
+            restore_media=restore_media,
         )
     if write_guard is not None or cleanup_guard is not None:
         raise ComfyRegistryActivationError(
             "registry_install_verification_failed",
             "Claimed Registry activation requires a verification target",
         )
+    restore_start = restore_media or start_media
     _require_stopped(media_worker_stopped)
     install = _install(session, install_id)
     if not install.trusted:
@@ -293,12 +296,12 @@ async def activate_comfy_registry_install(
         await start_media()
     except asyncio.CancelledError:
         _deactivate(session, install_id, failure_code="activation_cancelled")
-        await _restore_after_cancellation(start_media)
+        await _restore_after_cancellation(restore_start)
         raise
     except Exception as exc:
         _deactivate(session, install_id, failure_code="activation_start_failed")
         try:
-            await start_media()
+            await restore_start()
         except (Exception, asyncio.CancelledError) as restore_exc:
             raise ComfyRegistryActivationError(
                 "activation_restore_failed",
@@ -322,7 +325,7 @@ async def activate_comfy_registry_install(
     except (ComfyRegistryArchiveError, OSError, ValueError) as exc:
         _deactivate(session, install_id, failure_code="activation_runtime_files_failed")
         try:
-            await start_media()
+            await restore_start()
         except (Exception, asyncio.CancelledError) as restore_exc:
             raise ComfyRegistryActivationError(
                 "activation_restore_failed",
@@ -339,7 +342,7 @@ async def activate_comfy_registry_install(
         # After startup and after the file contract, because both of those
         # can restore on their own terms; this one restores the same way.
         if read_node_inventory is None:
-            await _roll_back(session, install_id, start_media, "omission_unverifiable")
+            await _roll_back(session, install_id, restore_start, "omission_unverifiable")
             raise ComfyRegistryActivationError(
                 "omission_unverifiable",
                 "An omitted source dependency cannot be proven unnecessary without "
@@ -352,7 +355,7 @@ async def activate_comfy_registry_install(
             # A reader that fails is not a proof either, and it fails the same
             # way a refused proof does rather than leaving the trial standing.
             code = exc.code if isinstance(exc, OmissionProofError) else "omission_unverifiable"
-            await _roll_back(session, install_id, start_media, code)
+            await _roll_back(session, install_id, restore_start, code)
             raise ComfyRegistryActivationError(
                 code,
                 f"{exc} - the prior media runtime was restored",

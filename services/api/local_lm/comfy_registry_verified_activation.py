@@ -54,6 +54,7 @@ async def activate_verified_comfy_registry_install(
     read_node_inventory: NodeInventoryReader | None,
     write_guard: Callable[[Session], None] | None = None,
     cleanup_guard: Callable[[Session], None] | None = None,
+    restore_media: MediaStarter | None = None,
 ) -> ComfyRegistryActivationState:
     """Keep file work outside the writer and recheck authority after the worker starts."""
     _require_stopped(media_worker_stopped)
@@ -188,7 +189,7 @@ async def activate_verified_comfy_registry_install(
             if retained_guard is not None:
                 retained_guard(session)
                 session.rollback()
-            return await start_media()
+            return await (restore_media or start_media)()
 
         await _restore_after_cancellation(restore)
         if isinstance(exc, asyncio.CancelledError):

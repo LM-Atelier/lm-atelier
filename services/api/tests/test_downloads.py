@@ -49,6 +49,7 @@ from local_lm.models import (
     WorkflowPreference,
     WorkflowRevision,
 )
+from local_lm.progress import update_job_progress
 from local_lm.scheduler import ResourceScheduler
 from local_lm.schemas import CatalogFileSource, DownloadRequest
 
@@ -325,13 +326,11 @@ async def test_planned_chat_activation_requires_completion_and_records_evidence(
             ]
 
         async def load_chat(
-            self,
-            profile: ModelProfile,
-            _install: ModelInstall,
+            self, profile: ModelProfile, _install: ModelInstall, **_kwargs: object
         ) -> None:
             self.loaded.append(profile.id)
 
-        async def stop(self, name: str) -> None:
+        async def stop(self, name: str, **_kwargs: object) -> None:
             self.stopped.append(name)
 
     processes = FakeProcesses()
@@ -432,13 +431,11 @@ async def test_failed_chat_probe_restores_the_previous_profile(
             ]
 
         async def load_chat(
-            self,
-            profile: ModelProfile,
-            _install: ModelInstall,
+            self, profile: ModelProfile, _install: ModelInstall, **_kwargs: object
         ) -> None:
             self.loaded.append(profile.id)
 
-        async def stop(self, _name: str) -> None:
+        async def stop(self, _name: str, **_kwargs: object) -> None:
             raise AssertionError("a working prior profile should be restored")
 
     processes = RestoringProcesses()
@@ -574,13 +571,11 @@ async def test_unknown_gguf_plan_installs_and_activates_with_one_request(
             return [SimpleNamespace(name="chat", running=False, profile_id=None)]
 
         async def load_chat(
-            self,
-            _profile: ModelProfile,
-            _install: ModelInstall,
+            self, _profile: ModelProfile, _install: ModelInstall, **_kwargs: object
         ) -> None:
             return None
 
-        async def stop(self, _name: str) -> None:
+        async def stop(self, _name: str, **_kwargs: object) -> None:
             return None
 
     manager = DownloadManager(
@@ -730,13 +725,11 @@ async def test_chat_plan_downloads_a_pinned_projector_from_a_companion_repo(
             return [SimpleNamespace(name="chat", running=False, profile_id=None)]
 
         async def load_chat(
-            self,
-            _profile: ModelProfile,
-            _install: ModelInstall,
+            self, _profile: ModelProfile, _install: ModelInstall, **_kwargs: object
         ) -> None:
             return None
 
-        async def stop(self, _name: str) -> None:
+        async def stop(self, _name: str, **_kwargs: object) -> None:
             return None
 
     def model_info(remote_id: str, **_kwargs: object) -> object:
@@ -890,10 +883,12 @@ async def test_a_reused_component_is_reported_as_reused_while_the_next_one_downl
         def statuses(self) -> list[object]:
             return [SimpleNamespace(name="chat", running=False, profile_id=None)]
 
-        async def load_chat(self, _profile: ModelProfile, _install: ModelInstall) -> None:
+        async def load_chat(
+            self, _profile: ModelProfile, _install: ModelInstall, **_kwargs: object
+        ) -> None:
             return None
 
-        async def stop(self, _name: str) -> None:
+        async def stop(self, _name: str, **_kwargs: object) -> None:
             return None
 
     info = SimpleNamespace(
@@ -930,7 +925,7 @@ async def test_a_reused_component_is_reported_as_reused_while_the_next_one_downl
     import local_lm.downloads as downloads_module
 
     written: list[dict[str, Any]] = []
-    record = downloads_module.update_job_progress
+    record = update_job_progress
 
     def recording(job: Job, **kwargs: Any) -> dict[str, Any]:
         written.append(kwargs)
@@ -1052,10 +1047,12 @@ async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
         def statuses(self) -> list[object]:
             return [SimpleNamespace(name="media", running=False, profile_id=None)]
 
-        async def start_media(self, model_root: tuple[Path, dict[str, str]]) -> None:
+        async def start_media(
+            self, model_root: tuple[Path, dict[str, str]], **_kwargs: object
+        ) -> None:
             self.started.append(model_root)
 
-        async def stop(self, name: str) -> None:
+        async def stop(self, name: str, **_kwargs: object) -> None:
             self.stopped.append(name)
 
     class MediaAdapter:
@@ -1208,10 +1205,12 @@ async def test_workflow_checkpoint_installs_as_an_inert_verified_asset(
         def statuses(self) -> list[object]:
             return [SimpleNamespace(name="media", running=False, profile_id=None)]
 
-        async def start_media(self, model_root: tuple[Path, dict[str, str]]) -> None:
+        async def start_media(
+            self, model_root: tuple[Path, dict[str, str]], **_kwargs: object
+        ) -> None:
             self.started.append(model_root)
 
-        async def stop(self, name: str) -> None:
+        async def stop(self, name: str, **_kwargs: object) -> None:
             self.stopped.append(name)
 
     class MediaAdapter:
@@ -2117,7 +2116,7 @@ async def test_media_activation_waits_for_the_shared_compute_lease(
     started = asyncio.Event()
 
     class FakeProcesses:
-        async def start_media(self, _model_paths: object = None) -> None:
+        async def start_media(self, _model_paths: object = None, **_kwargs: object) -> None:
             started.set()
 
     class FakeMediaAdapter:
@@ -2214,7 +2213,7 @@ async def test_planned_media_activation_requires_output_and_records_evidence(
     class Processes:
         runtimes = None
 
-        async def start_media(self, _model_paths: object = None) -> None:
+        async def start_media(self, _model_paths: object = None, **_kwargs: object) -> None:
             return None
 
     class MediaAdapter:
@@ -2352,7 +2351,7 @@ async def test_adaptive_activation_failure_is_removed_before_retry(
     )
 
     class FakeProcesses:
-        async def start_media(self, _model_paths: object = None) -> None:
+        async def start_media(self, _model_paths: object = None, **_kwargs: object) -> None:
             return None
 
     class FakeMediaAdapter:
@@ -2377,7 +2376,7 @@ async def test_adaptive_activation_failure_is_removed_before_retry(
     )
     manager._api = SimpleNamespace(model_info=lambda *_args, **_kwargs: info)  # type: ignore[assignment]
 
-    async def prepare(_request: DownloadRequest) -> object:
+    async def prepare(_request: DownloadRequest, **_kwargs: object) -> object:
         return compiled
 
     async def download_file(**kwargs: Any) -> str:
@@ -2480,7 +2479,7 @@ async def test_an_install_failure_without_a_message_still_says_what_failed(
     )
 
     class FakeProcesses:
-        async def start_media(self, _model_paths: object = None) -> None:
+        async def start_media(self, _model_paths: object = None, **_kwargs: object) -> None:
             return None
 
     class FakeMediaAdapter:
@@ -2506,7 +2505,7 @@ async def test_an_install_failure_without_a_message_still_says_what_failed(
     )
     manager._api = SimpleNamespace(model_info=lambda *_args, **_kwargs: info)  # type: ignore[assignment]
 
-    async def prepare(_request: DownloadRequest) -> object:
+    async def prepare(_request: DownloadRequest, **_kwargs: object) -> object:
         return compiled
 
     async def download_file(**kwargs: Any) -> str:
@@ -2579,7 +2578,7 @@ async def test_a_planned_install_failure_without_a_message_names_it_on_the_plan(
         processes=FakeProcesses(),  # type: ignore[arg-type]
     )
 
-    async def prepare(_request: DownloadRequest) -> object:
+    async def prepare(_request: DownloadRequest, **_kwargs: object) -> object:
         raise httpx.ReadTimeout("")
 
     monkeypatch.setattr(manager, "_prepare_comfy_template", prepare)

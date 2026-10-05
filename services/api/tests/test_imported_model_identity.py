@@ -26,6 +26,7 @@ from local_lm.filesystem_links import (
     open_entry,
 )
 from local_lm.models import Job, ModelInstall
+from local_lm.scheduler import JobClaim
 
 
 @pytest.fixture
@@ -112,6 +113,7 @@ async def _activate_imported(
         default_settings: Any,
         component_hashes: dict[str, str],
         primary_lease_held: bool = False,
+        claim: JobClaim | None = None,
     ) -> str:
         proved["hashes"] = component_hashes
         return "ok"
@@ -263,6 +265,7 @@ async def test_activating_an_imported_model_measures_the_files_it_proves(
         default_settings: Any,
         component_hashes: dict[str, str],
         primary_lease_held: bool = False,
+        claim: JobClaim | None = None,
     ) -> str:
         proved["hashes"] = component_hashes
         return "ok"
@@ -389,6 +392,7 @@ async def test_activating_a_replaced_imported_model_measures_the_new_bytes(
         default_settings: Any,
         component_hashes: dict[str, str],
         primary_lease_held: bool = False,
+        claim: JobClaim | None = None,
     ) -> str:
         proved.append(component_hashes)
         return "ok"
