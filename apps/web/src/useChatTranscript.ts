@@ -28,7 +28,9 @@ export function useChatTranscript(chatId: string | null) {
   const head = metadata.data?.active_head_message_id ?? null;
   const messages = useChatMessagePages(readyId, head);
   const context = useQuery({ queryKey: ["chat", chatId, "context", head], enabled: Boolean(readyId),
-    queryFn: ({ signal }) => api.chatContext(readyId!, head, signal) });
+    queryFn: ({ signal }) => api.chatContext(readyId!, head, signal),
+    // Like the messages, kept for the same chat while a new head's context loads.
+    placeholderData: (previous, previousQuery) => previousQuery?.queryKey[1] === chatId ? previous : undefined });
   const oldest = messages.data?.[0]?.id;
   const history = useInfiniteQuery({
     queryKey: ["chat", chatId, "searches", head, oldest], enabled: Boolean(readyId && oldest),

@@ -137,3 +137,111 @@ it("does not read messages before a chat is selected", () => {
   renderHook(() => useChatMessagePages(null, null), { wrapper });
   expect(api.chatMessages).not.toHaveBeenCalled();
 });
+
+// A server holding one conversation in order, read the way the transcript reads it.
+function conversation(length: number, held: Set<string> = new Set()) {
+  const all = Array.from({ length }, (_, index) => message(index));
+  const waiting = new Map<string, () => void>();
+  vi.mocked(api.chatMessages).mockImplementation(async (_id, options) => {
+    const read = `${options?.headId}:${options?.before ?? "latest"}`;
+    if (held.has(read)) await new Promise<void>((done) => waiting.set(read, done));
+    const end = options?.before ? Number(options.before.split("-")[1])
+      : Number(options?.headId?.split("-")[1]) + 1;
+    const start = Math.max(0, end - (options?.limit ?? 40));
+    return { chat_id: "chat-one", messages: all.slice(start, end), has_older: start > 0, has_newer: Boolean(options?.before) };
+  });
+  return { release: (read: string) => { held.delete(read); waiting.get(read)?.(); } };
+}
+
+function ids(data: Message[] | undefined) {
+  return data?.map((item) => Number(item.id.split("-")[1]));
+}
+
+function range(start: number, end: number) {
+  return Array.from({ length: end - start }, (_, index) => start + index);
+}
+
+it("keeps loaded older messages, and shows them meanwhile, when another window adds to the conversation", async () => {
+  const server = conversation(82, new Set(["message-81:latest"]));
+  const { wrapper } = setup();
+  const { result, rerender } = renderHook(({ head }) => useChatMessagePages("chat-one", head), {
+    wrapper, initialProps: { head: "message-79" },
+  });
+  await waitFor(() => expect(ids(result.current.data)).toEqual(range(40, 80)));
+  await act(async () => { await result.current.loadOlder(); });
+  await waitFor(() => expect(ids(result.current.data)).toEqual(range(0, 80)));
+
+  rerender({ head: "message-81" });
+  expect(ids(result.current.data)).toEqual(range(0, 80));
+  await act(async () => { server.release("message-81:latest"); });
+
+  await waitFor(() => expect(ids(result.current.data)).toEqual(range(0, 82)));
+  expect(result.current.hasNextPage).toBe(false);
+});
+
+it("starts again from the new head when it does not continue what is shown", async () => {
+  conversation(82);
+  const { wrapper } = setup();
+  const { result, rerender } = renderHook(({ head }) => useChatMessagePages("chat-one", head), {
+    wrapper, initialProps: { head: "message-79" },
+  });
+  await waitFor(() => expect(ids(result.current.data)).toEqual(range(40, 80)));
+
+  // A head whose newest page does not reach the newest message shown.
+  rerender({ head: "message-20" });
+
+  await waitFor(() => expect(ids(result.current.data)).toEqual(range(0, 21)));
+});
+
+it("asks again for an older page that a move of the head cut short", async () => {
+  const server = conversation(82, new Set(["message-79:message-40"]));
+  const { wrapper } = setup();
+  const { result, rerender } = renderHook(({ head }) => useChatMessagePages("chat-one", head), {
+    wrapper, initialProps: { head: "message-79" },
+  });
+  await waitFor(() => expect(ids(result.current.data)).toEqual(range(40, 80)));
+  act(() => { void result.current.loadOlder(); });
+  await waitFor(() => expect(result.current.isFetchingNextPage).toBe(true));
+
+  rerender({ head: "message-81" });
+
+  await waitFor(() => expect(ids(result.current.data)).toEqual(range(0, 82)));
+  expect(vi.mocked(api.chatMessages)).toHaveBeenCalledWith("chat-one", {
+    headId: "message-81", before: "message-40", limit: 40, signal: expect.any(AbortSignal),
+  });
+  server.release("message-79:message-40");
+});
+
+it("asks again for an interrupted older page even when the move also refreshes the conversation", async () => {
+  const server = conversation(82, new Set(["message-79:message-40", "message-81:latest"]));
+  const { client, wrapper } = setup();
+  const { result, rerender } = renderHook(({ head }) => useChatMessagePages("chat-one", head), {
+    wrapper, initialProps: { head: "message-79" },
+  });
+  await waitFor(() => expect(ids(result.current.data)).toEqual(range(40, 80)));
+  act(() => { void result.current.loadOlder(); });
+  await waitFor(() => expect(result.current.isFetchingNextPage).toBe(true));
+
+  // The other window's message arrives as a head change and a refresh at once.
+  rerender({ head: "message-81" });
+  act(() => { void client.invalidateQueries({ queryKey: ["chat", "chat-one"] }); });
+  await act(async () => { server.release("message-81:latest"); });
+
+  await waitFor(() => expect(ids(result.current.data)).toEqual(range(0, 82)));
+  server.release("message-79:message-40");
+});
+
+it("asks again for an older page that a refresh cancelled", async () => {
+  const server = conversation(80, new Set(["message-79:message-40"]));
+  const { client, wrapper } = setup();
+  const { result } = renderHook(() => useChatMessagePages("chat-one", "message-79"), { wrapper });
+  await waitFor(() => expect(ids(result.current.data)).toEqual(range(40, 80)));
+  act(() => { void result.current.loadOlder(); });
+  await waitFor(() => expect(result.current.isFetchingNextPage).toBe(true));
+
+  // A reply streaming in elsewhere refreshes the conversation meanwhile.
+  await act(async () => { await client.invalidateQueries({ queryKey: ["chat", "chat-one"] }); });
+  await act(async () => { server.release("message-79:message-40"); });
+
+  await waitFor(() => expect(ids(result.current.data)).toEqual(range(0, 80)));
+});
