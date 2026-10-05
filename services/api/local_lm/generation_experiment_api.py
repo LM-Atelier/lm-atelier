@@ -82,6 +82,10 @@ REFUSALS: dict[str, tuple[int, str]] = {
         409,
         "The workflow this choice ran on cannot take a recipe now.",
     ),
+    "generation-experiment-recipe-not-for-changes": (
+        409,
+        "A way of changing a picture cannot be kept as a recipe yet.",
+    ),
     "generation-experiment-record-invalid": (
         409,
         "This comparison's stored record no longer matches what was accepted.",

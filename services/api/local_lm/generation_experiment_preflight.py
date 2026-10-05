@@ -6,6 +6,11 @@ and the LoRA stack. Two things differ on purpose. Saved defaults and presets
 never enter a choice, so what is compared is only what was chosen. And no LoRA
 is ever added automatically, so a choice runs only the LoRAs it names.
 
+A change to a picture is resolved as an edit turn resolves it, with its edit
+strength, from one Media Library picture whose size it must be shown to keep:
+the picture has to reach the saved result through a plain encode, sample and
+decode, as a remix that changes the picture requires.
+
 Nothing is written. The resolution runs against a chat that is never stored,
 and the session it reads must be as clean when it ends as when it began.
 """
@@ -15,7 +20,7 @@ from __future__ import annotations
 import copy
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 from sqlalchemy.orm import Session
 
@@ -45,11 +50,19 @@ from .generation_experiments_v1 import (
     RefusalAlternativeOut,
     ResourceEvidenceOut,
     SeedPolicyKind,
+    SourceGeometry,
     canonical_sha256,
 )
+from .image_edit_strength import resolve_image_edit_strength
 from .models import Chat, ModelInstall, ModelProfile
-from .orchestrator import _resolve_output_loras, _workflow_execution_witness
+from .orchestrator import (
+    ConversationOrchestrator,
+    _chosen_setting_layers,
+    _resolve_output_loras,
+    _workflow_execution_witness,
+)
 from .outpaint_workflows import OUTPAINT_SETTING_KEY, extends_by_nothing
+from .picture_remix import RemixSource, _changes_the_picture, read_remix_source
 from .schemas import SettingField, TurnRequest
 from .settings_registry import WORKFLOW_LORA_OVERRIDES_SETTING_KEY, validate_settings
 from .studio_masks import MASK_SETTING_KEY
@@ -58,11 +71,9 @@ from .video_length import resolve_video_length_settings
 from .workflow_node_dependencies import node_dependency_errors
 from .workflow_selection import WorkflowFamilySelectionError, resolve_exact_workflow_revision
 
-if TYPE_CHECKING:
-    from .orchestrator import ConversationOrchestrator
-
 Code = GenerationExperimentRefusalCode
-OPERATION = Operation.TEXT_TO_IMAGE
+# A picture's side is encoded in multiples of this, so only such a size is kept exactly.
+_ENCODED_SIDE = 8
 # Shared by both choices, so a choice cannot set one for itself.
 COMMON_SETTING_KEYS = frozenset({"negative_prompt", "seed", "width", "height", "batch_size"})
 # Inputs a comparison from words does not take.
@@ -195,6 +206,10 @@ def _refusal(
     )
 
 
+def operation_of(request: GenerationExperimentRequest) -> Operation:
+    return Operation(request.operation)
+
+
 def _setting_name(key: str) -> str | None:
     """A setting is named back only when it looks like one; anything else stays unnamed."""
 
@@ -237,6 +252,7 @@ def _common_settings(
     arm: ExperimentArmRequest,
     revision: Any,
     request_fields: list[SettingField],
+    source: RemixSource | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """The turn settings one choice runs with: its own, plus what both share.
 
@@ -278,8 +294,22 @@ def _common_settings(
         raise ArmRefused(Code.ARM_SEED_UNSUPPORTED)
     settings["seed"] = 0
     geometry = request.geometry
+    if isinstance(geometry, SourceGeometry):
+        # The size is the picture's, kept by the route the choice is shown to
+        # take; no size setting is asked of the workflow.
+        if source is None:
+            raise ArmRefused(Code.SOURCE_UNAVAILABLE)
+        shape = {
+            "intent": geometry.model_dump(mode="json"),
+            "width": source.width,
+            "height": source.height,
+            "derived": True,
+        }
+        return settings, shape
     if isinstance(geometry, PresetGeometry):
-        size = default_output_size(session, OPERATION, revision, geometry.preset_id, None)
+        size = default_output_size(
+            session, operation_of(request), revision, geometry.preset_id, None
+        )
         if size is None:
             raise ArmRefused(Code.ARM_GEOMETRY_UNREACHABLE)
         width, height, derived = size.width, size.height, True
@@ -309,18 +339,24 @@ async def _resolve_arm(
     request: GenerationExperimentRequest,
     arm: ExperimentArmRequest,
     ordinal: int,
+    source: RemixSource | None,
 ) -> ResolvedArm:
+    operation = operation_of(request)
+    edit = operation == Operation.IMAGE_TO_IMAGE
     profile = _require_image_profile(session, arm.profile_id)
     try:
         revision, _activation, bound_profile = resolve_exact_workflow_revision(
             session,
             arm.workflow_revision_id,
             capability="image",
-            operation=OPERATION,
+            operation=operation,
             engine=orchestrator.engines.settings.media_engine,
         )
     except WorkflowFamilySelectionError as exc:
-        raise ArmRefused(_REASONS.get(exc.reason, Code.ARM_WORKFLOW_UNAVAILABLE)) from None
+        code = _REASONS.get(exc.reason, Code.ARM_WORKFLOW_UNAVAILABLE)
+        if edit and code == Code.ARM_OPERATION_MISMATCH:
+            code = Code.ARM_NOT_AN_EDIT
+        raise ArmRefused(code) from None
     if bound_profile is not None and bound_profile.id != profile.id:
         raise ArmRefused(
             Code.ARM_MODEL_MISMATCH,
@@ -336,7 +372,7 @@ async def _resolve_arm(
     )
     try:
         chosen_profile, model_selection, chosen_revision = orchestrator._execution_for_turn(
-            session, chat, OPERATION, request.prompt, choice
+            session, chat, operation, request.prompt, choice
         )
     except LookupError:
         raise ArmRefused(Code.ARM_PROFILE_UNAVAILABLE) from None
@@ -349,10 +385,12 @@ async def _resolve_arm(
         or chosen_profile.id != profile.id
     ):
         raise ArmRefused(Code.ARM_MODEL_MISMATCH)
+    if edit and not _changes_the_picture(session, chosen_revision):
+        raise ArmRefused(Code.ARM_NOT_AN_EDIT)
     model_selection = {**model_selection, "compatibility_only": True}
     try:
         turn_workflow = await orchestrator._turn_workflow(
-            session, OPERATION, chosen_profile, chosen_revision, None
+            session, operation, chosen_profile, chosen_revision, None
         )
     except (EngineSchemaUnavailableError, EngineNotConfiguredError):
         raise ArmRefused(Code.ARM_ENGINE_UNAVAILABLE) from None
@@ -361,13 +399,15 @@ async def _resolve_arm(
     activation = turn_workflow.activation
     fields = turn_workflow.fields
     request_fields = [item for item in fields if item.scope != "load"]
-    settings, shape = _common_settings(session, request, arm, chosen_revision, request_fields)
+    settings, shape = _common_settings(
+        session, request, arm, chosen_revision, request_fields, source
+    )
     setting_request = choice.model_copy(update={"settings": settings})
     try:
         layers = orchestrator.resolve_turn_setting_layers(
             session,
             chat,
-            OPERATION,
+            operation,
             chosen_profile,
             setting_request,
             fields,
@@ -406,6 +446,24 @@ async def _resolve_arm(
     if isinstance(batch, int) and batch > 1:
         adaptations.append({"setting": "batch_size", "from": batch, "to": 1})
         effective["batch_size"] = 1
+    image_edit: dict[str, Any] | None = None
+    if edit:
+        # The strength a turn would take, from the same layers in the same order;
+        # it is written into the settings as a turn writes it.
+        strength = resolve_image_edit_strength(
+            operation,
+            request.prompt,
+            fields,
+            effective,
+            _chosen_setting_layers(
+                chosen_profile,
+                layers.workflow_lora_layers,
+                layers.request_settings,
+                use_case_settings=layers.use_case_settings,
+            ),
+            workflow_schema=chosen_revision.input_schema_json,
+        )
+        image_edit = ConversationOrchestrator._image_edit_provenance(operation, strength)
     # The seed each picture runs with is chosen when the comparison is accepted.
     effective.pop("seed", None)
     witness = _workflow_execution_witness(session, chosen_revision, activation, model_selection)
@@ -420,9 +478,9 @@ async def _resolve_arm(
         lora_resolution.provenance if lora_resolution else [],
         request.prompt,
     )
-    snapshot = {
+    snapshot: dict[str, Any] = {
         "version": CONTRACT_VERSION,
-        "operation": OPERATION.value,
+        "operation": operation.value,
         "profile": accepted.model_dump(mode="json") if accepted else None,
         "model_provenance": accepted_profile_provenance(accepted),
         "workflow": workflow.model_dump(mode="json") if workflow else None,
@@ -440,6 +498,11 @@ async def _resolve_arm(
         "geometry": shape,
         "adaptations": adaptations,
     }
+    if edit:
+        # Kept only for a change, so a comparison from words is digested exactly
+        # as one made before changes could be compared.
+        snapshot["source_artifact_id"] = request.source_artifact_id
+        snapshot["image_edit"] = copy.deepcopy(image_edit)
     return ResolvedArm(
         ordinal=ordinal,
         label=arm.label,
@@ -467,12 +530,14 @@ def _same_family(first: str | None, second: str | None) -> bool:
 
 
 def _estimate(
-    orchestrator: ConversationOrchestrator, arms: tuple[ResolvedArm, ...]
+    orchestrator: ConversationOrchestrator, operation: Operation, arms: tuple[ResolvedArm, ...]
 ) -> tuple[int, int]:
     work = 0
     output_bytes = 0
     for arm in arms:
-        figures = orchestrator._media_plan_estimate(OPERATION, arm.effective_settings, 1)
+        # The size each picture comes out at, which for a change is its picture's.
+        settings = {**arm.effective_settings, "width": arm.width, "height": arm.height}
+        figures = orchestrator._media_plan_estimate(operation, settings, 1)
         work += int(figures["work_units"])
         output_bytes += int(figures["estimated_bytes"])
     return work, output_bytes
@@ -488,6 +553,8 @@ def common_inputs(request: GenerationExperimentRequest) -> dict[str, Any]:
         "seed_policy": request.seed_policy.model_dump(mode="json"),
         "output_count": 1,
     }
+    if request.source_artifact_id is not None:
+        common["source_artifact_id"] = request.source_artifact_id
     # Kept only when blind, so a comparison that names its choices is stored,
     # and digested, exactly as one made before blind comparisons existed.
     if request.evaluation_mode == GenerationExperimentEvaluationMode.BLIND:
@@ -495,7 +562,9 @@ def common_inputs(request: GenerationExperimentRequest) -> dict[str, Any]:
     return common
 
 
-def preflight_digest(common: dict[str, Any], arms: list[tuple[int, str, str]]) -> str:
+def preflight_digest(
+    common: dict[str, Any], arms: list[tuple[int, str, str]], operation: str
+) -> str:
     """One digest over the shared request and each choice's snapshot.
 
     Random seeds are drawn only when a comparison is accepted, so they are not
@@ -505,11 +574,33 @@ def preflight_digest(common: dict[str, Any], arms: list[tuple[int, str, str]]) -
     return canonical_sha256(
         {
             "contract_version": CONTRACT_VERSION,
-            "operation": OPERATION.value,
+            "operation": operation,
             "common": common,
             "arms": [list(arm) for arm in arms],
         }
     )
+
+
+def picture_to_change(
+    orchestrator: ConversationOrchestrator, artifact_id: str | None
+) -> RemixSource | None:
+    """The picture an edit changes, when it is one whose size can be kept; otherwise none.
+
+    The same picture a remix may start from, and more narrowly: shown at the
+    size it is stored at, and with sides the encoder keeps exactly.
+    """
+
+    if artifact_id is None:
+        return None
+    source = read_remix_source(orchestrator.artifacts, artifact_id)
+    if (
+        source is None
+        or source.turned
+        or source.width % _ENCODED_SIDE
+        or source.height % _ENCODED_SIDE
+    ):
+        return None
+    return source
 
 
 async def resolve_generation_experiment(
@@ -524,11 +615,14 @@ async def resolve_generation_experiment(
     chat = _resolution_chat()
     resolved: list[ResolvedArm | None] = []
     refusals: list[ExperimentRefusalOut] = []
+    source = picture_to_change(orchestrator, request.source_artifact_id)
+    if request.source_artifact_id is not None and source is None:
+        refusals.append(_refusal(Code.SOURCE_UNAVAILABLE))
     with session.no_autoflush:
         for ordinal, arm in enumerate(request.arms, start=1):
             try:
                 resolved.append(
-                    await _resolve_arm(orchestrator, session, chat, request, arm, ordinal)
+                    await _resolve_arm(orchestrator, session, chat, request, arm, ordinal, source)
                 )
             except ArmRefused as refused:
                 resolved.append(None)
@@ -565,7 +659,7 @@ async def resolve_generation_experiment(
             and first.snapshot_sha256 == second.snapshot_sha256
         ):
             refusals.append(_refusal(Code.ARMS_IDENTICAL))
-        work, output_bytes = _estimate(orchestrator, arms)
+        work, output_bytes = _estimate(orchestrator, operation_of(request), arms)
         estimate = (
             ResourceEvidenceOut(
                 resource="work_units",
@@ -599,6 +693,7 @@ async def resolve_generation_experiment(
         preflight_digest(
             common_inputs(request),
             [(arm.ordinal, arm.label, arm.snapshot_sha256) for arm in arms],
+            request.operation,
         )
         if not refusals
         else None

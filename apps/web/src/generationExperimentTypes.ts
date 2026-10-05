@@ -8,7 +8,7 @@ export type GenerationExperimentRefusalCode =
   | "arm-activation-not-ready" | "arm-package-missing" | "arm-model-mismatch" | "arm-engine-unavailable"
   | "arm-setting-unsupported" | "arm-setting-invalid" | "common-input-overridden" | "arm-input-unsupported"
   | "arm-seed-unsupported" | "arm-geometry-unreachable" | "arm-lora-refused" | "seed-family-unproven"
-  | "arms-identical" | "experiment-too-large" | "arm-changed";
+  | "arms-identical" | "experiment-too-large" | "arm-changed" | "source-unavailable" | "arm-not-an-edit";
 
 export type TrialWorkStatus = WorkStepStatus | "removed";
 
@@ -23,7 +23,15 @@ export interface SizeGeometry {
   height: number;
 }
 
-export type ExperimentGeometry = PresetGeometry | SizeGeometry;
+/** The size of the picture being changed; only a change has it. */
+export interface SourceGeometry {
+  mode: "source";
+}
+
+export type ExperimentGeometry = PresetGeometry | SizeGeometry | SourceGeometry;
+
+/** A comparison makes pictures from words, or changes one picture from the Media Library. */
+export type ExperimentOperation = "text_to_image" | "image_to_image";
 
 export interface SeedPolicy {
   kind: SeedPolicyKind;
@@ -39,7 +47,9 @@ export interface ExperimentArmRequest {
 
 export interface GenerationExperimentRequest {
   name: string;
-  operation: "text_to_image";
+  operation: ExperimentOperation;
+  /** The one picture a change starts from; absent for pictures made from words. */
+  source_artifact_id?: string;
   prompt: string;
   negative_prompt: string;
   geometry: ExperimentGeometry;
@@ -158,7 +168,8 @@ export interface GenerationExperiment {
   id: string;
   name: string;
   state: "ready" | "started";
-  operation: "text_to_image";
+  operation: ExperimentOperation;
+  source_artifact_id: string | null;
   prompt: string;
   negative_prompt: string;
   geometry: ExperimentGeometry;

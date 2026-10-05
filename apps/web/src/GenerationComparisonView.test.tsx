@@ -64,7 +64,7 @@ function compatible(overrides: Partial<GenerationExperimentPreflight> = {}): Gen
 
 function experiment(state: "ready" | "started", statuses: ("queued" | "complete" | "failed")[] = ["queued", "queued"]): GenerationExperiment {
   return {
-    id: "gexp-1", name: "Choice A and Choice B", state, operation: "text_to_image", prompt: "A quiet harbor", negative_prompt: "",
+    id: "gexp-1", name: "Choice A and Choice B", state, operation: "text_to_image", source_artifact_id: null, prompt: "A quiet harbor", negative_prompt: "",
     geometry: { mode: "size", width: 1024, height: 1024 }, seed_policy: { kind: "same_recorded_number", seed: 41 },
     seed_equivalence: "none", preflight_sha256: "a".repeat(64), snapshot_sha256: "b".repeat(64), estimate: compatible().estimate,
     created_at: "2026-10-01T00:00:00Z", work_plan_id: state === "started" ? "plan-1" : null, started_at: null,

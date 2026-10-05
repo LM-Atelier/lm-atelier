@@ -44,6 +44,23 @@ describe("comparisonRequest", () => {
     });
   });
 
+  it("asks to change one picture at its own size when a picture is chosen", () => {
+    const built = comparisonRequest(draft({
+      source: { id: "sha256:" + "c".repeat(64) },
+      size: { mode: "preset", presetId: "" },
+    }), []);
+    expect(built.problems).toEqual([]);
+    expect(built.request).toMatchObject({
+      operation: "image_to_image",
+      source_artifact_id: "sha256:" + "c".repeat(64),
+      geometry: { mode: "source" },
+    });
+    // Words alone name no picture, and are asked for exactly as before.
+    const words = comparisonRequest(draft(), []).request;
+    expect(words && "source_artifact_id" in words).toBe(false);
+    expect(words?.operation).toBe("text_to_image");
+  });
+
   it("asks for a blind comparison only when one was chosen", () => {
     const blind = comparisonRequest(draft({ blind: true }), []).request;
     const named = comparisonRequest(draft(), []).request;

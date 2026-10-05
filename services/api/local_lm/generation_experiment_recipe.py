@@ -66,6 +66,10 @@ async def recipe_draft(
     # made is not to be known, and a draft would lead from one to the other.
     if store.blind_pending(experiment):
         raise RecipeDraftRefused("generation-experiment-blind")
+    # A recipe here is one for making pictures from words; a way of changing a
+    # picture is kept by none of them yet.
+    if experiment.operation != OPERATION.value:
+        raise RecipeDraftRefused("generation-experiment-recipe-not-for-changes")
     arm = next((arm for arm in experiment.arms if arm.ordinal == arm_ordinal), None)
     if arm is None:
         raise RecipeDraftRefused("generation-experiment-arm-not-found")

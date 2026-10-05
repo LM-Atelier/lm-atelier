@@ -375,7 +375,9 @@ def out(
     arms = [_arm_out(arm, {} if pending else progress or {}) for arm in experiment.arms]
     common = experiment.common_json
     shared = preflight_digest(
-        common, [(arm.ordinal, arm.label, arm.snapshot_sha256) for arm in arms]
+        common,
+        [(arm.ordinal, arm.label, arm.snapshot_sha256) for arm in arms],
+        experiment.operation,
     )
     trials = [(arm.ordinal, trial.ordinal, trial.seed) for arm in arms for trial in arm.trials]
     recomputed = _record_digest(
@@ -395,6 +397,7 @@ def out(
                 "name": experiment.name,
                 "state": experiment.state,
                 "operation": experiment.operation,
+                "source_artifact_id": common.get("source_artifact_id"),
                 "prompt": common["prompt"],
                 "negative_prompt": common["negative_prompt"],
                 "geometry": common["geometry"],
