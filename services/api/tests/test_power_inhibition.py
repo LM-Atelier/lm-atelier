@@ -9,6 +9,7 @@ import sys
 import threading
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any, Literal
 
 import pytest
 
@@ -186,7 +187,7 @@ def _kernel(
 ) -> SimpleNamespace:
     """kernel32's power request calls, recorded, each able to fail."""
 
-    def create_request(context: object) -> int:
+    def create_request(context: Any) -> int:
         reason = ctypes.cast(context, ctypes.POINTER(power_inhibition._ReasonContext)).contents
         calls.append(("create", (reason.version, reason.flags, reason.reason.simple)))
         return create
@@ -263,13 +264,13 @@ def test_windows_refusing_to_end_the_request_still_closes_it() -> None:
 
 
 def test_each_platform_gets_its_own_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(power_inhibition.sys, "platform", "darwin")
+    monkeypatch.setattr(sys, "platform", "darwin")
     assert isinstance(power_inhibition.default_power_backend(), UnsupportedPowerBackend)
-    monkeypatch.setattr(power_inhibition.sys, "platform", "linux")
+    monkeypatch.setattr(sys, "platform", "linux")
     assert isinstance(
         power_inhibition.default_power_backend(), power_inhibition.LinuxLogindPowerBackend
     )
-    monkeypatch.setattr(power_inhibition.sys, "platform", "win32")
+    monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(power_inhibition, "_kernel32", lambda: _kernel([]))
     assert isinstance(
         power_inhibition.default_power_backend(), power_inhibition.WindowsPowerBackend
@@ -353,7 +354,7 @@ def _fake_jeepney(recorded: dict[str, object], *, refuse: bool = False) -> dict[
         def __enter__(self) -> _Connection:
             return self
 
-        def __exit__(self, *exc: object) -> bool:
+        def __exit__(self, *exc: object) -> Literal[False]:
             return False
 
         def send_and_get_reply(self, message: object, timeout: float) -> object:
@@ -386,7 +387,7 @@ def _fake_jeepney(recorded: dict[str, object], *, refuse: bool = False) -> dict[
 def test_linux_asks_logind_to_hold_off_only_the_idle_timer(monkeypatch: pytest.MonkeyPatch) -> None:
     recorded: dict[str, object] = {}
     fake = _fake_jeepney(recorded)
-    monkeypatch.setattr(power_inhibition.importlib, "import_module", lambda name: fake[name])
+    monkeypatch.setattr(importlib, "import_module", lambda name: fake[name])
 
     assert power_inhibition._logind_inhibit(POWER_REASON) == 7
     assert recorded == {
@@ -407,7 +408,7 @@ def test_linux_asks_logind_to_hold_off_only_the_idle_timer(monkeypatch: pytest.M
 
 def test_a_logind_error_is_a_platform_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _fake_jeepney({}, refuse=True)
-    monkeypatch.setattr(power_inhibition.importlib, "import_module", lambda name: fake[name])
+    monkeypatch.setattr(importlib, "import_module", lambda name: fake[name])
 
     with pytest.raises(OSError):
         power_inhibition._logind_inhibit(POWER_REASON)

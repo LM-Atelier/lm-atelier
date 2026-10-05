@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import secrets
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -244,7 +245,7 @@ async def test_each_viewing_draws_its_own_order(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch, drawn: int
 ) -> None:
     started = await _blind_started(client)
-    monkeypatch.setattr(blind.secrets, "randbelow", lambda _bound: drawn)
+    monkeypatch.setattr(secrets, "randbelow", lambda _bound: drawn)
     view = (await client.post(f"{CREATE}/{started['id']}/blind-views")).json()
 
     said = await client.post(
