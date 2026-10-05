@@ -7,14 +7,16 @@ import { useReadyWorkflowChoices } from "./useReadyWorkflowChoices";
 import "./GenerationComparisonView.css";
 
 /** One choice: its label, the image model it uses and the exact workflow revision it runs. */
-export function ComparisonChoiceFields({ legend, value, onChange, labelRef }: {
+export function ComparisonChoiceFields({ legend, value, onChange, labelRef, operation = "text_to_image" }: {
   legend: string;
+  /** What the workflow must do: make a picture from words, or change the picture given. */
+  operation?: "text_to_image" | "image_to_image";
   value: ComparisonChoiceDraft;
   onChange: (next: ComparisonChoiceDraft) => void;
   labelRef?: Ref<HTMLInputElement>;
 }) {
   const library = useProfileLibrary("image", value.profileId || null);
-  const workflows = useReadyWorkflowChoices(value.revisionId ? [value.revisionId] : []);
+  const workflows = useReadyWorkflowChoices(value.revisionId ? [value.revisionId] : [], operation);
   const choices = workflows.rows.map((row) => ({
     id: row.revision_id, label: `${row.family_name} - ${row.workflow_name} · v${row.revision_version}`,
   }));
@@ -29,7 +31,7 @@ export function ComparisonChoiceFields({ legend, value, onChange, labelRef }: {
     <ReadyWorkflowBrowseControls workflows={workflows} />
     <label>Workflow<select aria-label="Workflow" value={value.revisionId}
       onChange={(event) => onChange({ ...value, revisionId: event.target.value })}>
-      <option value="">Choose a ready image workflow</option>
+      <option value="">{operation === "image_to_image" ? "Choose a ready image editing workflow" : "Choose a ready image workflow"}</option>
       {value.revisionId && !choices.some((choice) => choice.id === value.revisionId)
         && <option value={value.revisionId}>{workflows.missingLabel}</option>}
       {choices.map((choice) => <option key={choice.id} value={choice.id}>{choice.label}</option>)}

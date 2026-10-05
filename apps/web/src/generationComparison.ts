@@ -26,7 +26,14 @@ export type ComparisonSizeDraft =
   | { mode: "preset"; presetId: OutputRatioPresetId | "" }
   | { mode: "size"; width: string; height: string };
 
+/** The one Media Library picture a comparison changes. */
+export interface ComparisonSource {
+  id: string;
+}
+
 export interface ComparisonDraft {
+  /** The picture both choices change and keep the size of; none to make new pictures from words. */
+  source: ComparisonSource | null;
   prompt: string;
   negativePrompt: string;
   size: ComparisonSizeDraft;
@@ -37,6 +44,7 @@ export interface ComparisonDraft {
 }
 
 export const EMPTY_COMPARISON: ComparisonDraft = {
+  source: null,
   prompt: "",
   negativePrompt: "",
   size: { mode: "size", width: "1024", height: "1024" },
@@ -80,7 +88,9 @@ export function comparisonRequest(draft: ComparisonDraft, sharedPresets: OutputR
   if (draft.prompt.length > 200_000) problems.push("The prompt is too long.");
   if (draft.negativePrompt.length > 20_000) problems.push("The negative prompt is too long.");
   let geometry: GenerationExperimentRequest["geometry"] | null = null;
-  if (draft.size.mode === "preset") {
+  if (draft.source) {
+    geometry = { mode: "source" };
+  } else if (draft.size.mode === "preset") {
     if (!draft.size.presetId) problems.push("Choose a shape, or an exact size.");
     else if (!sharedPresets.includes(draft.size.presetId)) problems.push("Choose a shape both workflows can make.");
     else geometry = { mode: "preset", preset_id: draft.size.presetId };
@@ -100,7 +110,9 @@ export function comparisonRequest(draft: ComparisonDraft, sharedPresets: OutputR
   return {
     request: {
       name: `${labels[0]} and ${labels[1]}`.slice(0, 200),
-      operation: "text_to_image",
+      operation: draft.source ? "image_to_image" : "text_to_image",
+      // Sent only for a change, so a comparison from words is asked for exactly as before.
+      ...(draft.source ? { source_artifact_id: draft.source.id } : {}),
       prompt: draft.prompt,
       negative_prompt: draft.negativePrompt,
       geometry,

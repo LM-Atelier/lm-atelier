@@ -5,6 +5,10 @@ prompt, one output shape, one output per choice and one seed policy. Each
 choice is an exact model profile and workflow revision with its own settings.
 Both are checked together before anything is accepted, so one choice that
 cannot run means the comparison accepts no work at all.
+
+A comparison either makes new pictures from words or changes one picture from
+the Media Library. A change keeps that picture's size, so both choices start
+from, and return, the same picture shape.
 """
 
 import hashlib
@@ -70,6 +74,8 @@ class GenerationExperimentRefusalCode(StrEnum):
     ARMS_IDENTICAL = "arms-identical"
     EXPERIMENT_TOO_LARGE = "experiment-too-large"
     ARM_CHANGED = "arm-changed"
+    SOURCE_UNAVAILABLE = "source-unavailable"
+    ARM_NOT_AN_EDIT = "arm-not-an-edit"
 
 
 # One fixed sentence per refusal. A refusal never repeats what was asked for,
@@ -108,8 +114,7 @@ REFUSAL_MESSAGES: dict[GenerationExperimentRefusalCode, str] = {
         "and cannot be set for one."
     ),
     GenerationExperimentRefusalCode.ARM_INPUT_UNSUPPORTED: (
-        "A comparison makes new pictures from words only; selections, relighting and "
-        "extending are not part of it."
+        "Selections, relighting and extending are not part of a comparison."
     ),
     GenerationExperimentRefusalCode.ARM_SEED_UNSUPPORTED: (
         "This workflow does not accept a seed, so its result could not be reproduced."
@@ -133,6 +138,14 @@ REFUSAL_MESSAGES: dict[GenerationExperimentRefusalCode, str] = {
     GenerationExperimentRefusalCode.ARM_CHANGED: (
         "This choice would now run differently from when the comparison was accepted. "
         "Check it again."
+    ),
+    GenerationExperimentRefusalCode.SOURCE_UNAVAILABLE: (
+        "This picture cannot be changed here. Choose one picture from the Media Library "
+        "that is not moving and not too large."
+    ),
+    GenerationExperimentRefusalCode.ARM_NOT_AN_EDIT: (
+        "This workflow cannot be shown to change a picture and keep its size. "
+        "Choose an image editing workflow."
     ),
 }
 
@@ -160,7 +173,14 @@ class SizeGeometry(_Contract):
     height: int = Field(ge=1, le=MAX_DIMENSION)
 
 
-Geometry = Annotated[PresetGeometry | SizeGeometry, Field(discriminator="mode")]
+class SourceGeometry(_Contract):
+    """The size of the picture being changed, the same for both choices."""
+
+    mode: Literal["source"]
+
+
+Geometry = Annotated[PresetGeometry | SizeGeometry | SourceGeometry, Field(discriminator="mode")]
+ExperimentOperation = Literal["text_to_image", "image_to_image"]
 
 
 class SeedPolicy(_Contract):
@@ -205,7 +225,10 @@ class ExperimentArmRequest(_Contract):
 
 class GenerationExperimentRequest(_Contract):
     name: Name
-    operation: Literal["text_to_image"]
+    operation: ExperimentOperation
+    # The one picture an edit changes, a Media Library picture by its id;
+    # words alone name none.
+    source_artifact_id: str | None = Field(default=None, min_length=1, max_length=200)
     prompt: str = Field(min_length=1, max_length=200_000)
     negative_prompt: str = Field(default="", max_length=20_000)
     geometry: Geometry
@@ -222,6 +245,15 @@ class GenerationExperimentRequest(_Contract):
         labels = {arm.label.casefold() for arm in self.arms}
         if len(labels) != len(self.arms):
             raise ValueError("Give each choice its own label.")
+        return self
+
+    @model_validator(mode="after")
+    def require_one_picture_for_an_edit(self) -> Self:
+        edit = self.operation == "image_to_image"
+        if edit != (self.source_artifact_id is not None):
+            raise ValueError("A change names the one picture it changes, and only a change does.")
+        if edit != isinstance(self.geometry, SourceGeometry):
+            raise ValueError("A change keeps its picture's size, and only a change can.")
         return self
 
 
@@ -407,7 +439,8 @@ class GenerationExperimentOut(BaseModel):
     id: str
     name: str
     state: GenerationExperimentState
-    operation: Literal["text_to_image"]
+    operation: ExperimentOperation
+    source_artifact_id: str | None = None
     prompt: str
     negative_prompt: str
     geometry: Geometry

@@ -19,7 +19,7 @@ export function ComparisonSharedFields({ value, onChange, sharedPresets, shapesK
       onChange={(event) => onChange({ ...value, prompt: event.target.value })} /></label>
     <label>Negative prompt<textarea value={value.negativePrompt} maxLength={20_000} rows={2}
       onChange={(event) => onChange({ ...value, negativePrompt: event.target.value })} /></label>
-    <fieldset className="comparison-shared-group">
+    {value.source ? <p className="comparison-note">Size: the picture's own, for both choices.</p> : <fieldset className="comparison-shared-group">
       <legend>Size</legend>
       <label className="comparison-radio"><input type="radio" name="comparison-size" checked={size.mode === "size"}
         onChange={() => onChange({ ...value, size: { mode: "size", width: "1024", height: "1024" } })} />Exact size</label>
@@ -36,7 +36,7 @@ export function ComparisonSharedFields({ value, onChange, sharedPresets, shapesK
         <option value="">{shapesKnown ? (sharedPresets.length ? "Choose a shape" : "No shape both workflows can make") : "Choose both workflows first"}</option>
         {sharedPresets.map((presetId) => <option key={presetId} value={presetId}>{`${RATIO_LABELS[presetId]} (${presetId})`}</option>)}
       </select></label>}
-    </fieldset>
+    </fieldset>}
     <fieldset className="comparison-shared-group">
       <legend>Seed</legend>
       {SEED_KINDS.map((kind) => <label key={kind} className="comparison-radio"><input type="radio" name="comparison-seed"

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { ComparisonCheckResult, ComparisonRefusals } from "./ComparisonCheckResult";
 import { ComparisonChoiceFields } from "./ComparisonChoiceFields";
+import { ComparisonPictureField } from "./ComparisonPictureField";
 import { ComparisonResults } from "./ComparisonResults";
 import { ComparisonSharedFields } from "./ComparisonSharedFields";
 import { ErrorCallout } from "./ErrorCallout";
@@ -54,6 +55,14 @@ export function GenerationComparisonView({ onOpenChat }: {
   useEffect(() => {
     if (comparison.experimentId) resultsHeading.current?.focus();
   }, [comparison.experimentId]);
+
+  const operation = draft.source ? "image_to_image" : "text_to_image";
+  const changeStart = (source: ComparisonDraft["source"]) => {
+    // A workflow chosen to make pictures from words cannot change one, nor the other way about.
+    const choices = Boolean(source) === Boolean(draft.source) ? draft.choices
+      : draft.choices.map((choice) => ({ ...choice, revisionId: "" })) as [ComparisonChoiceDraft, ComparisonChoiceDraft];
+    setDraft({ ...draft, source, choices });
+  };
 
   const updateChoice = (index: 0 | 1, next: ComparisonChoiceDraft) => {
     const choices: [ComparisonChoiceDraft, ComparisonChoiceDraft] = [...draft.choices];
@@ -120,12 +129,13 @@ export function GenerationComparisonView({ onOpenChat }: {
   return <div className="page-view generation-comparison">
     <header className="page-header"><div><h1>Compare generation choices</h1>
       <p>Two choices, one prompt: everything but the model and workflow is held the same.</p></div></header>
+    <ComparisonPictureField value={draft.source} onChange={changeStart} />
     <ComparisonSharedFields value={draft} onChange={setDraft} sharedPresets={sharedPresets}
       shapesKnown={firstShape.isSuccess && secondShape.isSuccess} />
     <div className="comparison-columns">
-      <ComparisonChoiceFields legend="First choice" value={draft.choices[0]} labelRef={firstLabel}
+      <ComparisonChoiceFields legend="First choice" value={draft.choices[0]} labelRef={firstLabel} operation={operation}
         onChange={(next) => updateChoice(0, next)} />
-      <ComparisonChoiceFields legend="Second choice" value={draft.choices[1]}
+      <ComparisonChoiceFields legend="Second choice" value={draft.choices[1]} operation={operation}
         onChange={(next) => updateChoice(1, next)} />
     </div>
     {problems.length > 0 && <ul className="comparison-problems" role="alert">{problems.map((problem) => <li key={problem}>{problem}</li>)}</ul>}

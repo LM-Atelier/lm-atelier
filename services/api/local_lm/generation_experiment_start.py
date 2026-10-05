@@ -9,6 +9,11 @@ The pictures are two steps of one work plan with no dependency between them,
 so a failure, stop or retry of one never touches the other. They run in one
 hidden chat whose messages are never shown, searched, exported or used as
 context, and whose context is frozen when the work is accepted.
+
+A change to a picture gives that hidden chat the picture as its one input, as
+an edit turn's message carries it, so each run is given exactly that picture
+and its frozen context says so. The picture must still be one that can be
+changed when the work starts.
 """
 
 from __future__ import annotations
@@ -29,11 +34,17 @@ from .domain import (
     MessageRole,
     MessageStatus,
     Operation,
+    PartType,
     RoutingMode,
     RunStatus,
     utcnow,
 )
-from .generation_experiment_preflight import ArmRefused, _refusal, _require_image_profile
+from .generation_experiment_preflight import (
+    ArmRefused,
+    _refusal,
+    _require_image_profile,
+    picture_to_change,
+)
 from .generation_experiments_v1 import (
     EXPERIMENT_CHAT_SCOPE,
     ExperimentRefusalOut,
@@ -49,6 +60,7 @@ from .models import (
     GenerationExperimentArm,
     Job,
     Message,
+    MessagePart,
     ModelProfile,
     Run,
     WorkPlan,
@@ -67,7 +79,6 @@ if TYPE_CHECKING:
     from .config import Settings
 
 Code = GenerationExperimentRefusalCode
-OPERATION = Operation.TEXT_TO_IMAGE
 PLANNER_VERSION = "generation-experiment-v1"
 SOURCE_ACTION = "generation_experiment"
 QUEUE_CLASS = "media_compute"
@@ -130,6 +141,24 @@ def _check_arm(
             raise ArmRefused(Code.ARM_CHANGED)
 
 
+def _operation(experiment: GenerationExperiment) -> Operation:
+    return Operation(experiment.operation)
+
+
+def _source(experiment: GenerationExperiment) -> str | None:
+    """The picture a change starts from, as accepted; none for pictures made from words."""
+
+    value = experiment.common_json.get("source_artifact_id")
+    return value if isinstance(value, str) else None
+
+
+def _sized(arm: GenerationExperimentArm, settings: dict[str, Any]) -> dict[str, Any]:
+    """Settings with the size the picture comes out at, which for a change is its picture's."""
+
+    geometry = arm.snapshot_json.get("geometry") or {}
+    return {**settings, "width": geometry.get("width"), "height": geometry.get("height")}
+
+
 def _admission(
     orchestrator: ConversationOrchestrator,
     settings: Settings,
@@ -142,7 +171,9 @@ def _admission(
     for arm in experiment.arms:
         for trial in arm.trials:
             figures = ConversationOrchestrator._media_plan_estimate(
-                OPERATION, {**arm.effective_settings_json, "seed": trial.seed}, 1
+                _operation(experiment),
+                _sized(arm, {**arm.effective_settings_json, "seed": trial.seed}),
+                1,
             )
             totals["work_units"] += int(figures["work_units"])
             totals["estimated_bytes"] += int(figures["estimated_bytes"])
@@ -222,6 +253,8 @@ def _write_work(
     trials = [(arm, trial) for arm in experiment.arms for trial in arm.trials]
     count = len(trials)
     prompt = experiment.common_json["prompt"]
+    operation = _operation(experiment)
+    source = _source(experiment)
     chat = Chat(
         title="Generation comparison",
         scope=EXPERIMENT_CHAT_SCOPE,
@@ -231,19 +264,33 @@ def _write_work(
         confirm_uncertain_media=False,
         generation_settings_json={},
         generation_preset_ids_json={},
-        vision_settings_json={},
+        # A checked edit adds a second picture of its own; a comparison is one
+        # picture per choice, as a remix of a picture is.
+        vision_settings_json={"verify_image_edits": False} if source else {},
     )
     session.add(chat)
     session.flush()
     # The prompt travels in each run, never as a transcript message, so the
-    # frozen context of each picture holds no conversation at all.
+    # frozen context of each picture holds no conversation at all. The picture
+    # a change starts from is the message's one input, where every run reads it.
     user_message = Message(
         chat_id=chat.id,
         parent_id=None,
         role=MessageRole.USER.value,
         status=MessageStatus.COMPLETE.value,
         transcript_visible=False,
-        parts=[],
+        parts=(
+            [
+                MessagePart(
+                    position=0,
+                    type=PartType.IMAGE.value,
+                    artifact_id=source,
+                    metadata_json={"input_reference": True, "input_reference_source": "explicit"},
+                )
+            ]
+            if source
+            else []
+        ),
     )
     session.add(user_message)
     session.flush()
@@ -254,7 +301,7 @@ def _write_work(
             role=MessageRole.ASSISTANT.value,
             status=MessageStatus.PENDING.value,
             transcript_visible=False,
-            parts=ConversationOrchestrator._initial_output_parts(OPERATION, ordinal, count),
+            parts=ConversationOrchestrator._initial_output_parts(operation, ordinal, count),
         )
         for ordinal in range(1, count + 1)
     ]
@@ -273,7 +320,7 @@ def _write_work(
         planner_version=PLANNER_VERSION,
         failure_policy="continue_independent",
         summary_json={
-            "operation": OPERATION.value,
+            "operation": operation.value,
             "routing_mode": RoutingMode.IMAGE.value,
             "step_count": count,
             "output_count": count,
@@ -300,13 +347,15 @@ def _write_work(
             plan=plan,
             ordinal=ordinal,
             display_group=SOURCE_ACTION,
-            operation=OPERATION.value,
+            operation=operation.value,
             status=JobStatus.QUEUED.value,
             prompt=prompt,
             profile_id=arm.profile_id,
             workflow_revision_id=arm.workflow_revision_id,
             settings_json=copy.deepcopy(settings),
-            input_bindings_json=[],
+            input_bindings_json=(
+                [{"type": "explicit_artifact", "artifact_id": source}] if source else []
+            ),
             output_contract_json=[
                 {"slot": slot, "type": "image", "index": ordinal, "count": count}
             ],
@@ -337,7 +386,7 @@ def _write_work(
                 "workflow_revision_id": arm.workflow_revision_id,
                 "compatibility_only": True,
             },
-            "input_artifact_ids": [],
+            "input_artifact_ids": [source] if source else [],
             "model": ConversationOrchestrator._model_provenance(session, profile),
             "preset": None,
             "preset_layers": [],
@@ -348,10 +397,10 @@ def _write_work(
             "video_length": None,
             "source_fit_request": None,
             "media_plan_estimate": ConversationOrchestrator._media_plan_estimate(
-                OPERATION, settings, 1
+                operation, _sized(arm, settings), 1
             ),
             "media_output": {"index": ordinal, "count": count, "slot": slot},
-            "image_edit": None,
+            "image_edit": copy.deepcopy(snapshot.get("image_edit")),
             "auxiliary_assets": auxiliary,
         }
         run = Run(
@@ -361,7 +410,7 @@ def _write_work(
             assistant_message_id=message.id,
             work_plan_id=plan.id,
             work_step_id=step.id,
-            operation=OPERATION.value,
+            operation=operation.value,
             status=RunStatus.QUEUED.value,
             standalone_prompt=prompt,
             profile_id=arm.profile_id,
@@ -381,7 +430,7 @@ def _write_work(
         session.flush()
         step.run_id = run.id
         job = Job(
-            kind=ConversationOrchestrator._job_kind(OPERATION).value,
+            kind=ConversationOrchestrator._job_kind(operation).value,
             status=JobStatus.QUEUED.value,
             run_id=run.id,
             work_plan_id=plan.id,
@@ -394,7 +443,7 @@ def _write_work(
             queue_ticket=f"{sequence:020d}:{ordinal:04d}:{run.id}",
             enqueued_at=utcnow(),
             payload_json={
-                "operation": OPERATION.value,
+                "operation": operation.value,
                 "output_index": ordinal,
                 "output_count": count,
                 "generation_experiment_trial_id": trial.id,
@@ -429,6 +478,7 @@ def _freeze_and_bind(
     """Freeze each picture's context and require it to be the accepted choice."""
 
     arms = {trial.id: arm for arm in experiment.arms for trial in arm.trials}
+    source = _source(experiment)
     refusals: list[ExperimentRefusalOut] = []
     for trial_id, _job, run, _step in written:
         arm = arms[trial_id]
@@ -442,6 +492,7 @@ def _freeze_and_bind(
             or context.profile.model_dump(mode="json") != snapshot.get("profile")
             or context.workflow.model_dump(mode="json") != snapshot.get("workflow")
             or context.media_engine != (snapshot.get("workflow") or {}).get("engine")
+            or list(context.input_artifact_ids) != ([source] if source else [])
         ):
             refusals.append(_refusal(Code.ARM_CHANGED, arm_ordinal=arm.ordinal))
             continue
@@ -454,6 +505,19 @@ def _freeze_and_bind(
             "generation-experiment-preflight-changed",
             refusals=[refusal.model_dump(mode="json") for refusal in refusals],
         )
+
+
+def _still_changeable(
+    orchestrator: ConversationOrchestrator, experiment: GenerationExperiment
+) -> bool:
+    """Whether the picture a change starts from is still one that can be changed, at its size."""
+
+    first = experiment.arms[0].snapshot_json.get("geometry") or {}
+    picture = picture_to_change(orchestrator, _source(experiment))
+    return picture is not None and (picture.width, picture.height) == (
+        first.get("width"),
+        first.get("height"),
+    )
 
 
 def start_generation_experiment(
@@ -508,6 +572,11 @@ def start_generation_experiment(
             raise StartRefused(
                 "generation-experiment-preflight-changed",
                 refusals=[refusal.model_dump(mode="json") for refusal in refusals],
+            )
+        if _source(experiment) is not None and not _still_changeable(orchestrator, experiment):
+            raise StartRefused(
+                "generation-experiment-preflight-changed",
+                refusals=[_refusal(Code.SOURCE_UNAVAILABLE).model_dump(mode="json")],
             )
         admission = _admission(orchestrator, settings, experiment, payload)
         plan, written = _write_work(orchestrator, session, experiment, payload, admission)
