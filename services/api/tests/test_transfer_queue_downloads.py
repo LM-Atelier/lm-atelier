@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Never
 
 import pytest
@@ -64,9 +65,11 @@ async def test_new_and_individually_resumed_downloads_wait_for_lane_resume(
 ) -> None:
     manager: DownloadManager = app.state.services.downloads
     entered: list[str] = []
+    entered_at: dict[str, float] = {}
 
     async def sources(request: DownloadRequest, _plan: InstallPlan | None) -> Never:
         entered.append(request.remote_id)
+        entered_at[request.remote_id] = time.monotonic()
         raise OSError("Constructed transfer failure")
 
     monkeypatch.setattr(manager, "_download_sources", sources)
@@ -86,8 +89,27 @@ async def test_new_and_individually_resumed_downloads_wait_for_lane_resume(
             original = dict(job.payload_json)
         tasks = [manager._tasks[accepted], manager._tasks[resumed]]
         assert control("resume", 1).dispatch_state == "open"
+        reopened = time.monotonic()
         await manager.scheduler.queue_control_changed("transfer")
-        await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+        # Waited on without cancelling, so a download still running at the bound is described
+        # as it stands: whether the time went before it started or after it failed.
+        _finished, running = await asyncio.wait(tasks, timeout=10)
+        if running:
+            with SessionLocal() as session:
+                stored = [session.get(Job, job_id) for job_id in (accepted, resumed)]
+                states = [
+                    (job.status, job.phase, job.claim_owner is not None)
+                    for job in stored
+                    if job is not None
+                ]
+            lane = read()
+            starts = sorted((name, round(at - reopened, 3)) for name, at in entered_at.items())
+            raise AssertionError(
+                f"{len(running)} of 2 downloads still running {time.monotonic() - reopened:.2f}s "
+                f"after the lane reopened; started {starts}; stored (status, phase, claimed) "
+                f"{states}; lane {lane.dispatch_state} with {lane.running_jobs} running"
+            )
+        await asyncio.gather(*tasks)
         assert sorted(entered) == ["example/accepted", "example/resumed"]
         with SessionLocal() as session:
             job = session.get(Job, accepted)
