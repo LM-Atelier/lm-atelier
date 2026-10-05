@@ -137,6 +137,7 @@ def test_graphless_compatibility_is_presented_to_the_eligibility_check(session: 
     session.add(profile)
     session.flush()
     family = ensure_legacy_profile_workflow(session, profile)
+    assert family is not None
     seen: list[WorkflowRevision | None] = []
 
     def eligibility(revision: WorkflowRevision | None) -> str:
@@ -172,6 +173,7 @@ def test_compatibility_revision_must_also_pass_eligibility(session: Session) -> 
     session.add(profile)
     session.flush()
     family = ensure_legacy_profile_workflow(session, profile)
+    assert family is not None
     _, _, revision = _family_revision(session, "Legacy execution")
     revision.engine = "mock"
     session.flush()

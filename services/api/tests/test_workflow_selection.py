@@ -461,6 +461,7 @@ def test_compatibility_family_uses_bound_profile_and_legacy_revision(session: Se
     session.add(profile)
     session.flush()
     family = ensure_legacy_profile_workflow(session, profile)
+    assert family is not None
     legacy_definition = WorkflowDefinition(
         name="Legacy executable",
         operation=Operation.TEXT_TO_IMAGE.value,
