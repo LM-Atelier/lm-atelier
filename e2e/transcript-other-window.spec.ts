@@ -32,6 +32,26 @@ async function open(page: Page, id: string, width: number) {
   await expect(page.locator(".messages > article.message")).toHaveCount(40);
 }
 
+/** Where the message being read sits and what is above it, so a moved position can name its cause. */
+async function layout(page: Page, text: string) {
+  return page.evaluate((wanted) => {
+    const viewport = document.querySelector(".messages");
+    if (!(viewport instanceof HTMLElement)) return { viewport: false };
+    const children = Array.from(viewport.children);
+    const index = children.findIndex((element) => element.matches("article.message") && element.textContent?.includes(wanted));
+    const height = (element: Element) => Math.round(element.getBoundingClientRect().height);
+    return {
+      scrollTop: viewport.scrollTop, scrollHeight: viewport.scrollHeight, clientHeight: viewport.clientHeight,
+      viewportTop: Math.round(viewport.getBoundingClientRect().top),
+      readingIndex: index, readingTop: index < 0 ? null : Math.round(children[index].getBoundingClientRect().top),
+      // The nearest few, which are what a change of about a line above the message would be in.
+      above: children.slice(Math.max(0, index - 6), Math.max(0, index))
+        .map((element) => `${element.tagName.toLowerCase()}.${element.className}:${height(element)}`),
+      alerts: Array.from(document.querySelectorAll("[role=alert]"), (element) => (element.textContent ?? "").slice(0, 80)),
+    };
+  }, text);
+}
+
 async function scrollToTop(page: Page) {
   const viewport = page.locator(".messages");
   await viewport.hover();
@@ -62,7 +82,8 @@ for (const width of [1280, 390]) {
         const messages = page.locator(".messages > article.message");
         const older = page.getByRole("button", { name: "Load older messages", exact: true });
         await scrollToTop(page);
-        let reading = page.locator(".message.user").filter({ hasText: "Notebook entry 23." });
+        let readingText = "Notebook entry 23.";
+        let reading = page.locator(".message.user").filter({ hasText: readingText });
         let release = () => {};
         if (loading) {
           // The older page is slow, as it can be on a busy machine.
@@ -76,10 +97,12 @@ for (const width of [1280, 390]) {
           await older.click();
           await expect(messages).toHaveCount(80);
           await scrollToTop(page);
-          reading = page.locator(".message.user").filter({ hasText: "Notebook entry 4." });
+          readingText = "Notebook entry 4.";
+          reading = page.locator(".message.user").filter({ hasText: readingText });
         }
         await expect(reading).toBeVisible();
         const readingTop = (await reading.boundingBox())!.y;
+        const before = await layout(page, readingText);
 
         const composer = other.getByRole("textbox", { name: "Message", exact: true });
         await composer.fill("A message from another window.");
@@ -90,7 +113,15 @@ for (const width of [1280, 390]) {
 
         await expect(messages).toHaveCount(82);
         await expect(reading).toBeVisible();
-        await expect.poll(async () => Math.abs((await reading.boundingBox())!.y - readingTop)).toBeLessThan(3);
+        try {
+          await expect.poll(async () => Math.abs((await reading.boundingBox())!.y - readingTop)).toBeLessThan(3);
+        } catch (error) {
+          // Whether the scroll, the container or something above the message moved.
+          throw new Error(`${error instanceof Error ? error.message : String(error)}
+Before: ${JSON.stringify(before)}
+After: ${JSON.stringify(await layout(page, readingText))}`,
+            { cause: error });
+        }
         await expect(page.locator(".transcript-history-button")).toBeFocused();
         expect(errors).toEqual([]);
       } finally {
