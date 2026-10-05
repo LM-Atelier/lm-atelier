@@ -21,6 +21,11 @@ Plaintext only ever exists in the private archive staging folder, in files
 named with its prefix and removed as soon as the work that needed them ends;
 startup removes any a crash left. Nothing here writes to the backup folder, so
 these files never join the automatic backups or their rotation.
+
+A backup to be restored on the next start waits in that folder encrypted, and
+is opened there again with the archive key the system vault holds for it. The
+restore is applied before the startup sweep runs, so the sweep only ever finds
+such a file once nothing will use it.
 """
 
 from __future__ import annotations
@@ -34,7 +39,7 @@ import re
 import shutil
 import struct
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -42,13 +47,18 @@ from pathlib import Path
 from typing import BinaryIO, Final, cast
 
 from . import __version__
+from .archive_key_store import ArchiveKeyVaultUnavailable, RestoreKeyBinding
 from .backups import BackupManager
 from .config import Settings
+from .filesystem_links import is_link_or_reparse
 from .portable_archive_v1 import (
     MAX_PASSPHRASE_BYTES,
     ArchiveKind,
     ArchiveRefused,
     open_archive,
+    open_with_key,
+    read_header,
+    unwrap_key,
     write_archive,
 )
 from .project_archive_encryption import ExportUnverified, private_staging, staging_path
@@ -441,6 +451,44 @@ async def check_uploaded_backup(
     does.
     """
 
+    return await _receive_then(
+        settings, body, passphrase, declared_bytes, partial(_check_staged, manager, settings)
+    )
+
+
+async def stage_encrypted_restore(
+    manager: BackupManager,
+    settings: Settings,
+    body: AsyncIterator[bytes],
+    passphrase: bytes,
+    *,
+    declared_bytes: int | None,
+) -> EncryptedBackupReport:
+    """Receive an encrypted backup, check it as a backup, and have it restored on the next start.
+
+    The upload is received and checked exactly as :func:`check_uploaded_backup`
+    does, and a backup made by a newer version is refused here, while that can
+    still be said. Only then is the encrypted file kept for the next start, and
+    its archive key, never the passphrase, held in the system vault beside it;
+    the plaintext checked is removed at once. Without a usable vault nothing is
+    received or scheduled, because the alternative would be to keep the
+    plaintext on disk until the next start.
+    """
+
+    if not await asyncio.to_thread(manager.archive_keys.available):
+        raise ArchiveKeyVaultUnavailable
+    return await _receive_then(
+        settings, body, passphrase, declared_bytes, partial(_stage_restore, manager, settings)
+    )
+
+
+async def _receive_then(
+    settings: Settings,
+    body: AsyncIterator[bytes],
+    passphrase: bytes,
+    declared_bytes: int | None,
+    work: Callable[[Path, bytes], EncryptedBackupReport],
+) -> EncryptedBackupReport:
     _passphrase_in_range(passphrase)
     limit = max_encrypted_bytes(settings)
     if declared_bytes is not None and declared_bytes > limit:
@@ -456,9 +504,7 @@ async def check_uploaded_backup(
         upload = staging_path(staging, ".lm-atelier.encrypted")
         receiving = _Receiving(upload)
         await receiving.receive(body, limit)
-        checking = asyncio.ensure_future(
-            asyncio.to_thread(_check_staged, manager, settings, receiving.path, passphrase)
-        )
+        checking = asyncio.ensure_future(asyncio.to_thread(work, receiving.path, passphrase))
     except BaseException:
         if receiving is None:
             _remove(upload)
@@ -556,23 +602,124 @@ def _check_staged(
                 )
         finally:
             split.close()
-        header = split.finish()
-        sizes = {name: size for name, size, _sha in _parts(header)}
+        return _report(manager, split, database, media)
+    finally:
+        _remove(database, media)
+
+
+def _report(
+    manager: BackupManager, split: _Split, database: Path, media: Path
+) -> EncryptedBackupReport:
+    """Check an opened backup as a backup is checked, and say what it holds."""
+
+    header = split.finish()
+    sizes = {name: size for name, size, _sha in _parts(header)}
+    try:
+        artifact_count = manager.verify_files(database, media if "media" in sizes else None)
+        revision = manager.schema_revision(database)
+    except ValueError as exc:
+        raise BackupInvalid from exc
+    if revision != header["schema_revision"]:
+        raise BackupInvalid
+    return EncryptedBackupReport(
+        created_at=str(header["created_at"]),
+        app_version=str(header["app_version"]),
+        schema_revision=revision,
+        database_size_bytes=sizes["database"],
+        media_included="media" in sizes,
+        media_size_bytes=sizes.get("media"),
+        artifact_count=artifact_count,
+    )
+
+
+class _Hashing:
+    """A readable file that hashes every byte read from it."""
+
+    def __init__(self, source: BinaryIO) -> None:
+        self._source = source
+        self._digest = hashlib.sha256()
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._source.read(size)
+        self._digest.update(chunk)
+        return chunk
+
+    def hexdigest(self) -> str:
+        return self._digest.hexdigest()
+
+
+def _stage_restore(
+    manager: BackupManager, settings: Settings, encrypted: Path, passphrase: bytes
+) -> EncryptedBackupReport:
+    staging = private_staging(settings.export_dir)
+    # The encrypted file is already on disk; its plaintext is about as large.
+    _require_room(staging, encrypted.stat().st_size)
+    database = staging_path(staging, ".sqlite3")
+    media = staging_path(staging, ".media.zip")
+    try:
+        split = _Split(database, media)
         try:
-            artifact_count = manager.verify_files(database, media if "media" in sizes else None)
-            revision = manager.schema_revision(database)
-        except ValueError as exc:
-            raise BackupInvalid from exc
-        if revision != header["schema_revision"]:
-            raise BackupInvalid
-        return EncryptedBackupReport(
-            created_at=str(header["created_at"]),
-            app_version=str(header["app_version"]),
-            schema_revision=revision,
-            database_size_bytes=sizes["database"],
-            media_included="media" in sizes,
-            media_size_bytes=sizes.get("media"),
-            artifact_count=artifact_count,
-        )
+            with encrypted.open("rb") as raw:
+                source = _Hashing(cast(BinaryIO, raw))
+                header = read_header(cast(BinaryIO, source))
+                if header.kind != ArchiveKind.BACKUP:
+                    raise ArchiveRefused("archive-kind-mismatch")
+                slot, key = unwrap_key(header, passphrase)
+                open_with_key(cast(BinaryIO, source), cast(BinaryIO, split), header, key)
+        finally:
+            split.close()
+        report = _report(manager, split, database, media)
+        manager.require_known_revision(database)
+    finally:
+        _remove(database, media)
+    binding = RestoreKeyBinding(os.urandom(16).hex(), source.hexdigest(), slot.key_id.hex())
+    manager.request_encrypted_restore(binding, encrypted, key)
+    return report
+
+
+@contextlib.contextmanager
+def opened_encrypted_restore(
+    manager: BackupManager, binding: RestoreKeyBinding
+) -> Iterator[tuple[Path, Path | None]]:
+    """Open the encrypted file a restore waits on, with its stored key, into private staging.
+
+    Yields the database and, when the backup holds media, the media zip, each
+    already matching the digest the backup's own header gives it. The file
+    must be the one the restore was asked for, by its digest and the key slot
+    it was opened with. The opened files are removed when the block ends; the
+    encrypted file and the key are the caller's to remove.
+    """
+
+    encrypted = manager.staged_restore_path(binding.operation)
+    if is_link_or_reparse(encrypted, missing="assume_regular", unreadable="assume_link"):
+        raise ValueError("the encrypted backup may not be a filesystem link")
+    if not encrypted.is_file():
+        raise FileNotFoundError("the encrypted backup is no longer there")
+    key = manager.archive_keys.key_for(binding)
+    staging = private_staging(manager.settings.export_dir)
+    _require_room(staging, encrypted.stat().st_size)
+    database: Path | None = None
+    media: Path | None = None
+    try:
+        database = staging_path(staging, ".sqlite3")
+        media = staging_path(staging, ".media.zip")
+        try:
+            split = _Split(database, media)
+            try:
+                with encrypted.open("rb") as raw:
+                    source = _Hashing(cast(BinaryIO, raw))
+                    header = read_header(cast(BinaryIO, source))
+                    slots = {slot.key_id.hex() for slot in header.slots}
+                    if header.kind != ArchiveKind.BACKUP or binding.key_id not in slots:
+                        raise BackupInvalid
+                    open_with_key(cast(BinaryIO, source), cast(BinaryIO, split), header, key)
+            finally:
+                split.close()
+            if source.hexdigest() != binding.sha256:
+                raise BackupInvalid
+            opened = split.finish()
+        except (ArchiveRefused, BackupInvalid) as exc:
+            raise ValueError("the encrypted backup did not open as the backup asked for") from exc
+        yield database, (None if opened["media"] is None else media)
     finally:
         _remove(database, media)

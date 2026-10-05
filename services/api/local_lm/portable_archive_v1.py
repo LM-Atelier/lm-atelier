@@ -238,10 +238,21 @@ def open_archive(
     header = read_header(source)
     if header.kind != kind:
         raise ArchiveRefused("archive-kind-mismatch")
+    _slot, data_key = unwrap_key(header, passphrase)
+    return open_with_key(source, destination, header, data_key)
+
+
+def unwrap_key(header: ArchiveHeader, passphrase: bytes) -> tuple[KeySlot, bytes]:
+    """The archive's own key, and the slot that held it, from ``passphrase``.
+
+    Each slot is tried in turn, at most two derivations in all. A passphrase
+    that opens none of them is refused as ``invalid_passphrase_or_corrupt``,
+    the same refusal a damaged slot gets.
+    """
+
     if not 1 <= len(passphrase) <= MAX_PASSPHRASE_BYTES:
         raise ArchiveRefused("invalid_passphrase_or_corrupt")
     prefix = header.prefix()
-    data_key: bytes | None = None
     for index, slot in enumerate(header.slots):
         unwrapping = Cobblestone256Decryptor(
             _slot_key(passphrase, slot), _slot_context(prefix, slot, index)
@@ -250,8 +261,24 @@ def open_archive(
             data_key = unwrapping.update(slot.wrapped_key) + unwrapping.finalize()
         except InvalidTag:
             continue
+        if len(data_key) == KEY_BYTES:
+            return slot, data_key
         break
-    if data_key is None or len(data_key) != KEY_BYTES:
+    raise ArchiveRefused("invalid_passphrase_or_corrupt")
+
+
+def open_with_key(
+    source: BinaryIO, destination: BinaryIO, header: ArchiveHeader, data_key: bytes
+) -> int:
+    """Decrypt the body that follows ``header`` in ``source`` with the archive's own key.
+
+    ``source`` must stand just past the header, as :func:`read_header` leaves
+    it. Tampering, truncation, trailing bytes and a key of another archive all
+    end in ``invalid_passphrase_or_corrupt``, and as with :func:`open_archive`
+    the caller discards ``destination`` unless this returns.
+    """
+
+    if len(data_key) != KEY_BYTES:
         raise ArchiveRefused("invalid_passphrase_or_corrupt")
     decryptor = Cobblestone256Decryptor(data_key, _PAYLOAD_CONTEXT + header.packed())
     written = 0

@@ -46,6 +46,7 @@ from . import __version__
 from .accepted_turn_context import accepted_context, recorded_enlargement
 from .adapter_grammar_review import review_adapter_grammar
 from .api_errors import ApiError, api_error
+from .archive_key_store import ArchiveKeyVaultUnavailable
 from .artifact_library import (
     ArtifactLibraryConflict,
     ArtifactLibraryCursorError,
@@ -74,7 +75,9 @@ from .backup_archives import (
     EncryptedBackupBusy,
     check_uploaded_backup,
     create_encrypted_backup,
+    stage_encrypted_restore,
 )
+from .backups import BackupFromNewerVersion
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
 from .catalog_file_identity import hash_selected_catalog_files
@@ -1341,6 +1344,13 @@ async def dismiss_failed_restore(request: Request) -> Response:
     return Response(status_code=204)
 
 
+@router.post("/backups/restore-state/cancel", status_code=204)
+async def cancel_requested_restore(request: Request) -> Response:
+    # Withdrawing nothing is not an error: the restore may already be gone.
+    await asyncio.to_thread(_services(request).backups.withdraw_requested_restore)
+    return Response(status_code=204)
+
+
 def _encrypted_backup_error(
     exc: ArchiveRefused
     | StagingNotPrivate
@@ -1453,6 +1463,60 @@ async def check_encrypted_backup_file(request: Request, response: Response) -> E
             422,
             "backup-invalid",
             "This file opened, but it does not hold a complete LM Atelier backup.",
+        ) from exc
+    except (
+        ArchiveRefused,
+        StagingNotPrivate,
+        EncryptedBackupBusy,
+        BackupStorageInsufficient,
+    ) as exc:
+        raise _encrypted_backup_error(exc) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return EncryptedBackupCheck.model_validate(dataclasses.asdict(report))
+
+
+@router.post("/backups/encrypted/restore", response_model=EncryptedBackupCheck)
+async def restore_encrypted_backup_file(
+    request: Request, response: Response
+) -> EncryptedBackupCheck:
+    # Received and checked exactly as a check is, then kept, still encrypted,
+    # for the next start to put in place of the current data.
+    passphrase = passphrase_from_header(request)
+    declared = request.headers.get("content-length")
+    services = _services(request)
+    try:
+        report = await stage_encrypted_restore(
+            services.backups,
+            services.settings,
+            request.stream(),
+            passphrase,
+            declared_bytes=(
+                int(declared) if declared and declared.isascii() and declared.isdigit() else None
+            ),
+        )
+    except ArchiveKeyVaultUnavailable as exc:
+        raise api_error(
+            503,
+            "restore-needs-key-vault",
+            "Restoring an encrypted backup needs this computer's credential vault, which is "
+            "not available. Nothing was scheduled.",
+        ) from exc
+    except BackupTooLarge as exc:
+        raise api_error(
+            413, "backup-file-too-large", "This file is larger than an encrypted backup can be."
+        ) from exc
+    except BackupInvalid as exc:
+        raise api_error(
+            422,
+            "backup-invalid",
+            "This file opened, but it does not hold a complete LM Atelier backup.",
+        ) from exc
+    except BackupFromNewerVersion as exc:
+        raise api_error(
+            422,
+            "backup-newer",
+            "This backup was made by a newer version of LM Atelier, so this version cannot "
+            "restore it.",
         ) from exc
     except (
         ArchiveRefused,
