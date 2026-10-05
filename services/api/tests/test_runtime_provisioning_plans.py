@@ -217,7 +217,7 @@ async def test_runtime_drift_before_the_installation_worker_runs_cannot_install(
     original = asyncio.to_thread
 
     async def delayed(function: Any, *args: Any, **kwargs: Any) -> Any:
-        if function.__name__ == "install":
+        if getattr(function, "__name__", None) == "install":
             provisioner._definition("llama.cpp")["license"] = "Changed terms"
         return await original(function, *args, **kwargs)
 

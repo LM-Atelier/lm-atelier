@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from .comfy_registry import ComfyNodeResolution
 from .comfy_registry_activation import (
     ComfyRegistryActivationError,
+    MediaStarter,
     activate_comfy_registry_install,
     record_registry_policy_trust,
 )
@@ -70,6 +71,24 @@ def _prepared_install(
     return install
 
 
+def _claimed_media_starter(
+    processes: ProcessSupervisor,
+    session_factory: Callable[[], Session],
+    guard: Callable[[Session], None] | None,
+) -> MediaStarter:
+    if guard is None:
+        return processes.start_media
+
+    async def start() -> object:
+        def require_claim() -> None:
+            with session_factory() as session:
+                guard(session)
+
+        return await processes.start_media(before_replace=require_claim)
+
+    return start
+
+
 async def activate_prepared_workflow_package(
     session: Session,
     preparation: ComfyRegistryPreparation,
@@ -120,7 +139,10 @@ async def activate_prepared_workflow_package(
             custom_node_root=context.custom_node_root,
             environment_root=environment_root,
             media_worker_stopped=media_worker_stopped(processes),
-            start_media=processes.start_media,
+            start_media=_claimed_media_starter(processes, session_factory, write_guard),
+            restore_media=_claimed_media_starter(
+                processes, session_factory, cleanup_guard or write_guard
+            ),
             read_node_inventory=processes.comfy_node_inventory,
             verification_target=target,
             write_guard=write_guard,

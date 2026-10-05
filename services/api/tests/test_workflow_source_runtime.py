@@ -140,7 +140,7 @@ async def test_source_installation_owns_temporary_worker_and_restores_previous_s
             for worker in original()
         ]
 
-    async def stop(name: str) -> WorkerStatus:
+    async def stop(name: str, **_kwargs: object) -> WorkerStatus:
         nonlocal running
         if name != "media":
             return await original_stop(name)
@@ -219,7 +219,7 @@ async def test_restoration_failure_preserves_only_a_committed_installation(
             for worker in original_statuses()
         ]
 
-    async def stop(name: str) -> WorkerStatus:
+    async def stop(name: str, **_kwargs: object) -> WorkerStatus:
         nonlocal running
         if name != "media":
             return await original_stop(name)

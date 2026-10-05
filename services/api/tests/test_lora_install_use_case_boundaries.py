@@ -94,10 +94,12 @@ async def test_an_accepted_plan_without_use_case_metadata_ignores_later_provider
         def statuses(self) -> list[object]:
             return [SimpleNamespace(name="media", running=False, profile_id=None)]
 
-        async def start_media(self, model_root: tuple[Path, dict[str, str]]) -> None:
+        async def start_media(
+            self, model_root: tuple[Path, dict[str, str]], **_kwargs: object
+        ) -> None:
             self.started.append(model_root)
 
-        async def stop(self, name: str) -> None:
+        async def stop(self, name: str, **_kwargs: object) -> None:
             self.stopped.append(name)
 
     class MediaAdapter:
@@ -248,10 +250,12 @@ async def test_checkpoint_installation_does_not_derive_a_lora_use_case(
         def statuses(self) -> list[object]:
             return [SimpleNamespace(name="media", running=False, profile_id=None)]
 
-        async def start_media(self, model_root: tuple[Path, dict[str, str]]) -> None:
+        async def start_media(
+            self, model_root: tuple[Path, dict[str, str]], **_kwargs: object
+        ) -> None:
             self.started.append(model_root)
 
-        async def stop(self, name: str) -> None:
+        async def stop(self, name: str, **_kwargs: object) -> None:
             self.stopped.append(name)
 
     class MediaAdapter:

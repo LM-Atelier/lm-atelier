@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import Any
 
 import httpx
@@ -24,7 +25,7 @@ from .models import (
 )
 from .processes import ProcessSupervisor
 from .progress import update_job_progress
-from .runtime_provisioning import RuntimeProvisioningError
+from .runtime_provisioning import RuntimeProvisioningError, _runtime_worker
 from .runtime_provisioning_plans import RuntimeProvisioningPlan
 from .scheduler import JobClaim
 from .schemas import WorkflowRevisionCreate
@@ -189,15 +190,23 @@ def _read_source(offer_id: str, claim: JobClaim) -> AcceptedSource | None:
 
 
 async def _prepare_runtime(processes: ProcessSupervisor, source: AcceptedSource) -> None:
-    if source.claim is None:
+    claim = source.claim
+    if claim is None:
         raise WorkflowOfferCompletionError("workflow-completion-unavailable")
-    await asyncio.to_thread(require_workflow_source_attempt, source.offer_id, source.claim)
+    await _runtime_worker(partial(require_workflow_source_attempt, source.offer_id, claim))
     provisioner = processes.runtimes
     if provisioner is None or source.runtime_plan is None:
         raise WorkflowOfferCompletionError("workflow-runtime-plan-unavailable")
+
+    def require_retained_claim() -> None:
+        with SessionLocal() as session:
+            guard_workflow_completion_claim(session, source.offer_id, claim, require_running=False)
+
     try:
-        await provisioner.provision("comfyui", expected_plan=source.runtime_plan)
-        installed = await asyncio.to_thread(provisioner.preflight, "comfyui")
+        await provisioner.provision(
+            "comfyui", expected_plan=source.runtime_plan, require_claim=require_retained_claim
+        )
+        installed = await _runtime_worker(partial(provisioner.preflight, "comfyui"))
     except (OSError, RuntimeProvisioningError) as exc:
         raise WorkflowOfferCompletionError("workflow-runtime-plan-changed") from exc
 
@@ -212,7 +221,7 @@ async def _prepare_runtime(processes: ProcessSupervisor, source: AcceptedSource)
             record_workflow_runtime(session, offer, source.attempt, source.runtime_plan, installed)
             session.commit()
 
-    await asyncio.to_thread(record)
+    await _runtime_worker(record)
 
 
 def _compile(source: AcceptedSource, info: dict[str, Any]) -> WorkflowRevisionCreate:
@@ -384,7 +393,7 @@ async def complete_workflow_source(
     claim: JobClaim,
 ) -> str | None:
     """Finish under the caller's primary lease, which outlives cancellation and I/O."""
-    source = await asyncio.to_thread(_read_source, offer_id, claim)
+    source = await _runtime_worker(partial(_read_source, offer_id, claim))
     if source is None:
         return None
     if processes is None or media is None:
@@ -398,7 +407,7 @@ async def complete_workflow_source(
     try:
         async with workflow_package_runtime(processes, require_claim=require_retained_claim):
             await _prepare_runtime(processes, source)
-            await asyncio.to_thread(_require_runtime_plan, processes, source)
+            await _runtime_worker(partial(_require_runtime_plan, processes, source))
             async with prepared_workflow_source_runtime(
                 processes, offer_id, claim=claim
             ) as prepared:
@@ -409,7 +418,7 @@ async def complete_workflow_source(
     except WorkflowPackageRestorationError:
         if activation_id is None:
             raise
-        await asyncio.to_thread(_record_restoration_warning, source, activation_id)
+        await _runtime_worker(partial(_record_restoration_warning, source, activation_id))
         return activation_id
     except WorkflowOfferCompletionError as exc:
         if exc.code != "workflow-extension-review-required":

@@ -53,7 +53,7 @@ def source_runtime(
             for worker in original_statuses()
         ]
 
-    async def stop(name: str) -> WorkerStatus:
+    async def stop(name: str, **_kwargs: object) -> WorkerStatus:
         nonlocal running, launch_digest
         if name != "media":
             return await original_stop(name)

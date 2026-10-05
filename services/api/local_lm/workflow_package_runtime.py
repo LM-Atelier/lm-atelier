@@ -99,7 +99,9 @@ async def _stop(
 ) -> None:
     if require_claim is not None:
         require_claim()
-    await processes.stop("media")
+        await processes.stop("media", before_stop=require_claim)
+    else:
+        await processes.stop("media")
     if require_claim is not None:
         require_claim()
     if not media_worker_stopped(processes):
@@ -125,11 +127,17 @@ async def _restore(
                 scope = _restore_scope(activation_id, launch_sha256, context, processes)
                 if require_claim is not None:
                     require_claim()
-                await processes.start_media(activation_scope=scope)
+                    await processes.start_media(
+                        activation_scope=scope, before_replace=require_claim
+                    )
+                else:
+                    await processes.start_media(activation_scope=scope)
             else:
                 if require_claim is not None:
                     require_claim()
-                await processes.start_media()
+                    await processes.start_media(before_replace=require_claim)
+                else:
+                    await processes.start_media()
             if require_claim is not None:
                 require_claim()
         except Exception as exc:

@@ -6447,7 +6447,7 @@ async def cancel_job(
                     download_id, cancelled_offer_id=cancelled_offer_id
                 )
             await _services(request).scheduler.publish_job(job_id)
-    elif job.kind == JobKind.DOWNLOAD.value:
+    elif job.kind in {JobKind.DOWNLOAD.value, JobKind.ACTIVATE.value}:
         changed = await _services(request).downloads.cancel(job_id)
     elif job.kind == JobKind.REGISTRY_PREPARE.value:
         changed = await _cancel_registry_preparation(job_id)
@@ -13586,6 +13586,14 @@ async def _run_workflow_package_preparation(
         initial_attempt = initial.attempt
         initial_ticket = initial.queue_ticket
     claim: JobClaim | None = None
+    execution = asyncio.current_task()
+    displaced = False
+
+    def stop_displaced() -> None:
+        nonlocal displaced
+        displaced = True
+        if execution is not None:
+            execution.cancel()
 
     def require_current() -> None:
         if claim is not None:
@@ -13649,7 +13657,7 @@ async def _run_workflow_package_preparation(
 
     try:
         async with services.scheduler.job_lease(
-            job_id, resource="media_compute", group="primary"
+            job_id, resource="media_compute", group="primary", on_claim_lost=stop_displaced
         ) as acquired:
             claim = acquired
             try:
@@ -13771,7 +13779,8 @@ async def _run_workflow_package_preparation(
             session.execute(text("UPDATE jobs SET status = status WHERE 0"))
             job = session.get(Job, job_id, populate_existing=True)
             if (
-                job is not None
+                not displaced
+                and job is not None
                 and job.kind == JobKind.REGISTRY_PREPARE.value
                 and job.attempt == (claim.attempt if claim is not None else initial_attempt)
                 and (
@@ -13799,7 +13808,8 @@ async def _run_workflow_package_preparation(
                 job.completed_at = utcnow()
                 update_job_progress(job, stage="Preparation interrupted", indeterminate=True)
             session.commit()
-    await services.scheduler.publish_job(job_id)
+    if not displaced:
+        await services.scheduler.publish_job(job_id)
 
 
 def _queue_registry_preparation(

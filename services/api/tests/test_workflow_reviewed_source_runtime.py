@@ -104,7 +104,7 @@ async def test_source_runtime_keeps_reviewed_context_and_drains_its_workers(
     def materializer(requirement: Any, selection: Any) -> Any:
         return materialize_comfy_runtime_dependency(provisioner, requirement, selection)
 
-    async def start(*, activation_scope: WorkflowSourceLaunchScope) -> None:
+    async def start(*, activation_scope: WorkflowSourceLaunchScope, **_kwargs: object) -> None:
         nonlocal running
         if change == "revoked-at-start":
             revoke()
@@ -121,7 +121,7 @@ async def test_source_runtime_keeps_reviewed_context_and_drains_its_workers(
         if change == "revoked-after-start":
             revoke()
 
-    async def stop(_name: str) -> None:
+    async def stop(_name: str, **_kwargs: object) -> None:
         nonlocal running
         assert not entered.is_set() or finished.is_set()
         stops.append(True)

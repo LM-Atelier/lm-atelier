@@ -25,7 +25,7 @@ from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
 from local_lm import workflow_asset_downloads
 from local_lm.db import SessionLocal
 from local_lm.model_manifests import inspect_repository_metadata
-from local_lm.model_planner import persist_install_plan, resolve_install_plan
+from local_lm.model_planner import ResolvedInstallPlan, persist_install_plan, resolve_install_plan
 from local_lm.models import (
     Job,
     ModelAssetInstall,
@@ -72,6 +72,10 @@ pytestmark = pytest.mark.asyncio
         "preferred-optional",
         "preferred-any",
         "preferred-ambiguous",
+        "batch-replaced",
+        "batch-cleared",
+        "batch-cancel-displaced",
+        "batch-cancel-owned",
     ],
 )
 async def test_accepted_download_completes_offer_and_activates_exact_installed_dependency(
@@ -82,9 +86,7 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
         change = change.removeprefix("contract-")
     content = safetensors_bytes(["lora_unet_block.lora_down.weight"])
     digest = hashlib.sha256(content).hexdigest()
-    filename = "detail.safetensors"
-    remote = "synthetic/neutral-detail"
-    revision = "d" * 40
+    filename, remote, revision = "detail.safetensors", "synthetic/neutral-detail", "d" * 40
     inspection = inspect_repository_metadata({filename: content}, [filename], role="image")
     planned = resolve_install_plan(
         remote_id=remote,
@@ -405,6 +407,22 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
 
         monkeypatch.setattr(manager, "reconcile_workflow_install_offers", defer_completion)
     complete = getattr(manager, "_complete_workflow_install_offer", None)
+    if change.startswith("batch-"):
+        await _check_completion_batch(
+            app,
+            client,
+            monkeypatch,
+            change,
+            workflow,
+            workflow_revision,
+            offer_id,
+            job_id,
+            filename,
+            plan_id,
+            planned,
+            attention,
+        )
+        return
     if change in {"cancel-check", "install-retry"} and complete is not None:
         entered = threading.Event()
         release = threading.Event()
@@ -696,6 +714,153 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
             run = session.get(Run, accepted.json()["run"]["id"])
             assert run is not None
             assert run.provenance_json["workflow"]["activation"]["id"] == activation_id
+
+
+async def _check_completion_batch(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+    workflow: str,
+    workflow_revision: str,
+    offer_id: str,
+    job_id: str,
+    filename: str,
+    plan_id: str,
+    planned: ResolvedInstallPlan,
+    attention: list[dict[str, object]],
+) -> None:
+    services = app.state.services
+    manager = services.downloads
+    reconcile = manager.reconcile_workflow_install_offers
+    complete = manager._complete_workflow_install_offer
+    from local_lm import scheduler as scheduler_module
+
+    monkeypatch.setattr(scheduler_module, "_HEARTBEAT_SECONDS", 0.02)
+
+    async def deferred(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(manager, "reconcile_workflow_install_offers", deferred)
+    with SessionLocal() as session:
+        persist_install_plan(session, planned)
+        session.commit()
+    next_offer = await client.post(
+        f"/api/workflows/{workflow}/revisions/{workflow_revision}/install-offers",
+        json={
+            "selections": [
+                {
+                    "reference_filename": filename,
+                    "install_plan_id": plan_id,
+                    "artifact_path": filename,
+                }
+            ]
+        },
+    )
+    assert next_offer.status_code == 201, next_offer.text
+    next_id = next_offer.json()["id"]
+    assert next_id != offer_id
+    async with services.scheduler.lease("primary"):
+        next_download = await client.post(f"/api/workflow-install-offers/{next_id}/install")
+        assert next_download.status_code == 202, next_download.text
+    await manager._download(job_id)
+    next_job_id = next_download.json()[0]["id"]
+    if next_job_id != job_id:
+        await manager._download(next_job_id)
+    with SessionLocal() as session:
+        order = list(
+            session.scalars(
+                select(WorkflowInstallOffer.id)
+                .where(WorkflowInstallOffer.status == "queued")
+                .distinct()
+            )
+        )
+        assert set(order) == {offer_id, next_id}
+        first_offer = session.get(WorkflowInstallOffer, order[0])
+        assert first_offer is not None and first_offer.source_plan_id is None
+        first_job_id = first_offer.completion_job_id
+        assert first_job_id is not None
+    held_entered, held_release = threading.Event(), threading.Event()
+    visited: list[str] = []
+
+    def held(current_offer: str, *, claim: JobClaim) -> str | None:
+        visited.append(current_offer)
+        if current_offer == order[0]:
+            held_entered.set()
+            assert held_release.wait(30), "Completion was not released"
+        result: str | None = complete(current_offer, claim=claim)
+        return result
+
+    def first_state() -> tuple[object, ...]:
+        with SessionLocal() as session:
+            job = session.get(Job, first_job_id)
+            stored = session.get(WorkflowInstallOffer, order[0])
+            assert job is not None and stored is not None
+            return (
+                job.claim_owner,
+                job.attempt,
+                job.queue_group,
+                job.claim_expires_at,
+                job.heartbeat_at,
+                job.status,
+                job.completed_at,
+                job.error,
+                dict(job.result_json),
+                stored.status,
+                stored.completed_at,
+                stored.completion_error_code,
+            )
+
+    monkeypatch.setattr(manager, "_complete_workflow_install_offer", held)
+    assert reconcile is not None
+    batch = asyncio.create_task(reconcile())
+    displaced = change != "batch-cancel-owned"
+    caller_cancelled = change.startswith("batch-cancel-")
+    try:
+        assert await asyncio.to_thread(held_entered.wait, 30)
+        if displaced:
+            with SessionLocal() as session:
+                job = session.get(Job, first_job_id)
+                assert job is not None and job.claim_owner is not None
+                job.claim_owner = None if change == "batch-cleared" else "replacement-attempt"
+                job.attempt += 1
+                if job.claim_owner is not None:
+                    job.queue_group = "replacement"
+                session.commit()
+            before = first_state()
+            heartbeat = next(
+                task
+                for task in asyncio.all_tasks()
+                if task.get_name() == f"job-heartbeat-{first_job_id}"
+            )
+            await asyncio.wait_for(asyncio.shield(heartbeat), timeout=5)
+        if caller_cancelled:
+            batch.cancel()
+            await asyncio.sleep(0)
+            batch.cancel()
+            await asyncio.sleep(0)
+        assert not batch.done()
+        assert visited == [order[0]]
+    finally:
+        held_release.set()
+        await asyncio.wait_for(asyncio.gather(batch, return_exceptions=True), timeout=30)
+    assert batch.cancelled() == caller_cancelled
+    if not caller_cancelled:
+        assert batch.result() is None
+        assert visited == order
+        with SessionLocal() as session:
+            later = session.get(WorkflowInstallOffer, order[1])
+            assert later is not None and later.status == "completed"
+            later_job = session.get(Job, later.completion_job_id)
+            assert later_job is not None and later_job.status == "complete"
+    else:
+        assert visited == [order[0]]
+        with SessionLocal() as session:
+            later = session.get(WorkflowInstallOffer, order[1])
+            assert later is not None and later.status == "queued"
+    if displaced:
+        assert first_state() == before
+    assert attention == []
 
 
 async def _check_manual_completion(

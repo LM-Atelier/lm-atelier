@@ -415,7 +415,7 @@ async def test_registry_cancellation_keeps_the_install_claim_until_restoration_f
         entered.set()
         await asyncio.Event().wait()
 
-    async def stop(_name: str) -> None:
+    async def stop(_name: str, **_kwargs: object) -> None:
         restoring.set()
         await release.wait()
 

@@ -11,6 +11,7 @@ from local_lm.db import SessionLocal
 from local_lm.domain import utcnow
 from local_lm.models import Job
 from local_lm.queue_lane_policy import Action, LanePolicy, change_lane_policy, read_lane_policy
+from local_lm.scheduler import JobClaim
 from local_lm.schemas import QueueControlCommand
 
 
@@ -30,11 +31,12 @@ async def test_restart_recovers_activations_without_reopening_a_paused_lane(
     manager = app.state.services.downloads
     entered: list[str] = []
 
-    async def finish(job_id: str) -> None:
+    async def finish(job_id: str, *, claim: JobClaim | None = None) -> None:
         entered.append(job_id)
         with SessionLocal() as session:
             job = session.get(Job, job_id)
-            assert job is not None and job.claim_owner is not None
+            assert job is not None and claim is not None
+            assert (job.claim_owner, job.attempt) == (claim.token, claim.attempt)
             assert job.status == "running"
             job.status = "complete"
             job.completed_at = utcnow()
@@ -100,7 +102,7 @@ async def test_shutdown_interrupts_an_activation_and_releases_the_draining_lane(
     manager = app.state.services.downloads
     entered = asyncio.Event()
 
-    async def wait_for_shutdown(_job_id: str) -> None:
+    async def wait_for_shutdown(_job_id: str, *, claim: JobClaim | None = None) -> None:
         entered.set()
         await asyncio.Event().wait()
 

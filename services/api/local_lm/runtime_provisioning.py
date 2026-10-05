@@ -19,6 +19,7 @@ from collections.abc import Callable, Mapping, MutableMapping
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import asdict
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, cast
 from urllib.parse import urlparse
@@ -67,6 +68,24 @@ class RuntimeProvisioningError(RuntimeError):
 
 class RuntimeVerificationCancelled(RuntimeError):
     pass
+
+
+async def _runtime_worker[T](operation: Callable[[], T]) -> T:
+    task = asyncio.create_task(asyncio.to_thread(operation))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # A cancelled await cannot stop a thread. Keep its lock until it exits.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        with suppress(Exception):
+            task.result()
+        raise
 
 
 def default_engine_manifest_path() -> Path:
@@ -266,17 +285,32 @@ class RuntimeProvisioner:
         task.add_done_callback(consume_result)
         return self._states[engine]
 
-    async def ensure(self, engine: RuntimeName) -> RuntimeStatus:
+    async def ensure(
+        self,
+        engine: RuntimeName,
+        *,
+        require_claim: Callable[[], None] | None = None,
+    ) -> RuntimeStatus:
+        def check_claim() -> None:
+            if require_claim is not None:
+                require_claim()
+
+        check_claim()
         current = self.status(engine)
         if current.state == "installing" and self._restore_task is not None:
             await asyncio.shield(self._restore_task)
+            check_claim()
             current = self.status(engine)
         if current.state == "ready":
             return current
         existing = self._tasks.get(engine)
         if existing and existing is not asyncio.current_task():
-            return await existing
-        return await self.provision(engine)
+            result = await asyncio.shield(existing)
+            check_claim()
+            return result
+        if require_claim is None:
+            return await self.provision(engine)
+        return await self.provision(engine, require_claim=require_claim)
 
     def _provisioning_inputs(self, engine: RuntimeName) -> dict[str, Any]:
         definition = deepcopy(self._definition(engine))
@@ -373,14 +407,23 @@ class RuntimeProvisioner:
             raise RuntimeProvisioningError("The approved runtime setup changed. Preview it again.")
 
     async def provision(
-        self, engine: RuntimeName, *, expected_plan: RuntimeProvisioningPlan | None = None
+        self,
+        engine: RuntimeName,
+        *,
+        expected_plan: RuntimeProvisioningPlan | None = None,
+        require_claim: Callable[[], None] | None = None,
     ) -> RuntimeStatus:
+        def require_current_claim() -> None:
+            if require_claim is not None:
+                require_claim()
+
         async with self._locks[engine]:
+            require_current_claim()
             if expected_plan is not None:
                 from .runtime_provisioning_recovery import recover_approved_runtime
 
-                recovered = await asyncio.to_thread(
-                    recover_approved_runtime, self, engine, expected_plan
+                recovered = await _runtime_worker(
+                    partial(recover_approved_runtime, self, engine, expected_plan)
                 )
                 if recovered is not None:
                     if (
@@ -390,6 +433,7 @@ class RuntimeProvisioner:
                         raise RuntimeProvisioningError(
                             "The approved runtime setup changed. Preview it again."
                         )
+                    require_current_claim()
                     self._apply_configuration(engine, recovered.installed, persist=True)
                     status = self._status(
                         engine,
@@ -403,8 +447,8 @@ class RuntimeProvisioner:
                     )
                     self._states[engine] = status
                     return status
-                current, definition, configured, asset = await asyncio.to_thread(
-                    self._preflight_snapshot, engine
+                current, definition, configured, asset = await _runtime_worker(
+                    partial(self._preflight_snapshot, engine)
                 )
                 if current != expected_plan:
                     raise RuntimeProvisioningError(
@@ -416,6 +460,7 @@ class RuntimeProvisioner:
                 configured = self._configured_status(engine, definition)
                 asset = self._asset(engine, definition)
             if configured:
+                require_current_claim()
                 self._states[engine] = configured
                 return configured
             if self._security_blocked(definition):
@@ -449,6 +494,7 @@ class RuntimeProvisioner:
                 )
                 self._states[engine] = status
                 raise RuntimeProvisioningError(status.message)
+            require_current_claim()
             self._states[engine] = self._status(
                 engine,
                 definition,
@@ -462,26 +508,30 @@ class RuntimeProvisioner:
                 self._check_disk_space(asset)
                 archive = await self._download(engine, definition, asset)
                 if expected_plan is not None:
-                    await asyncio.to_thread(self._require_provisioning_plan, engine, expected_plan)
+                    await _runtime_worker(
+                        partial(self._require_provisioning_plan, engine, expected_plan)
+                    )
                 overlays = []
                 for overlay in self._security_overlays(asset):
                     overlay_archive = await self._download(engine, definition, overlay)
                     if expected_plan is not None:
-                        await asyncio.to_thread(
-                            self._require_provisioning_plan, engine, expected_plan
+                        await _runtime_worker(
+                            partial(self._require_provisioning_plan, engine, expected_plan)
                         )
                     overlays.append((overlay, overlay_archive))
 
                 def install() -> dict[str, Path]:
                     self._require_provisioning_plan(engine, expected_plan)
+                    require_current_claim()
                     return self._install_archive(
                         engine, definition, asset, archive, overlays, approved_plan=expected_plan
                     )
 
-                installed = await asyncio.to_thread(install)
+                installed = await _runtime_worker(install)
                 # Installation creates the planned files, so only its immutable
                 # inputs must still match before the resulting configuration is saved.
                 self._require_provisioning_inputs(engine, expected_plan)
+                require_current_claim()
                 self._apply_configuration(engine, installed, persist=True)
                 configured_status = self._status(
                     engine,
@@ -499,6 +549,7 @@ class RuntimeProvisioner:
                 self._states[engine] = configured_status
                 return configured_status
             except asyncio.CancelledError:
+                require_current_claim()
                 self._states[engine] = self._status(
                     engine,
                     definition,
@@ -510,6 +561,7 @@ class RuntimeProvisioner:
                 )
                 raise
             except Exception as exc:
+                require_current_claim()
                 detail = str(exc).strip() or f"{engine} setup failed"
                 self._states[engine] = self._status(
                     engine,
@@ -564,7 +616,7 @@ class RuntimeProvisioner:
         if archive.is_file():
             if (
                 archive.stat().st_size == expected_size
-                and await asyncio.to_thread(self._sha256_file, archive) == expected_hash
+                and await _runtime_worker(lambda: self._sha256_file(archive)) == expected_hash
             ):
                 return archive
             archive.unlink()
@@ -620,7 +672,7 @@ class RuntimeProvisioner:
                 f"The runtime download stopped at {downloaded} of {expected_size} bytes; "
                 "retry to resume."
             )
-        actual_hash = await asyncio.to_thread(self._sha256_file, partial)
+        actual_hash = await _runtime_worker(lambda: self._sha256_file(partial))
         if actual_hash != expected_hash:
             partial.unlink(missing_ok=True)
             raise RuntimeProvisioningError("The runtime archive failed SHA-256 verification.")

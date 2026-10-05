@@ -587,6 +587,7 @@ class ProcessSupervisor:
         *,
         launch_scope_sha256: str | None = None,
         vision_max_images: int | None = None,
+        before_replace: Callable[[], None] | None = None,
     ) -> WorkerStatus:
         if profile.engine == "vllm":
             return await self._load_vllm_chat(
@@ -594,6 +595,7 @@ class ProcessSupervisor:
                 install,
                 launch_scope_sha256=launch_scope_sha256,
                 vision_max_images=vision_max_images,
+                before_replace=before_replace,
             )
         if profile.engine != "llama.cpp":
             raise ValueError("the selected profile is not a managed chat profile")
@@ -629,8 +631,21 @@ class ProcessSupervisor:
         if projection_path is not None:
             model_size += projection_path.stat().st_size
         estimate = self._estimate_chat_memory(model_size, profile.load_settings_json)
-        previous_engine = self.settings.chat_engine
-        self.settings.chat_engine = "llama.cpp"
+        previous_engine: str | None = None
+
+        def select_engine() -> None:
+            nonlocal previous_engine
+            if before_replace is not None:
+                before_replace()
+            if previous_engine is None:
+                previous_engine = self.settings.chat_engine
+            self.settings.chat_engine = "llama.cpp"
+
+        replacement_checks: dict[str, Any] = {}
+        if before_replace is None:
+            select_engine()
+        else:
+            replacement_checks["before_replace"] = select_engine
         try:
             await self._replace(
                 "chat",
@@ -639,9 +654,11 @@ class ProcessSupervisor:
                 profile.id,
                 estimated_memory_bytes=estimate,
                 launch_scope_sha256=launch_scope_sha256,
+                **replacement_checks,
             )
         except (Exception, asyncio.CancelledError):
-            self.settings.chat_engine = previous_engine
+            if previous_engine is not None:
+                self.settings.chat_engine = previous_engine
             raise
         return self.statuses()[0]
 
@@ -652,6 +669,7 @@ class ProcessSupervisor:
         *,
         launch_scope_sha256: str | None = None,
         vision_max_images: int | None = None,
+        before_replace: Callable[[], None] | None = None,
     ) -> WorkerStatus:
         if (
             vision_max_images is not None
@@ -718,8 +736,21 @@ class ProcessSupervisor:
             candidate.stat().st_size for candidate in model_root.rglob("*") if candidate.is_file()
         )
         estimate = self._estimate_chat_memory(model_size, profile.load_settings_json)
-        previous_engine = self.settings.chat_engine
-        self.settings.chat_engine = "vllm"
+        previous_engine: str | None = None
+
+        def select_engine() -> None:
+            nonlocal previous_engine
+            if before_replace is not None:
+                before_replace()
+            if previous_engine is None:
+                previous_engine = self.settings.chat_engine
+            self.settings.chat_engine = "vllm"
+
+        replacement_checks: dict[str, Any] = {}
+        if before_replace is None:
+            select_engine()
+        else:
+            replacement_checks["before_replace"] = select_engine
         try:
             await self._replace(
                 "chat",
@@ -728,9 +759,11 @@ class ProcessSupervisor:
                 profile.id,
                 estimated_memory_bytes=estimate,
                 launch_scope_sha256=launch_scope_sha256,
+                **replacement_checks,
             )
         except (Exception, asyncio.CancelledError):
-            self.settings.chat_engine = previous_engine
+            if previous_engine is not None:
+                self.settings.chat_engine = previous_engine
             raise
         return self.statuses()[0]
 
@@ -740,10 +773,16 @@ class ProcessSupervisor:
         *,
         phase_callback: Callable[[str], Awaitable[None]] | None = None,
         activation_scope: WorkflowMediaLaunchScope | None = None,
+        before_replace: Callable[[], None] | None = None,
     ) -> WorkerStatus:
         from .workflow_activations import WorkflowSourceLaunchScope
 
+        def check_start() -> None:
+            if before_replace is not None:
+                before_replace()
+
         async def report_phase(phase: str) -> None:
+            check_start()
             if phase_callback is None:
                 return
             try:
@@ -755,10 +794,13 @@ class ProcessSupervisor:
                 raise
             except Exception:
                 logger.warning("Could not publish media startup phase", exc_info=True)
+            check_start()
 
         if provisional_model_paths is not None and activation_scope is not None:
             raise ValueError("Provisional model paths cannot broaden an activation-scoped launch")
+        check_start()
         await self._revalidate_source_media_scope(activation_scope)
+        check_start()
         if (
             not self.settings.comfy_executable
             or not self.settings.comfy_executable.is_file()
@@ -766,7 +808,10 @@ class ProcessSupervisor:
             or not (self.settings.comfy_directory / "main.py").is_file()
         ) and self.runtimes:
             await report_phase("Provisioning media runtime")
-            await self.runtimes.ensure("comfyui")
+            if before_replace is None:
+                await self.runtimes.ensure("comfyui")
+            else:
+                await self.runtimes.ensure("comfyui", require_claim=before_replace)
         executable = self.settings.comfy_executable
         directory = self.settings.comfy_directory
         if not executable or not directory:
@@ -781,15 +826,21 @@ class ProcessSupervisor:
         await report_phase("Validating media dependencies")
         custom_node_types: tuple[str, ...] = ()
         if activation_scope is None:
-            await self._clear_cancelled_workflow_activations()
+            if before_replace is None:
+                await self._clear_cancelled_workflow_activations()
+            else:
+                await self._clear_cancelled_workflow_activations(before_stop=before_replace)
+            check_start()
             trusted_custom_nodes = await self._trusted_comfy_node_folders()
         else:
             trusted_custom_nodes, custom_node_types = await self._scoped_comfy_node_folders(
                 activation_scope
             )
+        check_start()
         registry_contract, reviewed_inputs = await self._verified_comfy_registry_contract(
             activation_scope, phase_callback=report_phase
         )
+        check_start()
         try:
             editor_bridge = await asyncio.to_thread(
                 prepare_comfy_editor_bridge,
@@ -822,6 +873,7 @@ class ProcessSupervisor:
                     "Native workflow editing is unavailable: %s",
                     editor_bridge.support.message,
                 )
+        check_start()
         trusted_custom_nodes = sorted(
             {*trusted_custom_nodes, *registry_contract.custom_node_folders}
         )
@@ -881,6 +933,8 @@ class ProcessSupervisor:
                 raise WorkerStartRefused("The configured media runtime changed before startup.")
 
         source_checks: dict[str, Any] = {}
+        if before_replace is not None:
+            source_checks["before_replace"] = before_replace
         if reviewed_inputs is not None or isinstance(activation_scope, WorkflowSourceLaunchScope):
             source_checks["prestart_check"] = revalidate
         if activation_scope is not None:
@@ -920,7 +974,9 @@ class ProcessSupervisor:
             )
         return self.statuses()[1]
 
-    async def _clear_cancelled_workflow_activations(self) -> None:
+    async def _clear_cancelled_workflow_activations(
+        self, *, before_stop: Callable[[], None] | None = None
+    ) -> None:
         from .db import SessionLocal
         from .workflow_completion_jobs import (
             cancelled_workflow_activation_packages,
@@ -933,6 +989,8 @@ class ProcessSupervisor:
                 return bool(cancelled_workflow_activation_packages(session))
 
         def clear() -> None:
+            if before_stop is not None:
+                before_stop()
             with SessionLocal() as session:
                 deactivate_cancelled_workflow_activations(session)
                 session.commit()
@@ -942,6 +1000,8 @@ class ProcessSupervisor:
         async with self._locks["media"]:
             if not await asyncio.to_thread(pending):
                 return
+            if before_stop is not None:
+                before_stop()
             await self._stop_unlocked("media")
             remaining = await asyncio.to_thread(self._matching_worker_processes, "media")
             if not media_worker_stopped(self) or remaining:
@@ -1478,10 +1538,14 @@ class ProcessSupervisor:
             result[key] = item
         return result
 
-    async def stop(self, name: str) -> WorkerStatus:
+    async def stop(
+        self, name: str, *, before_stop: Callable[[], None] | None = None
+    ) -> WorkerStatus:
         if name not in self._locks:
             raise ValueError("worker must be chat or media")
         async with self._locks[name]:
+            if before_stop is not None:
+                before_stop()
             await self._stop_unlocked(name)
         return next(item for item in self.statuses() if item.name == name)
 
@@ -1505,6 +1569,7 @@ class ProcessSupervisor:
         launch_scope_sha256: str | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
         prestart_check: Callable[[], Awaitable[None]] | None = None,
+        before_replace: Callable[[], None] | None = None,
     ) -> None:
         if launch_scope_sha256 is not None and not re.fullmatch(
             r"[0-9a-f]{64}", launch_scope_sha256
@@ -1513,6 +1578,8 @@ class ProcessSupervisor:
         async with self._locks[name]:
             if prestart_check is not None:
                 await prestart_check()
+            if before_replace is not None:
+                before_replace()
             current = self._workers.get(name)
             if (
                 launch_scope_sha256 is not None
@@ -1532,6 +1599,8 @@ class ProcessSupervisor:
             await self._ensure_port_available(name, health_url)
             if prestart_check is not None:
                 await prestart_check()
+            if before_replace is not None:
+                before_replace()
             startup_started_at = time.perf_counter()
             log_path = self.settings.log_dir / f"{name}-worker.log"
             worker_log = _RotatingWorkerLog(log_path)

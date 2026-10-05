@@ -143,7 +143,7 @@ async def test_preparation_applies_the_policy_and_finishes_runtime_setup(
             for worker in original_statuses()
         ]
 
-    async def stop(name: str) -> Any:
+    async def stop(name: str, **_kwargs: object) -> Any:
         nonlocal running
         if name != "media":
             return await original_stop(name)
