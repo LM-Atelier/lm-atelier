@@ -1230,6 +1230,9 @@ class TurnRequest(ApiModel):
     mode: RoutingMode | None = None
     parent_message_id: str | None = None
     input_artifact_ids: list[str] = Field(default_factory=list, max_length=16)
+    input_image_roles: list[Literal["edit_source", "reference"]] | None = Field(
+        default=None, max_length=16
+    )
     references: list[TurnReferenceIn] = Field(
         default_factory=list, max_length=MAX_REFERENCES_PER_TURN
     )
@@ -1247,6 +1250,13 @@ class TurnRequest(ApiModel):
     workflow_selection: TurnWorkflowSelectionIn | None = None
     confirm_media: bool = False
     idempotency_key: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def bind_input_image_roles(self) -> Self:
+        from .media_input_roles import validate_input_image_roles
+
+        validate_input_image_roles(self.input_artifact_ids, self.input_image_roles)
+        return self
 
     @field_validator("role_overrides")
     @classmethod
@@ -1294,6 +1304,13 @@ class ChatComposerDraftAttachmentIn(ApiModel):
     artifact_id: str = Field(min_length=1, max_length=80)
     kind: Literal["image", "video"]
     origin: Literal["uploaded", "generated", "edited"]
+    image_role: Literal["edit_source", "reference"] | None = None
+
+    @model_validator(mode="after")
+    def bind_image_role(self) -> Self:
+        if self.image_role is not None and self.kind != "image":
+            raise ValueError("Only picture attachments can have an image purpose.")
+        return self
 
 
 class ChatComposerDraftMentionIn(ApiModel):
@@ -1323,6 +1340,12 @@ class ChatComposerDraftIn(ApiModel):
     )
     template_settings: ChatComposerDraftTemplateIn | None = None
 
+    @model_validator(mode="after")
+    def bind_image_roles(self) -> Self:
+        if sum(attachment.image_role == "edit_source" for attachment in self.attachments) > 1:
+            raise ValueError("Choose one picture to edit; the others can be references.")
+        return self
+
 
 class ChatComposerDraftWrite(ApiModel):
     """Replace a chat's draft, but only if it is still the revision the writer read."""
@@ -1347,6 +1370,18 @@ class PriorTurnEditRequest(TurnRequest):
     idempotency_key: StrictStr = Field(min_length=1, max_length=200)
     source_run_id: str | None = Field(default=None, min_length=1, max_length=40)
     source_snapshot_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def bind_input_image_roles(self) -> Self:
+        from .media_input_roles import validate_input_image_roles
+
+        ids = (
+            self.input_artifact_ids
+            if "input_artifact_ids" in self.model_fields_set
+            else [str(index) for index in range(len(self.input_image_roles or []))]
+        )
+        validate_input_image_roles(ids, self.input_image_roles)
+        return self
 
 
 class PriorTurnEditConfiguration(ApiModel):
@@ -1388,6 +1423,7 @@ class PriorTurnEditSource(PriorTurnEditConfiguration):
     plan_kind: Literal["single", "ordered"] = "single"
     steps: list[PriorTurnEditStepSource] = Field(default_factory=list)
     input_artifact_ids: list[str]
+    input_image_roles: list[Literal["edit_source", "reference"]] | None = None
     input_artifacts: list[ArtifactOut]
     references: list[MessageReferenceOut]
     context_messages: list[dict[str, str]]
@@ -3542,6 +3578,7 @@ class EngineCapabilities(ApiModel):
     roles: list[str]
     operations: list[str]
     input_modalities: list[str] = Field(default_factory=lambda: ["text"])
+    image_slot_bindings: bool = False
     formats: list[str]
     devices: list[str]
     streaming: bool

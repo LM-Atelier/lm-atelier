@@ -56,6 +56,14 @@ in `settings` for older clients. Once a role mapping is present, it must cover
 every advertised role. Clients fall back to `settings` only when the mapping is
 absent.
 
+Media adapters may advertise `image_slot_bindings: true` when they consume
+`MediaRequest.input_image_bindings`. Each mapping key names an image placeholder
+in the workflow and each value is a tuple of indices into `input_paths` and its
+parallel `input_contents`. Every selected picture must be consumed and every
+image placeholder must be bound. An explicit mapping must never fall back to
+positional inputs or reuse the last picture for an unfilled slot. The default
+capability is false; requests without a mapping retain the existing behavior.
+
 LM Atelier bounds individual events, previews, assets, stream volume, and idle
 time. Invalid or unterminated streams fail with a generic adapter error so
 third-party exception text is not copied into chats or logs.

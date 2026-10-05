@@ -41,9 +41,21 @@ describe("reading a record", () => {
     expect(generationRecordFileName(summary)).toBe(`generation-record-${SHA.slice(0, 12)}.json`);
   });
 
-  it("refuses anything that is not a version 1 record", () => {
+  it("reads a record whose pictures are named by purpose", () => {
+    const summary = readGenerationRecord(recordBytes({
+      version: 2,
+      inputs: [
+        { media_type: "image/png", role: "edit_source", sha256: "b".repeat(64), size_bytes: 10 },
+        { media_type: "image/png", role: "reference", sha256: "c".repeat(64), size_bytes: 5 },
+      ],
+    }));
+
+    expect([summary.inputCount, summary.inputBytes]).toEqual([2, 15]);
+  });
+
+  it("refuses anything that is not a version 1 or 2 record", () => {
     expect(() => readGenerationRecord(recordBytes({ schema: "something-else" }))).toThrow();
-    expect(() => readGenerationRecord(recordBytes({ version: 2 }))).toThrow();
+    expect(() => readGenerationRecord(recordBytes({ version: 3 }))).toThrow();
     expect(() => readGenerationRecord(recordBytes({ prompt: "words" }))).toThrow();
   });
 

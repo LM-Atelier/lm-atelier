@@ -111,6 +111,10 @@ def _capability_contract_errors(
         errors.append("capabilities include unsupported input modalities")
     if "text" not in modalities:
         errors.append("capabilities must include the text input modality")
+    if type(capabilities.image_slot_bindings) is not bool:
+        errors.append("image slot binding support must be a boolean")
+    elif capabilities.image_slot_bindings and kind != "media":
+        errors.append("only media adapters may advertise image slot bindings")
 
     for label, value in (
         ("engine", capabilities.engine),
@@ -515,6 +519,12 @@ class GuardedMediaAdapter:
         return [f"The selected media adapter reported {len(errors)} workflow issue(s)."]
 
     async def generate(self, request: MediaRequest) -> AsyncIterator[MediaEvent]:
+        if request.input_image_bindings is not None:
+            capabilities = await self.capabilities()
+            if not capabilities.image_slot_bindings:
+                raise AdapterContractError(
+                    "The selected media adapter cannot bind pictures by their purpose."
+                )
         try:
             events = self._adapter.generate(request)
         except asyncio.CancelledError:

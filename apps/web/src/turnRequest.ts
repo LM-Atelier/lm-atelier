@@ -1,7 +1,7 @@
 import type { ComposerPromptSource } from "./composerPromptSource";
 import type { TurnReference } from "./mentionDraft";
 import type { SourceFitIntent, SourceFitSelection } from "./sourceFit";
-import type { OutputRatioPresetId, RoutingMode } from "./types";
+import type { ImageInputRole, OutputRatioPresetId, RoutingMode } from "./types";
 
 /** The shape new pictures and videos take when nothing else sets their size. */
 export type DefaultOutputShapes = { image: OutputRatioPresetId | null; video: OutputRatioPresetId | null };
@@ -10,6 +10,7 @@ export interface TurnRequestInput {
   text: string;
   mode: RoutingMode;
   inputArtifactIds: string[];
+  inputImageRoles?: ImageInputRole[];
   settings: Record<string, unknown>;
   idempotencyKey?: string;
   workflowRevisionId?: string;
@@ -29,6 +30,7 @@ export interface TurnRequestPayload {
   text: string;
   mode: RoutingMode;
   input_artifact_ids: string[];
+  input_image_roles?: ImageInputRole[];
   settings: Record<string, unknown>;
   idempotency_key?: string;
   workflow_revision_id?: string;
@@ -47,16 +49,22 @@ export const SOURCE_FIT_BINDING_ERROR = "The source or workflow changed. Preview
 export function buildTurnRequest(input: TurnRequestInput): TurnRequestPayload {
   const { sourceFit, mode, defaultOutputShapes: shapes } = input;
   const selection = sourceFit && "request" in sourceFit ? sourceFit : undefined;
+  const roles = input.inputImageRoles;
+  if (roles && (roles.length !== input.inputArtifactIds.length || new Set(input.inputArtifactIds).size !== roles.length
+    || roles.some((role) => role !== "edit_source" && role !== "reference")
+    || roles.filter((role) => role === "edit_source").length > 1)) throw new Error("Choose a purpose for each picture before sending.");
+  const sourceIndex = roles ? roles.indexOf("edit_source") : 0;
   if (sourceFit && (mode !== "image" && mode !== "auto")) throw new Error(SOURCE_FIT_BINDING_ERROR);
   if (selection && (
     !selection.workflowRevisionId
-    || input.inputArtifactIds[0] !== selection.sourceArtifactId
+    || input.inputArtifactIds[sourceIndex] !== selection.sourceArtifactId
     || (input.workflowRevisionId !== undefined && input.workflowRevisionId !== selection.workflowRevisionId)
   )) throw new Error(SOURCE_FIT_BINDING_ERROR);
   const payload: TurnRequestPayload = {
     text: input.text,
     mode,
     input_artifact_ids: input.inputArtifactIds,
+    ...(roles ? { input_image_roles: roles } : {}),
     references: input.references ?? [],
     settings: input.settings,
     workflow_revision_id: selection?.workflowRevisionId ?? input.workflowRevisionId,

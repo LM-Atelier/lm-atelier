@@ -24,6 +24,7 @@ from local_lm.comfy_templates import (
 )
 from local_lm.config import Settings
 from local_lm.schemas import CatalogFileSource
+from local_lm.workflow_image_slots_v1 import SLOT_KEY
 
 
 def _installed_templates(registry: ComfyTemplateRegistry) -> Path:
@@ -811,8 +812,19 @@ def test_native_edit_loaders_bind_ordered_runtime_images(
     assert compiled.api_graph["1"]["inputs"]["image"] == "${input_image_0}"
     assert compiled.api_graph["2"]["inputs"]["image"] == "${input_image_1}"
     assert compiled.api_graph["3"]["inputs"]["ckpt_name"] == "model.safetensors"
-    assert compiled.input_schema["properties"]["input_image_0"] == {"type": "string"}
-    assert compiled.input_schema["properties"]["input_image_1"] == {"type": "string"}
+    # This node information names no output node, so no sampler is shown to
+    # run and neither picture's role is known; each slot still names its node.
+    for index, node_id in enumerate(("1", "2")):
+        assert compiled.input_schema["properties"][f"input_image_{index}"] == {
+            "type": "string",
+            SLOT_KEY: {
+                "version": 1,
+                "node": node_id,
+                "role": "unknown",
+                "basis": "none",
+                "required": True,
+            },
+        }
 
 
 def test_a_template_that_loads_a_picture_installs_as_an_edit(tmp_path: Path) -> None:
@@ -902,7 +914,10 @@ def test_a_template_that_loads_a_picture_installs_as_an_edit(tmp_path: Path) -> 
     assert offered["image_fill_outpaint_example"] == "image_to_image"
     assert compiled.template.operation == "image_to_image"
     assert compiled.api_graph["1"]["inputs"]["image"] == "${input_image}"
-    assert compiled.input_schema["properties"]["input_image"] == {"type": "string"}
+    assert compiled.input_schema["properties"]["input_image"] == {
+        "type": "string",
+        SLOT_KEY: {"version": 1, "node": "1", "role": "unknown", "basis": "none", "required": True},
+    }
 
 
 def test_native_image_conditioning_keeps_authored_denoise_constant() -> None:

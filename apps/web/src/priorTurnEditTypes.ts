@@ -1,6 +1,6 @@
 import type { ComposerPromptSource } from "./composerPromptSource";
 import type { SourceFitIntent } from "./sourceFit";
-import type { EngineRole, RoutingMode, TurnReferenceInput, TurnRoleOverrides, TurnWorkflowSelectionInput, WorkflowSelection } from "./types";
+import type { EngineRole, ImageInputRole, RoutingMode, TurnReferenceInput, TurnRoleOverrides, TurnWorkflowSelectionInput, WorkflowSelection } from "./types";
 
 /** What a prior-turn edit sends, and the configuration it starts from. */
 
@@ -17,6 +17,8 @@ export interface PriorTurnEditRequest {
   parent_message_id?: string | null;
   /** Omit to inherit source inputs; an empty array explicitly removes them. */
   input_artifact_ids?: string[];
+  /** Omit to inherit purposes; null restores automatic input selection. */
+  input_image_roles?: ImageInputRole[] | null;
   /** Omit to inherit source bindings; an empty array explicitly removes them. */
   references?: TurnReferenceInput[];
   prompt_source?: ComposerPromptSource | null;

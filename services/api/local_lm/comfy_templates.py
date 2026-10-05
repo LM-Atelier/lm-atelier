@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
@@ -25,6 +26,7 @@ from .workflow_edit_calibration import (
     EDIT_CALIBRATION_SCHEMA_KEY,
     standard_edit_calibration,
 )
+from .workflow_image_slots_v1 import SLOT_KEY, image_slots
 
 _RUNTIME_PARAMETERS = {
     "batch_size": "batch_size",
@@ -46,7 +48,7 @@ _RUNTIME_PARAMETERS = {
 _SUPPRESSED_RUNTIME_NAMES = frozenset({"motion_strength"})
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "COMFY_DYNAMICCOMBO_V3", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 25
+COMFY_TEMPLATE_COMPILER_VERSION = 27
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -196,6 +198,12 @@ class ComfyTemplate:
     published_date: str | None = None
     general_purpose: bool = True
     performance_hints: tuple[str, ...] = ()
+    # The role of each picture the template takes, in slot order, as authored
+    # for this exact file; empty when nothing has been authored for it.
+    image_slot_roles: tuple[str, ...] = ()
+    # For a workflow derived from a shipped template, that file's sha256; the
+    # template's own sha256 is then the derived graph's.
+    derived_from: str = ""
 
     @property
     def remote_id(self) -> str:
@@ -256,8 +264,13 @@ class ComfyTemplateRegistry:
         self.settings = settings
 
     def matches(self, remote_id: str, role: str) -> list[ComfyTemplate]:
+        # A derived workflow ranks just below the template it comes from, so it
+        # is installed only when it is the one asked for.
         matches = [
-            replace(template, score=1_000 + template.preference_score)
+            replace(
+                template,
+                score=(999 if template.derived_from else 1_000) + template.preference_score,
+            )
             for template in self.available(role)
             if template.remote_id.casefold() == remote_id.casefold()
         ]
@@ -293,7 +306,7 @@ class ComfyTemplateRegistry:
                     role=role,
                     operation=operation,
                     score=0,
-                    sha256=hashlib.sha256(_template_bytes(path)).hexdigest(),
+                    sha256=(template_sha256 := hashlib.sha256(_template_bytes(path)).hexdigest()),
                     dependencies=dependencies,
                     published_date=_metadata_string(template_metadata, "date"),
                     general_purpose=_is_general_purpose_template(
@@ -301,7 +314,15 @@ class ComfyTemplateRegistry:
                         dependencies,
                     ),
                     performance_hints=_template_performance_hints(template_metadata),
+                    image_slot_roles=_AUTHORED_IMAGE_SLOT_ROLES.get(
+                        (path.stem, template_sha256), ()
+                    ),
                 )
+            )
+            matches.extend(
+                _derived_template(matches[-1], derived_id, raw)
+                for derived_id, derivation in _DERIVED_TEMPLATES.items()
+                if (derivation.base, derivation.base_sha256) == (path.stem, template_sha256)
             )
         return sorted(matches, key=lambda item: item.id)
 
@@ -399,8 +420,9 @@ class ComfyTemplateRegistry:
             if adaptive and adaptive.id == template_id:
                 return adaptive
             raise ValueError("adaptive ComfyUI template binding does not match the download")
+        derivation = _DERIVED_TEMPLATES.get(template_id)
         for path in self._template_files():
-            if path.stem != template_id:
+            if path.stem != (derivation.base if derivation else template_id):
                 continue
             raw = _read_json(path)
             dependencies = tuple(_model_dependencies(raw))
@@ -414,13 +436,13 @@ class ComfyTemplateRegistry:
             ):
                 break
             template_metadata = _template_index_metadata(self._template_files()).get(path.stem, {})
-            return ComfyTemplate(
+            template = ComfyTemplate(
                 id=path.stem,
                 path=path,
                 role=role,
                 operation=operation,
                 score=0,
-                sha256=hashlib.sha256(_template_bytes(path)).hexdigest(),
+                sha256=(template_sha256 := hashlib.sha256(_template_bytes(path)).hexdigest()),
                 dependencies=dependencies,
                 published_date=_metadata_string(template_metadata, "date"),
                 general_purpose=_is_general_purpose_template(
@@ -428,7 +450,13 @@ class ComfyTemplateRegistry:
                     dependencies,
                 ),
                 performance_hints=_template_performance_hints(template_metadata),
+                image_slot_roles=_AUTHORED_IMAGE_SLOT_ROLES.get((path.stem, template_sha256), ()),
             )
+            if derivation is None:
+                return template
+            if template_sha256 != derivation.base_sha256:
+                break
+            return _derived_template(template, template_id, raw)
         raise ValueError(f"ComfyUI template is unavailable: {template_id}")
 
     def compile(
@@ -454,6 +482,8 @@ class ComfyTemplateRegistry:
         if template.runtime_adaptive:
             ui_graph = deepcopy(_ADAPTIVE_CHECKPOINT_GRAPH)
             ui_graph["nodes"][0]["widgets_values"] = [template.dependencies[0].name]
+        elif template.derived_from:
+            ui_graph = _derived_graph(template)
         else:
             ui_graph = _read_json(template.path)
         acceleration_recipes = _resolve_declared_workflow_acceleration(
@@ -465,6 +495,7 @@ class ComfyTemplateRegistry:
             object_info,
             operation=template.operation,
             validate_model_choices=validate_model_choices,
+            image_slot_roles=template.image_slot_roles,
         )
         if acceleration_recipes:
             input_schema["x-lm-atelier-workflow-acceleration"] = _workflow_acceleration_provenance(
@@ -810,6 +841,141 @@ def _operation_for_template(
 
 def _is_link(path: Path) -> bool:
     return is_link_or_reparse(path, missing="assume_link", unreadable="assume_link")
+
+
+# Roles authored for registered templates whose graphs have been read, bound to
+# the exact file: a changed upstream template is another graph and gets none.
+_AUTHORED_IMAGE_SLOT_ROLES: dict[tuple[str, str], tuple[str, ...]] = {
+    # Material replacement: the first picture is the object whose material
+    # changes and the second the material, as the template's catalog entry
+    # describes its two inputs.
+    (
+        "image_qwen_image_edit_2511",
+        "d561a38c15bd7d08758a5e6773d467142244d5b83fc5d3aecdf6d8df9fe881b6",
+    ): ("edit_source", "reference"),
+    # The same edit with a third picture: the first is still the one edited,
+    # and the other two are read alongside it in order.
+    (
+        "image_qwen_image_edit_2511_three_pictures",
+        "5401e1083787eda40c6898dec188e9262e152758e593c0669631303d2ce9f6fb",
+    ): ("edit_source", "reference", "reference"),
+}
+
+
+@dataclass(frozen=True)
+class _Derivation:
+    """A workflow built from one exact shipped template by a fixed change."""
+
+    base: str
+    base_sha256: str
+    derive: Callable[[dict[str, Any]], dict[str, Any]]
+
+
+def _with_a_third_picture(graph: dict[str, Any]) -> dict[str, Any]:
+    """The shipped two-picture edit with its empty third picture input given a LoadImage.
+
+    The template wraps its whole graph in one node whose third picture input
+    already reaches both of its encoders and is left unlinked. This adds one
+    core LoadImage like the template's own second one, numbered from the
+    file's own counters, links its picture to that input, and changes nothing
+    else. A graph of any other shape is refused rather than guessed at.
+    """
+
+    derived = deepcopy(graph)
+    nodes, links = derived.get("nodes"), derived.get("links")
+    last_node, last_link = derived.get("last_node_id"), derived.get("last_link_id")
+    if (
+        not isinstance(nodes, list)
+        or not isinstance(links, list)
+        or type(last_node) is not int
+        or type(last_link) is not int
+    ):
+        raise ValueError("the edit template does not have the expected shape")
+    loads = [node for node in nodes if isinstance(node, dict) and node.get("type") == "LoadImage"]
+    openings = [
+        (node, slot)
+        for node in nodes
+        if isinstance(node, dict) and isinstance(node.get("inputs"), list)
+        for slot, item in enumerate(node["inputs"])
+        if isinstance(item, dict)
+        and item.get("name") == "image3"
+        and item.get("type") == "IMAGE"
+        and item.get("link") is None
+    ]
+    if len(loads) != 2 or len(openings) != 1:
+        raise ValueError("the edit template does not have the expected shape")
+    host, slot = openings[0]
+    node_id, link_id = last_node + 1, last_link + 1
+    picture = deepcopy(loads[-1])
+    outputs = picture.get("outputs")
+    if not isinstance(outputs, list) or not outputs or not isinstance(outputs[0], dict):
+        raise ValueError("the edit template does not have the expected shape")
+    picture["id"] = node_id
+    picture["outputs"] = [
+        {**output, "links": [link_id] if index == 0 else None}
+        for index, output in enumerate(outputs)
+        if isinstance(output, dict)
+    ]
+    position = picture.get("pos")
+    if isinstance(position, list) and len(position) == 2:
+        picture["pos"] = [position[0], position[1] + 400]
+    nodes.append(picture)
+    links.append([link_id, node_id, 0, host.get("id"), slot, "IMAGE"])
+    host["inputs"][slot]["link"] = link_id
+    derived["last_node_id"], derived["last_link_id"] = node_id, link_id
+    return derived
+
+
+# Workflows derived from exact shipped templates, by the id each is offered as.
+# Each applies only to those bytes: a changed upstream file yields none.
+_DERIVED_TEMPLATES: dict[str, _Derivation] = {
+    # One picture edited, read alongside two others: the shipped two-picture
+    # edit already routes a third picture to both encoders and leaves it empty.
+    "image_qwen_image_edit_2511_three_pictures": _Derivation(
+        "image_qwen_image_edit_2511",
+        "d561a38c15bd7d08758a5e6773d467142244d5b83fc5d3aecdf6d8df9fe881b6",
+        _with_a_third_picture,
+    ),
+}
+
+
+def _graph_sha256(graph: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(graph, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+
+
+def _derived_template(base: ComfyTemplate, derived_id: str, raw: dict[str, Any]) -> ComfyTemplate:
+    """The catalog entry for a workflow derived from a shipped template's graph."""
+
+    digest = _graph_sha256(_DERIVED_TEMPLATES[derived_id].derive(raw))
+    return replace(
+        base,
+        id=derived_id,
+        sha256=digest,
+        derived_from=base.sha256,
+        image_slot_roles=_AUTHORED_IMAGE_SLOT_ROLES.get((derived_id, digest), ()),
+    )
+
+
+def _derived_graph(template: ComfyTemplate) -> dict[str, Any]:
+    """Build a derived workflow from the shipped file, or refuse if either has changed."""
+
+    derivation = _DERIVED_TEMPLATES.get(template.id)
+    content = _template_bytes(template.path)
+    if (
+        derivation is None
+        or template.derived_from != derivation.base_sha256
+        or hashlib.sha256(content).hexdigest() != derivation.base_sha256
+    ):
+        raise ValueError(f"ComfyUI template is unavailable: {template.id}")
+    raw = json.loads(content.decode("utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"ComfyUI template must contain an object: {template.path.name}")
+    graph = derivation.derive(raw)
+    if _graph_sha256(graph) != template.sha256:
+        raise ValueError(f"ComfyUI template is unavailable: {template.id}")
+    return graph
 
 
 def _template_bytes(path: Path) -> bytes:
@@ -1684,6 +1850,7 @@ def _compile_ui_graph(
     *,
     operation: str,
     validate_model_choices: bool = True,
+    image_slot_roles: tuple[str, ...] = (),
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     definitions = {
         str(item.get("id")): item
@@ -1820,6 +1987,25 @@ def _compile_ui_graph(
         source_nodes,
     )
     source_indices = {node_id: index for index, node_id in enumerate(source_nodes)}
+    # What each picture is for, recorded on its slot below: from the graph, or
+    # from a declaration authored for this exact template.
+    slot_records = {
+        slot.node: slot.as_schema()
+        for slot in image_slots(
+            flat_nodes,
+            links,
+            [
+                (node_id, "input_image" if len(source_nodes) == 1 else f"input_image_{index}")
+                for index, node_id in enumerate(source_nodes)
+            ],
+            image_slot_roles,
+            frozenset(
+                name
+                for name, info in object_info.items()
+                if isinstance(info, dict) and info.get("output_node") is True
+            ),
+        )
+    }
     default_candidates: dict[str, list[Any]] = {}
     # A graph with a real cfg input keeps guidance as its independent saved
     # literal. Only guidance-only graphs use the historical cfg alias.
@@ -1900,7 +2086,7 @@ def _compile_ui_graph(
                 "input_image" if len(source_nodes) == 1 else f"input_image_{source_index}"
             )
             _bind_runtime_parameter(inputs, "image", runtime_name, schema_properties)
-            schema_properties[runtime_name] = {"type": "string"}
+            schema_properties[runtime_name] = {"type": "string", SLOT_KEY: slot_records[node_id]}
         if class_type == "CLIPTextEncode" and "text" in inputs:
             title = str(node.get("title") or "").lower()
             negative = "negative" in title

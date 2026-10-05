@@ -67,6 +67,9 @@ class MediaRequest:
     # source through upload without reopening its pathname. This field is
     # transport data; accepted-source and workflow authority remain upstream.
     input_contents: tuple[bytes, ...] | None = field(default=None, repr=False)
+    # Explicit selections bind graph slots to input_paths indices. None retains
+    # positional transport for accepted turns created before role selection.
+    input_image_bindings: dict[str, tuple[int, ...]] | None = None
 
 
 @dataclass

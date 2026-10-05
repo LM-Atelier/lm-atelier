@@ -183,9 +183,10 @@ function choiceText(choice: InputChoice | undefined): string {
   return choice.item.original_name ?? "a picture from the library";
 }
 
-/** How a record's input is named to the person: the picture it changed, or one it was given. */
+/** How a record's input is named to the person: the picture it changed, one it read beside it, or one it was given. */
 function inputText(position: number, role: string | null): string {
-  if (role === "source") return "The picture it started from";
+  if (role === "source" || role === "edit_source") return "The picture it started from";
+  if (role === "reference") return `Reference picture ${position + 1}`;
   if (role === "mask") return "Its selection";
   return `Input picture ${position + 1}`;
 }

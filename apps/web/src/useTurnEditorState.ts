@@ -60,11 +60,17 @@ export function useTurnEditorState(
   const setAttachments = useCallback((update: SetStateAction<ComposerAttachment[]>) => updateState((current) => ({
     ...current,
     attachmentIntent: "replace",
-    attachments: typeof update === "function" ? update(current.attachments) : update,
+    attachments: completeImagePurposes(typeof update === "function" ? update(current.attachments) : update),
   })), [updateState]);
   const clearAcceptedState = () => updateState((current) => ({
     ...current, requestId: crypto.randomUUID(), submittedFingerprint: undefined, sourceFit: undefined,
     attachments: [], attachmentIntent: "replace", mentions: [], referenceIntent: "replace", outputCount: 1, templateSettings: null,
   }));
   return { state, updateState, setOutputCount, changeMode, currentMode, setTemplateSettings, setAttachments, clearAcceptedState };
+}
+
+function completeImagePurposes(attachments: ComposerAttachment[]): ComposerAttachment[] {
+  if (!attachments.some((item) => item.imageRole !== undefined)) return attachments;
+  return attachments.map((item) => item.kind === "image" && item.imageRole === undefined
+    ? { ...item, imageRole: "reference" } : item);
 }

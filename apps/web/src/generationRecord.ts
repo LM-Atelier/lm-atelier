@@ -124,7 +124,8 @@ function inputBytes(value: unknown): number | null {
 /** What a downloaded record says, read without altering a byte of it. */
 export function readGenerationRecord(bytes: ArrayBuffer): GenerationRecordSummary {
   const record = object(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
-  if (record.schema !== GENERATION_RECORD_SCHEMA || record.version !== 1) {
+  // Version 2 differs only in naming each picture by its purpose instead of its place.
+  if (record.schema !== GENERATION_RECORD_SCHEMA || (record.version !== 1 && record.version !== 2)) {
     throw new Error("This is not a generation record this version can read.");
   }
   const output = object(record.output);

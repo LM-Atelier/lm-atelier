@@ -7,7 +7,7 @@ import type { ComposerDraft, ComposerPromptSource } from "./composerPromptSource
 import type { TurnReference } from "./mentionDraft";
 import { recoverPromptSourceSend } from "./promptSourceSendRecovery";
 import type { SourceFitSelection } from "./sourceFit";
-import type { TurnAccepted } from "./types";
+import type { ImageInputRole, TurnAccepted } from "./types";
 
 export type SendTurnVariables = PendingTurn & {
   chatId: string;
@@ -18,6 +18,7 @@ export type SendTurnVariables = PendingTurn & {
   outputCount?: number;
   promptSource?: ComposerPromptSource;
   sourceFit?: SourceFitSelection;
+  imageRoles?: ImageInputRole[];
   stopCurrent?: boolean;
 };
 
@@ -51,7 +52,13 @@ export function useTurnSending({
       void client.invalidateQueries({ queryKey: ["edited-branches", chatId] });
     }, [client]);
     const send = useMutation({
-      mutationFn: ({ chatId, id, text, mode, artifacts, settings, references, outputCount, promptSource, sourceFit, stopCurrent }: SendTurnVariables) => {
+      mutationFn: ({ chatId, id, text, mode, artifacts, settings, references, outputCount, promptSource, sourceFit, imageRoles, stopCurrent }: SendTurnVariables) => {
+        if (imageRoles !== undefined) {
+          if (stopCurrent) return api.stopAndSendTurn(chatId, text, mode, artifacts, settings, id,
+            references, outputCount, promptSource, requestTurnConfirmation, sourceFit, imageRoles);
+          return api.sendTurn(chatId, text, mode, artifacts, settings, id, "turns", undefined,
+            references, outputCount, promptSource, requestTurnConfirmation, sourceFit, undefined, imageRoles);
+        }
         // A fitted canvas rides as the last argument only when there is one, so
         // an ordinary send keeps exactly the call it always made.
         const fit = sourceFit ? [sourceFit] as const : [] as const;

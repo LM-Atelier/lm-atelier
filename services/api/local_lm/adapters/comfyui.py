@@ -30,6 +30,7 @@ from ..filesystem_links import (
     remove_directory_entry,
     remove_entry,
 )
+from ..media_image_bindings import validate_image_bindings
 from ..network import shared_tls_context
 from ..output_origin import stated_origin
 from ..schemas import EngineCapabilities
@@ -216,6 +217,7 @@ class ComfyUIAdapter:
                 Operation.IMAGE_TO_VIDEO.value,
             ],
             input_modalities=["text", "image"],
+            image_slot_bindings=True,
             formats=["safetensors", "comfy-workflow"],
             devices=[],
             streaming=False,
@@ -414,6 +416,13 @@ class ComfyUIAdapter:
             and not request.input_paths
         ):
             raise ValueError(f"{request.operation} requires a conditioning image")
+        bindings = (
+            validate_image_bindings(
+                request.workflow, request.input_image_bindings, len(request.input_paths)
+            )
+            if request.input_image_bindings is not None
+            else None
+        )
         parameters = {
             "prompt": request.prompt,
             "negative_prompt": request.negative_prompt or "",
@@ -425,7 +434,16 @@ class ComfyUIAdapter:
             # the resolved local path never leaves this adapter.
             parameters["mask"] = mask_reference
         uploaded = await self._upload_inputs(request)
-        if uploaded:
+        if bindings is not None:
+            if len(uploaded) != len(request.input_paths):
+                raise ValueError("The workflow image bindings do not match the uploaded images")
+            for name, indices in bindings.items():
+                parameters[name] = (
+                    [uploaded[index] for index in indices]
+                    if name == "input_images"
+                    else uploaded[indices[0]]
+                )
+        elif uploaded:
             parameters["input_image"] = uploaded[0]
             parameters["input_images"] = uploaded
             parameters.update(

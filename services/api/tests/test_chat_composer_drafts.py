@@ -113,7 +113,9 @@ async def test_a_saved_draft_comes_back_whole(client: AsyncClient, settings: Set
     assert read["revision"] == 1
     assert read["text"] == "A wider path between the beds"
     assert read["mode"] == "image" and read["output_count"] == 3
-    assert read["attachments"] == [{"artifact_id": picture, "kind": "image", "origin": "generated"}]
+    assert read["attachments"] == [
+        {"artifact_id": picture, "kind": "image", "origin": "generated", "image_role": None}
+    ]
     assert read["mentions"] == [{"reference_subject_id": "refsub-garden", "mention_slug": "garden"}]
     assert read["template_settings"] == {"name": "Soft light", "settings": {"steps": 20}}
     assert read["prompt_source"] == SOURCE
