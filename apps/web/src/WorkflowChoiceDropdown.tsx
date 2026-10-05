@@ -25,9 +25,17 @@ export function WorkflowChoiceDropdown({ id, label, browseLabel, value, options,
   const visible = options.filter(option => !query || option.searchResult || option.label.toLowerCase().includes(query));
   const enabled = visible.filter(option => !option.disabled);
   const activeIndex = visible.findIndex(option => option.value === active && !option.disabled);
+  const shown = unavailableText ?? (open ? browse.search : selectedLabel);
   useEffect(() => {
     if (open && activeIndex >= 0) document.getElementById(`${listId}-${activeIndex}`)?.scrollIntoView?.({ block: "nearest" });
   }, [open, activeIndex, listId]);
+  useEffect(() => {
+    // After a choice or Escape the list closes with focus kept in the box,
+    // which then shows the chosen workflow's name. Selected, that name is
+    // replaced by the next keystroke, which starts a new search instead of
+    // being added to the end of it.
+    if (!open && document.activeElement === input.current) input.current?.select();
+  }, [open, shown]);
   const close = () => { setOpen(false); setActive(null); browse.setSearch(""); };
   const choose = (next: string) => {
     if (blocked || !enabled.some(option => option.value === next)) return;
@@ -42,7 +50,7 @@ export function WorkflowChoiceDropdown({ id, label, browseLabel, value, options,
       <input ref={input} id={id} role="combobox" aria-autocomplete="list" aria-expanded={expanded}
         aria-controls={expanded ? listId : undefined} aria-activedescendant={expanded && activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined}
         aria-disabled={blocked} readOnly={blocked} autoComplete="off" maxLength={500}
-        value={unavailableText ?? (open ? browse.search : selectedLabel)} placeholder={open ? "Type to search…" : selectedLabel}
+        value={shown} placeholder={open ? "Type to search…" : selectedLabel}
         onFocus={event => event.currentTarget.select()}
         onClick={() => { if (!blocked) setOpen(true); }}
         onChange={event => { if (!blocked) { browse.setSearch(event.target.value); setOpen(true); setActive(null); } }}
