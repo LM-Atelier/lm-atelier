@@ -181,7 +181,9 @@ it("keeps off-page stop controls and exposes older pending search decisions", as
 it("uses the sidebar for the chat name and keeps only history controls above its transcript", async () => {
   const client = open();
   const conversation = await screen.findByRole("region", { name: chat.title });
-  expect(screen.queryByRole("heading", { name: chat.title })).not.toBeInTheDocument();
+  // The title is not shown above the transcript; a visually hidden heading
+  // names the conversation for heading navigation.
+  expect(screen.getByRole("heading", { level: 1, name: chat.title })).toHaveClass("sr-only");
   expect(screen.getByRole("button", { name: chat.title })).toBeVisible();
   expect(conversation.querySelector(".chat-header")).toBeNull();
   expect(screen.queryByText("Unfiled chat")).not.toBeInTheDocument();

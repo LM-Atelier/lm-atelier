@@ -183,3 +183,14 @@ it("labels derived use cases in the family browser", async () => {
   await screen.findByText("Derived from model metadata");
   await waitFor(() => expect(screen.getAllByText("Derived from model metadata")).toHaveLength(1));
 });
+
+it("heads the family list so each family's heading sits one level below it", async () => {
+  wrap(<WorkflowsView />);
+  const list = await screen.findByRole("heading", { level: 2, name: "Workflow families" });
+  expect(list).toHaveClass("sr-only");
+  const families = await screen.findAllByRole("heading", { level: 3 });
+  expect(families.length).toBeGreaterThan(0);
+  for (const heading of families) {
+    expect(list.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  }
+});
