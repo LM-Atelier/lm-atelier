@@ -9,6 +9,7 @@ from unittest.mock import DEFAULT, Mock
 
 import pytest
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import Update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -58,7 +59,8 @@ async def test_a_contended_heartbeat_retries_and_preserves_the_current_claim(
             assert job.heartbeat_at is not None and job.heartbeat_at.replace(tzinfo=UTC) > before
             assert job.claim_expires_at is not None
         _change("contended-heartbeat", claim_owner="replacement")
-        await asyncio.wait_for(heartbeat, timeout=2)
+        # It ends at its next renewal, a database write, which a loaded machine can slow.
+        await asyncio.wait_for(heartbeat, timeout=PATIENCE_SECONDS)
         with SessionLocal() as session:
             job = session.get(Job, "contended-heartbeat")
             assert job is not None and job.claim_owner == "replacement"
@@ -98,7 +100,9 @@ async def test_lease_cleanup_preserves_the_execution_outcome_after_heartbeat_fai
 
     task = asyncio.create_task(execute())
     try:
-        await asyncio.wait_for(failed.wait(), timeout=2)
+        # The lease claims its job in the database before the heartbeat starts, and on a
+        # loaded machine that alone can outlast a short bound.
+        await asyncio.wait_for(failed.wait(), timeout=PATIENCE_SECONDS)
         if outcome == "cancelled":
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
