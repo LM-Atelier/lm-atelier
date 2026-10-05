@@ -30,6 +30,7 @@ import { SettingsLibraryPages } from "./SettingsLibraryPages";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { StorageSummary } from "./StorageSummary";
 import { RestoreFailureNotice } from "./RestoreFailureNotice";
+import { ScheduledRestoreNotice } from "./ScheduledRestoreNotice";
 import { RecentlyDeleted } from "./RecentlyDeleted";
 import { ThirdPartyNotices } from "./ThirdPartyNotices";
 import { OutputShapeSettings } from "./OutputShapeSettings";
@@ -474,9 +475,9 @@ export function SettingsView({ engines, appearance, destinationId, onDestination
         <p className="muted">State backups save chats, settings, and library records, but exclude image and video files. Choose Back up with media to save those files too.</p>
         <RestoreFailureNotice />
         {backups.data?.some((backup) => backup.restore_pending) && (
-          <div className="callout success" role="status">
-            Restore scheduled. Restart LM Atelier to apply the selected backup.
-          </div>
+          <ScheduledRestoreNotice
+            onCancelled={() => setBackupFeedback({ kind: "success", message: "Restore cancelled. The current data stays." })}
+          />
         )}
         {backups.data?.length ? (
           <div className="backup-list">
