@@ -13,7 +13,7 @@ from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
 from local_lm.db import Base
 from local_lm.domain import ArtifactKind
-from local_lm.filesystem_links import rename_entry
+from local_lm.filesystem_links import open_entry, rename_entry
 from local_lm.models import Artifact
 
 PAYLOAD = b"bytes that already exist in the store"
@@ -174,7 +174,7 @@ def test_the_reservation_is_held_before_the_bytes_appear_not_merely_before_the_r
     with Session(engine) as session:
         returned = store.ingest_bytes(
             session,
-            PAYLOAD,
+            PAYLOAD + b" new publication",
             kind=ArtifactKind.IMAGE,
             media_type="image/png",
         )
@@ -190,3 +190,36 @@ def test_the_reservation_is_held_before_the_bytes_appear_not_merely_before_the_r
         row = session.get(Artifact, returned_id)
         assert row is not None
         assert store.resolve(row).is_file()
+
+
+def test_the_reservation_protects_an_existing_artifact_before_reuse(
+    store_and_engine: tuple[ArtifactStore, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, engine = store_and_engine
+    _make_sweepable(store, engine)
+    real_open = open_entry
+    excluded_before_reuse: list[bool] = []
+
+    def open_then_probe(*args: Any, **kwargs: Any) -> int | None:
+        descriptor = real_open(*args, **kwargs)
+        if descriptor is not None:
+            with Session(engine) as sweeper:
+                try:
+                    store.cleanup_retention(
+                        sweeper, retention_days=0, temporary_hours=0, dry_run=False
+                    )
+                    sweeper.commit()
+                    excluded_before_reuse.append(False)
+                except OperationalError:
+                    sweeper.rollback()
+                    excluded_before_reuse.append(True)
+        return descriptor
+
+    monkeypatch.setattr(artifacts_module, "open_entry", open_then_probe)
+    with Session(engine) as session:
+        repeated = store.ingest_bytes(
+            session, PAYLOAD, kind=ArtifactKind.IMAGE, media_type="image/png"
+        )
+        session.commit()
+        assert excluded_before_reuse == [True]
+        assert store.resolve(repeated).is_file()
