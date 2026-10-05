@@ -25,6 +25,7 @@ from local_lm.models import (
     Chat,
     Message,
     MessagePart,
+    ModelInstall,
     ModelProfile,
     Run,
     WorkPlan,
@@ -357,3 +358,53 @@ async def test_a_change_is_not_drafted_as_a_recipe_for_making_pictures(
 
     assert response.status_code == 409, response.text
     assert response.json()["code"] == "generation-experiment-recipe-not-for-changes"
+
+
+async def test_a_choice_that_changed_the_picture_is_kept_as_a_studio_recipe(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, light, heavier = await _two_strengths(app, client, monkeypatch)
+    revision, profile = heavier["workflow_revision_id"], heavier["profile_id"]
+    # A run names its model through the model's install, in a chat as here.
+    with SessionLocal() as session:
+        install = ModelInstall(
+            name="Edit fixture base",
+            role="image",
+            engine="comfyui",
+            local_path="C:/managed/edit-fixture",
+            manifest_json={},
+            active=True,
+        )
+        session.add(install)
+        session.flush()
+        stored = session.get(ModelProfile, profile)
+        assert stored is not None
+        stored.model_install_id = install.id
+        session.commit()
+    accepted = await _accepted(client, _edit(source, light, heavier, prompt="Warmer evening light"))
+    async with app.state.services.scheduler.lease("primary"):
+        response = await _start(client, accepted)
+        assert response.status_code == 202, response.text
+    second = response.json()["arms"][1]["trials"][0]["run_id"]
+
+    # The words are the comparison's own, asked of every choice, though no message holds them.
+    draft = await client.get(f"/api/runs/{second}/edit-recipe-draft")
+    assert draft.status_code == 200, draft.text
+    assert draft.json() == {"run_id": second, "instruction": "Warmer evening light"}
+
+    saved = await client.post(
+        "/api/edit-templates",
+        json={
+            "name": "Heavier touch",
+            "instruction": "Warmer evening light",
+            "from_run_id": second,
+        },
+    )
+
+    assert saved.status_code == 201, saved.text
+    template = saved.json()
+    assert (template["workflow_revision_id"], template["model_profile_id"]) == (revision, profile)
+    assert template["mask_mode"] == "none"
+    # That choice's own strength, without the comparison's seed or its one-picture count.
+    assert template["settings_json"]["denoise"] == 0.55
+    assert not {"seed", "batch_size"} & set(template["settings_json"])

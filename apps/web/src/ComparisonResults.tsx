@@ -104,7 +104,8 @@ export function ComparisonResults({ experimentId, onStart, starting, startError,
         job={(jobs.data ?? []).find((job) => job.id === trial.job_id)} />)}
       {/* Kept once its picture is seen: the reason to keep a setup is what it made. */}
       {arm.trials.some((trial) => trial.status === "complete")
-        && <ComparisonKeepRecipe experimentId={experiment.id} arm={arm} onOpenChat={onOpenChat} />}
+        && <ComparisonKeepRecipe experimentId={experiment.id} operation={experiment.operation} arm={arm}
+          onOpenChat={onOpenChat} />}
       <ComparisonChoiceSummary arm={arm} seed={arm.trials[0]?.seed ?? null} />
     </section>)}</div>}
     {/* Said once there is a picture to say it of. */}

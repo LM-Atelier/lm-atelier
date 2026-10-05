@@ -3,8 +3,10 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApiError, api } from "./api";
 import { ComparisonKeepRecipe } from "./ComparisonKeepRecipe";
-import type { ExperimentArm, GenerationExperimentRecipeDraft } from "./generationExperimentTypes";
-import type { Chat, EngineCapabilities, SettingField, WorkflowRevisionSchema } from "./types";
+import type {
+  ExperimentArm, ExperimentOperation, ExperimentTrial, GenerationExperimentRecipeDraft,
+} from "./generationExperimentTypes";
+import type { Chat, EditTemplate, EngineCapabilities, SettingField, WorkflowRevisionSchema } from "./types";
 import type { WorkflowUseCasePreset } from "./workflowUseCaseTypes";
 
 vi.mock("./api", async (importOriginal) => {
@@ -22,6 +24,8 @@ vi.mock("./api", async (importOriginal) => {
       updateChat: vi.fn(),
       setChatWorkflowSelection: vi.fn(),
       setWorkflowUseCaseChoice: vi.fn(),
+      editRecipeDraft: vi.fn(),
+      createEditTemplate: vi.fn(),
     },
   };
 });
@@ -36,7 +40,9 @@ const ENGINE: EngineCapabilities = { engine: "mock", version: "1", roles: ["imag
   settings: [field("steps", "Steps", 20), field("width", "Width", 1024), field("height", "Height", 1024)] };
 const SCHEMA: WorkflowRevisionSchema = { workflow_id: "w2", revision_id: "revision-b", operation: "text_to_image",
   input_schema_json: { properties: {} } };
-const ARM = { id: "garm_b", ordinal: 2, label: "More steps", profile_id: "profile-b" } as unknown as ExperimentArm;
+const TRIAL: ExperimentTrial = { id: "gtrial_b", ordinal: 1, seed: 7, state: "started", work_step_id: "step_b", run_id: "run_b",
+  job_id: "job_b", status: "complete" };
+const ARM = { id: "garm_b", ordinal: 2, label: "More steps", profile_id: "profile-b", trials: [TRIAL] } as unknown as ExperimentArm;
 const DRAFT: GenerationExperimentRecipeDraft = {
   experiment_id: "gexp_one", arm_ordinal: 2, use_case: "image_generation", name: "More steps",
   settings_json: { steps: 20, width: 1024, height: 1024 },
@@ -47,12 +53,12 @@ const DRAFT: GenerationExperimentRecipeDraft = {
 const SAVED: WorkflowUseCasePreset = { id: "wfuc_saved", name: "More steps", use_case: "image_generation",
   settings_json: { steps: 20, width: 1024, height: 1024 }, enabled: true, is_default: false, builtin: false };
 
-function show(onOpenChat = vi.fn()) {
+function show(onOpenChat = vi.fn(), operation: ExperimentOperation = "text_to_image", arm = ARM, open = true) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(<QueryClientProvider client={client}>
-    <ComparisonKeepRecipe experimentId="gexp_one" arm={ARM} onOpenChat={onOpenChat} />
+    <ComparisonKeepRecipe experimentId="gexp_one" operation={operation} arm={arm} onOpenChat={onOpenChat} />
   </QueryClientProvider>);
-  fireEvent.click(screen.getByRole("button", { name: "Keep as a recipe" }));
+  if (open) fireEvent.click(screen.getByRole("button", { name: "Keep as a recipe" }));
   return onOpenChat;
 }
 
@@ -142,4 +148,27 @@ it("says why when no draft can be made from the choice", async () => {
 
   expect(await within(dialog).findByText("The workflow this choice ran on cannot take a recipe now.")).toBeInTheDocument();
   expect(within(dialog).queryByRole("button", { name: "Save recipe" })).toBeNull();
+});
+
+it("keeps a choice that changed a picture as an Image Studio recipe, read from the run that made its picture", async () => {
+  vi.mocked(api.editRecipeDraft).mockResolvedValue({ run_id: "run_b", instruction: "Warmer evening light" });
+  vi.mocked(api.createEditTemplate).mockResolvedValue({ id: "tmpl_1", name: "Heavier touch" } as EditTemplate);
+  show(vi.fn(), "image_to_image");
+  const dialog = await screen.findByRole("dialog", { name: "Keep this edit as a recipe" });
+
+  expect(await within(dialog).findByRole("textbox", { name: "Words" })).toHaveValue("Warmer evening light");
+  expect(api.editRecipeDraft).toHaveBeenCalledWith("run_b", expect.anything());
+  expect(api.generationExperimentRecipeDraft).not.toHaveBeenCalled();
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "Recipe name" }), { target: { value: "Heavier touch" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Save recipe" }));
+
+  await screen.findByText("Saved the recipe Heavier touch. Image Studio offers it with its recipes.");
+  expect(api.createEditTemplate).toHaveBeenCalledExactlyOnceWith(
+    { name: "Heavier touch", instruction: "Warmer evening light", from_run_id: "run_b" });
+});
+
+it("offers no recipe for a changed picture until that choice's picture is made", () => {
+  show(vi.fn(), "image_to_image", { ...ARM, trials: [{ ...TRIAL, status: "running" }] }, false);
+
+  expect(screen.queryByRole("button", { name: "Keep as a recipe" })).toBeNull();
 });
