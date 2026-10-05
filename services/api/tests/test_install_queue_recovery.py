@@ -61,6 +61,11 @@ async def test_restart_recovers_activations_without_reopening_a_paused_lane(
         session.commit()
     assert control("pause_after_current", 0).dispatch_state == "draining"
     async with app.router.lifespan_context(app):
+        # The retention sweep runs after startup and holds the database writer
+        # while a batch works, on a loaded machine for longer than the queue
+        # control below may wait. Start from the settled store, as the client
+        # fixture does.
+        await asyncio.wait_for(app.state.retention_sweep, timeout=30)
         async with asyncio.timeout(10):
             while True:
                 with SessionLocal() as session:
