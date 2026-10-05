@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import get_args
 
 from pydantic import ValidationError
@@ -104,14 +105,21 @@ def _project(
         return None
 
 
-def chat_searches(session: Session, chat_id: str) -> list[WebSearchOut]:
-    rows = session.execute(
+def chat_searches(
+    session: Session, chat_id: str, *, message_ids: Sequence[str] | None = None
+) -> list[WebSearchOut]:
+    if message_ids is not None and not message_ids:
+        return []
+    query = (
         select(Run, WebSearchProposal, Job.status)
         .outerjoin(WebSearchProposal, WebSearchProposal.run_id == Run.id)
         .outerjoin(Job, Job.id == WebSearchProposal.job_id)
         .where(Run.chat_id == chat_id, Run.operation == "text")
         .order_by(Run.created_at, Run.id)
     )
+    if message_ids is not None:
+        query = query.where(Run.assistant_message_id.in_(message_ids))
+    rows = session.execute(query)
     result = []
     for run, proposal, status in rows:
         item = _project(run, proposal, status)
