@@ -5,7 +5,7 @@ import ipaddress
 import os
 import socket
 import ssl
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Literal
@@ -36,17 +36,28 @@ def shared_tls_context(*, trust_environment: bool = True) -> ssl.SSLContext:
     )
 
 
-OutboundPurpose = Literal["web-page", "web-search"]
+OutboundPurpose = Literal["web-page", "web-search", "model-catalog"]
+_WEB_PURPOSES: frozenset[OutboundPurpose] = frozenset({"web-page", "web-search"})
+RefusalCode = Literal["network-refused", "network-host-refused", "network-address-refused"]
 
 
 class OutboundRefused(Exception):
     """An outbound request this installation does not allow, refused before any lookup."""
 
-    def __init__(
-        self,
-        code: Literal["network-refused", "network-host-refused", "network-address-refused"],
-    ) -> None:
+    def __init__(self, code: RefusalCode) -> None:
         super().__init__(code)
+        self.code = code
+
+
+class OutboundRequestRefused(httpx.RequestError):
+    """The same refusal, raised as one of httpx's request errors.
+
+    A client whose callers already treat httpx's request errors as a request
+    that did not get through needs nothing new to handle a refused one.
+    """
+
+    def __init__(self, code: RefusalCode, *, request: httpx.Request) -> None:
+        super().__init__(code, request=request)
         self.code = code
 
 
@@ -54,9 +65,10 @@ class OutboundRefused(Exception):
 class OutboundPolicy:
     """Which outbound purposes this installation allows, read again at every use.
 
-    Only the web purposes exist so far, and they follow the installation's web
-    access switch. Reading it at every use, not once, is what lets a switch
-    turned off in the middle of a request stop that request's next hop.
+    The web purposes follow the installation's web access switch. Reading it
+    at every use, not once, is what lets a switch turned off in the middle of a
+    request stop that request's next hop. Nothing turns the model catalog off
+    yet, so it is always allowed, but it is asked all the same.
     """
 
     web_access_enabled: Callable[[], bool]
@@ -66,18 +78,55 @@ class OutboundPolicy:
         return cls(lambda: settings.web_access_enabled is True)
 
     def allows(self, purpose: OutboundPurpose) -> bool:
-        return self.web_access_enabled()
+        if purpose in _WEB_PURPOSES:
+            return self.web_access_enabled()
+        return True
 
     def lease(
-        self, purpose: OutboundPurpose, *, hosts: frozenset[str] | None = None
+        self,
+        purpose: OutboundPurpose,
+        *,
+        hosts: frozenset[str] | None = None,
+        domains: frozenset[str] | None = None,
     ) -> OutboundLease:
-        """Permission for one purpose, to the given hosts or to any host its caller admits."""
+        """Permission for one purpose, to the given hosts or to any host its caller admits.
+
+        ``domains`` admits each one and every name below it as well.
+        """
 
         if not self.allows(purpose):
             raise OutboundRefused("network-refused")
+        if hosts is None and domains is None:
+            return OutboundLease(self, purpose, None)
         return OutboundLease(
-            self, purpose, None if hosts is None else frozenset(map(_host_key, hosts))
+            self,
+            purpose,
+            frozenset(map(_host_key, hosts or ())),
+            frozenset(map(_host_key, domains or ())),
         )
+
+    def request_check(
+        self,
+        purpose: OutboundPurpose,
+        *,
+        hosts: frozenset[str] | None = None,
+        domains: frozenset[str] | None = None,
+    ) -> Callable[[httpx.Request], Awaitable[None]]:
+        """An httpx request hook that asks for a lease before every request a client sends.
+
+        httpx runs it before each hop, a redirect included, and before the hop's
+        host is looked up or a proxy is reached. The lease is asked for again at
+        every request, so a client can be made before this purpose is allowed.
+        A refusal is raised as :class:`OutboundRequestRefused`.
+        """
+
+        async def check(request: httpx.Request) -> None:
+            try:
+                self.lease(purpose, hosts=hosts, domains=domains).check(request.url.host)
+            except OutboundRefused as refused:
+                raise OutboundRequestRefused(refused.code, request=request) from refused
+
+        return check
 
 
 @dataclass(frozen=True)
@@ -87,11 +136,12 @@ class OutboundLease:
     policy: OutboundPolicy
     purpose: OutboundPurpose
     hosts: frozenset[str] | None
+    domains: frozenset[str] = frozenset()
 
     def check(self, host: str) -> None:
         if not self.policy.allows(self.purpose):
             raise OutboundRefused("network-refused")
-        if self.hosts is not None and _host_key(host) not in self.hosts:
+        if self.hosts is not None and not _named(_host_key(host), self.hosts, self.domains):
             raise OutboundRefused("network-host-refused")
 
     def resolver(self, base: Callable[..., Any] | None = None) -> Callable[..., Any]:
@@ -106,6 +156,24 @@ class OutboundLease:
             return (base or socket.getaddrinfo)(host, port, *args, **kwargs)
 
         return resolve
+
+
+def _named(key: str, hosts: frozenset[str], domains: frozenset[str]) -> bool:
+    if key in hosts or key in domains:
+        return True
+    # Only a name has names below it, and an address is never one of them,
+    # however its digits end.
+    if _is_address(key):
+        return False
+    return any(key.endswith("." + domain) for domain in domains if not _is_address(domain))
+
+
+def _is_address(key: str) -> bool:
+    try:
+        ipaddress.ip_address(key)
+    except ValueError:
+        return False
+    return True
 
 
 Address = ipaddress.IPv4Address | ipaddress.IPv6Address

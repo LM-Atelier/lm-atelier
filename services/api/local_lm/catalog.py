@@ -16,7 +16,7 @@ from .catalog_cache import CatalogCacheStore
 from .config import Settings
 from .domain import CompatibilityLevel
 from .gguf import automatic_mmproj_selection, gguf_identity_tokens
-from .network import shared_tls_context
+from .network import OutboundPolicy, shared_tls_context
 from .provider_descriptions import MAX_PROVIDER_DESCRIPTION_CHARS, normalize_provider_description
 from .schemas import CatalogModel, CatalogPage
 
@@ -44,6 +44,9 @@ _FILENAME_QUANTIZATION = re.compile(
 _PARAMETERS = re.compile(r"(?:^|[-_ ])(\d+(?:\.\d+)?)\s*([bmk])(?:$|[-_ ])", re.I)
 _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _CACHE_VERSION = 7
+# Hugging Face answers on its own name and sends a file's bytes from hosts
+# below its two domains, where its content delivery and storage live.
+_HUGGING_FACE_DOMAINS = frozenset({"huggingface.co", "hf.co"})
 
 
 class HuggingFaceCatalog:
@@ -61,6 +64,18 @@ class HuggingFaceCatalog:
             timeout=30,
             follow_redirects=True,
             verify=shared_tls_context(),
+            # Every request, each redirect included, is asked of the outbound
+            # policy before its host is looked up or a proxy is reached, and
+            # goes nowhere but Hugging Face's own hosts. A refusal is one of
+            # httpx's request errors, so it is handled as a request that did
+            # not get through: saved results where there are any.
+            event_hooks={
+                "request": [
+                    OutboundPolicy.from_settings(settings).request_check(
+                        "model-catalog", domains=_HUGGING_FACE_DOMAINS
+                    )
+                ]
+            },
         )
         self._cache = CatalogCacheStore(settings.catalog_cache_dir)
 
