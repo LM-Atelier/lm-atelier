@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import Session
 from test_comfy_registry_reviewed_wheel_metadata import _HEADERS, _review_metadata
@@ -348,6 +349,31 @@ async def test_local_verification_and_writes_leave_the_event_loop_thread(
     assert all(identity != event_loop_thread for identity in reads + writes)
 
 
+async def _until_held(entered: asyncio.Event, task: asyncio.Task[object]) -> None:
+    """Wait for staging to reach the held write, or say why it never did.
+
+    Getting there takes a database read and a file copy, well under a second
+    on an idle machine, so the suite's shared patience only decides how slow a
+    runner may be before a test about cancellation gives up before cancelling
+    anything. A stage that fails on the way fails here with its own error,
+    instead of leaving only a timeout behind.
+    """
+
+    held = asyncio.ensure_future(entered.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {held, task}, timeout=PATIENCE_SECONDS, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        held.cancel()
+    if held in done:
+        return
+    if task in done:
+        task.result()
+        raise AssertionError("Staging finished without reaching the held write")
+    raise AssertionError(f"Staging had not reached the held write after {PATIENCE_SECONDS:g}s")
+
+
 @pytest.mark.parametrize("during_manifest", [False, True])
 async def test_repeated_cancellation_drains_local_writes_before_cleanup(
     source_review_context: tuple[Session, ArtifactStore],
@@ -391,7 +417,7 @@ async def test_repeated_cancellation_drains_local_writes_before_cleanup(
         )
     )
     try:
-        await asyncio.wait_for(entered.wait(), timeout=5)
+        await _until_held(entered, task)
         task.cancel()
         await asyncio.sleep(0)
         task.cancel()
