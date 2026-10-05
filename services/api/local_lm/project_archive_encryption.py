@@ -11,6 +11,8 @@ ever holds the encrypted form.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import hashlib
 import io
@@ -18,7 +20,7 @@ import logging
 import os
 import uuid
 from pathlib import Path
-from typing import IO, BinaryIO, cast
+from typing import IO, TYPE_CHECKING, BinaryIO, cast
 
 from .api_errors import ApiError, api_error
 from .filesystem_links import (
@@ -33,8 +35,14 @@ from .filesystem_links import (
 )
 from .portable_archive_v1 import MAGIC, ArchiveKind, ArchiveRefused, open_archive, write_archive
 
+if TYPE_CHECKING:
+    from starlette.requests import HTTPConnection
+
 STAGING_PREFIX = "archive-staging-"
 STAGING_FOLDER = "archive-staging"
+# Where an upload whose body is the encrypted file itself carries its passphrase,
+# base64 encoded, so the body can stream to disk untouched.
+PASSPHRASE_HEADER = "x-archive-passphrase"
 _READ_BYTES = 1024 * 1024
 logger = logging.getLogger("local_lm")
 
@@ -120,6 +128,22 @@ def private_staging(export_dir: Path) -> Path:
 def archive_api_error(refused: ArchiveRefused) -> ApiError:
     status, code, message = _REFUSALS[refused.code]
     return api_error(status, code, message)
+
+
+def passphrase_from_header(request: HTTPConnection) -> bytes:
+    """The passphrase an upload carries in ``PASSPHRASE_HEADER``, or a refusal."""
+
+    value = request.headers.get(PASSPHRASE_HEADER)
+    if not value:
+        raise api_error(
+            422,
+            "archive-passphrase-required",
+            "This file is encrypted. Enter its passphrase to open it.",
+        )
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise archive_api_error(ArchiveRefused("archive-passphrase-invalid")) from exc
 
 
 class _Digest:

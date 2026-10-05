@@ -51,6 +51,22 @@ A wrong passphrase and a damaged archive deliberately share one refusal. A key t
 
 Opening releases each chunk as soon as it is authenticated. Only the final check proves that nothing was cut off, so decrypted data is written somewhere it can be discarded, and kept only when opening succeeds.
 
+## What a backup archive holds, version 1
+
+Opening a backup archive gives one stream, laid out exactly as follows, so that a later version can still read a backup made by this one:
+
+1. the eight bytes `LMABKUP\0`;
+2. the header's length, four bytes, big-endian, from 1 to 65536;
+3. the header, that many bytes of UTF-8 JSON;
+4. the database copy, exactly the header's `database.size_bytes`;
+5. the media zip, exactly the header's `media.size_bytes`, when `media` is not null;
+
+and nothing after it. The header has exactly these keys: `format` (`"lm-atelier-backup"`), `version` (1), `created_at`, `app_version`, `schema_revision`, `database` and `media`. `database` is `{"size_bytes", "sha256"}`; `media` is the same, or null for a backup without media. The media zip is the one a recovery backup with media has.
+
+The header lets a damaged stream be refused early; it is not trusted. Each part must match its size and SHA-256, the database must pass the same integrity checks a recovery backup does, its schema revision must be the header's, and the media zip must match the database's records exactly. A backup that fails any of these is refused as `backup-invalid`.
+
+The stream is never held whole. While a backup is made, its plaintext exists only in a staging folder private to the account, and it is deleted once the sealed file has opened again, part by part, to exactly what was written. A backup is checked the same way: opened into that folder, checked, and deleted. Nothing is restored.
+
 ## Verification
 
 - **Spec conformance.** Tests decode an archive by the published construction alone: plain Argon2id, HKDF-SHA-512 and AES-256-GCM, without the library's own decoder.

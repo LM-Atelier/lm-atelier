@@ -60,6 +60,7 @@ CHECKED_CONTRACTS = {
     "ArtifactLibraryItem": "ArtifactLibraryItem",
     "ArtifactStorageInfo": "ArtifactStorageInfo",
     "BackupInfo": "BackupInfo",
+    "EncryptedBackupCheck": "EncryptedBackupCheck",
     "BoundWorkflowAsset": "BoundWorkflowAssetOut",
     "CatalogDetail": "CatalogDetail",
     "CatalogInstallMatches": "CatalogInstallMatches",

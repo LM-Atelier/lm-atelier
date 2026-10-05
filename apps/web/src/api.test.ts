@@ -903,6 +903,31 @@ it("uses the recovery and unsuccessful-job action contracts", async () => {
   ]);
 });
 
+it("keeps an encrypted backup's passphrase out of the address, and sends the file to check as it is", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ url: "/api/artifacts/backup-1/content" }), { status: 201 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ artifact_count: 0 }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const file = new File([new Uint8Array([1, 2, 3])], "workspace.lm-atelier.encrypted");
+
+  const { api } = await import("./api");
+  await api.createEncryptedBackup(true, "pässphrase");
+  await api.checkEncryptedBackup(file, "pässphrase");
+
+  const [[createUrl, create], [checkUrl, check]] = fetchMock.mock.calls.slice(1);
+  expect([createUrl, create?.method]).toEqual(["/api/backups/encrypted", "POST"]);
+  expect(JSON.parse(String(create?.body))).toEqual({ passphrase: "pässphrase", include_media: true });
+  expect(new Headers(create?.headers).get("content-type")).toBe("application/json");
+  expect([checkUrl, check?.method]).toEqual(["/api/backups/encrypted/check", "POST"]);
+  expect(check?.body).toBe(file);
+  const headers = new Headers(check?.headers);
+  expect(headers.get("content-type")).toBe("application/octet-stream");
+  // Base64 of the passphrase's UTF-8 bytes, since a header carries only Latin-1.
+  expect(headers.get("x-archive-passphrase")).toBe("cMOkc3NwaHJhc2U=");
+  expect(headers.get("x-local-lm-csrf")).toBe("csrf");
+});
+
 it("requests transactional profile cleanup when deleting an installed model", async () => {
   const fetchMock = vi.fn()
     .mockResolvedValueOnce(

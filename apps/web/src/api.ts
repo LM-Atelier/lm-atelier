@@ -14,6 +14,7 @@ import type { WorkflowRecipeTarget, WorkflowUseCase, WorkflowUseCaseChoice, Work
 import type { EnlargementPreview } from "./studioEnlargement";
 import type { EditRecipeDraft, OutputRecipeDraft } from "./recipeDraftTypes";
 import type { BackupRestoreState } from "./backupRestoreTypes";
+import type { EncryptedBackupCheck } from "./backupArchiveTypes";
 import { buildTurnRequest, SOURCE_FIT_BINDING_ERROR, type TurnRequestPayload } from "./turnRequest";
 import { defaultOutputShapes } from "./outputShapePreferences";
 export { buildTurnRequest } from "./turnRequest";
@@ -1185,6 +1186,19 @@ export const api = {
     request<BackupInfo>(`/api/backups/${encodeURIComponent(name)}/restore`, { method: "POST" }),
   deleteBackup: (name: string) =>
     request<void>(`/api/backups/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  createEncryptedBackup: (includeMedia: boolean, passphrase: string) =>
+    request<{ url: string }>("/api/backups/encrypted", {
+      method: "POST",
+      // In the body, never the address, so the passphrase stays out of logs and history.
+      body: JSON.stringify({ passphrase, include_media: includeMedia }),
+    }),
+  checkEncryptedBackup: (file: File, passphrase: string) =>
+    request<EncryptedBackupCheck>("/api/backups/encrypted/check", {
+      method: "POST",
+      // The file is the body, sent from disk rather than read into memory first.
+      headers: { "content-type": "application/octet-stream", "x-archive-passphrase": base64Text(passphrase) },
+      body: file,
+    }),
   exportProject: (projectId: string, includeMedia = true, passphrase?: string) =>
     request<{ url: string }>(
       `/api/projects/${projectId}/export?${new URLSearchParams({ include_media: String(includeMedia) })}`,

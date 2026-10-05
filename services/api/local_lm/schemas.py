@@ -3874,6 +3874,25 @@ class BackupRestoreStateOut(ApiModel):
     failed_at: datetime | None = None
 
 
+class EncryptedBackupRequest(ApiModel):
+    """An encrypted backup's options, in its body so a passphrase never travels in an address."""
+
+    passphrase: str = Field(min_length=1, max_length=1024)
+    include_media: bool = False
+
+
+class EncryptedBackupCheck(ApiModel):
+    """What an encrypted backup holds, once it has opened and passed a backup's checks."""
+
+    created_at: datetime
+    app_version: str
+    schema_revision: str
+    database_size_bytes: int
+    media_included: bool
+    media_size_bytes: int | None = None
+    artifact_count: int
+
+
 def _utc_instant(value: datetime) -> str:
     """SQLite keeps these naive and they are UTC; say so at the browser boundary."""
 
