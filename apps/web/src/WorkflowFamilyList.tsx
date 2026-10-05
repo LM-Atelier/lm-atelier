@@ -31,6 +31,8 @@ export function WorkflowFamilyList({ selectedId, onSelect, includeArchived, onIn
   const other = showUngrouped ? ungrouped.data ?? [] : [];
   const update = (value: Partial<WorkflowLibraryFilters>) => setFilters(previous => ({ ...previous, ...value }));
   return <div className="workflow-family-browser">
+    {/* Each family card is a third-level heading under this one. */}
+    <h2 className="sr-only">Workflow families</h2>
     <div className="workflow-family-filters">
       <label>Search workflow families
         <input type="search" value={filters.search} maxLength={500}

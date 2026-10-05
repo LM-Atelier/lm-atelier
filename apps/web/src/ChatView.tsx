@@ -1,7 +1,7 @@
 import { ChatSearchConsent } from "./ChatSearchConsent";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Bot, LoaderCircle, MessageSquare, Sparkles } from "lucide-react";
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { TranscriptReadControls, TranscriptReadFailure } from "./TranscriptReadControls";
 import { useChatMessagePages } from "./useChatMessagePages";
 import { EditedBranchCards } from "./EditedBranchCards";
@@ -68,6 +68,7 @@ export function ChatView({
     edited.preview?.branch_head_message_id ?? null);
   const endRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const headingId = useId();
   useVisibleChatActivity(messagesRef, chat?.id);
   const followMessages = useRef(true);
   const olderScroll = useRef<{ height: number; top: number } | null>(null);
@@ -182,7 +183,10 @@ export function ChatView({
     }),
   );
   return (
-    <section className="chat-view" aria-label={chat.title}>
+    <section className="chat-view" aria-labelledby={headingId}>
+      {/* The title is shown in the sidebar, not above the transcript; this
+          heading keeps the conversation findable by heading navigation. */}
+      <h1 id={headingId} className="sr-only">{chat.title}</h1>
       {/* Reported here because the global list belongs to a component the
           transcript cannot reach. */}
       <FirstFailure of={[feedback, toggleFavorite]} />
