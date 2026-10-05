@@ -1178,6 +1178,7 @@ export const api = {
   backups: () => request<BackupInfo[]>("/api/backups"),
   backupRestoreState: () => request<BackupRestoreState>("/api/backups/restore-state"),
   dismissFailedRestore: () => request<void>("/api/backups/restore-state/dismiss", { method: "POST" }),
+  cancelRestore: () => request<void>("/api/backups/restore-state/cancel", { method: "POST" }),
   createBackup: (includeMedia = false) =>
     request<BackupInfo>(`/api/backups?${new URLSearchParams({ include_media: String(includeMedia) })}`, { method: "POST" }),
   verifyBackup: (name: string) =>
@@ -1196,6 +1197,12 @@ export const api = {
     request<EncryptedBackupCheck>("/api/backups/encrypted/check", {
       method: "POST",
       // The file is the body, sent from disk rather than read into memory first.
+      headers: { "content-type": "application/octet-stream", "x-archive-passphrase": base64Text(passphrase) },
+      body: file,
+    }),
+  restoreEncryptedBackup: (file: File, passphrase: string) =>
+    request<EncryptedBackupCheck>("/api/backups/encrypted/restore", {
+      method: "POST",
       headers: { "content-type": "application/octet-stream", "x-archive-passphrase": base64Text(passphrase) },
       body: file,
     }),
