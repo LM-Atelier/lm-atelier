@@ -2936,7 +2936,37 @@ async def create_chat(
 
 
 @router.get("/chats/{chat_id}", response_model=ChatDetail)
-async def get_chat(chat_id: str, session: ConversationSessionDep) -> ChatDetail:
+async def get_chat(
+    chat_id: str,
+    session: ConversationSessionDep,
+    limit: int | None = Query(default=None, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=2**63 - 1),
+) -> ChatDetail:
+    if limit is not None or offset:
+        chat = session.scalar(
+            select(Chat).where(
+                Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE, visible_chat(Chat.id)
+            )
+        )
+        if not chat:
+            raise api_error(404, "chat-not-found", "chat not found")
+        messages = list(
+            session.scalars(
+                select(Message)
+                .where(Message.chat_id == chat_id)
+                .order_by(Message.created_at, Message.id)
+                .limit(limit if limit is not None else 50)
+                .offset(offset)
+                .options(*_MESSAGE_WINDOW_LOADERS)
+            ).all()
+        )
+        return ChatDetail(
+            **_chat_outputs(session, [chat])[0].model_dump(),
+            messages=[MessageOut.model_validate(message) for message in messages],
+            web_searches=chat_searches(
+                session, chat_id, message_ids=[message.id for message in messages]
+            ),
+        )
     chat = session.scalar(
         select(Chat)
         .options(
