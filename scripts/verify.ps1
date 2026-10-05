@@ -142,6 +142,7 @@ try {
     Invoke-Checked "API tests" $Pytest @(
         "services/api/tests",
         "-q",
+        "--durations=20",
         "--basetemp=$PytestTemp",
         "-p",
         "no:cacheprovider",
