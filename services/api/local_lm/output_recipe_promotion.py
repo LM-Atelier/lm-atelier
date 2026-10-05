@@ -244,8 +244,9 @@ def edit_recipe_draft(session: Session, run_id: str) -> EditRecipeDraftOut:
     Not the run's standalone prompt: a follow-up in a chat carries the earlier
     picture's whole prompt there, which would ask every later edit for that
     picture again. An edit that was one step of a longer request keeps that
-    step's own words. Words taken back from the chat are never offered; the
-    person writes the recipe's own instead.
+    step's own words, and one made by a comparison keeps the words the
+    comparison asked every choice with. Words taken back from the chat are never
+    offered; the person writes the recipe's own instead.
     """
 
     run = session.get(Run, run_id)
@@ -265,6 +266,9 @@ def edit_recipe_draft(session: Session, run_id: str) -> EditRecipeDraftOut:
 def _typed_words(session: Session, run: Run) -> str:
     if prompt_taken_back(session, run):
         return ""
+    # A comparison's words travel in each of its runs, never as a message.
+    if isinstance(run.provenance_json.get("generation_experiment"), dict):
+        return run.standalone_prompt
     step = run.provenance_json.get("compiled_step")
     words = step.get("prompt") if isinstance(step, dict) else None
     if isinstance(words, str) and words.strip():
