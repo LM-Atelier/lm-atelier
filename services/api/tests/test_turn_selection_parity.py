@@ -246,10 +246,11 @@ def _matrix(engine: Engine) -> dict[str, str]:
         )
         create = _generic_revision(session, T2I, age=10)
         edit = _generic_revision(session, I2I, age=10)
-        compatible = {
-            profile.id: ensure_legacy_profile_workflow(session, profile)
-            for profile in (painter, sketcher, unplugged)
-        }
+        compatible: dict[str, WorkflowFamily] = {}
+        for profile in (painter, sketcher, unplugged):
+            family = ensure_legacy_profile_workflow(session, profile)
+            assert family is not None
+            compatible[profile.id] = family
         posters, (posters_create, posters_edit) = _family(session, "Posters", use_case="posters")
 
         ids = {

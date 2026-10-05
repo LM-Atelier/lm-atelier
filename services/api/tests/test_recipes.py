@@ -421,7 +421,10 @@ def test_a_template_recipe_refuses_any_other_template(contract: dict[str, object
     assert recipe
     template = recipe_workflow_template(recipe)
     assert template
-    pinned = {"workflow_template_id": template[0], "workflow_template_sha256": template[1]}
+    pinned: dict[str, object] = {
+        "workflow_template_id": template[0],
+        "workflow_template_sha256": template[1],
+    }
     api_module._assert_recipe_pins_hold(recipe, _resolved(recipe, pinned))
     with pytest.raises(ValueError, match="different workflow template"):
         api_module._assert_recipe_pins_hold(recipe, _resolved(recipe, contract))

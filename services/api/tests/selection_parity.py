@@ -34,7 +34,7 @@ from local_lm import orchestrator as orchestrator_module
 from local_lm.domain import Operation
 from local_lm.models import Chat, ModelProfile, WorkflowRevision
 from local_lm.orchestrator import ConversationOrchestrator
-from local_lm.workflow_selection import WorkflowFamilySelectionError
+from local_lm.workflow_selection import WorkflowFamilySelectionError, resolve_workflow_family
 
 #: What a turn does today.
 WORKFLOW = "workflow"
@@ -107,7 +107,7 @@ def compare_turn_selection(
     """Resolve one chat's turn both ways and classify the result."""
 
     asked: list[tuple[str | None, str | None]] = []
-    resolve = orchestrator_module.resolve_workflow_family
+    resolve = resolve_workflow_family
 
     def recording(*args: Any, **kwargs: Any) -> Any:
         try:
