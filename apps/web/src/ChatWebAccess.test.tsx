@@ -106,3 +106,29 @@ it("keeps the active permission focusable while ignoring duplicate saves", async
   await waitFor(() => expect(screen.getByRole("group", { name: "Permissions for this chat" }))
     .toHaveAttribute("aria-disabled", "false"));
 });
+
+const LABELS = ["Read links I include in messages", "Allow web searches", "Allow searches without asking again"];
+
+it("tells each control why it cannot be turned on while the installation keeps web access off", async () => {
+  await mount(off, { ...ready, installation_enabled: false });
+
+  for (const label of LABELS) {
+    expect(screen.getByLabelText(label)).toHaveAccessibleDescription("Web access is turned off for this installation.");
+  }
+});
+
+it("tells the search controls why they wait for the search provider, and not the link control", async () => {
+  await mount(off, { ...ready, configured: false, provider_endpoint: null, error_code: "search_not_configured" });
+
+  const reason = "Set up the search provider in Settings before enabling searches.";
+  expect(screen.getByLabelText("Allow web searches")).toHaveAccessibleDescription(reason);
+  expect(screen.getByLabelText("Allow searches without asking again")).toHaveAccessibleDescription(reason);
+  expect(screen.getByLabelText("Read links I include in messages")).toHaveAccessibleDescription("");
+});
+
+it("gives no reason to a control that can be turned on or that waits on another choice here", async () => {
+  await mount();
+
+  for (const label of LABELS) expect(screen.getByLabelText(label)).toHaveAccessibleDescription("");
+  expect(screen.getByLabelText("Allow searches without asking again")).toBeDisabled();
+});
