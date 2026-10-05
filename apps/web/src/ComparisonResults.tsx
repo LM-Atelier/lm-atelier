@@ -15,9 +15,12 @@ import { artifactSource } from "./messageMedia";
 import type { Job } from "./types";
 import "./GenerationComparisonView.css";
 
-function TrialPicture({ experimentId, arm, trial, job }: {
+function TrialPicture({ experimentId, arm, trial, job, video }: {
   experimentId: string; arm: ExperimentArm; trial: ExperimentTrial; job: Job | undefined;
+  /** The comparison made videos rather than pictures. */
+  video: boolean;
 }) {
+  const noun = video ? "video" : "picture";
   const finished = trial.status === "complete" && Boolean(trial.run_id);
   const run = useQuery({
     queryKey: ["generation-experiments", experimentId, "run", trial.run_id],
@@ -25,7 +28,7 @@ function TrialPicture({ experimentId, arm, trial, job }: {
     enabled: finished,
     staleTime: Infinity,
   });
-  const picture = run.data ? keptPicture(run.data, trial) : null;
+  const picture = run.data ? keptPicture(run.data, trial, video ? "video" : "image") : null;
   const fraction = job ? jobProgressFraction(job) : null;
   return <>
     <p>{trial.status ? TRIAL_STATUS_TEXT[trial.status] : "Not started"}</p>
@@ -36,17 +39,22 @@ function TrialPicture({ experimentId, arm, trial, job }: {
         style={fraction === null ? undefined : { width: `${fraction * 100}%` }} />
     </div>}
     {trialIsWorking(trial.status) && job && <small>{jobProgressText(job)}</small>}
-    {finished && run.isPending && <p role="status">Loading the picture…</p>}
-    {finished && run.isError && <p role="alert">This picture could not be loaded.</p>}
+    {finished && run.isPending && <p role="status">{`Loading the ${noun}…`}</p>}
+    {finished && run.isError && <p role="alert">{`This ${noun} could not be loaded.`}</p>}
     {picture && <figure className="comparison-picture">
-      <ShieldedMedia kind="image"><img src={artifactSource(picture) ?? undefined} alt={`Made by ${arm.label}`} /></ShieldedMedia>
+      {video ? <ShieldedMedia kind="video">
+        {/* Generated media has no caption track to point at, and an empty one would claim an affordance that is not there. */}
+        {/* eslint-disable-next-line jsx-a11y-x/media-has-caption */}
+        <video src={artifactSource(picture) ?? undefined} controls preload="metadata" aria-label={`Made by ${arm.label}`} />
+      </ShieldedMedia>
+        : <ShieldedMedia kind="image"><img src={artifactSource(picture) ?? undefined} alt={`Made by ${arm.label}`} /></ShieldedMedia>}
     </figure>}
-    {finished && run.data && !picture && <p>No picture was recorded for this choice.</p>}
+    {finished && run.data && !picture && <p>{`No ${noun} was recorded for this choice.`}</p>}
     {run.data && picture && <GenerationDetails provenance={run.data.provenance_json} />}
   </>;
 }
 
-/** An accepted comparison: start it, then both pictures side by side as they are made. */
+/** An accepted comparison: start it, then both results side by side as they are made. */
 export function ComparisonResults({ experimentId, onStart, starting, startError, onNew, onOpenChat, headingRef, children }: {
   experimentId: string;
   onStart: (experiment: GenerationExperiment) => void;
@@ -83,14 +91,16 @@ export function ComparisonResults({ experimentId, onStart, starting, startError,
   const ready = trials.filter((trial) => trial.status === "complete").length;
   const failure = startError ? comparisonFailure(startError) : null;
   const labels = experiment.arms.map((arm) => arm.label);
+  const video = experiment.operation === "text_to_video";
+  const nouns = video ? "videos" : "pictures";
   return <section className="comparison-results" aria-labelledby="comparison-results-heading">
     <h2 id="comparison-results-heading" ref={headingRef} tabIndex={-1}>{experiment.name}</h2>
     {experiment.state === "started" && !experiment.blind_pending && <p role="status">{ready === trials.length
-      ? "Both pictures are ready" : `${ready} of ${trials.length} pictures ready`}</p>}
+      ? `Both ${nouns} are ready` : `${ready} of ${trials.length} ${nouns} ready`}</p>}
     {experiment.state === "ready" && <>
-      <ComparisonEstimate estimate={experiment.estimate} />
+      <ComparisonEstimate estimate={experiment.estimate} nouns={nouns} />
       <button type="button" className="primary" aria-disabled={starting}
-        onClick={() => { if (!starting) onStart(experiment); }}>{starting ? "Starting…" : "Make both pictures"}</button>
+        onClick={() => { if (!starting) onStart(experiment); }}>{starting ? "Starting…" : `Make both ${nouns}`}</button>
     </>}
     {failure && <><ErrorCallout message={failure.message} />
       <ComparisonRefusals refusals={failure.refusals} labels={labels} /></>}
@@ -101,7 +111,7 @@ export function ComparisonResults({ experimentId, onStart, starting, startError,
       aria-labelledby={`comparison-arm-${arm.ordinal}`}>
       <h3 id={`comparison-arm-${arm.ordinal}`}>{arm.label}</h3>
       {arm.trials.map((trial) => <TrialPicture key={trial.id} experimentId={experiment.id} arm={arm} trial={trial}
-        job={(jobs.data ?? []).find((job) => job.id === trial.job_id)} />)}
+        job={(jobs.data ?? []).find((job) => job.id === trial.job_id)} video={video} />)}
       {/* Kept once its picture is seen: the reason to keep a setup is what it made. */}
       {arm.trials.some((trial) => trial.status === "complete")
         && <ComparisonKeepRecipe experimentId={experiment.id} operation={experiment.operation} arm={arm}

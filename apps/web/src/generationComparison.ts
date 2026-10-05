@@ -1,5 +1,6 @@
 import type {
   ExperimentArm,
+  ExperimentOperation,
   ExperimentRefusal,
   ExperimentTrial,
   GenerationExperiment,
@@ -15,6 +16,8 @@ import type { RecipeSettingValue, WorkflowUseCasePresetCreate } from "./workflow
 
 export const MAX_SEED = 2_147_483_647;
 const MAX_DIMENSION = 1_000_000;
+/** A bound on what is sent; each workflow refuses a length it cannot make. */
+const MAX_VIDEO_SECONDS = 3_600;
 
 export interface ComparisonChoiceDraft {
   label: string;
@@ -41,6 +44,10 @@ export interface ComparisonDraft {
   choices: [ComparisonChoiceDraft, ComparisonChoiceDraft];
   /** Hide which choice made each picture until the preference is said. */
   blind: boolean;
+  /** Make a video from the words rather than a picture; never with a picture to change. */
+  video: boolean;
+  /** How long each video runs, in seconds; empty leaves each workflow its own length. */
+  seconds: string;
 }
 
 export const EMPTY_COMPARISON: ComparisonDraft = {
@@ -54,7 +61,14 @@ export const EMPTY_COMPARISON: ComparisonDraft = {
     { label: "Choice B", profileId: "", revisionId: "" },
   ],
   blind: false,
+  video: false,
+  seconds: "",
 };
+
+/** What a draft asks both choices to do. */
+export function comparisonOperation(draft: Pick<ComparisonDraft, "source" | "video">): ExperimentOperation {
+  return draft.source ? "image_to_image" : draft.video ? "text_to_video" : "text_to_image";
+}
 
 export const SEED_POLICY_LABELS: Record<SeedPolicyKind, string> = {
   same_recorded_number: "Same number for both",
@@ -82,7 +96,10 @@ export function comparisonRequest(draft: ComparisonDraft, sharedPresets: OutputR
   const labels = draft.choices.map((choice) => choice.label.trim());
   if (labels.some((label) => label.length < 1 || label.length > 80)) problems.push("Give each choice a label of 1 to 80 characters.");
   else if (folded(labels[0]) === folded(labels[1])) problems.push("Give each choice its own label.");
-  if (draft.choices.some((choice) => !choice.profileId || choice.profileId.length > 40)) problems.push("Choose an image model for each choice.");
+  const video = comparisonOperation(draft) === "text_to_video";
+  if (draft.choices.some((choice) => !choice.profileId || choice.profileId.length > 40)) {
+    problems.push(video ? "Choose a video model for each choice." : "Choose an image model for each choice.");
+  }
   if (draft.choices.some((choice) => !choice.revisionId || choice.revisionId.length > 40)) problems.push("Choose a workflow for each choice.");
   if (!draft.prompt.trim()) problems.push("Write the prompt both choices share.");
   if (draft.prompt.length > 200_000) problems.push("The prompt is too long.");
@@ -106,11 +123,17 @@ export function comparisonRequest(draft: ComparisonDraft, sharedPresets: OutputR
     if (seed === null) problems.push(`Enter a seed from 0 to ${MAX_SEED}.`);
   }
   if (draft.seed.kind === "fixed_numeric" && !draft.seed.number.trim()) problems.push("Enter the seed both choices start from.");
+  let seconds: number | null = null;
+  if (video && draft.seconds.trim()) {
+    const parsed = Number(draft.seconds.trim());
+    if (Number.isFinite(parsed) && parsed > 0 && parsed <= MAX_VIDEO_SECONDS) seconds = parsed;
+    else problems.push(`Enter a length of more than 0 and at most ${MAX_VIDEO_SECONDS} seconds.`);
+  }
   if (problems.length || geometry === null) return { request: null, problems };
   return {
     request: {
       name: `${labels[0]} and ${labels[1]}`.slice(0, 200),
-      operation: draft.source ? "image_to_image" : "text_to_image",
+      operation: comparisonOperation(draft),
       // Sent only for a change, so a comparison from words is asked for exactly as before.
       ...(draft.source ? { source_artifact_id: draft.source.id } : {}),
       prompt: draft.prompt,
@@ -118,10 +141,13 @@ export function comparisonRequest(draft: ComparisonDraft, sharedPresets: OutputR
       geometry,
       seed_policy: { kind: draft.seed.kind, seed: draft.seed.kind === "random_per_trial" ? null : seed },
       arms: draft.choices.map((choice, index) => ({
-        label: labels[index], profile_id: choice.profileId, workflow_revision_id: choice.revisionId, settings: {},
+        label: labels[index], profile_id: choice.profileId, workflow_revision_id: choice.revisionId,
+        // Each choice is asked for the same seconds; its own workflow decides the frames.
+        settings: seconds === null ? {} : { duration_seconds: seconds },
       })),
       // Sent only when blind, so a comparison that names its choices is asked for exactly as before.
-      ...(draft.blind ? { evaluation_mode: "blind" as const } : {}),
+      // Videos are always compared with their choices named.
+      ...(draft.blind && !video ? { evaluation_mode: "blind" as const } : {}),
     },
     problems: [],
   };
@@ -165,7 +191,7 @@ export function comparisonIsWorking(experiment: GenerationExperiment | undefined
 }
 
 /** The picture a finished trial made, read from its own run; null unless the run is that trial's. */
-export function keptPicture(run: Run, trial: ExperimentTrial): string | null {
+export function keptPicture(run: Run, trial: ExperimentTrial, kind: "image" | "video" = "image"): string | null {
   const provenance = run.provenance_json as Record<string, unknown>;
   const witness = provenance.generation_experiment as Record<string, unknown> | undefined;
   if (run.id !== trial.run_id || run.work_step_id !== trial.work_step_id || witness?.trial_id !== trial.id) return null;
@@ -177,7 +203,7 @@ export function keptPicture(run: Run, trial: ExperimentTrial): string | null {
     const origin = record.output_origin as Record<string, unknown> | undefined;
     // A preview the engine does not keep is never the picture shown.
     if (origin?.state === "attributed" && origin.output_type === "temp") continue;
-    if (record.kind === "image" && typeof record.artifact_id === "string" && record.artifact_id) return record.artifact_id;
+    if (record.kind === kind && typeof record.artifact_id === "string" && record.artifact_id) return record.artifact_id;
   }
   return null;
 }

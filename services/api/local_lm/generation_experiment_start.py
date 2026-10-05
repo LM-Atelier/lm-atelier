@@ -42,7 +42,7 @@ from .domain import (
 from .generation_experiment_preflight import (
     ArmRefused,
     _refusal,
-    _require_image_profile,
+    _require_profile,
     picture_to_change,
 )
 from .generation_experiments_v1 import (
@@ -110,7 +110,7 @@ def _check_arm(
     """Refuse a choice whose accepted identities no longer hold; read nothing into it."""
 
     snapshot: dict[str, Any] = arm.snapshot_json
-    _require_image_profile(session, arm.profile_id)
+    _require_profile(session, arm.profile_id, _capability(Operation(snapshot["operation"])))
     workflow = snapshot.get("workflow") or {}
     if workflow.get("engine") != orchestrator.engines.settings.media_engine:
         raise ArmRefused(Code.ARM_WORKFLOW_UNAVAILABLE)
@@ -143,6 +143,12 @@ def _check_arm(
 
 def _operation(experiment: GenerationExperiment) -> Operation:
     return Operation(experiment.operation)
+
+
+def _capability(operation: Operation) -> str:
+    """What a comparison makes, which names its models, its route and each result."""
+
+    return "video" if operation == Operation.TEXT_TO_VIDEO else "image"
 
 
 def _source(experiment: GenerationExperiment) -> str | None:
@@ -254,13 +260,14 @@ def _write_work(
     count = len(trials)
     prompt = experiment.common_json["prompt"]
     operation = _operation(experiment)
+    made = _capability(operation)
     source = _source(experiment)
     chat = Chat(
         title="Generation comparison",
         scope=EXPERIMENT_CHAT_SCOPE,
         archived=True,
         project_id=None,
-        routing_mode=RoutingMode.IMAGE.value,
+        routing_mode=RoutingMode(made).value,
         confirm_uncertain_media=False,
         generation_settings_json={},
         generation_preset_ids_json={},
@@ -321,7 +328,7 @@ def _write_work(
         failure_policy="continue_independent",
         summary_json={
             "operation": operation.value,
-            "routing_mode": RoutingMode.IMAGE.value,
+            "routing_mode": RoutingMode(made).value,
             "step_count": count,
             "output_count": count,
             "source_action": SOURCE_ACTION,
@@ -356,9 +363,7 @@ def _write_work(
             input_bindings_json=(
                 [{"type": "explicit_artifact", "artifact_id": source}] if source else []
             ),
-            output_contract_json=[
-                {"slot": slot, "type": "image", "index": ordinal, "count": count}
-            ],
+            output_contract_json=[{"slot": slot, "type": made, "index": ordinal, "count": count}],
             queue_class=QUEUE_CLASS,
         )
         session.add(step)
@@ -394,7 +399,7 @@ def _write_work(
             **({"workflow_lora": copy.deepcopy(lora_receipt)} if lora_receipt else {}),
             "resolved_settings": copy.deepcopy(settings),
             "generation_estimate": None,
-            "video_length": None,
+            "video_length": copy.deepcopy(snapshot.get("video_length")),
             "source_fit_request": None,
             "media_plan_estimate": ConversationOrchestrator._media_plan_estimate(
                 operation, _sized(arm, settings), 1

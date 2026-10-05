@@ -36,8 +36,11 @@ from .workflow_use_cases_v1 import WorkflowUseCase, WorkflowUseCaseInputs
 if TYPE_CHECKING:
     from .orchestrator import ConversationOrchestrator
 
-OPERATION = Operation.TEXT_TO_IMAGE
-USE_CASE = WorkflowUseCase.IMAGE_GENERATION
+#: The comparisons whose choices a recipe can carry, by what they make from words.
+USE_CASES = {
+    Operation.TEXT_TO_IMAGE: WorkflowUseCase.IMAGE_GENERATION,
+    Operation.TEXT_TO_VIDEO: WorkflowUseCase.VIDEO_GENERATION,
+}
 
 
 class RecipeDraftRefused(Exception):
@@ -66,9 +69,11 @@ async def recipe_draft(
     # made is not to be known, and a draft would lead from one to the other.
     if store.blind_pending(experiment):
         raise RecipeDraftRefused("generation-experiment-blind")
-    # A recipe here is one for making pictures from words; a way of changing a
-    # picture is kept by none of them yet.
-    if experiment.operation != OPERATION.value:
+    # A recipe here is one for making pictures or videos from words; a way of
+    # changing a picture is kept as an edit's recipe instead.
+    operation = Operation(experiment.operation)
+    use_case = USE_CASES.get(operation)
+    if use_case is None:
         raise RecipeDraftRefused("generation-experiment-recipe-not-for-changes")
     arm = next((arm for arm in experiment.arms if arm.ordinal == arm_ordinal), None)
     if arm is None:
@@ -80,14 +85,14 @@ async def recipe_draft(
     profile = arm.snapshot_json.get("profile") or {}
     engine = profile.get("engine") if isinstance(profile.get("engine"), str) else revision.engine
     fields = await orchestrator.engines.settings_for_role(
-        operation_model_role(OPERATION), engine=engine
+        operation_model_role(operation), engine=engine
     )
     accepts_added_loras = revision_accepts_added_loras(revision)
 
     def admit(settings: dict[str, Any]) -> None:
         admit_workflow_use_case_preset(
             ResolvedWorkflowUseCasePreset(
-                use_case=USE_CASE,
+                use_case=use_case,
                 mode="preset",
                 scope="workspace",
                 # Checked as a saved recipe is checked; the choice stands in
@@ -96,7 +101,7 @@ async def recipe_draft(
                 preset_name=arm.label,
                 settings_json=settings,
             ),
-            WorkflowUseCaseInputs(OPERATION),
+            WorkflowUseCaseInputs(operation),
             revision,
             definition,
             expected_revision_id=revision.id,
@@ -115,7 +120,7 @@ async def recipe_draft(
     return GenerationExperimentRecipeDraftOut(
         experiment_id=experiment.id,
         arm_ordinal=arm.ordinal,
-        use_case=USE_CASE.value,
+        use_case=use_case.value,
         name=arm.label,
         settings_json=kept,
         left_out=sorted(left_out + refused, key=lambda item: item.setting),
