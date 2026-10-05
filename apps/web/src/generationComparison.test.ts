@@ -61,6 +61,29 @@ describe("comparisonRequest", () => {
     expect(words?.operation).toBe("text_to_image");
   });
 
+  it("asks for two videos at one length, always with their choices named", () => {
+    const built = comparisonRequest(draft({ video: true, seconds: " 2.5 ", blind: true }), []);
+    expect(built.problems).toEqual([]);
+    expect(built.request).toMatchObject({ operation: "text_to_video", geometry: { mode: "size", width: 1024, height: 1024 } });
+    expect(built.request?.arms.map((arm) => arm.settings)).toEqual([{ duration_seconds: 2.5 }, { duration_seconds: 2.5 }]);
+    expect(built.request && "evaluation_mode" in built.request).toBe(false);
+    // Left empty, each workflow makes its own length.
+    expect(comparisonRequest(draft({ video: true }), []).request?.arms.map((arm) => arm.settings)).toEqual([{}, {}]);
+    // A picture to change is changed, whatever was said of videos.
+    expect(comparisonRequest(draft({ video: true, source: { id: "sha256:" + "c".repeat(64) } }), []).request?.operation)
+      .toBe("image_to_image");
+  });
+
+  it("names what is wrong with a video's length or its models", () => {
+    for (const seconds of ["0", "-1", "two", "3601"]) {
+      expect(comparisonRequest(draft({ video: true, seconds }), []).problems)
+        .toEqual(["Enter a length of more than 0 and at most 3600 seconds."]);
+    }
+    const unchosen = draft({ video: true });
+    unchosen.choices = [{ ...unchosen.choices[0], profileId: "" }, unchosen.choices[1]];
+    expect(comparisonRequest(unchosen, []).problems).toEqual(["Choose a video model for each choice."]);
+  });
+
   it("asks for a blind comparison only when one was chosen", () => {
     const blind = comparisonRequest(draft({ blind: true }), []).request;
     const named = comparisonRequest(draft(), []).request;

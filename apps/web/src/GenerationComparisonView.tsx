@@ -9,6 +9,7 @@ import { ComparisonSharedFields } from "./ComparisonSharedFields";
 import { ErrorCallout } from "./ErrorCallout";
 import {
   comparisonFailure,
+  comparisonOperation,
   comparisonRequest,
   EMPTY_COMPARISON,
   sameComparisonRequest,
@@ -16,7 +17,7 @@ import {
   type ComparisonChoiceDraft,
   type ComparisonDraft,
 } from "./generationComparison";
-import type { GenerationExperiment } from "./generationExperimentTypes";
+import type { ExperimentOperation, GenerationExperiment } from "./generationExperimentTypes";
 import { useConfirm } from "./useConfirm";
 import { useGenerationComparison } from "./useGenerationComparison";
 import "./GenerationComparisonView.css";
@@ -29,7 +30,15 @@ function useShape(revisionId: string) {
   });
 }
 
-/** Compare two generation choices against one prompt, then see both pictures side by side. */
+/** What asking before a long comparison says, in the words of what it makes. */
+function largeWork(operation: ExperimentOperation) {
+  return operation === "text_to_video"
+    ? { title: "Make two videos?", question: "These videos will take a while to make.", confirmLabel: "Make both videos" }
+    : { title: "Make two large pictures?", question: "These pictures are large and will take a while to make.",
+      confirmLabel: "Make both pictures" };
+}
+
+/** Compare two generation choices against one prompt, then see both results side by side. */
 export function GenerationComparisonView({ onOpenChat }: {
   /** Show a chat set up with a choice that was kept. */
   onOpenChat?: (chatId: string) => void;
@@ -56,13 +65,18 @@ export function GenerationComparisonView({ onOpenChat }: {
     if (comparison.experimentId) resultsHeading.current?.focus();
   }, [comparison.experimentId]);
 
-  const operation = draft.source ? "image_to_image" : "text_to_image";
-  const changeStart = (source: ComparisonDraft["source"]) => {
-    // A workflow chosen to make pictures from words cannot change one, nor the other way about.
-    const choices = Boolean(source) === Boolean(draft.source) ? draft.choices
-      : draft.choices.map((choice) => ({ ...choice, revisionId: "" })) as [ComparisonChoiceDraft, ComparisonChoiceDraft];
-    setDraft({ ...draft, source, choices });
+  const operation = comparisonOperation(draft);
+  const video = operation === "text_to_video";
+  const changeStart = (source: ComparisonDraft["source"], makesVideo: boolean) => {
+    const next = comparisonOperation({ source, video: makesVideo });
+    // A workflow chosen to make pictures from words cannot change one, nor make a
+    // video, and a video model makes no pictures.
+    const choices = next === operation ? draft.choices : draft.choices.map((choice) => ({
+      ...choice, revisionId: "", profileId: (next === "text_to_video") === video ? choice.profileId : "",
+    })) as [ComparisonChoiceDraft, ComparisonChoiceDraft];
+    setDraft({ ...draft, source, video: makesVideo, choices });
   };
+
 
   const updateChoice = (index: 0 | 1, next: ComparisonChoiceDraft) => {
     const choices: [ComparisonChoiceDraft, ComparisonChoiceDraft] = [...draft.choices];
@@ -93,8 +107,7 @@ export function GenerationComparisonView({ onOpenChat }: {
   const start = async (experiment: GenerationExperiment, confirmExpensive = false) => {
     if (sending.current || startComparison.isPending) return;
     if (!confirmExpensive && checked?.preflight.confirmation_required && checked.preflight.preflight_sha256 === experiment.preflight_sha256) {
-      const yes = await confirm({ title: "Make two large pictures?", question: "These pictures are large and will take a while to make.",
-        confirmLabel: "Make both pictures" });
+      const yes = await confirm(largeWork(experiment.operation));
       if (!yes) return;
       confirmExpensive = true;
     }
@@ -103,8 +116,7 @@ export function GenerationComparisonView({ onOpenChat }: {
       onSettled: () => { sending.current = false; },
       onError: async (error) => {
         if (comparisonFailure(error).next !== "confirm" || confirmExpensive) return;
-        const yes = await confirm({ title: "Make two large pictures?", question: "These pictures are large and will take a while to make.",
-          confirmLabel: "Make both pictures" });
+        const yes = await confirm(largeWork(experiment.operation));
         if (yes) void start(experiment, true);
       },
     });
@@ -129,7 +141,7 @@ export function GenerationComparisonView({ onOpenChat }: {
   return <div className="page-view generation-comparison">
     <header className="page-header"><div><h1>Compare generation choices</h1>
       <p>Two choices, one prompt: everything but the model and workflow is held the same.</p></div></header>
-    <ComparisonPictureField value={draft.source} onChange={changeStart} />
+    <ComparisonPictureField value={draft.source} video={draft.video} onChange={changeStart} />
     <ComparisonSharedFields value={draft} onChange={setDraft} sharedPresets={sharedPresets}
       shapesKnown={firstShape.isSuccess && secondShape.isSuccess} />
     <div className="comparison-columns">

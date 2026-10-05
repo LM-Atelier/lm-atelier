@@ -180,7 +180,7 @@ class SourceGeometry(_Contract):
 
 
 Geometry = Annotated[PresetGeometry | SizeGeometry | SourceGeometry, Field(discriminator="mode")]
-ExperimentOperation = Literal["text_to_image", "image_to_image"]
+ExperimentOperation = Literal["text_to_image", "image_to_image", "text_to_video"]
 
 
 class SeedPolicy(_Contract):
@@ -254,6 +254,17 @@ class GenerationExperimentRequest(_Contract):
             raise ValueError("A change names the one picture it changes, and only a change does.")
         if edit != isinstance(self.geometry, SourceGeometry):
             raise ValueError("A change keeps its picture's size, and only a change can.")
+        return self
+
+    @model_validator(mode="after")
+    def compare_videos_with_their_choices_named(self) -> Self:
+        # A blind viewing shows each result as a picture made anew, which a
+        # video cannot be.
+        if (
+            self.operation == "text_to_video"
+            and self.evaluation_mode == GenerationExperimentEvaluationMode.BLIND
+        ):
+            raise ValueError("Videos are compared with their choices named.")
         return self
 
 
@@ -507,7 +518,7 @@ class GenerationExperimentRecipeDraftOut(BaseModel):
 
     experiment_id: str
     arm_ordinal: int
-    use_case: Literal["image_generation"]
+    use_case: Literal["image_generation", "video_generation"]
     name: str
     settings_json: dict[str, JsonValue]
     left_out: list[RecipeDraftLeftOut]

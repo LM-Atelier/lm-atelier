@@ -5,16 +5,20 @@ import { ShieldedThumbnail } from "./ShieldedThumbnail";
 import type { ComparisonSource } from "./generationComparison";
 import "./GenerationComparisonView.css";
 
-/** What both choices start from: words alone, or one picture from the Media Library to change. */
-export function ComparisonPictureField({ value, onChange }: {
+/** What both choices start from: words alone for a new picture or video, or one picture from the Media Library to change. */
+export function ComparisonPictureField({ value, video, onChange }: {
   value: ComparisonSource | null;
-  onChange: (next: ComparisonSource | null) => void;
+  /** Words alone make a video rather than a picture. */
+  video: boolean;
+  onChange: (next: ComparisonSource | null, video: boolean) => void;
 }) {
   const [choosing, setChoosing] = useState(false);
   return <fieldset className="comparison-shared-group">
     <legend>Start from</legend>
-    <label className="comparison-radio"><input type="radio" name="comparison-start" checked={value === null}
-      onChange={() => onChange(null)} />Words only: make a new picture</label>
+    <label className="comparison-radio"><input type="radio" name="comparison-start" checked={value === null && !video}
+      onChange={() => onChange(null, false)} />Words only: make a new picture</label>
+    <label className="comparison-radio"><input type="radio" name="comparison-start" checked={value === null && video}
+      onChange={() => onChange(null, true)} />Words only: make a new video</label>
     <label className="comparison-radio"><input type="radio" name="comparison-start" checked={value !== null}
       onChange={() => { if (value === null) setChoosing(true); }} />A picture from the Media Library: change it</label>
     {value && <div className="comparison-start-picture">
@@ -25,7 +29,7 @@ export function ComparisonPictureField({ value, onChange }: {
     {choosing && <LibraryImagePicker title="The picture both choices change" confirmLabel="Change this picture" single
       onConfirm={(items) => {
         const [item] = items;
-        if (item) onChange({ id: item.id });
+        if (item) onChange({ id: item.id }, false);
       }}
       onClose={() => setChoosing(false)} />}
   </fieldset>;

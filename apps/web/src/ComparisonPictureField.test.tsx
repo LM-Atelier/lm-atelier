@@ -14,10 +14,12 @@ const PICTURE: ArtifactLibraryItem = {
   created_at: "2026-01-01T00:00:00Z", reference_count: 0, chat_ids: [], project_ids: [],
 };
 
-function show(value: ComparisonSource | null) {
+function show(value: ComparisonSource | null, video = false) {
   const change = vi.fn();
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><ComparisonPictureField value={value} onChange={change} /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}>
+    <ComparisonPictureField value={value} video={video} onChange={change} />
+  </QueryClientProvider>);
   return change;
 }
 
@@ -36,7 +38,7 @@ it("starts from words, and changes one library picture once one is chosen", asyn
   fireEvent.click(await screen.findByRole("button", { name: "Harbor" }));
   fireEvent.click(screen.getByRole("button", { name: "Change this picture" }));
 
-  expect(change).toHaveBeenCalledWith({ id: PICTURE.id });
+  expect(change).toHaveBeenCalledWith({ id: PICTURE.id }, false);
 });
 
 it("closing the picker without a picture leaves the comparison making pictures from words", async () => {
@@ -56,5 +58,18 @@ it("shows the chosen picture and goes back to words when asked", () => {
 
   fireEvent.click(screen.getByRole("radio", { name: "Words only: make a new picture" }));
 
-  expect(change).toHaveBeenCalledWith(null);
+  expect(change).toHaveBeenCalledWith(null, false);
+});
+
+it("makes a video from words when asked, and a picture again", () => {
+  const change = show(null);
+
+  fireEvent.click(screen.getByRole("radio", { name: "Words only: make a new video" }));
+  expect(change).toHaveBeenLastCalledWith(null, true);
+  cleanup();
+
+  const back = show(null, true);
+  expect(screen.getByRole("radio", { name: "Words only: make a new video" })).toBeChecked();
+  fireEvent.click(screen.getByRole("radio", { name: "Words only: make a new picture" }));
+  expect(back).toHaveBeenLastCalledWith(null, false);
 });

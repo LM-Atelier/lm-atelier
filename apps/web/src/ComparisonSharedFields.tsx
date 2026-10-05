@@ -6,7 +6,7 @@ import "./GenerationComparisonView.css";
 
 const SEED_KINDS: SeedPolicyKind[] = ["same_recorded_number", "fixed_numeric", "independent_deterministic", "random_per_trial"];
 
-/** What both choices share: the words, the size and how their seeds are chosen. */
+/** What both choices share: the words, the size, a video's length and how their seeds are chosen. */
 export function ComparisonSharedFields({ value, onChange, sharedPresets, shapesKnown }: {
   value: ComparisonDraft;
   onChange: (next: ComparisonDraft) => void;
@@ -37,6 +37,11 @@ export function ComparisonSharedFields({ value, onChange, sharedPresets, shapesK
         {sharedPresets.map((presetId) => <option key={presetId} value={presetId}>{`${RATIO_LABELS[presetId]} (${presetId})`}</option>)}
       </select></label>}
     </fieldset>}
+    {value.video && !value.source && <label>Length in seconds (optional)
+      <input inputMode="decimal" value={value.seconds}
+        onChange={(event) => onChange({ ...value, seconds: event.target.value })} />
+      <small>Each workflow makes the length nearest to this that it can; left empty, each makes its own.</small>
+    </label>}
     <fieldset className="comparison-shared-group">
       <legend>Seed</legend>
       {SEED_KINDS.map((kind) => <label key={kind} className="comparison-radio"><input type="radio" name="comparison-seed"
@@ -47,8 +52,9 @@ export function ComparisonSharedFields({ value, onChange, sharedPresets, shapesK
           onChange={(event) => onChange({ ...value, seed: { ...value.seed, number: event.target.value } })} />
       </label>}
     </fieldset>
-    <label className="comparison-radio"><input type="checkbox" checked={value.blind}
+    {/* A blind viewing shows each result as a picture made anew, which a video cannot be. */}
+    {!(value.video && !value.source) && <label className="comparison-radio"><input type="checkbox" checked={value.blind}
       onChange={(event) => onChange({ ...value, blind: event.target.checked })} />
-      Compare blind: hide which choice made each picture until you say which you prefer</label>
+      Compare blind: hide which choice made each picture until you say which you prefer</label>}
   </div>;
 }

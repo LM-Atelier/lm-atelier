@@ -8,8 +8,10 @@ const PAGE_SIZE = 50;
 /** Ready workflows to choose from: by default those that make a picture from words. */
 export function useReadyWorkflowChoices(
   selectedIds: string[],
-  operation: "text_to_image" | "image_to_image" = "text_to_image",
+  operation: "text_to_image" | "image_to_image" | "text_to_video" = "text_to_image",
 ) {
+  // Sent only for a video, so a picture's workflows are asked for exactly as before.
+  const made = operation === "text_to_video" ? { selectorCapability: "video" as const } : {};
   const [search, setSearch] = useState("");
   const query = search.trim();
   const ids = [...new Set(selectedIds.filter(Boolean))].sort();
@@ -17,7 +19,7 @@ export function useReadyWorkflowChoices(
     queryKey: ["workflow-families", "ready-revisions", query, operation],
     initialPageParam: 0,
     queryFn: ({ pageParam, signal }) => api.workflowReadyRevisions({
-      operation, limit: PAGE_SIZE, offset: pageParam, search: query,
+      operation, limit: PAGE_SIZE, offset: pageParam, search: query, ...made,
     }, signal),
     getNextPageParam: (last, loaded) => last.length === PAGE_SIZE
       ? loaded.reduce((count, page) => count + page.length, 0) : undefined,
@@ -27,7 +29,7 @@ export function useReadyWorkflowChoices(
     queryKey: ["workflow-families", "selected-ready-revisions", ids, operation],
     enabled: ids.length > 0,
     queryFn: ({ signal }) => api.workflowReadyRevisions({
-      operation, limit: 200, revisionIds: ids,
+      operation, limit: 200, revisionIds: ids, ...made,
     }, signal),
   });
   const rows = (pages.data ?? []).filter(row => !ids.includes(row.revision_id));

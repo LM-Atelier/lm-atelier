@@ -31,7 +31,7 @@ export interface SourceGeometry {
 export type ExperimentGeometry = PresetGeometry | SizeGeometry | SourceGeometry;
 
 /** A comparison makes pictures from words, or changes one picture from the Media Library. */
-export type ExperimentOperation = "text_to_image" | "image_to_image";
+export type ExperimentOperation = "text_to_image" | "image_to_image" | "text_to_video";
 
 export interface SeedPolicy {
   kind: SeedPolicyKind;
@@ -200,7 +200,7 @@ export interface RecipeDraftLeftOut {
 export interface GenerationExperimentRecipeDraft {
   experiment_id: string;
   arm_ordinal: number;
-  use_case: "image_generation";
+  use_case: "image_generation" | "video_generation";
   name: string;
   settings_json: Record<string, unknown>;
   left_out: RecipeDraftLeftOut[];

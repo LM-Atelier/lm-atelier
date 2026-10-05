@@ -6,6 +6,8 @@ export interface WorkflowReadPageOptions {
   search?: string;
   operation?: string;
   role?: EngineRole;
+  /** What the ready workflows are chosen to make; the server assumes pictures. */
+  selectorCapability?: WorkflowSelectorCapability;
   workflowIds?: string[];
   revisionIds?: string[];
   ungroupedOnly?: boolean;
@@ -18,6 +20,7 @@ export function workflowReadQuery(options: WorkflowReadPageOptions) {
   if (options.search) query.set("search", options.search);
   if (options.operation) query.set("operation", options.operation);
   if (options.role) query.set("role", options.role);
+  if (options.selectorCapability) query.set("selector_capability", options.selectorCapability);
   if (options.ungroupedOnly) query.set("ungrouped_only", "true");
   options.workflowIds?.forEach(id => query.append("workflow_id", id));
   options.revisionIds?.forEach(id => query.append("revision_id", id));

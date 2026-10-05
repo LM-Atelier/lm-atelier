@@ -60,10 +60,10 @@ export function ComparisonSettings({ arms }: { arms: (ArmPreflight | ExperimentA
   </table>;
 }
 
-export function ComparisonEstimate({ estimate }: { estimate: ResourceEvidence[] }) {
+export function ComparisonEstimate({ estimate, nouns = "pictures" }: { estimate: ResourceEvidence[]; nouns?: "pictures" | "videos" }) {
   if (!estimate.length) return null;
   return <ul className="comparison-estimate">{estimate.map((item) => <li key={item.resource}>
-    {item.resource === "output_bytes" ? `About ${formatBytes(item.value)} of pictures` : `${item.value.toLocaleString()} work units`}
+    {item.resource === "output_bytes" ? `About ${formatBytes(item.value)} of ${nouns}` : `${item.value.toLocaleString()} work units`}
     {" (estimated)"}
   </li>)}</ul>;
 }
@@ -81,6 +81,7 @@ export function ComparisonCheckResult({ checked, stale, accepting, onAccept, hea
   const { preflight, request } = checked;
   const labels = request.arms.map((arm) => arm.label);
   const blocked = stale || accepting;
+  const video = request.operation === "text_to_video";
   return <section className="comparison-check" aria-labelledby="comparison-check-heading">
     <h2 id="comparison-check-heading" ref={headingRef} tabIndex={-1}>
       {preflight.outcome === "compatible" ? "Both choices can run" : "This comparison cannot run as asked"}</h2>
@@ -93,8 +94,9 @@ export function ComparisonCheckResult({ checked, stale, accepting, onAccept, hea
       <div className="comparison-columns">{preflight.arms.map((arm) => <section key={arm.ordinal} aria-label={arm.label}>
         <h3>{arm.label}</h3><ComparisonChoiceSummary arm={arm} /></section>)}</div>
       <ComparisonSettings arms={preflight.arms} />
-      <ComparisonEstimate estimate={preflight.estimate} />
-      {preflight.confirmation_required && <p>These pictures are large; you will be asked to confirm before they are made.</p>}
+      <ComparisonEstimate estimate={preflight.estimate} nouns={video ? "videos" : "pictures"} />
+      {preflight.confirmation_required && <p>{video ? "These videos will take a while to make; you will be asked to confirm before they are made."
+        : "These pictures are large; you will be asked to confirm before they are made."}</p>}
       <button type="button" className="primary" aria-disabled={blocked}
         onClick={() => { if (!blocked) onAccept(); }}>{accepting ? "Accepting…" : "Accept this comparison"}</button>
     </>}

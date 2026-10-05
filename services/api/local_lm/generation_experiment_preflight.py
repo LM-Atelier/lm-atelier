@@ -235,9 +235,9 @@ def _require_clean(session: Session) -> None:
         raise RuntimeError("A comparison is resolved only from a session with nothing pending.")
 
 
-def _require_image_profile(session: Session, profile_id: str) -> ModelProfile:
+def _require_profile(session: Session, profile_id: str, role: str) -> ModelProfile:
     profile = session.get(ModelProfile, profile_id)
-    if profile is None or profile.role != "image":
+    if profile is None or profile.role != role:
         raise ArmRefused(Code.ARM_PROFILE_UNAVAILABLE)
     if profile.model_install_id:
         install = session.get(ModelInstall, profile.model_install_id)
@@ -343,12 +343,14 @@ async def _resolve_arm(
 ) -> ResolvedArm:
     operation = operation_of(request)
     edit = operation == Operation.IMAGE_TO_IMAGE
-    profile = _require_image_profile(session, arm.profile_id)
+    video = operation == Operation.TEXT_TO_VIDEO
+    capability: Literal["image", "video"] = "video" if video else "image"
+    profile = _require_profile(session, arm.profile_id, capability)
     try:
         revision, _activation, bound_profile = resolve_exact_workflow_revision(
             session,
             arm.workflow_revision_id,
-            capability="image",
+            capability=capability,
             operation=operation,
             engine=orchestrator.engines.settings.media_engine,
         )
@@ -417,9 +419,14 @@ async def _resolve_arm(
         raise ArmRefused(Code.ARM_SETTING_INVALID) from None
     if layers.mask is not None or layers.relight is not None:
         raise ArmRefused(Code.ARM_INPUT_UNSUPPORTED)
-    effective, _video_length = resolve_video_length_settings(
-        layers.effective_settings, chosen_revision.input_schema_json
-    )
+    # The length a video runs, worked out from the seconds asked as a turn
+    # works it out, so each choice is held to its own workflow's frames.
+    try:
+        effective, video_length = resolve_video_length_settings(
+            layers.effective_settings, chosen_revision.input_schema_json
+        )
+    except ValueError:
+        raise ArmRefused(Code.ARM_SETTING_INVALID, setting="duration_seconds") from None
     # As for a turn: margins of nothing that nobody asked for are only the
     # workflow's declared default. Any others extend a picture this has none of.
     if extends_by_nothing(effective.get(OUTPAINT_SETTING_KEY)):
@@ -503,6 +510,9 @@ async def _resolve_arm(
         # as one made before changes could be compared.
         snapshot["source_artifact_id"] = request.source_artifact_id
         snapshot["image_edit"] = copy.deepcopy(image_edit)
+    if video:
+        # Likewise only for a video, which is the only kind with a length.
+        snapshot["video_length"] = copy.deepcopy(video_length)
     return ResolvedArm(
         ordinal=ordinal,
         label=arm.label,
