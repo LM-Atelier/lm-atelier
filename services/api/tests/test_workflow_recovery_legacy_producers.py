@@ -36,6 +36,7 @@ async def _deleted(client: AsyncClient, action: str) -> tuple[str, str]:
         session.flush()
         reconcile_legacy_workflow_compatibility(session)
         mapping = session.get(WorkflowProfileCompatibility, profile.id)
+        assert mapping is not None
         family_id, profile_id = mapping.workflow_family_id, profile.id
         if action == "purge-history":
             definition = session.scalar(
@@ -44,6 +45,7 @@ async def _deleted(client: AsyncClient, action: str) -> tuple[str, str]:
                     WorkflowDefinition.variant_key == "create",
                 )
             )
+            assert definition is not None
             revision = WorkflowRevision(
                 definition=definition,
                 version=1,
@@ -95,6 +97,7 @@ async def test_a_legacy_profile_update_leaves_its_deleted_workflow_rows_unchange
             for model in models
         }
         profile = session.get(ModelProfile, profile_id)
+        assert profile is not None
         profile.name = "Renamed garden legacy renderer"
         assert ensure_legacy_profile_workflow(session, profile) is None
         session.commit()
@@ -125,9 +128,9 @@ async def test_a_chat_cannot_select_a_deleted_workflow_through_its_legacy_profil
     assert response.json()["code"] == "workflow-selection-unavailable"
     with SessionLocal() as session:
         assert session.scalar(select(func.count()).select_from(Chat)) == before
-        assert (
-            session.get(Chat, chat["id"]).active_image_profile_id == chat["active_image_profile_id"]
-        )
+        saved_chat = session.get(Chat, chat["id"])
+        assert saved_chat is not None
+        assert saved_chat.active_image_profile_id == chat["active_image_profile_id"]
         assert session.scalar(select(func.count()).select_from(ChatWorkflowSelection)) == selections
 
 
@@ -168,6 +171,8 @@ async def test_a_cached_graphless_text_workflow_cannot_run_after_disabled_restor
                 WorkflowPreference.selector_capability == "chat",
             )
         )
+        assert old_family is not None
+        assert old_preference is not None
         assert old_family.enabled and old_preference.enabled
         selection = resolve_workflow_family(
             reader,

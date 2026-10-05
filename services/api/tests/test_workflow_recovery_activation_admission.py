@@ -35,6 +35,7 @@ async def test_activation_admission_reads_current_family_state_before_any_author
         session.flush()
         revision = _revision(session, _contract(), suffix="recovery-admission")
         definition = session.get(WorkflowDefinition, revision.workflow_id)
+        assert definition is not None
         definition.family_id = family.id
         definition.variant_key = "create"
         definition.current_revision_id = revision.id
@@ -90,6 +91,7 @@ async def test_activation_admission_reads_current_family_state_before_any_author
             assert not reader.dirty
             with SessionLocal() as session:
                 activation = session.get(WorkflowActivation, scope.activation_id)
+                assert activation is not None
                 assert not activation.is_active and activation.state == "disabled"
                 result = activate_reviewed_revision(
                     session,
