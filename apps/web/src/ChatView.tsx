@@ -70,18 +70,37 @@ export function ChatView({
   const messagesRef = useRef<HTMLDivElement>(null);
   useVisibleChatActivity(messagesRef, chat?.id);
   const followMessages = useRef(true);
-  const olderScroll = useRef<{ height: number; top: number } | null>(null);
+  const olderScroll = useRef<{
+    height: number; top: number; oldest?: string; reading: string | null; offset: number;
+  } | null>(null);
+  const oldest = chat?.messages[0]?.id;
   useLayoutEffect(() => {
-    if (!olderScroll.current || transcript?.loadingOlder) return;
+    const saved = olderScroll.current;
     const viewport = messagesRef.current;
-    if (viewport) viewport.scrollTop = olderScroll.current.top + viewport.scrollHeight - olderScroll.current.height;
+    // Only once older messages are in place: the message that was oldest is
+    // still shown and others now come before it. A render before that, such
+    // as a message another window added, leaves the position for later.
+    const place = chat?.messages.findIndex((message) => message.id === saved?.oldest) ?? -1;
+    if (!saved || !viewport || transcript?.loadingOlder || place <= 0) return;
+    // The message being read stays where it was, whatever else changed below
+    // it. It is found again by its id, since the move may have redrawn it.
+    const reading = saved.reading === null ? undefined : [...viewport.querySelectorAll(":scope > article.message")]
+      .find((element) => element.getAttribute("data-message-id") === saved.reading);
+    if (reading) {
+      viewport.scrollTop += reading.getBoundingClientRect().top - viewport.getBoundingClientRect().top - saved.offset;
+    } else viewport.scrollTop = saved.top + viewport.scrollHeight - saved.height;
     olderScroll.current = null;
   }, [chat?.messages, transcript?.loadingOlder]);
   const loadOlder = () => {
     const viewport = messagesRef.current;
     if (!viewport || !transcript) return;
     followMessages.current = false;
-    olderScroll.current = { height: viewport.scrollHeight, top: viewport.scrollTop };
+    const top = viewport.getBoundingClientRect().top;
+    const reading = [...viewport.querySelectorAll(":scope > article.message")]
+      .find((element) => element.getBoundingClientRect().bottom > top) ?? null;
+    olderScroll.current = { height: viewport.scrollHeight, top: viewport.scrollTop, oldest,
+      reading: reading?.getAttribute("data-message-id") ?? null,
+      offset: reading ? reading.getBoundingClientRect().top - top : 0 };
     void transcript.loadOlder();
   };
   const previousChatId = useRef<string | undefined>(undefined);

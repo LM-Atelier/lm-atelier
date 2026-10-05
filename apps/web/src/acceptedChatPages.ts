@@ -1,6 +1,6 @@
 import type { InfiniteData, QueryClient } from "@tanstack/react-query";
 import type { Chat, ChatMessageWindow, ChatTranscriptContext, TurnAccepted } from "./types";
-import type { ChatMessagePageCursor } from "./useChatMessagePages";
+import { chatMessageWindowPages, type ChatMessagePageCursor } from "./useChatMessagePages";
 
 export function applyAcceptedChatPages(client: QueryClient, chatId: string, accepted: TurnAccepted, activate: boolean) {
   const current = client.getQueryData<Chat>(["chat", chatId]);
@@ -17,18 +17,9 @@ export function applyAcceptedChatPages(client: QueryClient, chatId: string, acce
   for (const message of [accepted.user_message, ...outputs]) messages.set(message.id, message);
   const ordered = [...messages.values()];
   const older = prior?.pages.at(-1)?.has_older ?? Boolean(accepted.user_message.parent_id);
-  const pages: ChatMessageWindow[] = [];
-  for (let end = ordered.length; end > 0; end -= 40) {
-    const start = Math.max(0, end - 40);
-    pages.push({ chat_id: chatId, messages: ordered.slice(start, end),
-      has_older: start > 0 || older, has_newer: end < ordered.length });
-  }
-  client.setQueryData<InfiniteData<ChatMessageWindow, ChatMessagePageCursor>>(key, {
-    pages, pageParams: pages.map((page, index) => ({
-      before: index ? pages[index - 1].messages[0].id : undefined,
-      limit: index ? page.messages.length : 40,
-    })),
-  });
+  client.setQueryData<InfiniteData<ChatMessageWindow, ChatMessagePageCursor>>(
+    key, chatMessageWindowPages(chatId, ordered, older),
+  );
   if (continuing) {
     const context = client.getQueryData<ChatTranscriptContext>(["chat", chatId, "context", previousHead]);
     if (context) {
