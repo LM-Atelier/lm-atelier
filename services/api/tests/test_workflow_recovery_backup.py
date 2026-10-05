@@ -40,7 +40,9 @@ async def test_workflow_backup_restore_preserves_the_clock_history_and_disabled_
         with SessionLocal() as session:
             if history:
                 _consumer(session, "run", revision_id, "complete")
-            session.get(WorkflowRevision, revision_id).artifact_sha256 = "a" * 64
+            revision = session.get(WorkflowRevision, revision_id)
+            assert revision is not None
+            revision.artifact_sha256 = "a" * 64
             session.commit()
         path = f"/api/workflow-families/{family_id}"
         preview = await _impact(client, f"{path}/deletion-impact")
@@ -53,12 +55,16 @@ async def test_workflow_backup_restore_preserves_the_clock_history_and_disabled_
         deadline = datetime.fromisoformat(trash_item["purge_after"]).astimezone(UTC)
         with SessionLocal() as session:
             item = session.get(RecoveryItem, deletion_id)
+            assert item is not None
             original_revision = item.subject_revision
             operation = session.scalar(
                 select(RecoveryOperation).where(RecoveryOperation.deletion_id == deletion_id)
             )
+            assert operation is not None
             trash_result = copy.deepcopy(operation.response_json)
-            graph = copy.deepcopy(session.get(WorkflowRevision, revision_id).api_graph_json)
+            revision = session.get(WorkflowRevision, revision_id)
+            assert revision is not None
+            graph = copy.deepcopy(revision.api_graph_json)
         before = _history()
         backup = await asyncio.to_thread(app.state.services.backups.create, include_media=True)
         verified = await asyncio.to_thread(app.state.services.backups.verify, backup.name)
@@ -80,6 +86,7 @@ async def test_workflow_backup_restore_preserves_the_clock_history_and_disabled_
         assert _history() == before
         with SessionLocal() as session:
             item = session.get(RecoveryItem, deletion_id)
+            assert item is not None
             assert item.subject_id == family_id and item.subject_revision == original_revision
             assert item.deleted_at.replace(tzinfo=UTC) == deleted_at
             assert item.purge_after.replace(tzinfo=UTC) == deadline
@@ -87,11 +94,15 @@ async def test_workflow_backup_restore_preserves_the_clock_history_and_disabled_
             operation = session.scalar(
                 select(RecoveryOperation).where(RecoveryOperation.deletion_id == deletion_id)
             )
+            assert operation is not None
             assert operation.response_json == trash_result
             revision = session.get(WorkflowRevision, revision_id)
+            assert revision is not None
             assert revision.workflow_id == definition_id and revision.artifact_sha256 == "a" * 64
             assert revision.api_graph_json == graph and not revision.trusted
-            assert not session.get(WorkflowFamily, family_id).enabled
+            family = session.get(WorkflowFamily, family_id)
+            assert family is not None
+            assert not family.enabled
             assert session.scalar(select(func.count()).select_from(Job)) == 0
         early = await expire_recovery_batch(
             app.state.services, deadline - timedelta(microseconds=1)
@@ -123,6 +134,7 @@ async def test_workflow_backup_restore_preserves_the_clock_history_and_disabled_
                 assert revision is not None and revision.api_graph_json == graph
                 assert not revision.trusted
             else:
+                assert item is not None
                 assert item.state == "purged" and item.subject_id == family_id
                 assert item.deleted_at.replace(tzinfo=UTC) == deleted_at
                 assert item.purge_after.replace(tzinfo=UTC) == deadline
@@ -132,5 +144,6 @@ async def test_workflow_backup_restore_preserves_the_clock_history_and_disabled_
                     assert revision.workflow_id == definition_id
                     assert revision.artifact_sha256 == "a" * 64 and not revision.trusted
                 else:
-                    assert family is revision is None
+                    assert family is None
+                    assert revision is None
             assert session.scalar(select(func.count()).select_from(Job)) == 0
