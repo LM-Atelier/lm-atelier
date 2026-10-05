@@ -171,6 +171,35 @@ async def test_an_encrypted_backup_asked_for_replaces_the_data_on_the_next_start
     assert _staged(settings) == []
 
 
+async def test_the_waiting_file_is_on_disk_before_it_is_put_in_place(
+    settings: Settings, vault: _Vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[tuple[str, int]] = []
+    fsync, replace = os.fsync, os.replace
+
+    def synced(fd: int) -> None:
+        events.append(("synced", os.fstat(fd).st_ino))
+        fsync(fd)
+
+    def moved(source: Any, destination: Any) -> None:
+        events.append(("moved", os.stat(source).st_ino))
+        replace(source, destination)
+
+    async with _running(settings) as client:
+        await _chat(client, "Kept plan")
+        backup = await _encrypted_backup(client)
+        with monkeypatch.context() as watching:
+            watching.setattr(backups_module.os, "fsync", synced)
+            watching.setattr(backups_module.os, "replace", moved)
+            scheduled = await _restore(client, backup)
+
+        assert scheduled.status_code == 200, scheduled.text
+        (waiting,) = _staged(settings)
+        identity = waiting.stat().st_ino
+        assert ("moved", identity) in events
+        assert ("synced", identity) in events[: events.index(("moved", identity))]
+
+
 async def test_a_wrong_passphrase_schedules_nothing_and_keeps_nothing(
     settings: Settings, vault: _Vault
 ) -> None:

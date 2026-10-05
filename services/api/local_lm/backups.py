@@ -263,6 +263,11 @@ class BackupManager:
             (self.settings.state_dir / _FAILED_RESTORE).unlink(missing_ok=True)
             self._withdraw_locked()
             staged = self.staged_restore_path(binding.operation)
+            # On disk before anything points at it: the marker written next is
+            # synced, and a file a crash cut short would be refused at the very
+            # start the restore was asked for.
+            with encrypted.open("r+b") as handle:
+                os.fsync(handle.fileno())
             os.replace(encrypted, staged)
             try:
                 self.archive_keys.put(binding, key)
