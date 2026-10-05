@@ -52,11 +52,16 @@ def reference_capacity(workflow: dict[str, Any]) -> int:
                 index := int(match.group("index"))
             ) < MAX_NUMBERED_INPUTS:
                 numbered.add(index)
-    if numbered:
-        # Numbered slots and a plain first input can coexist; the slots are
-        # what bound the count, and slot 0 is the same picture as the first.
-        return max(numbered) + 1
-    return 1 if takes_first else 0
+    if takes_first:
+        numbered.add(0)
+    if not numbered:
+        return 0
+    prefix = 0
+    while prefix in numbered:
+        prefix += 1
+    # Higher slots repeat the last supplied picture. That can fill one gap,
+    # but every earlier picture still needs its own slot.
+    return min(prefix + 1, max(numbered) + 1)
 
 
 def exceeds_capacity(workflow: dict[str, Any], supplied: int) -> int | None:
