@@ -15,7 +15,7 @@ from local_lm.db import SessionLocal
 from local_lm.models import Job, Run, WorkStep
 from local_lm.orchestrator import ConversationOrchestrator
 
-ORDERED = {
+ORDERED: dict[str, Any] = {
     "text": (
         "Write a short story about a paper boat,\nthen create an image based on it, "
         "then animate the image into a video, then summarize the video"
