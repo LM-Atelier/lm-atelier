@@ -10,14 +10,16 @@ import stat
 import tempfile
 import threading
 import zipfile
-from contextlib import closing, suppress
+from contextlib import ExitStack, closing, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, get_args
 
+from .archive_key_store import ArchiveKeyMissing, ArchiveKeyStore, RestoreKeyBinding
 from .config import Settings
 from .filesystem_links import is_link_or_reparse
+from .project_archive_encryption import STAGING_FOLDER, STAGING_PREFIX
 from .schema_revisions import known_revisions
 from .schemas import BackupInfo
 
@@ -40,7 +42,9 @@ _RESTORE_MARKER = "restore-on-next-start.json"
 _FAILED_RESTORE = "restore-failed.json"
 
 #: Why a restore someone asked for could not be applied, as the API reports it.
-FailedRestoreReason = Literal["backup-missing", "backup-invalid", "backup-newer", "restore-failed"]
+FailedRestoreReason = Literal[
+    "backup-missing", "backup-invalid", "backup-newer", "backup-key-missing", "restore-failed"
+]
 
 
 class BackupFromNewerVersion(ValueError):
@@ -67,11 +71,16 @@ class RestoreState:
     backup: str | None = None
     reason: FailedRestoreReason | None = None
     failed_at: datetime | None = None
+    #: Whether the restore is, or was, of an encrypted backup file rather than a backup here.
+    encrypted: bool = False
 
 
 class BackupManager:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, archive_keys: ArchiveKeyStore | None = None) -> None:
         self.settings = settings
+        self.archive_keys = (
+            ArchiveKeyStore(settings.data_dir) if archive_keys is None else archive_keys
+        )
         # Automatic checks run in a worker thread while backup actions remain
         # available through the API. Serialize the filesystem transaction as
         # well as the daily check/create decision so two checks cannot both
@@ -222,35 +231,69 @@ class BackupManager:
 
         with self._lock:
             result = self._verify_locked(name)
-            self._require_known_revision(self._path(name))
+            self.require_known_revision(self._path(name))
             # Asking again replaces whatever the last failure said. Cleared
             # before the restore is armed, so a record that cannot be cleared
             # leaves nothing scheduled behind the error.
             (self.settings.state_dir / _FAILED_RESTORE).unlink(missing_ok=True)
-            marker = self.settings.state_dir / _RESTORE_MARKER
-            fd, temporary_name = tempfile.mkstemp(
-                prefix="restore-marker-",
-                suffix=".partial",
-                dir=self.settings.state_dir,
+            replaced = self._pending_encrypted()
+            self._write_marker(
+                {"backup": name, "requested": True} if requested else {"backup": name}
             )
-            temporary = Path(temporary_name)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    json.dump(
-                        {"backup": name, "requested": True} if requested else {"backup": name},
-                        handle,
-                    )
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, marker)
-            finally:
-                temporary.unlink(missing_ok=True)
+            # An encrypted restore this one replaced takes its file and key with
+            # it, once nothing points at them any more.
+            if replaced is not None:
+                self._discard_encrypted(replaced)
             result.restore_pending = True
             return result
+
+    def request_encrypted_restore(
+        self, binding: RestoreKeyBinding, encrypted: Path, key: bytes
+    ) -> None:
+        """Ask for an opened and checked encrypted backup to replace the data on the next start.
+
+        ``encrypted`` is moved to where the next start looks for it and ``key``,
+        its archive key, waits in the vault; the marker names neither, only the
+        identities in ``binding``. Always a restore a person asked for. If the
+        key cannot be stored nothing is scheduled, and no other restore that was
+        waiting is left in place either.
+        """
+
+        with self._lock:
+            (self.settings.state_dir / _FAILED_RESTORE).unlink(missing_ok=True)
+            self._withdraw_locked()
+            staged = self.staged_restore_path(binding.operation)
+            os.replace(encrypted, staged)
+            try:
+                self.archive_keys.put(binding, key)
+                self._write_marker({"encrypted": binding.as_marker(), "requested": True})
+            except BaseException:
+                with suppress(OSError):
+                    staged.unlink(missing_ok=True)
+                self.archive_keys.discard(binding)
+                raise
+
+    def staged_restore_path(self, operation: str) -> Path:
+        """Where the encrypted file of the restore ``operation`` waits for the next start.
+
+        It sits in the private archive staging folder under that folder's own
+        prefix, so whatever a crash leaves is removed by the same sweep at
+        startup, which runs after a waiting restore has been applied.
+        """
+
+        if not re.fullmatch(r"[0-9a-f]{32}", operation):
+            raise ValueError("invalid restore operation")
+        return (
+            self.settings.export_dir
+            / STAGING_FOLDER
+            / f"{STAGING_PREFIX}restore-{operation}.lm-atelier.encrypted"
+        )
 
     def restore_state(self) -> RestoreState:
         """What waits for the next start, or why the last restore asked for was not applied."""
 
+        if self._pending_encrypted() is not None:
+            return RestoreState(state="pending", encrypted=True)
         pending = self._pending_backup_name()
         if pending is not None:
             return RestoreState(state="pending", backup=pending)
@@ -262,6 +305,7 @@ class BackupManager:
             reason = payload["reason"]
             failed_at = datetime.fromisoformat(payload["failed_at"])
             backup = payload.get("backup")
+            encrypted = payload.get("encrypted") is True
         except (OSError, ValueError, KeyError, TypeError):
             return RestoreState(state="failed", reason="restore-failed")
         return RestoreState(
@@ -269,6 +313,7 @@ class BackupManager:
             backup=backup if isinstance(backup, str) and _BACKUP_NAME.fullmatch(backup) else None,
             reason=reason if reason in get_args(FailedRestoreReason) else "restore-failed",
             failed_at=failed_at,
+            encrypted=encrypted,
         )
 
     def dismiss_failed_restore(self) -> bool:
@@ -288,10 +333,55 @@ class BackupManager:
         """
 
         with self._lock:
-            marker = self.settings.state_dir / _RESTORE_MARKER
-            existed = marker.is_file()
-            marker.unlink(missing_ok=True)
-            return existed
+            return self._withdraw_locked()
+
+    def withdraw_requested_restore(self) -> bool:
+        """Withdraw the restore a person asked for, before it is applied.
+
+        An encrypted one's file and key go with it. A restore armed for any
+        other reason is left alone. Returns whether one was withdrawn.
+        """
+
+        with self._lock:
+            payload = self._pending_marker()
+            if payload is None or payload.get("requested") is not True:
+                return False
+            return self._withdraw_locked()
+
+    def _withdraw_locked(self) -> bool:
+        marker = self.settings.state_dir / _RESTORE_MARKER
+        existed = marker.is_file()
+        encrypted = self._pending_encrypted()
+        marker.unlink(missing_ok=True)
+        if encrypted is not None:
+            self._discard_encrypted(encrypted)
+        return existed
+
+    def _discard_encrypted(self, binding: RestoreKeyBinding) -> None:
+        """Remove an encrypted restore's file and its key; startup sweeps a file left behind."""
+
+        try:
+            self.staged_restore_path(binding.operation).unlink(missing_ok=True)
+        except OSError:
+            logger.warning("The file of a withdrawn restore could not be removed.", exc_info=True)
+        self.archive_keys.discard(binding)
+
+    def _write_marker(self, payload: dict[str, object]) -> None:
+        marker = self.settings.state_dir / _RESTORE_MARKER
+        fd, temporary_name = tempfile.mkstemp(
+            prefix="restore-marker-",
+            suffix=".partial",
+            dir=self.settings.state_dir,
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, marker)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def delete(self, name: str) -> None:
         with self._lock:
@@ -641,19 +731,25 @@ class BackupManager:
         payload = json.loads(marker.read_text(encoding="utf-8"))
         requested = isinstance(payload, dict) and payload.get("requested") is True
         try:
+            if requested and "encrypted" in payload:
+                return self._apply_encrypted_restore(marker, payload["encrypted"])
             return self._apply_restore(marker, payload)
         except _RestoreNotApplied as failure:
             if not requested:
                 raise failure.cause from None
-            self._record_failed_restore(marker, payload.get("backup"), failure.cause)
+            self._record_failed_restore(marker, payload, failure.cause)
             return False
 
-    def _record_failed_restore(self, marker: Path, backup: object, error: Exception) -> None:
+    def _record_failed_restore(
+        self, marker: Path, payload: dict[str, Any], error: Exception
+    ) -> None:
         reason: FailedRestoreReason
         if isinstance(error, FileNotFoundError):
             reason = "backup-missing"
         elif isinstance(error, BackupFromNewerVersion):
             reason = "backup-newer"
+        elif isinstance(error, ArchiveKeyMissing):
+            reason = "backup-key-missing"
         elif isinstance(error, ValueError | KeyError | TypeError):
             reason = "backup-invalid"
         else:
@@ -664,12 +760,14 @@ class BackupManager:
             reason,
             exc_info=error,
         )
+        backup = payload.get("backup")
         record = {
             "backup": backup
             if isinstance(backup, str) and _BACKUP_NAME.fullmatch(backup)
             else None,
             "reason": reason,
             "failed_at": datetime.now(UTC).isoformat(),
+            "encrypted": "encrypted" in payload,
         }
         try:
             self._write_failure_record(json.dumps(record))
@@ -709,12 +807,53 @@ class BackupManager:
 
         try:
             source_path = self._path(str(payload["backup"]))
+            media_path = self._media_path(source_path)
+            media = media_path if media_path.is_file() else None
+        except Exception as exc:
+            raise _RestoreNotApplied(exc) from exc
+        return self._restore_from(marker, source_path, media)
+
+    def _apply_encrypted_restore(self, marker: Path, binding_value: object) -> bool:
+        """Open the encrypted backup a restore waits on, with its stored key, and put it in place.
+
+        The opened files are removed when this ends. The encrypted file and its
+        key are used once: they go too once the restore was applied or was not.
+        Only a failure that may have changed the live data keeps them, because
+        then the start stops and the next one must be able to finish the
+        restore. Failures are reported exactly as :meth:`_apply_restore` does.
+        """
+
+        # Imported here because the encrypted backup module builds on this one.
+        from .backup_archives import opened_encrypted_restore
+
+        binding: RestoreKeyBinding | None = None
+        settled = False
+        try:
+            with ExitStack() as opened:
+                try:
+                    binding = RestoreKeyBinding.from_marker(binding_value)
+                    database, media = opened.enter_context(opened_encrypted_restore(self, binding))
+                except Exception as exc:
+                    raise _RestoreNotApplied(exc) from exc
+                applied = self._restore_from(marker, database, media)
+            settled = True
+            return applied
+        except _RestoreNotApplied:
+            settled = True
+            raise
+        finally:
+            # A marker that cannot be read names no key, so none is removed:
+            # it may be another restore's, and the next restore replaces it.
+            if settled and binding is not None:
+                self._discard_encrypted(binding)
+
+    def _restore_from(self, marker: Path, source_path: Path, media_path: Path | None) -> bool:
+        try:
             self._verify_path(source_path)
             # Checked again here, not only when the restore was asked for: a build
             # that cannot open the backup must not put it in place of data it can.
-            self._require_known_revision(source_path)
-            media_path = self._media_path(source_path)
-            if media_path.is_file():
+            self.require_known_revision(source_path)
+            if media_path is not None:
                 self._verify_media_archive(media_path, source_path)
 
             # Materialize and verify the complete database before changing any live
@@ -736,7 +875,7 @@ class BackupManager:
                 ):
                     source.backup(target)
                 self._verify_path(restored_database)
-                if media_path.is_file():
+                if media_path is not None:
                     self._restore_media_archive(media_path, restored_database)
                 destination.parent.mkdir(parents=True, exist_ok=True)
             except Exception as exc:
@@ -807,7 +946,7 @@ class BackupManager:
             raise _LiveLogLeftAside("the live database log could not be put back") from exc
 
     @staticmethod
-    def _require_known_revision(path: Path) -> None:
+    def require_known_revision(path: Path) -> None:
         """Refuse a backup that records any schema revision this build's migrations do not know.
 
         Data on more than one migration branch records one revision for each,
@@ -835,15 +974,28 @@ class BackupManager:
         return path.resolve()
 
     def _pending_backup_name(self) -> str | None:
+        payload = self._pending_marker()
+        name = None if payload is None else payload.get("backup")
+        return name if isinstance(name, str) and _BACKUP_NAME.fullmatch(name) else None
+
+    def _pending_encrypted(self) -> RestoreKeyBinding | None:
+        payload = self._pending_marker()
+        if payload is None or "encrypted" not in payload:
+            return None
+        try:
+            return RestoreKeyBinding.from_marker(payload["encrypted"])
+        except ValueError:
+            return None
+
+    def _pending_marker(self) -> dict[str, Any] | None:
         marker = self.settings.state_dir / _RESTORE_MARKER
         if not marker.is_file() or self._is_link(marker):
             return None
         try:
             payload = json.loads(marker.read_text(encoding="utf-8"))
-            name = payload.get("backup")
         except (OSError, json.JSONDecodeError):
             return None
-        return name if isinstance(name, str) and _BACKUP_NAME.fullmatch(name) else None
+        return payload if isinstance(payload, dict) else None
 
     def _is_managed_file(self, path: Path) -> bool:
         if self._is_link(path) or not path.is_file():

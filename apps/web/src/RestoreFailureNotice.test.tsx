@@ -15,7 +15,7 @@ function show() {
 }
 
 function failed(reason: BackupRestoreState["reason"]): BackupRestoreState {
-  return { state: "failed", backup: "local-lm-20260110T120000Z-00000001.sqlite3", reason, failed_at: "2026-10-04T12:00:00Z" };
+  return { state: "failed", backup: "local-lm-20260110T120000Z-00000001.sqlite3", reason, failed_at: "2026-10-04T12:00:00Z", encrypted: false };
 }
 
 afterEach(() => {
@@ -27,6 +27,7 @@ it.each([
   ["backup-missing", "The backup it was asked to use was no longer there."],
   ["backup-invalid", "The backup did not pass its checks."],
   ["backup-newer", "The backup was made by a newer version of LM Atelier."],
+  ["backup-key-missing", "The key that opens the encrypted backup was no longer in this computer's credential vault."],
   ["restore-failed", "The backup could not be put in place."],
 ] as const)("says the data was left as it was, and why: %s", async (reason, sentence) => {
   vi.mocked(api.backupRestoreState).mockResolvedValue(failed(reason));
@@ -38,8 +39,9 @@ it.each([
 });
 
 it.each([
-  { state: "none", backup: null, reason: null, failed_at: null },
-  { state: "pending", backup: "local-lm-20260110T120000Z-00000001.sqlite3", reason: null, failed_at: null },
+  { state: "none", backup: null, reason: null, failed_at: null, encrypted: false },
+  { state: "pending", backup: "local-lm-20260110T120000Z-00000001.sqlite3", reason: null, failed_at: null, encrypted: false },
+  { state: "pending", backup: null, reason: null, failed_at: null, encrypted: true },
 ] as const)("says nothing when no restore failed: $state", async (state) => {
   vi.mocked(api.backupRestoreState).mockResolvedValue(state);
   show();
@@ -51,7 +53,7 @@ it.each([
 it("goes away once dismissed", async () => {
   vi.mocked(api.backupRestoreState)
     .mockResolvedValueOnce(failed("backup-missing"))
-    .mockResolvedValue({ state: "none", backup: null, reason: null, failed_at: null });
+    .mockResolvedValue({ state: "none", backup: null, reason: null, failed_at: null, encrypted: false });
   vi.mocked(api.dismissFailedRestore).mockResolvedValue(undefined);
   show();
 

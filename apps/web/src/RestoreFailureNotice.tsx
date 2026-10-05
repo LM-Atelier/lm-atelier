@@ -9,6 +9,7 @@ const REASONS: Record<Reason, string> = {
   "backup-missing": "The backup it was asked to use was no longer there.",
   "backup-invalid": "The backup did not pass its checks.",
   "backup-newer": "The backup was made by a newer version of LM Atelier.",
+  "backup-key-missing": "The key that opens the encrypted backup was no longer in this computer's credential vault.",
   "restore-failed": "The backup could not be put in place.",
 };
 

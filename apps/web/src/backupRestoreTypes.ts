@@ -2,6 +2,8 @@
 export interface BackupRestoreState {
   state: "none" | "pending" | "failed";
   backup: string | null;
-  reason: "backup-missing" | "backup-invalid" | "backup-newer" | "restore-failed" | null;
+  reason: "backup-missing" | "backup-invalid" | "backup-newer" | "backup-key-missing" | "restore-failed" | null;
   failed_at: string | null;
+  /** Whether the restore is, or was, of an encrypted backup file rather than a backup here. */
+  encrypted: boolean;
 }

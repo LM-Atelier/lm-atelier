@@ -3868,10 +3868,18 @@ class BackupRestoreStateOut(ApiModel):
 
     state: Literal["none", "pending", "failed"]
     backup: str | None = None
-    reason: Literal["backup-missing", "backup-invalid", "backup-newer", "restore-failed"] | None = (
-        None
-    )
+    reason: (
+        Literal[
+            "backup-missing",
+            "backup-invalid",
+            "backup-newer",
+            "backup-key-missing",
+            "restore-failed",
+        ]
+        | None
+    ) = None
     failed_at: datetime | None = None
+    encrypted: bool = False
 
 
 class EncryptedBackupRequest(ApiModel):

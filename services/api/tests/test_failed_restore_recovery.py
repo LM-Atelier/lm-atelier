@@ -299,6 +299,7 @@ async def test_the_application_starts_after_a_requested_restore_fails_and_report
                 "backup": None,
                 "reason": None,
                 "failed_at": None,
+                "encrypted": False,
             }
 
 
