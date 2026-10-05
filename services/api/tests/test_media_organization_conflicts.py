@@ -16,7 +16,9 @@ from local_lm.models import Artifact, MediaOrganizationImpact, MediaTag, MediaTa
 async def _destination(client: AsyncClient) -> dict[str, object]:
     response = await client.post("/api/media-tags", json={"label": "Landscape"})
     assert response.status_code == 201
-    return response.json()
+    value = response.json()
+    assert isinstance(value, dict)
+    return value
 
 
 @pytest.mark.parametrize("label", ["landscape", "LANDSCAPE"])
@@ -38,8 +40,12 @@ async def test_a_taken_normalized_tag_name_is_refused_before_preview(
         assert response.json()["code"] == "media-tag-conflict"
     with db.SessionLocal() as session:
         assert session.scalars(select(MediaOrganizationImpact)).all() == []
-        assert session.get(MediaTag, source["id"]).label == "Study"
-        assert session.get(MediaTag, destination["id"]).label == "Landscape"
+        source_tag = session.get(MediaTag, source["id"])
+        destination_tag = session.get(MediaTag, destination["id"])
+        assert source_tag is not None
+        assert destination_tag is not None
+        assert source_tag.label == "Study"
+        assert destination_tag.label == "Landscape"
 
 
 async def test_a_name_taken_after_preview_has_the_same_specific_refusal(

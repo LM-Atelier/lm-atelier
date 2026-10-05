@@ -176,7 +176,9 @@ def test_sixteen_bit_grey_stays_whole_in_png_and_is_scaled_in_eight_bit_formats(
     for file_format in ("jpeg", "webp"):
         flat = _open(export_picture(_encoded(mid_grey), file_format)).convert("L")
         # Clipped to eight bits this would be white; scaled it is the middle.
-        assert abs(flat.getpixel((4, 4)) - 128) <= 3, file_format
+        value = flat.getpixel((4, 4))
+        assert isinstance(value, (int, float))
+        assert abs(value - 128) <= 3, file_format
 
 
 def test_the_file_is_named_after_the_picture() -> None:

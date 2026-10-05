@@ -381,7 +381,7 @@ def _c2sp_open(key: bytes, context: bytes, sealed: bytes) -> bytes:
 
 def _counting_derivations(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     derived: list[int] = []
-    real = archive.Argon2id
+    real = Argon2id
 
     def counting(**kwargs: Any) -> Argon2id:
         derived.append(1)
