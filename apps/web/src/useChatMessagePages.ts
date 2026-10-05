@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useQueryClient, type InfiniteData } from "@tanstack/react-query";
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { api } from "./api";
 import type { ChatMessageWindow, Message } from "./types";
 
@@ -48,6 +48,17 @@ function carriedPages(chatId: string, shown: ChatMessagePages, latest: ChatMessa
 export function useChatMessagePages(chatId: string | null | undefined, headId: string | null) {
   const client = useQueryClient();
   const key = ["chat", chatId, "messages", headId];
+  // The pages the head shown holds, carried over or read. A refresh that
+  // began before older pages were added, such as by the carry below, lands
+  // after them with only its own pages; then what was held is shown with it
+  // at once, and written back below.
+  const carriedTo = useRef<{ chatId: typeof chatId; headId: string | null; data: ChatMessagePages } | null>(null);
+  const select = useCallback((data: ChatMessagePages) => {
+    const kept = carriedTo.current;
+    const again = chatId && kept && kept.chatId === chatId && kept.headId === headId
+      && data.pages.length < kept.data.pages.length && carriedPages(chatId, kept.data, data);
+    return messagesFromPages(again || data);
+  }, [chatId, headId]);
   const query = useInfiniteQuery({
     queryKey: key,
     enabled: Boolean(chatId),
@@ -67,7 +78,7 @@ export function useChatMessagePages(chatId: string | null | undefined, headId: s
     // Until the new head's first page arrives the same chat keeps showing what
     // it showed, so the conversation never empties under the person reading it.
     placeholderData: (previous, previousQuery) => previousQuery?.queryKey[1] === chatId ? previous : undefined,
-    select: messagesFromPages,
+    select,
   });
   const shown = useRef<{ chatId: typeof chatId; headId: string | null }>({ chatId, headId });
   // Older messages someone asked for, until they arrive. A refresh, such as
@@ -87,10 +98,23 @@ export function useChatMessagePages(chatId: string | null | undefined, headId: s
       const carried = chatId && previous && latest.pages.length === 1 && carriedPages(chatId, previous, latest);
       if (carried) {
         client.setQueryData<ChatMessagePages>(["chat", chatId, "messages", headId], carried);
+        carriedTo.current = { chatId, headId, data: carried };
         return;
       }
       if (latest.pages.length === 1) olderWanted.current = null;
     } else shown.current = { chatId, headId };
+    const kept = carriedTo.current;
+    const current = client.getQueryData<ChatMessagePages>(["chat", chatId, "messages", headId]);
+    if (chatId && current && !isPlaceholderData) {
+      const again = kept?.chatId === chatId && kept.headId === headId
+        && current.pages.length < kept.data.pages.length && carriedPages(chatId, kept.data, current);
+      if (again) {
+        client.setQueryData<ChatMessagePages>(["chat", chatId, "messages", headId], again);
+        carriedTo.current = { chatId, headId, data: again };
+        return;
+      }
+      carriedTo.current = { chatId, headId, data: current };
+    }
     const wanted = olderWanted.current;
     if (!wanted) return;
     const arrived = data?.some((message, index) => index > 0 && message.id === wanted.oldest);

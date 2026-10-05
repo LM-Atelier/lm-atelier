@@ -150,7 +150,10 @@ function conversation(length: number, held: Set<string> = new Set()) {
     const start = Math.max(0, end - (options?.limit ?? 40));
     return { chat_id: "chat-one", messages: all.slice(start, end), has_older: start > 0, has_newer: Boolean(options?.before) };
   });
-  return { release: (read: string) => { held.delete(read); waiting.get(read)?.(); } };
+  return {
+    hold: (read: string) => { held.add(read); },
+    release: (read: string) => { held.delete(read); waiting.get(read)?.(); },
+  };
 }
 
 function ids(data: Message[] | undefined) {
@@ -244,4 +247,38 @@ it("asks again for an older page that a refresh cancelled", async () => {
   await act(async () => { server.release("message-79:message-40"); });
 
   await waitFor(() => expect(ids(result.current.data)).toEqual(range(0, 80)));
+});
+
+it("keeps loaded older messages when a refresh that began before they were carried over lands after", async () => {
+  const server = conversation(82);
+  const { client, wrapper } = setup();
+  const shown: number[] = [];
+  const { result, rerender } = renderHook(({ head }) => {
+    const pages = useChatMessagePages("chat-one", head);
+    shown.push(pages.data?.length ?? 0);
+    return pages;
+  }, { wrapper, initialProps: { head: "message-79" } });
+  await waitFor(() => expect(ids(result.current.data)).toEqual(range(40, 80)));
+  await act(async () => { await result.current.loadOlder(); });
+  await waitFor(() => expect(ids(result.current.data)).toEqual(range(0, 80)));
+
+  // The new head's newest page is in, and a refresh of it, brought by the
+  // events of a reply streaming in elsewhere, starts before the transcript
+  // has carried the older pages over to it.
+  const latest = ["chat", "chat-one", "messages", "message-81"];
+  await act(async () => { await client.prefetchInfiniteQuery({ queryKey: latest, initialPageParam: { limit: 40 },
+    queryFn: () => api.chatMessages("chat-one", { headId: "message-81", limit: 40 }) }); });
+  server.hold("message-81:latest");
+  act(() => { void client.refetchQueries({ queryKey: latest, exact: true }); });
+  rerender({ head: "message-81" });
+  await waitFor(() => expect(ids(result.current.data)).toEqual(range(0, 82)));
+  const carried = shown.length;
+
+  await act(async () => { server.release("message-81:latest"); });
+
+  await waitFor(() => expect(client.isFetching({ queryKey: latest })).toBe(0));
+  await waitFor(() => expect(client.getQueryData<{ pages: unknown[] }>(latest)?.pages).toHaveLength(3));
+  // Not one render after the carry shows fewer messages.
+  expect(shown.slice(carried - 1).every((count) => count === 82)).toBe(true);
+  expect(ids(result.current.data)).toEqual(range(0, 82));
 });
