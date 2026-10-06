@@ -9,11 +9,12 @@ import secrets
 import shutil
 import stat
 import tempfile
+import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from collections.abc import Set as AbstractSet
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -46,6 +47,7 @@ from .filesystem_links import (
     AnchoredDirectoryError,
     AnchoredEntry,
     AnchoredEntryKind,
+    available_bytes,
     create_entry,
     discard_entry,
     is_link_or_reparse,
@@ -58,6 +60,7 @@ from .filesystem_links import (
     rename_entry,
     sync_directory,
 )
+from .media_process import outlast_cancellation
 from .models import (
     Artifact,
     ArtifactLibraryEntry,
@@ -83,18 +86,30 @@ _RESTORE_PARTIAL = re.compile(r"(?:[0-9a-f]{64}|\.[0-9a-f]{64}\.[^.]+)\.restore-
 _ROOT_LISTING_LIMIT: Final = 65536
 _STAGED_DELETION = re.compile(r"^(?P<digest>[0-9a-f]{64})\.[0-9a-f]{32}$")
 _MAX_VIDEO_POSTER_BYTES = 16 * 1024 * 1024
+_TOOL_INPUT_PREFIX: Final = "tool-input-"
+#: Exactly the names the copy below makes, and so the only ones the sweep may remove.
+_TOOL_INPUT_NAME: Final = re.compile(r"tool-input-[0-9a-f]{32}\.tmp")
+_COPY_READ: Final = 1024 * 1024
+#: Room a private copy must leave free on the store's volume, so that making it
+#: never fills the volume other writes, the database's among them, depend on.
+_COPY_HEADROOM: Final = 1024 * 1024 * 1024
 
 
 def _is_temporary_name(name: str) -> bool:
     """True only for a name this store's own staging could have produced.
 
-    `ingest_bytes` stages as `ingest-<hex>.tmp`, and the proxy encoder uses
-    `mkstemp(prefix="video-proxy-", suffix=".mp4")`. Reading the shapes the
-    store WRITES on the way back out means a pass can only ever delete
-    something this store could have left behind.
+    `ingest_bytes` stages as `ingest-<hex>.tmp`, the proxy encoder uses
+    `mkstemp(prefix="video-proxy-", suffix=".mp4")`, and a copy made for a tool
+    to read is `tool-input-` with 32 lowercase hex digits and `.tmp`, matched
+    exactly. Reading the shapes the store WRITES on the way back out means a
+    pass can only ever delete something this store could have left behind.
     """
 
-    return name.startswith("ingest-") or (name.startswith("video-proxy-") and name.endswith(".mp4"))
+    return (
+        name.startswith("ingest-")
+        or (name.startswith("video-proxy-") and name.endswith(".mp4"))
+        or _TOOL_INPUT_NAME.fullmatch(name) is not None
+    )
 
 
 def _aged_file_size(entry: AnchoredEntry, cutoff: datetime) -> int | None:
@@ -268,6 +283,14 @@ class _BoundedWalk:
         return self.leaves > 0 and time.monotonic() - self.started >= self.seconds
 
 
+class _CopyAbandoned(Exception):
+    """The caller was cancelled and asked the copy to stop; it still waits for it to end."""
+
+
+class ArtifactCopyUnavailable(OSError):
+    """A private copy of a stored file could not be made: no room, or the store refused it."""
+
+
 @dataclass(frozen=True)
 class StagedArtifactFile:
     path: Path
@@ -276,6 +299,15 @@ class StagedArtifactFile:
 
     def discard(self) -> None:
         self.path.unlink(missing_ok=True)
+
+
+def _read_stored(source: IO[bytes]) -> bytes:
+    """The next chunk of a stored file; a failed read is the stored file's fault."""
+
+    try:
+        return source.read(_COPY_READ)
+    except OSError as exc:
+        raise ValueError("artifact file could not be read") from exc
 
 
 def _path_follows_a_link(path: Path) -> bool:
@@ -424,6 +456,118 @@ class ArtifactStore:
         if content_digest.hexdigest() != digest_value:
             raise ValueError("artifact file checksum does not match its record")
         return bytes(content)
+
+    @asynccontextmanager
+    async def verified_copy(self, artifact: Artifact, *, maximum_bytes: int) -> AsyncIterator[Path]:
+        """Exactly the verified bytes of an artifact, as a file a tool can open by name.
+
+        A tool handed the stored path opens it after any check made here, so it
+        reads whatever that name holds by then, and the verified-path cache
+        cannot tell a replacement that kept the size and time. This copies from
+        the one held descriptor whose size and digest are checked into a new,
+        unpredictable name created exclusively in the store root, and the tool
+        reads that copy, which nothing else writes. The copy is removed when the
+        block ends; one left by a crash has a temporary name, so the orphan
+        sweep removes it. A caller cancelled during the copy stops it and waits
+        for it, so no copy is left behind for the sweep.
+        """
+
+        stop = threading.Event()
+        copying = asyncio.ensure_future(
+            asyncio.to_thread(self._copy_verified, artifact, maximum_bytes, stop)
+        )
+        try:
+            name = await outlast_cancellation(copying, on_cancel=stop.set)
+            yield self.root / name
+        finally:
+            if copying.done() and not copying.cancelled() and copying.exception() is None:
+                # Best effort: a copy this cannot remove is left for the orphan sweep.
+                with (
+                    suppress(AnchoredDirectoryError, OSError),
+                    AnchoredDirectory(self.root) as root,
+                ):
+                    discard_entry(root, copying.result())
+
+    def _copy_verified(self, artifact: Artifact, maximum_bytes: int, stop: threading.Event) -> str:
+        """Copy the artifact through its held, checked descriptor into a new root entry.
+
+        Size and digest are measured on the bytes as they are copied, so the
+        copy holds exactly what was verified. Returns the new entry's name.
+        """
+
+        if maximum_bytes < 0:
+            raise ValueError("maximum artifact read size is invalid")
+        digest_value = artifact.sha256
+        if artifact.id != f"sha256:{digest_value}" or not _SHA256.fullmatch(digest_value):
+            raise ValueError("artifact identity is invalid")
+        expected_relative = PurePosixPath(
+            digest_value[:2],
+            digest_value[2:4],
+            digest_value,
+        ).as_posix()
+        if artifact.relative_path != expected_relative:
+            raise ValueError("artifact path is not canonical")
+
+        name = f"{_TOOL_INPUT_PREFIX}{secrets.token_hex(16)}.tmp"
+        descriptor: int | None = None
+        try:
+            with (
+                AnchoredDirectory(self.root) as root,
+                open_child_directory(root, digest_value[:2]) as first,
+                open_child_directory(first, digest_value[2:4]) as second,
+            ):
+                descriptor = open_entry(second, digest_value)
+                if descriptor is None:
+                    raise FileNotFoundError("artifact file is missing")
+                measured = os.fstat(descriptor)
+                if not stat.S_ISREG(measured.st_mode):
+                    raise ValueError("artifact entry is not a regular file")
+                if measured.st_size != artifact.size_bytes:
+                    raise ValueError("artifact file size does not match its record")
+                if measured.st_size > maximum_bytes:
+                    raise ValueError("artifact is larger than this read allows")
+
+                # Created only once the source is open and checked, so a
+                # refusal before this point has nothing to remove.
+                try:
+                    if available_bytes(root) < measured.st_size + _COPY_HEADROOM:
+                        raise ArtifactCopyUnavailable("there is no room for a private copy")
+                    sink = create_entry(root, name)
+                except AnchoredDirectoryError as exc:
+                    raise ArtifactCopyUnavailable("a private copy could not be created") from exc
+                try:
+                    copied = 0
+                    content_digest = hashlib.sha256()
+                    try:
+                        with os.fdopen(sink, "wb") as copy, os.fdopen(descriptor, "rb") as source:
+                            descriptor = None
+                            while chunk := _read_stored(source):
+                                if stop.is_set():
+                                    raise _CopyAbandoned
+                                copied += len(chunk)
+                                if copied > measured.st_size:
+                                    raise ValueError("artifact file size does not match its record")
+                                content_digest.update(chunk)
+                                copy.write(chunk)
+                    except OSError as exc:
+                        # Reading the stored file reports its own failures; this is the copy's.
+                        raise ArtifactCopyUnavailable(
+                            "a private copy could not be written"
+                        ) from exc
+                    if copied != artifact.size_bytes:
+                        raise ValueError("artifact file size does not match its record")
+                    if content_digest.hexdigest() != digest_value:
+                        raise ValueError("artifact file checksum does not match its record")
+                except BaseException:
+                    discard_entry(root, name)
+                    raise
+        except AnchoredDirectoryError as exc:
+            raise ValueError("artifact path could not be held for reading") from exc
+        finally:
+            if descriptor is not None:
+                with suppress(OSError):
+                    os.close(descriptor)
+        return name
 
     def delivery_metadata(self, artifact: Artifact) -> tuple[Path, str, str]:
         path = self.verified_path(artifact)
