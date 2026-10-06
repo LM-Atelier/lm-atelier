@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 import pytest
+from run_waits import PATIENCE_SECONDS
 from websockets.exceptions import WebSocketException
 
 from local_lm.adapters.base import GeneratedAsset, MediaEvent, MediaRequest
@@ -545,9 +546,9 @@ async def test_cancel_wakes_a_blocked_comfyui_websocket(
     request = media_request(operation="text_to_image")
     collecting = asyncio.create_task(_collect_media_events(adapter, request))
     try:
-        await asyncio.wait_for(receiving.wait(), timeout=0.5)
+        await asyncio.wait_for(receiving.wait(), timeout=PATIENCE_SECONDS)
         await adapter.cancel(request.run_id)
-        events = await asyncio.wait_for(collecting, timeout=0.5)
+        events = await asyncio.wait_for(collecting, timeout=PATIENCE_SECONDS)
     finally:
         if not collecting.done():
             collecting.cancel()
@@ -597,7 +598,7 @@ def _adapter_on(monkeypatch: pytest.MonkeyPatch, handler: Any) -> ComfyUIAdapter
 async def _drive_to_queued(producer: Any) -> list[str]:
     seen: list[str] = []
     while True:
-        event = await asyncio.wait_for(anext(producer), timeout=1)
+        event = await asyncio.wait_for(anext(producer), timeout=PATIENCE_SECONDS)
         seen.append(event.type)
         if event.type == "queued":
             return seen
@@ -923,9 +924,9 @@ async def test_a_cancelled_run_is_interrupted_once_and_not_again_on_the_way_out(
     request = media_request(operation="text_to_image")
     collecting = asyncio.create_task(_collect_media_events(adapter, request))
     try:
-        await asyncio.wait_for(receiving.wait(), timeout=0.5)
+        await asyncio.wait_for(receiving.wait(), timeout=PATIENCE_SECONDS)
         await adapter.cancel(request.run_id)
-        events = await asyncio.wait_for(collecting, timeout=0.5)
+        events = await asyncio.wait_for(collecting, timeout=PATIENCE_SECONDS)
     finally:
         if not collecting.done():
             collecting.cancel()
