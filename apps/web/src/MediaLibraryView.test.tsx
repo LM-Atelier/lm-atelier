@@ -232,3 +232,14 @@ it("covers pictures and names items by place while covering is on", async () => 
     localStorage.removeItem(SENSITIVE_MEDIA_KEY);
   }
 });
+
+it("offers saving a frame and trimming on a video's card and on no picture's", async () => {
+  vi.mocked(api.artifactLibrary).mockResolvedValue(parsedPage([rawItem("b"), rawItem("a", { kind: "video" })]));
+  renderLibrary();
+
+  const video = (await screen.findByText("Item a")).closest("article");
+  const picture = screen.getByText("Item b").closest("article");
+  expect(video?.querySelector('[aria-label="Save a frame from this video"]')).not.toBeNull();
+  expect(video?.querySelector('[aria-label="Trim this video"]')).not.toBeNull();
+  expect(picture?.querySelector('[aria-label="Save a frame from this video"], [aria-label="Trim this video"]')).toBeNull();
+});

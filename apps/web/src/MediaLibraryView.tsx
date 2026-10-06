@@ -19,6 +19,8 @@ import { useSensitiveMediaChoice } from "./sensitiveMedia";
 import { ShieldedMedia } from "./ShieldedMedia";
 import { useMediaLibraryRecovery } from "./useMediaLibraryRecovery";
 import { useMediaOrganization } from "./useMediaOrganization";
+import { VideoFrameButton } from "./VideoFrameButton";
+import { VideoTrimButton } from "./VideoTrimButton";
 import { MediaOrganizationControls } from "./MediaOrganizationControls";
 import { MediaOrganizationManager } from "./MediaOrganizationManager";
 import { MediaOrganizationReview } from "./MediaOrganizationReview";
@@ -224,6 +226,10 @@ export function MediaLibraryView({
                           <Pencil size={14} />
                         </button>
                       )}
+                      {entry.kind === "video" && <>
+                        <VideoFrameButton artifactId={entry.artifact_id} source={source} />
+                        <VideoTrimButton artifactId={entry.artifact_id} source={source} />
+                      </>}
                       <button className="icon-button" aria-label={`Move ${name} to Recently Deleted`}
                         title="Move to Recently Deleted" aria-disabled={recovery.busy}
                         onClick={() => recovery.choose(entry)}><Trash2 size={14} /></button>

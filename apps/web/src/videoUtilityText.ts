@@ -46,3 +46,46 @@ export function useVideoUtilityJob(jobId: string | null) {
     refetchInterval: (query) => query.state.data && FINISHED.has(query.state.data.status) ? false : 500,
   });
 }
+
+/** What a picture or video made by a video utility records about the video it came from. */
+export type VideoUtilityOrigin =
+  | { action: "extract_frame"; sourceId: string; requested: number; actual: number }
+  | {
+    action: "trim";
+    sourceId: string;
+    requestedStart: number;
+    requestedEnd: number;
+    actualStart: number;
+    actualEnd: number;
+    fromBeginning: boolean;
+  };
+
+/** The origin a stored file's metadata records, or null when it was not made by a video utility. */
+export function videoUtilityOrigin(metadata: Record<string, unknown>): VideoUtilityOrigin | null {
+  const frame = metadata.video_frame;
+  if (typeof frame === "object" && frame !== null) {
+    const record = frame as Record<string, unknown>;
+    const requested = numberField(record, "requested_seconds");
+    const actual = numberField(record, "actual_seconds");
+    if (typeof record.source_artifact_id === "string" && requested !== null && actual !== null) {
+      return { action: "extract_frame", sourceId: record.source_artifact_id, requested, actual };
+    }
+  }
+  const trim = metadata.video_trim;
+  if (typeof trim === "object" && trim !== null) {
+    const record = trim as Record<string, unknown>;
+    const values = ["requested_start_seconds", "requested_end_seconds", "actual_start_seconds", "actual_end_seconds"]
+      .map((key) => numberField(record, key));
+    const [requestedStart, requestedEnd, actualStart, actualEnd] = values;
+    if (
+      typeof record.source_artifact_id === "string"
+      && requestedStart !== null && requestedEnd !== null && actualStart !== null && actualEnd !== null
+    ) {
+      return {
+        action: "trim", sourceId: record.source_artifact_id, requestedStart, requestedEnd, actualStart, actualEnd,
+        fromBeginning: record.from_beginning === true,
+      };
+    }
+  }
+  return null;
+}
