@@ -19,6 +19,11 @@ import httpx
 import websockets
 from websockets.exceptions import WebSocketException
 
+from ..comfy_lora_runtime_names import (
+    bind_lora_runtime_names,
+    has_nested_lora_names,
+    lora_runtime_names_need_binding,
+)
 from ..domain import Operation
 from ..filesystem_links import (
     AnchoredDirectory,
@@ -438,6 +443,31 @@ class ComfyUIAdapter:
                 )
         return parameters
 
+    async def _runtime_lora_graph(
+        self, graph: dict[str, Any], cancelled: asyncio.Event
+    ) -> dict[str, Any]:
+        if not has_nested_lora_names(graph):
+            return graph
+        try:
+            info = await self.object_info()
+        except (httpx.HTTPError, ValueError):
+            return graph
+        if cancelled.is_set() or not lora_runtime_names_need_binding(graph, info):
+            return graph
+        try:
+            response = await self._client.get("/system_stats", timeout=10)
+            response.raise_for_status()
+            if len(response.content) > _MAX_COMFY_JSON_BYTES:
+                return graph
+            metadata = response.json()
+        except (httpx.HTTPError, ValueError):
+            return graph
+        system = metadata.get("system") if isinstance(metadata, dict) else None
+        platform = system.get("os") if isinstance(system, dict) else None
+        return bind_lora_runtime_names(
+            graph, info, runtime_platform=platform if isinstance(platform, str) else None
+        )
+
     async def generate(self, request: MediaRequest) -> AsyncIterator[MediaEvent]:
         if request.run_id in self._cancelled:
             self._cancelled.discard(request.run_id)
@@ -476,6 +506,7 @@ class ComfyUIAdapter:
                 yield MediaEvent(type="cancelled")
                 return
             graph = self._compile(request.workflow, parameters)
+            graph = await self._runtime_lora_graph(graph, cancel_event)
             yield MediaEvent(
                 type="progress",
                 phase="Submitting media workflow",
