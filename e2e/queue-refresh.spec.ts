@@ -6,7 +6,7 @@ for (const cause of ["manual", "automatic"] as const) {
     let pending: Route | undefined;
     const result = {
       items: [], total: 0, next_cursor: null,
-      lane_counts: { generation: 0, transfer: 0, install: 0 },
+      lane_counts: { generation: 0, transfer: 0, install: 0, utility: 0 },
       observed_at: "2026-09-01T00:00:00Z",
     };
     await page.clock.install();

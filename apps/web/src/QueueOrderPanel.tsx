@@ -19,6 +19,7 @@ export function QueueOrderPanel({ initialLane, onBack }: { initialLane: QueueLan
             <option value="generation">Generation</option>
             <option value="transfer">Transfers</option>
             <option value="install">Installs</option>
+            <option value="utility">Video utilities</option>
           </select>
         </label>
         <button className="secondary compact-button" onClick={onBack}>Back to accepted work</button>

@@ -36,12 +36,13 @@ from .schemas import (
     WorkStepStatus,
 )
 
-Lane = Literal["generation", "transfer", "install"]
+Lane = Literal["generation", "transfer", "install", "utility"]
 Key = tuple[datetime, str, str]
 _ACTIVE = ("queued", "running", "paused")
 _PLAN_ACTIVE = (*_ACTIVE, "blocked")
 _INSTALL = ("activate", "registry_prepare", "workflow_install")
-_VISIBLE = ("chat", "image", "video", "download", "export", *_INSTALL)
+_UTILITY = ("media_utility",)
+_VISIBLE = ("chat", "image", "video", "download", "export", *_INSTALL, *_UTILITY)
 _LABELS = {
     "chat": "Chat generation",
     "image": "Image generation",
@@ -51,6 +52,7 @@ _LABELS = {
     "activate": "Model preparation",
     "registry_prepare": "Package preparation",
     "workflow_install": "Workflow installation",
+    "media_utility": "Video utility",
 }
 
 
@@ -139,7 +141,7 @@ def list_queue_activity(
     cursor: str | None = None,
 ) -> QueueActivityPageOut:
     """Read one acceptance-ordered page without hydrating jobs or plan payloads."""
-    if not 1 <= limit <= 100 or lane not in (None, "generation", "transfer", "install"):
+    if not 1 <= limit <= 100 or lane not in (None, "generation", "transfer", "install", "utility"):
         raise ValueError("Invalid accepted work query.")
     decoded = _decode(cursor, signing_key, lane) if cursor is not None else None
     _begin_read_snapshot(session)
@@ -196,6 +198,7 @@ def list_queue_activity(
             case(
                 (Job.kind.in_(("download", "export")), "transfer"),
                 (Job.kind.in_(_INSTALL), "install"),
+                (Job.kind.in_(_UTILITY), "utility"),
                 else_="generation",
             ).label("lane"),
             Job.status.label("status"),
@@ -245,7 +248,10 @@ def list_queue_activity(
         total = (
             getattr(lane_counts, lane)
             if lane is not None
-            else lane_counts.generation + lane_counts.transfer + lane_counts.install
+            else lane_counts.generation
+            + lane_counts.transfer
+            + lane_counts.install
+            + lane_counts.utility
         )
         query = select(owners).where(within)
         if lane is not None:

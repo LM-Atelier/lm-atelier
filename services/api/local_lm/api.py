@@ -6141,7 +6141,7 @@ async def queue_activity(
     request: Request,
     session: ConversationSessionDep,
     limit: int = Query(default=50, ge=1, le=100),
-    lane: Literal["generation", "transfer", "install"] | None = None,
+    lane: Literal["generation", "transfer", "install", "utility"] | None = None,
     cursor: str | None = Query(default=None, min_length=1, max_length=2_048),
 ) -> QueueActivityPageOut:
     try:
@@ -6162,7 +6162,7 @@ async def queue_activity(
 
 @router.get("/queue/lanes/{lane}/order", response_model=QueueOrderPageOut)
 def queue_order(
-    lane: Literal["generation", "transfer", "install"],
+    lane: Literal["generation", "transfer", "install", "utility"],
     session: ConversationSessionDep,
     limit: int = Query(default=50, ge=1, le=100),
     cursor: str | None = Query(default=None, min_length=1, max_length=2_048),
@@ -6184,7 +6184,7 @@ def queue_order(
 
 @router.post("/queue/lanes/{lane}/reorder", response_model=QueueOrderResultOut)
 async def reorder_queue(
-    lane: Literal["generation", "transfer", "install"],
+    lane: Literal["generation", "transfer", "install", "utility"],
     request: Request,
     payload: QueueOrderCommand,
     session: ConversationSessionDep,
@@ -6453,6 +6453,8 @@ async def cancel_job(
         changed = await _services(request).downloads.cancel(job_id)
     elif job.kind == JobKind.REGISTRY_PREPARE.value:
         changed = await _cancel_registry_preparation(job_id)
+    elif job.kind == JobKind.MEDIA_UTILITY.value:
+        changed = await _services(request).video_utilities.cancel(job_id)
     else:
         changed = await _services(request).orchestrator.cancel(job_id)
     if not changed:
@@ -6688,6 +6690,13 @@ async def retry_job(
         return job
     if job.kind == JobKind.REGISTRY_PREPARE.value:
         return _retry_registry_preparation(session, _services(request), job_id)
+    if job.kind == JobKind.MEDIA_UTILITY.value:
+        utilities = _services(request).video_utilities
+        utilities.stage_retry(job)
+        session.commit()
+        utilities.start(job.id)
+        session.refresh(job)
+        return job
     if job.kind == JobKind.DOWNLOAD.value:
         job.status = "queued"
         job.progress = 0

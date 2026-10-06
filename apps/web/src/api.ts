@@ -88,6 +88,9 @@ import type {
   GenerationQueuePolicy,
   TransferQueueAction,
   TransferQueuePolicy,
+  UtilityQueueAction,
+  UtilityQueuePolicy,
+  VideoProbe,
   QueueControlResult,
   QueueActivityPage,
   QueuePlanSteps,
@@ -892,6 +895,20 @@ export const api = {
     request<InstallQueuePolicy>("/api/queue/lanes/install", { signal }),
   installQueueControl: (action: InstallQueueAction, command: QueueControlCommand) =>
     request<InstallQueuePolicy>("/api/queue/lanes/install/"
+      + (action === "pause_after_current" ? "pause-after-current" : "resume"),
+    { method: "POST", body: JSON.stringify(command) }),
+  videoProbe: (artifactId: string, signal?: AbortSignal) =>
+    request<VideoProbe>(`/api/artifacts/${encodeURIComponent(artifactId)}/video-probe`, { signal }),
+  saveVideoFrame: (artifactId: string, requestedSeconds: number) =>
+    request<Job>(`/api/artifacts/${encodeURIComponent(artifactId)}/video-frames`, {
+      method: "POST", body: JSON.stringify({ requested_seconds: requestedSeconds }),
+    }),
+  videoUtilityJob: (jobId: string, signal?: AbortSignal) =>
+    request<Job>(`/api/video-utilities/jobs/${encodeURIComponent(jobId)}`, { signal }),
+  utilityQueuePolicy: (signal?: AbortSignal) =>
+    request<UtilityQueuePolicy>("/api/queue/lanes/utility", { signal }),
+  utilityQueueControl: (action: UtilityQueueAction, command: QueueControlCommand) =>
+    request<UtilityQueuePolicy>("/api/queue/lanes/utility/"
       + (action === "pause_after_current" ? "pause-after-current" : "resume"),
     { method: "POST", body: JSON.stringify(command) }),
   transferQueuePolicy: (signal?: AbortSignal) =>

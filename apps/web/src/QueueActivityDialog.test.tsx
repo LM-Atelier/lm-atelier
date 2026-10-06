@@ -10,6 +10,7 @@ import type { QueueActivityItem, QueueActivityPage } from "./types";
 vi.mock("./api", async (importOriginal) => ({ ...(await importOriginal<typeof import("./api")>()), api: {
   queueControl: vi.fn(), jobActivity: vi.fn(), queueActivity: vi.fn(), installQueuePolicy: vi.fn(), installQueueControl: vi.fn(), transferQueuePolicy: vi.fn(), transferQueueControl: vi.fn(), generationQueuePolicy: vi.fn(), generationQueueControl: vi.fn(), queuePlanSteps: vi.fn(), cancelJob: vi.fn(),
   pauseDownload: vi.fn(), resumeDownload: vi.fn(), retryJob: vi.fn(), queueOrder: vi.fn(),
+  utilityQueuePolicy: vi.fn(), utilityQueueControl: vi.fn(),
 } }));
 const clients: QueryClient[] = [];
 const stamp = "2026-09-01T00:00:00Z";
@@ -22,7 +23,7 @@ function item(id: string, lane: QueueActivityItem["lane"] = "generation"): Queue
 }
 function page(items: QueueActivityItem[], next: string | null = null, total = items.length): QueueActivityPage {
   return { items, next_cursor: next, total,
-    lane_counts: { generation: total, transfer: 0, install: 0 }, observed_at: stamp };
+    lane_counts: { generation: total, transfer: 0, install: 0, utility: 0 }, observed_at: stamp };
 }
 beforeEach(() => {
   vi.resetAllMocks();
@@ -33,6 +34,10 @@ beforeEach(() => {
   });
   vi.mocked(api.generationQueuePolicy).mockResolvedValue({
     lane: "generation", dispatch_state: "open", revision: 0,
+    running_jobs: 0, allowed_actions: ["pause_after_current"],
+  });
+  vi.mocked(api.utilityQueuePolicy).mockResolvedValue({
+    lane: "utility", dispatch_state: "open", revision: 0,
     running_jobs: 0, allowed_actions: ["pause_after_current"],
   });
   vi.mocked(api.jobActivity).mockResolvedValue({ active: [], active_count: 0, recent_issues: [] });

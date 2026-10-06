@@ -22,7 +22,7 @@ for (const width of [1280, 390]) {
     let pending: Route | undefined;
     await page.route("**/api/queue/activity?*", (route) => route.fulfill({ json: {
       items: current.running_jobs ? [item] : [], total: current.running_jobs,
-      lane_counts: { generation: current.running_jobs, transfer: 0, install: 0 },
+      lane_counts: { generation: current.running_jobs, transfer: 0, install: 0, utility: 0 },
       next_cursor: null, observed_at: "2026-09-01T00:00:00Z",
     } }));
     await page.route("**/api/queue/lanes/generation", (route) => route.fulfill({ json: current }));

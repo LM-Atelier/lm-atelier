@@ -42,6 +42,7 @@ _KINDS: dict[QueueLane, tuple[str, ...]] = {
     "generation": ("chat", "image", "video", "edit_verify"),
     "transfer": ("download", "export"),
     "install": ("activate", "registry_prepare", "workflow_install"),
+    "utility": ("media_utility",),
 }
 _TERMINAL = ("complete", "failed", "cancelled", "interrupted")
 _LABELS = {
@@ -50,6 +51,7 @@ _LABELS = {
     "activate": "Model preparation",
     "registry_prepare": "Package preparation",
     "workflow_install": "Workflow installation",
+    "media_utility": "Video utility",
 }
 _MAX_REVISION = 9_223_372_036_854_775_807
 _MAX_JOBS = 10_000

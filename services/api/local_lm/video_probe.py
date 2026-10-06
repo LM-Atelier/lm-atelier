@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import re
 from fractions import Fraction
+from pathlib import Path
 from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -162,40 +163,47 @@ async def probe_video(store: ArtifactStore, artifact: Artifact, ffprobe: MediaTo
 
     require_probe_input(artifact)
     async with store.verified_copy(artifact, maximum_bytes=MAX_INPUT_BYTES) as copy:
-        try:
-            answer = await run_tool(
-                ffprobe.executable,
-                [
-                    "-v",
-                    "error",
-                    "-hide_banner",
-                    "-protocol_whitelist",
-                    "file",
-                    "-format_whitelist",
-                    DEMUXERS,
-                    "-show_entries",
-                    _ENTRIES,
-                    "-of",
-                    "json",
-                    f"file:{copy}",
-                ],
-                seconds=PROBE_SECONDS,
-                stdout_limit=MAX_PROBE_BYTES,
-                stderr_limit=MAX_ERROR_BYTES,
-            )
-        except TimeoutError:
-            raise VideoProbeRefused("video-probe-timed-out") from None
-        except ToolOutputTooLarge:
-            raise VideoProbeRefused("video-probe-unreadable") from None
-        except OSError as exc:
-            # Found a moment ago, but it could not be started now: removed or
-            # replaced meanwhile. The stored video is not at fault.
-            code: ToolUnavailableCode = (
-                "media-tool-missing"
-                if isinstance(exc, FileNotFoundError)
-                else "media-tool-unreadable"
-            )
-            raise MediaToolUnavailable(code) from exc
+        return await probe_copy(copy, artifact, ffprobe)
+
+
+async def probe_copy(copy: Path, artifact: Artifact, ffprobe: MediaTool) -> VideoProbe:
+    """Describe a stored video from the copy ``ArtifactStore.verified_copy`` made of it.
+
+    For a caller that runs several tools over one video and copies it once.
+    """
+
+    try:
+        answer = await run_tool(
+            ffprobe.executable,
+            [
+                "-v",
+                "error",
+                "-hide_banner",
+                "-protocol_whitelist",
+                "file",
+                "-format_whitelist",
+                DEMUXERS,
+                "-show_entries",
+                _ENTRIES,
+                "-of",
+                "json",
+                f"file:{copy}",
+            ],
+            seconds=PROBE_SECONDS,
+            stdout_limit=MAX_PROBE_BYTES,
+            stderr_limit=MAX_ERROR_BYTES,
+        )
+    except TimeoutError:
+        raise VideoProbeRefused("video-probe-timed-out") from None
+    except ToolOutputTooLarge:
+        raise VideoProbeRefused("video-probe-unreadable") from None
+    except OSError as exc:
+        # Found a moment ago, but it could not be started now: removed or
+        # replaced meanwhile. The stored video is not at fault.
+        code: ToolUnavailableCode = (
+            "media-tool-missing" if isinstance(exc, FileNotFoundError) else "media-tool-unreadable"
+        )
+        raise MediaToolUnavailable(code) from exc
     if answer.returncode != 0:
         raise VideoProbeRefused("video-probe-unreadable")
     try:

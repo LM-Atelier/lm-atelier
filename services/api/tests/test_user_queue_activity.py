@@ -146,7 +146,7 @@ async def test_groups_plans_and_omits_internal_jobs_and_private_payloads(
     assert response.status_code == 200
     value = response.json()
     assert value["total"] == 3
-    assert value["lane_counts"] == {"generation": 1, "transfer": 1, "install": 1}
+    assert value["lane_counts"] == {"generation": 1, "transfer": 1, "install": 1, "utility": 0}
     assert [row["owner_id"] for row in value["items"]] == ["plan-a", "download", "install"]
     row = value["items"][0]
     assert row["owner_type"] == "work_plan"
