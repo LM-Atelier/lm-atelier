@@ -41,6 +41,8 @@ async def test_cancelled_execution_stops_only_its_accepted_prompt(
 
     async def backend(request: httpx.Request) -> httpx.Response:
         nonlocal running
+        if request.url.path.startswith("/api/jobs/"):
+            return httpx.Response(404)
         if request.url.path == "/prompt":
             return httpx.Response(200, json={"prompt_id": mine, "node_errors": {}})
         if request.url.path in {"/queue", "/interrupt"}:
@@ -136,6 +138,8 @@ async def test_older_execution_teardown_keeps_replacement_cancellation_state(
 
     async def backend(request: httpx.Request) -> httpx.Response:
         nonlocal submitted, running
+        if request.url.path.startswith("/api/jobs/"):
+            return httpx.Response(404)
         if request.url.path == "/prompt":
             prompt = prompts[submitted]
             submitted += 1

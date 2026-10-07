@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any, TypeGuard
-from urllib.parse import urlencode, urlparse, urlunparse
+from urllib.parse import quote, urlencode, urlparse, urlunparse
 from uuid import uuid4
 
 import httpx
@@ -1229,46 +1229,23 @@ class ComfyUIAdapter:
         return None
 
     async def _abandon_prompt(self, prompt_id: str) -> None:
-        """Ask the backend to drop one prompt this adapter stopped listening to.
+        """Cancel the submitted prompt through the atomic job endpoint when available.
 
-        Scoped to the submitted identity, because the backend scopes it too.
-        ComfyUI v0.28.0's post_interrupt reads prompt_id from the body, walks
-        the currently running items, and interrupts only when one of them
-        matches; with no prompt_id it interrupts whatever is running. An
-        abandoned run sending the empty-body form could therefore stop the
-        prompt that had already replaced it.
-
-        A run that never began sampling is still PENDING rather than running,
-        and an interrupt does nothing for it, so its queue entry is deleted as
-        well - and deleted FIRST. The backend worker consumes the queue
-        independently of these handlers, so a pending prompt can start in the
-        gap between the two requests: interrupting first leaves it pending, and
-        the deletion that follows removes only pending entries, so it does
-        nothing and the abandoned prompt runs to completion. Deleting first
-        closes that. Either the entry is removed before it can start, or the
-        worker won the transition and the interrupt that follows finds it
-        running. Deleting is safe for a running prompt too, for the same reason
-        it is useless against one: post_queue only removes pending entries.
-
-        One window no client ordering can close: between the backend dequeuing
-        a prompt and listing it as running, it is in neither the pending queue
-        nor the running set, so a delete misses it and an interrupt skips it.
-        That is the backend's own bookkeeping, and this pair is a best effort
-        against it rather than a guarantee.
-
-        One TOTAL deadline covers both requests. httpx timeouts are per-phase,
-        so a response trickling a byte at a time satisfies every one of them
-        and can still consume the whole five seconds `close_iterator` allows
-        for the close - taking the output cleanup after this with it. The
-        deadline is what keeps that cleanup's turn.
-
-        Failures are suppressed for the same reason the rest of this teardown
-        suppresses them: the caller is already unwinding, and a best-effort
-        request must not become the reason it stopped.
+        A completed or unknown job is a successful no-op. Only an unavailable
+        endpoint permits the older delete-then-interrupt protocol, which remains
+        best effort because its running check and interrupt are separate steps.
+        One total deadline bounds all requests so output cleanup can still run.
+        Failures remain local to this already-unwinding attempt.
         """
 
         with suppress(Exception):
             async with asyncio.timeout(ABANDONED_INTERRUPT_SECONDS):
+                identifier = quote(prompt_id, safe="")
+                if identifier in {".", ".."}:
+                    identifier = identifier.replace(".", "%2E")
+                response = await self._client.post(f"/api/jobs/{identifier}/cancel")
+                if response.status_code not in (404, 405):
+                    return
                 await self._client.post("/queue", json={"delete": [prompt_id]})
                 await self._client.post("/interrupt", json={"prompt_id": prompt_id})
 
