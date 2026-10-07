@@ -50,6 +50,13 @@ LimitCode = Literal[
     "video-frame-too-large",
     "video-rotation-unsupported",
 ]
+#: Why a video cannot be cut on exact frames; the last only leaves its sound out.
+ExactTrimLimitCode = Literal[
+    "exact-trim-picture-unsupported",
+    "exact-trim-frame-size-unsupported",
+    "exact-trim-turned-unsupported",
+    "exact-trim-audio-unsupported",
+]
 
 PROBE_VERSION: Final = 1
 
@@ -82,15 +89,34 @@ COPY_AUDIO_CODECS: Final[dict[Container, frozenset[str]]] = {
     "matroska": AUDIO_CODECS,
 }
 
+#: What a cut on exact frames re-encodes without changing how the picture
+#: looks: 8-bit 4:2:0 in limited range, standard-range colours, whole frames.
+EXACT_PIXEL_FORMAT: Final = "yuv420p"
+_EXACT_RANGES: Final = frozenset({"tv"})
+_EXACT_TRANSFERS: Final = frozenset({"bt709", "smpte170m", "bt470bg", "bt470m"})
+_EXACT_PRIMARIES: Final = frozenset({"bt709", "smpte170m", "bt470bg"})
+_EXACT_SPACES: Final = frozenset({"bt709", "smpte170m", "bt470bg"})
+_EXACT_FIELD_ORDERS: Final = frozenset({"progressive"})
+#: The largest frame an exact cut re-encodes: no side over 4096, no more pixels than 2160p.
+EXACT_MAX_SIDE: Final = 4096
+EXACT_MAX_PIXELS: Final = 3840 * 2160
+#: Sound an exact cut re-encodes as AAC: one or two channels at a rate AAC takes.
+EXACT_AUDIO_CODECS: Final = AUDIO_CODECS | frozenset({"pcm_s16le", "pcm_s24le", "pcm_f32le"})
+EXACT_SAMPLE_RATES: Final = frozenset(
+    {8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000}
+)
+
 _ENTRIES: Final = (
     "format=format_name,duration,start_time,nb_streams"
     ":stream=index,codec_type,codec_name,width,height,sample_aspect_ratio,"
-    "r_frame_rate,avg_frame_rate,time_base,duration,channels,sample_rate"
+    "r_frame_rate,avg_frame_rate,time_base,duration,channels,sample_rate,"
+    "pix_fmt,color_range,color_space,color_transfer,color_primaries,field_order"
     ":stream_disposition=attached_pic"
     ":stream_side_data=rotation"
     ":stream_tags=rotate"
 )
 _CODEC_NAME: Final = re.compile(r"[a-z0-9_]{1,32}")
+_PROPERTY_NAME: Final = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 _RATIO: Final = re.compile(r"(\d{1,10})[/:](\d{1,10})")
 
 _REFUSAL_MESSAGES: Final[dict[ProbeRefusalCode, str]] = {
@@ -128,6 +154,14 @@ class VideoStreamFacts(BaseModel):
     frame_rate: str | None
     frame_rate_form: FrameRateForm
     time_base: str | None
+    #: How the stream states its pictures are stored, by ffmpeg's names; None
+    #: when it does not say, and "unreadable" when what it says is not a name.
+    pixel_format: str | None
+    color_range: str | None
+    color_space: str | None
+    color_transfer: str | None
+    color_primaries: str | None
+    field_order: str | None
 
 
 class AudioStreamFacts(BaseModel):
@@ -161,6 +195,11 @@ class VideoProbe(BaseModel):
     #: same kind; dropping audio is always possible.
     can_keep_audio: bool
     limits: list[LimitCode]
+    #: Whether a part can be re-encoded to begin and end on exact frames.
+    can_trim_exact: bool
+    #: Whether such a cut can keep every audio stream, re-encoded as AAC.
+    can_keep_audio_exact: bool
+    exact_trim_limits: list[ExactTrimLimitCode]
     #: The ffprobe found on the system path, by its reported version and file digest.
     tool: dict[str, str]
 
@@ -283,6 +322,7 @@ def describe(payload: object, artifact: Artifact, ffprobe: MediaTool) -> VideoPr
     can_keep_audio = all(stream.codec in COPY_AUDIO_CODECS[container] for stream in audio)
     if not can_keep_audio:
         limits.append("audio-codec-unsupported")
+    exact_limits = exact_trim_limits(video, audio)
 
     return VideoProbe(
         artifact_id=artifact.id,
@@ -297,8 +337,54 @@ def describe(payload: object, artifact: Artifact, ffprobe: MediaTool) -> VideoPr
         can_trim=can_save_frame,
         can_keep_audio=can_keep_audio,
         limits=limits,
+        can_trim_exact=can_save_frame and not set(exact_limits) - {"exact-trim-audio-unsupported"},
+        can_keep_audio_exact="exact-trim-audio-unsupported" not in exact_limits,
+        exact_trim_limits=exact_limits,
         tool=ffprobe.record(),
     )
+
+
+def exact_trim_limits(
+    video: VideoStreamFacts, audio: list[AudioStreamFacts]
+) -> list[ExactTrimLimitCode]:
+    """Why a part of this video cannot be re-encoded to begin and end on exact frames.
+
+    Only pictures an H.264 re-encode keeps looking the same are offered: 8-bit
+    4:2:0 in limited range with standard-range colours, whole frames, an even
+    frame size within bounds, and no turn, which the re-encode would not keep.
+    """
+
+    limits: list[ExactTrimLimitCode] = []
+    if (
+        video.pixel_format != EXACT_PIXEL_FORMAT
+        or not _unset_or_in(video.color_range, _EXACT_RANGES)
+        or not _unset_or_in(video.color_transfer, _EXACT_TRANSFERS)
+        or not _unset_or_in(video.color_primaries, _EXACT_PRIMARIES)
+        or not _unset_or_in(video.color_space, _EXACT_SPACES)
+        or not _unset_or_in(video.field_order, _EXACT_FIELD_ORDERS)
+    ):
+        limits.append("exact-trim-picture-unsupported")
+    if (
+        video.width % 2
+        or video.height % 2
+        or max(video.width, video.height) > EXACT_MAX_SIDE
+        or video.width * video.height > EXACT_MAX_PIXELS
+    ):
+        limits.append("exact-trim-frame-size-unsupported")
+    if video.rotation != 0:
+        limits.append("exact-trim-turned-unsupported")
+    if not all(
+        stream.codec in EXACT_AUDIO_CODECS
+        and stream.channels in (1, 2)
+        and stream.sample_rate in EXACT_SAMPLE_RATES
+        for stream in audio
+    ):
+        limits.append("exact-trim-audio-unsupported")
+    return limits
+
+
+def _unset_or_in(value: str | None, allowed: frozenset[str]) -> bool:
+    return value is None or value in allowed
 
 
 def container_named(format_name: object) -> Container | None:
@@ -353,6 +439,12 @@ def _video_facts(stream: dict[str, Any]) -> VideoStreamFacts:
         frame_rate=None if rate is None else f"{rate.numerator}/{rate.denominator}",
         frame_rate_form=form,
         time_base=None if time_base is None else f"{time_base.numerator}/{time_base.denominator}",
+        pixel_format=_property(stream.get("pix_fmt")),
+        color_range=_property(stream.get("color_range")),
+        color_space=_property(stream.get("color_space")),
+        color_transfer=_property(stream.get("color_transfer")),
+        color_primaries=_property(stream.get("color_primaries")),
+        field_order=_property(stream.get("field_order")),
     )
 
 
@@ -407,6 +499,19 @@ def _rotation(stream: dict[str, Any]) -> Literal[0, 90, 180, 270] | None:
 def _codec(value: object) -> str:
     text = str(value) if value is not None else ""
     return text if _CODEC_NAME.fullmatch(text) else "unknown"
+
+
+def _property(value: object) -> str | None:
+    """A picture property ffprobe states by name: None when it states none or calls it unknown.
+
+    Anything else that is not a short lowercase name is kept as "unreadable",
+    so it can never pass for a property left unstated.
+    """
+
+    if value is None or value == "unknown":
+        return None
+    text = value if isinstance(value, str) else ""
+    return text if _PROPERTY_NAME.fullmatch(text) else "unreadable"
 
 
 def _count(value: object, *, minimum: int = 1) -> int | None:

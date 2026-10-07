@@ -938,19 +938,22 @@ it("checks a trim with a read of the stored video's preview, and queues one with
 
   const { api } = await import("./api");
   const controller = new AbortController();
-  await api.videoTrimPreview("sha256:clip/one", 1.43, 2, true, controller.signal);
-  await api.videoTrimPreview("sha256:clip/one", 0, 0.5, false);
-  const body = { start_seconds: 1.43, end_seconds: 2, keep_audio: true, shown_start_seconds: 1 };
+  await api.videoTrimPreview("sha256:clip/one", 1.43, 2, true, "copy", controller.signal);
+  await api.videoTrimPreview("sha256:clip/one", 0, 0.5, false, "exact");
+  const body = {
+    start_seconds: 1.43, end_seconds: 2, keep_audio: true, shown_start_seconds: 1.4, mode: "exact" as const,
+    shown_frame_count: 6,
+  };
   await expect(api.trimVideo("sha256:clip/one", body)).resolves.toEqual({ id: "job-trim" });
 
   const [[withSound, withSoundInit], [silent, silentInit], [trim, trimInit]] = fetchMock.mock.calls.slice(1);
   expect(withSound).toBe(
-    "/api/artifacts/sha256%3Aclip%2Fone/video-trim-preview?start_seconds=1.43&end_seconds=2&keep_audio=true",
+    "/api/artifacts/sha256%3Aclip%2Fone/video-trim-preview?start_seconds=1.43&end_seconds=2&keep_audio=true&mode=copy",
   );
   expect(withSoundInit?.method).toBeUndefined();
   expect(withSoundInit?.signal).toBe(controller.signal);
   expect(silent).toBe(
-    "/api/artifacts/sha256%3Aclip%2Fone/video-trim-preview?start_seconds=0&end_seconds=0.5&keep_audio=false",
+    "/api/artifacts/sha256%3Aclip%2Fone/video-trim-preview?start_seconds=0&end_seconds=0.5&keep_audio=false&mode=exact",
   );
   expect(silentInit?.method).toBeUndefined();
   expect([trim, trimInit?.method]).toEqual(["/api/artifacts/sha256%3Aclip%2Fone/video-trims", "POST"]);

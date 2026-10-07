@@ -20,6 +20,10 @@ const TRIM = {
   requested_start_seconds: 1.43, requested_end_seconds: 2.7, actual_start_seconds: 1,
   keyframe_seconds: 1, actual_end_seconds: 2.9, from_beginning: false,
 };
+const EXACT_TRIM = {
+  ...TRIM, mode: "exact", actual_start_seconds: 1.4, actual_end_seconds: 2.7,
+  frames: { first_seconds: 1.4, last_seconds: 2.6, count: 13 },
+};
 const FRAME = {
   action: "extract_frame", source_artifact_id: sourceId, source_sha256: "a".repeat(64),
   requested_seconds: 0.43, actual_seconds: 0.4,
@@ -62,6 +66,14 @@ describe("the video a saved frame or a trim came from", () => {
     expect(api.run).not.toHaveBeenCalled();
   });
 
+  it("says an exact cut was re-encoded, and names the frames it kept", async () => {
+    await details({ video_trim: EXACT_TRIM }, artifact(sourceId, "walk.mp4", {}));
+
+    expect(await screen.findByText("Trimmed from walk.mp4, re-encoded to start and end on the chosen frames.")).toBeVisible();
+    expect(screen.getByText(/The 13 frames from 1\.400 s to 2\.700 s \(asked for 1\.430 s to 2\.700 s\)\./)).toBeVisible();
+    expect(screen.queryByText(/without re-encoding/)).toBeNull();
+  });
+
   it("names the frame a picture holds and the time that was asked for", async () => {
     await details({ video_frame: FRAME }, artifact(sourceId, "walk.mp4", {}));
 
@@ -98,8 +110,11 @@ describe("reading a video utility's record from stored metadata", () => {
     });
     expect(videoUtilityOrigin({ video_trim: TRIM })).toEqual({
       action: "trim", sourceId, requestedStart: 1.43, requestedEnd: 2.7, actualStart: 1, actualEnd: 2.9,
-      fromBeginning: false,
+      fromBeginning: false, exactFrames: null,
     });
+    expect(videoUtilityOrigin({ video_trim: EXACT_TRIM })).toMatchObject({ actualStart: 1.4, exactFrames: 13 });
+    // A copy's record names no frames, whatever else it holds.
+    expect(videoUtilityOrigin({ video_trim: { ...TRIM, frames: { count: 13 } } })).toMatchObject({ exactFrames: null });
     expect(videoUtilityOrigin({ run_id: "run" })).toBeNull();
     expect(videoUtilityOrigin({ video_trim: { ...TRIM, actual_end_seconds: "late" } })).toBeNull();
     expect(videoUtilityOrigin({ video_frame: { ...FRAME, source_artifact_id: 7 } })).toBeNull();

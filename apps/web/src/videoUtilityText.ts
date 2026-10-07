@@ -58,6 +58,8 @@ export type VideoUtilityOrigin =
     actualStart: number;
     actualEnd: number;
     fromBeginning: boolean;
+    /** How many frames an exact cut kept; null for a copy, which records none. */
+    exactFrames: number | null;
   };
 
 /** The origin a stored file's metadata records, or null when it was not made by a video utility. */
@@ -84,6 +86,8 @@ export function videoUtilityOrigin(metadata: Record<string, unknown>): VideoUtil
       return {
         action: "trim", sourceId: record.source_artifact_id, requestedStart, requestedEnd, actualStart, actualEnd,
         fromBeginning: record.from_beginning === true,
+        // A record with no mode was made before cuts had one, so it is a copy.
+        exactFrames: record.mode === "exact" ? numberField(record.frames, "count") : null,
       };
     }
   }

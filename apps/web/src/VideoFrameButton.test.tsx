@@ -18,8 +18,11 @@ const PROBE: VideoProbe = {
   video: {
     index: 0, codec: "h264", width: 64, height: 48, display_width: 64, display_height: 48,
     sample_aspect: null, rotation: 0, frame_rate: "10/1", frame_rate_form: "constant", time_base: "1/10240",
+    pixel_format: "yuv420p", color_range: null, color_space: null, color_transfer: null, color_primaries: null,
+    field_order: "progressive",
   },
   audio: [], omitted_streams: 0, can_save_frame: true, can_trim: true, can_keep_audio: true, limits: [],
+  can_trim_exact: true, can_keep_audio_exact: true, exact_trim_limits: [],
   tool: { name: "ffprobe", version: "8.1.2", sha256: "b".repeat(64), origin: "system" },
 };
 const STAMP = "2026-10-06T00:00:00Z";
