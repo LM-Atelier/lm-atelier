@@ -6,7 +6,9 @@ import re
 import secrets
 import subprocess
 import threading
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -533,7 +535,7 @@ def test_open_entry_refuses_a_named_pipe_without_hanging(tmp_path: Path) -> None
     pins the absence of a hang as much as the refusal.
     """
 
-    os.mkfifo(tmp_path / "a-pipe")  # type: ignore[attr-defined]
+    cast(Callable[[Path], None], vars(os)["mkfifo"])(tmp_path / "a-pipe")
     with (
         links.AnchoredDirectory(tmp_path) as anchor,
         pytest.raises(links.AnchoredDirectoryError),

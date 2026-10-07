@@ -19,6 +19,7 @@ from collections.abc import Callable, Iterator
 from contextlib import suppress
 from ctypes import c_void_p
 from pathlib import Path
+from typing import Protocol, cast
 
 import pytest
 
@@ -29,6 +30,10 @@ LeaseRefused = _NAMESPACE["LeaseRefused"]
 pytestmark = pytest.mark.skipif(
     os.name != "nt", reason="the machine lease holds Windows kernel handles"
 )
+
+
+class _WindowsError(Protocol):
+    winerror: int
 
 
 @pytest.fixture
@@ -1013,7 +1018,7 @@ def test_a_stale_error_copy_never_masks_the_kernels_answer(anchor: Path) -> None
 
     holder = _NAMESPACE["acquire"]("holder", repo=anchor)
     try:
-        ctypes.set_last_error(999)
+        cast(Callable[[int], int], vars(ctypes)["set_last_error"])(999)
         with pytest.raises(LeaseRefused) as caught:
             _NAMESPACE["acquire"]("contender", repo=anchor)
     finally:
@@ -2173,7 +2178,7 @@ def _junction(link: Path, target: Path) -> None:
 
     import _winapi
 
-    _winapi.CreateJunction(str(target), str(link))
+    cast(Callable[[str, str], None], vars(_winapi)["CreateJunction"])(str(target), str(link))
 
 
 def _wait_until_the_pointer_moves(pointer: Path, content: bytes) -> None:
@@ -4124,7 +4129,7 @@ def _set_junction_in_place(directory: Path, target: Path) -> tuple[bool, bool, i
     kernel = _NAMESPACE["_kernel32"]()
     handle = kernel.CreateFileW(str(directory), 0x40000080, 7, None, 3, 0x02200000, None)
     if handle is None or handle == _NAMESPACE["_INVALID_HANDLE"]:
-        return False, False, ctypes.get_last_error()
+        return False, False, cast(Callable[[], int], vars(ctypes)["get_last_error"])()
     substitute = ("\\??\\" + str(target)).encode("utf-16-le")
     display = str(target).encode("utf-16-le")
     names = substitute + b"\0\0" + display + b"\0\0"
@@ -4167,7 +4172,7 @@ def _set_junction_in_place(directory: Path, target: Path) -> tuple[bool, bool, i
                 None,
             )
         )
-        error = ctypes.get_last_error()
+        error = cast(Callable[[], int], vars(ctypes)["get_last_error"])()
         return True, success, 0 if success else error
     finally:
         assert kernel.CloseHandle(ctypes.c_void_p(handle))
@@ -4314,7 +4319,7 @@ def test_a_held_reparse_parent_refuses_write_access(anchor: Path, tmp_path: Path
     def writable() -> bool:
         handle = kernel.CreateFileW(str(jump), 0x40000080, 7, None, 3, 0x02200000, None)
         if handle is None or handle == _NAMESPACE["_INVALID_HANDLE"]:
-            assert ctypes.get_last_error() == 32
+            assert cast(Callable[[], int], vars(ctypes)["get_last_error"])() == 32
             return False
         assert kernel.CloseHandle(ctypes.c_void_p(handle))
         return True
@@ -4451,7 +4456,7 @@ def _lease_file_link(anchor: Path, tmp_path: Path) -> Path:
     try:
         _lease_file(anchor).symlink_to(target)
     except OSError as error:
-        if error.winerror == 1314:
+        if cast(_WindowsError, error).winerror == 1314:
             pytest.skip("creating file links requires the Windows developer setting")
         raise
     return target
