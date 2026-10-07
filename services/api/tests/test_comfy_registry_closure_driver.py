@@ -21,6 +21,7 @@ from local_lm.comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifactManifest,
     resolve_comfy_registry_wheel_artifacts,
 )
+from local_lm.comfy_registry_wheel_metadata import MAX_WHEEL_CORE_METADATA_BYTES
 
 _TAG = "py3-none-any"
 _SHA256 = "a" * 64
@@ -480,7 +481,9 @@ async def test_driver_enforces_its_round_limit(
 
 def _metadata_manifest(content: bytes) -> ComfyRegistryWheelArtifactManifest:
     project, _ = _project("alpha", [("1.0", [])])
-    record = project["files"][0]
+    files = project["files"]
+    assert isinstance(files, list)
+    record = files[0]
     assert isinstance(record, dict)
     record["core-metadata"] = {"sha256": hashlib.sha256(content).hexdigest()}
     return resolve_comfy_registry_wheel_artifacts(
@@ -549,7 +552,7 @@ async def test_metadata_client_reports_rate_limit_and_size_bound() -> None:
             httpx.Response(429, headers={"retry-after": "17"}),
             httpx.Response(
                 200,
-                headers={"content-length": str(driver_module.MAX_WHEEL_CORE_METADATA_BYTES + 1)},
+                headers={"content-length": str(MAX_WHEEL_CORE_METADATA_BYTES + 1)},
             ),
         ]
     )

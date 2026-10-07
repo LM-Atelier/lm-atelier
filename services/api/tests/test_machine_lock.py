@@ -15,9 +15,11 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import suppress
+from ctypes import c_void_p
 from pathlib import Path
+from typing import Protocol, cast
 
 import pytest
 
@@ -30,6 +32,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+class _WindowsError(Protocol):
+    winerror: int
+
+
 @pytest.fixture
 def anchor(tmp_path: Path) -> Path:
     subprocess.run(["git", "init", "-q", str(tmp_path / "repo")], check=True, capture_output=True)
@@ -37,7 +43,8 @@ def anchor(tmp_path: Path) -> Path:
 
 
 def _lease_file(anchor: Path) -> Path:
-    return anchor / ".git" / _NAMESPACE["LEASE_BASENAME"]
+    basename: str = _NAMESPACE["LEASE_BASENAME"]
+    return anchor / ".git" / basename
 
 
 def test_acquire_holds_and_release_frees(anchor: Path) -> None:
@@ -806,17 +813,17 @@ def test_a_refused_raw_handle_close_after_a_failed_acquisition_is_reported(
             taken["handle"] = int(handle)
         return handle
 
-    def unmarkable(handle: object, mask: int, flags: int) -> int:
+    def unmarkable(handle: int | c_void_p, mask: int, flags: int) -> int:
         # The pins are marked inheritable before the lease is opened; only
         # the exclusion handle's mark is refused.
-        if int(getattr(handle, "value", handle)) == taken.get("handle"):  # type: ignore[arg-type]
+        if int(getattr(handle, "value", handle)) == taken.get("handle"):
             return 0
         return int(real_mark(handle, mask, flags))
 
-    def refusing_close_handle(handle: object) -> int:
+    def refusing_close_handle(handle: int | c_void_p) -> int:
         # Only the exclusion handle is refused; the pins and the held
         # directory handles close as they would in the kernel.
-        if int(getattr(handle, "value", handle)) == taken.get("handle"):  # type: ignore[arg-type]
+        if int(getattr(handle, "value", handle)) == taken.get("handle"):
             return 0
         return int(real_close_handle(handle))
 
@@ -856,8 +863,8 @@ def test_a_status_probe_whose_close_is_refused_never_answers_free(
             probes.append(int(handle))
         return handle
 
-    def refusing_probe_close(handle: object) -> int:
-        if int(getattr(handle, "value", handle)) in probes:  # type: ignore[arg-type]
+    def refusing_probe_close(handle: int | c_void_p) -> int:
+        if int(getattr(handle, "value", handle)) in probes:
             return 0
         return int(real_close_handle(handle))
 
@@ -984,8 +991,8 @@ def test_a_stranded_probe_reports_its_own_exit_code(
             probes.append(int(handle))
         return handle
 
-    def refusing_probe_close(handle: object) -> int:
-        if int(getattr(handle, "value", handle)) in probes:  # type: ignore[arg-type]
+    def refusing_probe_close(handle: int | c_void_p) -> int:
+        if int(getattr(handle, "value", handle)) in probes:
             return 0
         return int(real_close_handle(handle))
 
@@ -1011,7 +1018,7 @@ def test_a_stale_error_copy_never_masks_the_kernels_answer(anchor: Path) -> None
 
     holder = _NAMESPACE["acquire"]("holder", repo=anchor)
     try:
-        ctypes.set_last_error(999)
+        cast(Callable[[int], int], vars(ctypes)["set_last_error"])(999)
         with pytest.raises(LeaseRefused) as caught:
             _NAMESPACE["acquire"]("contender", repo=anchor)
     finally:
@@ -1041,10 +1048,11 @@ def _act_on_common_name(
     after the lease open, before the binding is re-verified."""
 
     real_final_path = module["_final_path"]
+    assert callable(real_final_path)
     seen: list[str] = []
 
     def final_path(handle: int) -> str:
-        name = real_final_path(handle)  # type: ignore[operator]
+        name: str = real_final_path(handle)
         if name.endswith(".git"):
             seen.append(name)
             if len(seen) == occurrence:
@@ -1101,13 +1109,13 @@ def test_a_directory_replaced_after_the_re_verification_is_refused_before_the_op
     leases normally."""
 
     module = _NAMESPACE["acquire"].__globals__
-    real_directory_identity = module["_directory_identity"]
+    real_directory_identity: Callable[[Path], tuple[int, int, int]] = module["_directory_identity"]
     git_dir = anchor / ".git"
     moved = anchor / ".git-moved"
     swapped: list[Path] = []
 
     def identity_then_swap(path: Path) -> tuple[int, int, int]:
-        identity = real_directory_identity(path)  # type: ignore[operator]
+        identity = real_directory_identity(path)
         if not swapped:
             swapped.append(path)
             _swap_directory_under_the_name(git_dir, moved)
@@ -1155,6 +1163,30 @@ def _linked_worktree(anchor: Path, tmp_path: Path) -> tuple[Path, Path, Path, by
     subprocess.run(["git", "init", "-q", str(other)], check=True, capture_output=True)
     pointer = linked / ".git"
     return linked, other, pointer, pointer.read_bytes()
+
+
+@pytest.mark.parametrize("linked_checkout", [False, True])
+def test_default_lease_uses_its_script_checkout_from_another_repository(
+    anchor: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linked_checkout: bool
+) -> None:
+    linked, other, _pointer, _original = _linked_worktree(anchor, tmp_path)
+    checkout = linked if linked_checkout else anchor
+    scripts = checkout / "scripts"
+    scripts.mkdir()
+    script = scripts / "machine_lock.py"
+    shutil.copyfile(ROOT / "scripts" / "machine_lock.py", script)
+    namespace = runpy.run_path(str(script))
+    monkeypatch.chdir(other)
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(other / ".git"))
+    with namespace["hold_lease"]("default-script-checkout") as lease:
+        lease.assert_bound()
+        assert "default-script-checkout" in namespace["status"]()
+        with pytest.raises(LeaseRefused, match="default-script-checkout"):
+            _NAMESPACE["acquire"]("explicit-checkout", repo=anchor)
+        lease.assert_bound()
+    assert _NAMESPACE["status"](anchor).startswith("free")
 
 
 def _redirect(other: Path) -> bytes:
@@ -1272,10 +1304,11 @@ def _resolve_then(
     the resolved common directory is opened."""
 
     real_common_dir = module["_common_dir"]
+    assert callable(real_common_dir)
     seen: list[Path] = []
 
     def common_dir(repo: Path | None) -> Path:
-        common = real_common_dir(repo)  # type: ignore[operator]
+        common: Path = real_common_dir(repo)
         if not seen:
             seen.append(common)
             action()
@@ -1519,7 +1552,7 @@ def test_a_pointer_cannot_move_once_the_chain_is_pinned(
             _repoint(pointer, _redirect(other))
         except PermissionError as refusal:
             refused.append(str(refusal))
-        real_assert_binding(binding)  # type: ignore[operator]
+        real_assert_binding(binding)
 
     monkeypatch.setitem(module, "_assert_binding", rewrite_then_verify)
     lease = _NAMESPACE["acquire"]("pinned-open", repo=linked)
@@ -2071,12 +2104,8 @@ def test_a_held_lease_pins_every_link_of_the_chain(anchor: Path, tmp_path: Path)
     lease = _NAMESPACE["acquire"]("chained", repo=linked)
     try:
         assert lease.binding is not None
-        assert [pin.role for pin in lease.binding.pins] == [
-            "the repository's .git entry",
-            "the checkout's private git directory",
-            "the commondir file",
-            "the common git directory",
-        ]
+        pinned = {Path(pin.path) for pin in lease.binding.pins}
+        assert {pointer, private, private.parent, commondir, anchor / ".git"} <= pinned
         with pytest.raises(PermissionError):
             _repoint(commondir, b"../../elsewhere" + bytes([10]))
         with pytest.raises(PermissionError):
@@ -2131,7 +2160,8 @@ foreach ($Pin in @($Lease.Binding.Pins) | Select-Object -Skip 1) {{
         check=False,
     )
     out = result.stdout
-    assert "HELD:4" in out, out + result.stderr
+    held = [line for line in out.splitlines() if line.startswith("HELD:")]
+    assert len(held) == 1 and int(held[0].split(":")[1]) >= 4, out + result.stderr
     live = [line for line in out.splitlines() if line.startswith("LIVE:")]
     assert live and live[0] != "LIVE:", "the kernel handle must still be live"
     assert "STAGE-REFUSED" in out, out + result.stderr
@@ -2148,7 +2178,7 @@ def _junction(link: Path, target: Path) -> None:
 
     import _winapi
 
-    _winapi.CreateJunction(str(target), str(link))
+    cast(Callable[[str, str], None], vars(_winapi)["CreateJunction"])(str(target), str(link))
 
 
 def _wait_until_the_pointer_moves(pointer: Path, content: bytes) -> None:
@@ -2176,15 +2206,14 @@ def _unprotect_and_close(handle: int) -> None:
     assert kernel32.CloseHandle(ctypes.c_void_p(handle))
 
 
-def _protecting_first_pin(taken: dict[str, int]):  # type: ignore[no-untyped-def]
-    """An _open_pin that marks the first pin it opens protect-from-close, so
-    the kernel refuses that pin's close while every other close succeeds."""
+def _protecting_entry_pin(taken: dict[str, int]):  # type: ignore[no-untyped-def]
+    """Protect the retained .git entry pin, leaving earlier parent retirement free."""
 
     real_open_pin = _NAMESPACE["acquire"].__globals__["_open_pin"]
 
     def open_pin(path: Path, role: str):  # type: ignore[no-untyped-def]
         pin = real_open_pin(path, role)
-        if "pin" not in taken:
+        if role == "the repository's .git entry" and "pin" not in taken:
             taken["pin"] = pin.handle
             _protect(pin.handle)
         return pin
@@ -2385,7 +2414,9 @@ def test_a_junction_on_the_way_to_the_private_directory_is_pinned(
         lease = _NAMESPACE["acquire"]("through-a-junction", repo=linked)
         try:
             roles = {Path(pin.path): pin.role for pin in lease.binding.pins}
-            assert roles.get(jump) == "a link on the way to the checkout's private git directory"
+            assert (
+                roles.get(jump) == "a component on the way to the checkout's private git directory"
+            )
             with pytest.raises(PermissionError):
                 os.rmdir(jump)
             elsewhere = subprocess.run(
@@ -2433,7 +2464,7 @@ def test_a_junction_on_the_way_to_the_common_directory_is_pinned(
         lease = _NAMESPACE["acquire"]("common-through-a-junction", repo=linked)
         try:
             roles = {Path(pin.path): pin.role for pin in lease.binding.pins}
-            assert roles.get(common_link) == "a link on the way to the common git directory"
+            assert roles.get(common_link) == "the common git directory"
             with pytest.raises(PermissionError):
                 os.rmdir(common_link)
             assert common_link.is_dir()
@@ -2484,7 +2515,9 @@ if (Exit-MachineLease $Lease) {{ Write-Output "RELEASED" }}
             assert process.poll() is None, process.communicate()[0]
 
         roles = _settled_text(entered, deadline=deadline, still_running=shell_alive)
-        assert f"a link on the way to the checkout's private git directory={jump}" in roles, roles
+        assert f"a component on the way to the checkout's private git directory={jump}" in roles, (
+            roles
+        )
         with pytest.raises(PermissionError):
             os.rmdir(jump)
         assert jump.is_dir()
@@ -2540,16 +2573,13 @@ def test_a_release_reports_the_descriptor_and_a_pin_that_will_not_close(
     _NAMESPACE["release"](successor)
 
 
-def _second_pin_refused(taken: dict[str, int]):  # type: ignore[no-untyped-def]
-    """An _open_pin whose first pin is protected from close and whose
-    second call refuses."""
+def _pin_refused_at(taken: dict[str, int], refused_role: str):  # type: ignore[no-untyped-def]
+    """Protect the retained entry pin, then refuse the named acquisition boundary."""
 
-    protecting = _protecting_first_pin(taken)
-    calls = {"n": 0}
+    protecting = _protecting_entry_pin(taken)
 
     def open_pin(path: Path, role: str):  # type: ignore[no-untyped-def]
-        calls["n"] += 1
-        if calls["n"] == 2:
+        if role == refused_role:
             raise LeaseRefused(f"{role} could not be held: forced")
         return protecting(path, role)
 
@@ -2559,15 +2589,17 @@ def _second_pin_refused(taken: dict[str, int]):  # type: ignore[no-untyped-def]
 def test_a_partial_pinning_reports_a_pin_that_will_not_close(
     anchor: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The chain of a linked checkout has three links; the second cannot be
-    pinned. The first pin is let go, and when the kernel refuses that close
+    """The private directory cannot be pinned. Earlier pins are let go,
+    and when the kernel refuses the entry pin's close
     the caller learns it as a strand raised from the pinning refusal, not
     as an ordinary refusal over a live pin."""
 
     linked, _other, _pointer, _original = _linked_worktree(anchor, tmp_path)
     taken: dict[str, int] = {}
     module = _NAMESPACE["acquire"].__globals__
-    monkeypatch.setitem(module, "_open_pin", _second_pin_refused(taken))
+    monkeypatch.setitem(
+        module, "_open_pin", _pin_refused_at(taken, "the checkout's private git directory")
+    )
     with pytest.raises(_NAMESPACE["LeaseStranded"], match="a refused pinning") as caught:
         _NAMESPACE["acquire"]("doomed-pinning", repo=linked)
     monkeypatch.undo()
@@ -2588,7 +2620,7 @@ def test_a_refused_common_directory_pin_reports_a_chain_pin_that_will_not_close(
 
     taken: dict[str, int] = {}
     module = _NAMESPACE["acquire"].__globals__
-    monkeypatch.setitem(module, "_open_pin", _second_pin_refused(taken))
+    monkeypatch.setitem(module, "_open_pin", _pin_refused_at(taken, "the common git directory"))
     with pytest.raises(_NAMESPACE["LeaseStranded"], match="a refused acquisition") as caught:
         _NAMESPACE["acquire"]("doomed-common-pin", repo=anchor)
     monkeypatch.undo()
@@ -2601,33 +2633,34 @@ def test_a_refused_common_directory_pin_reports_a_chain_pin_that_will_not_close(
 
 
 def test_a_failed_initialization_reports_a_pin_that_will_not_close(
-    anchor: Path, monkeypatch: pytest.MonkeyPatch
+    anchor: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The record cannot be built after the open. The descriptor closes,
     every pin is attempted, and the one the kernel refuses is a strand
     raised from the initialization failure; the machine itself is free."""
 
+    linked, _other, _pointer, _original = _linked_worktree(anchor, tmp_path)
     taken: dict[str, int] = {}
     module = _NAMESPACE["acquire"].__globals__
 
     def failing_dumps(*_args: object, **_kwargs: object) -> str:
         raise RuntimeError("record build failed")
 
-    monkeypatch.setitem(module, "_open_pin", _protecting_first_pin(taken))
+    monkeypatch.setitem(module, "_open_pin", _protecting_entry_pin(taken))
     monkeypatch.setattr(module["json"], "dumps", failing_dumps)
     with pytest.raises(_NAMESPACE["LeaseStranded"], match="a failed acquisition") as caught:
-        _NAMESPACE["acquire"]("doomed-record", repo=anchor)
+        _NAMESPACE["acquire"]("doomed-record", repo=linked)
     monkeypatch.undo()
     assert isinstance(caught.value.__cause__, RuntimeError)
     assert caught.value.strands == (("pin", taken["pin"], caught.value.error),)
     # The lease handle closed: a contender takes the machine at once.
-    successor = _NAMESPACE["acquire"]("after-failed-record", repo=anchor)
+    successor = _NAMESPACE["acquire"]("after-failed-record", repo=linked)
     _NAMESPACE["release"](successor)
     _unprotect_and_close(taken["pin"])
 
 
 def test_a_refused_binding_reports_the_handle_and_a_pin_that_will_not_close(
-    anchor: Path, monkeypatch: pytest.MonkeyPatch
+    anchor: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The binding is refused after the open; the lease handle and one pin
     both refuse to close. One strand names both, the handle first, raised
@@ -2637,6 +2670,7 @@ def test_a_refused_binding_reports_the_handle_and_a_pin_that_will_not_close(
 
     kernel32 = _NAMESPACE["_kernel32"]()
     real_create_file = kernel32.CreateFileW
+    linked, _other, _pointer, _original = _linked_worktree(anchor, tmp_path)
     taken: dict[str, int] = {}
 
     def create_file_protecting_the_lease(name: str, *rest: object) -> object:
@@ -2651,41 +2685,42 @@ def test_a_refused_binding_reports_the_handle_and_a_pin_that_will_not_close(
     def refuse_binding(binding: object) -> None:
         raise LeaseRefused("the repository moved under the lease: forced")
 
-    monkeypatch.setitem(module, "_open_pin", _protecting_first_pin(taken))
+    monkeypatch.setitem(module, "_open_pin", _protecting_entry_pin(taken))
     monkeypatch.setattr(kernel32, "CreateFileW", create_file_protecting_the_lease)
     monkeypatch.setitem(module, "_assert_binding", refuse_binding)
     with pytest.raises(_NAMESPACE["LeaseStranded"], match="every refused close") as caught:
-        _NAMESPACE["acquire"]("doomed-binding", repo=anchor)
+        _NAMESPACE["acquire"]("doomed-binding", repo=linked)
     monkeypatch.undo()
     assert isinstance(caught.value.__cause__, LeaseRefused)
     kinds = [(kind, number) for kind, number, _error in caught.value.strands]
     assert kinds == [("handle", taken["handle"]), ("pin", taken["pin"])]
     with pytest.raises(LeaseRefused, match="contended"):
-        _NAMESPACE["acquire"]("contender", repo=anchor)
+        _NAMESPACE["acquire"]("contender", repo=linked)
     assert kernel32.SetHandleInformation(ctypes.c_void_p(taken["handle"]), 2, 0)
     assert kernel32.CloseHandle(ctypes.c_void_p(taken["handle"]))
     _unprotect_and_close(taken["pin"])
-    successor = _NAMESPACE["acquire"]("after-refused-binding", repo=anchor)
+    successor = _NAMESPACE["acquire"]("after-refused-binding", repo=linked)
     _NAMESPACE["release"](successor)
 
 
 def test_a_status_probe_reports_a_pin_that_will_not_close_and_frees_the_machine(
-    anchor: Path, monkeypatch: pytest.MonkeyPatch
+    anchor: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The status probe's pin refuses to close: the probe's write-access
     handle is closed first all the same, so the machine is free, and the
     strand names the pin."""
 
     _lease_file(anchor).write_text("stale record", encoding="utf-8")
+    linked, _other, _pointer, _original = _linked_worktree(anchor, tmp_path)
     taken: dict[str, int] = {}
     module = _NAMESPACE["acquire"].__globals__
-    monkeypatch.setitem(module, "_open_pin", _protecting_first_pin(taken))
+    monkeypatch.setitem(module, "_open_pin", _protecting_entry_pin(taken))
     with pytest.raises(_NAMESPACE["LeaseStranded"], match="a status probe") as caught:
-        _NAMESPACE["status"](anchor)
+        _NAMESPACE["status"](linked)
     monkeypatch.undo()
     assert caught.value.strands == (("pin", taken["pin"], caught.value.error),)
     # The probe closed: a contender takes the machine at once.
-    successor = _NAMESPACE["acquire"]("after-probe-strand", repo=anchor)
+    successor = _NAMESPACE["acquire"]("after-probe-strand", repo=linked)
     _NAMESPACE["release"](successor)
     _unprotect_and_close(taken["pin"])
 
@@ -2857,8 +2892,8 @@ def _pin_marks_refused(monkeypatch: pytest.MonkeyPatch, *, protect: bool) -> dic
             taken["pin"] = int(handle)
         return handle
 
-    def refusing_mark(handle: object, mask: int, flags: int) -> int:
-        if int(getattr(handle, "value", handle)) == taken.get("pin"):  # type: ignore[arg-type]
+    def refusing_mark(handle: int | c_void_p, mask: int, flags: int) -> int:
+        if int(getattr(handle, "value", handle)) == taken.get("pin"):
             if protect:
                 assert real_mark(handle, 2, 2)
             return 0
@@ -3094,6 +3129,7 @@ def test_pytest_scratch_is_held_outside_the_repository(
 ) -> None:
     target = tmp_path / "available-scratch"
     target.mkdir()
+    assert _write_example_config(target, "before").returncode == 0
     fallback = tmp_path / "fallback-scratch"
     fallback.mkdir()
     script = f"""
@@ -3107,6 +3143,8 @@ $Lease = Enter-MachineLease -RepositoryRoot "{anchor}" -Purpose "scratch-test"
 if (-not $Lease) {{ exit 2 }}
 try {{
     $Scratch = New-HeldPytestScratch -RepositoryRoot "{anchor}" -Lease $Lease
+    & git config --file "{target / "example.config"}" example.value during
+    Write-Output "CONFIG-EXIT:$LASTEXITCODE"
     New-Item -ItemType Directory -Path $Scratch -ErrorAction Stop | Out-Null
     Set-Content -LiteralPath (Join-Path $Scratch "write.txt") -Value "ok"
     Write-Output "SCRATCH:$Scratch"
@@ -3125,12 +3163,14 @@ try {{
         timeout=180,
         check=False,
     )
+    assert _write_example_config(target, "after").returncode == 0
     out = result.stdout + result.stderr
     assert result.returncode == 0, out
     assert "INSIDE:False" in result.stdout, out
     assert "RUNNER:True" in result.stdout, out
     assert "EXISTS:True" in result.stdout, out
     assert "USABLE:True" in result.stdout, out
+    assert "CONFIG-EXIT:0" in result.stdout, out
 
 
 @pytest.mark.parametrize("host", _powershell_hosts())
@@ -3269,8 +3309,8 @@ def _second_pin_mark_refused(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
                 taken["inner"] = number
         return handle
 
-    def refusing_mark(handle: object, mask: int, flags: int) -> int:
-        number = int(getattr(handle, "value", handle))  # type: ignore[arg-type]
+    def refusing_mark(handle: int | c_void_p, mask: int, flags: int) -> int:
+        number = int(getattr(handle, "value", handle))
         if number == taken.get("inner") and mask == 1:
             assert real_mark(ctypes.c_void_p(number), 2, 2)
             return 0
@@ -3521,3 +3561,944 @@ def test_the_python_lease_never_mutates_the_process_environment() -> None:
             f"machine_lock.py now writes the process environment through {mutation!r}, "
             "so it needs the exact restoration comparison the shell helper has"
         )
+
+
+@pytest.mark.parametrize(
+    ("operation", "protected_open"),
+    [("identity", 1), ("acquire", 1), ("acquire", 2), ("binding", 1), ("binding", 2)],
+)
+def test_temporary_directory_close_refusal_is_reported(
+    anchor: Path, monkeypatch: pytest.MonkeyPatch, operation: str, protected_open: int
+) -> None:
+    """A temporary probe must not silently survive a successful operation."""
+    module = _NAMESPACE["acquire"].__globals__
+    original_open: Callable[[Path], int] = module["_open_directory"]
+    original_close = module["_close"]
+    held = _NAMESPACE["acquire"]("binding-probe", repo=anchor) if operation == "binding" else None
+    returned = None
+    opened: list[int] = []
+    protected: list[int] = []
+    attempts: list[int] = []
+
+    def open_probe(path: Path) -> int:
+        handle = original_open(path)
+        opened.append(handle)
+        if len(opened) == protected_open:
+            _protect(handle)
+            protected.append(handle)
+        return handle
+
+    def close_probe(handle: int) -> bool:
+        if handle in protected:
+            attempts.append(handle)
+        return bool(original_close(handle))
+
+    failure: BaseException | None = None
+    try:
+        with monkeypatch.context() as patch:
+            patch.setitem(module, "_open_directory", open_probe)
+            patch.setitem(module, "_close", close_probe)
+            try:
+                if operation == "identity":
+                    module["_directory_identity"](anchor)
+                elif operation == "binding":
+                    assert held is not None
+                    held.assert_bound()
+                else:
+                    returned = _NAMESPACE["acquire"]("probe-refusal", repo=anchor)
+            except _NAMESPACE["LeaseStranded"] as refusal:
+                failure = refusal
+        if returned is not None:
+            _NAMESPACE["release"](returned)
+        if held is not None:
+            _NAMESPACE["release"](held)
+            held = None
+        assert len(protected) == 1
+        assert isinstance(failure, _NAMESPACE["LeaseStranded"]), "temporary close refusal was lost"
+        assert [(kind, number) for kind, number, _error in failure.strands] == [
+            ("directory-probe", protected[0])
+        ]
+        assert attempts == protected, "a refused handle must be attempted exactly once"
+        successor = _NAMESPACE["acquire"]("after-temporary-probe-refusal", repo=anchor)
+        _NAMESPACE["release"](successor)
+    finally:
+        if held is not None:
+            _NAMESPACE["release"](held)
+        for handle in protected:
+            _unprotect_and_close(handle)
+
+
+def test_directory_probe_close_refusal_keeps_the_identity_error(
+    anchor: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _NAMESPACE["acquire"].__globals__
+    original_open: Callable[[Path], int] = module["_open_directory"]
+    protected: list[int] = []
+    primary = LeaseRefused("constructed identity refusal")
+
+    def open_probe(path: Path) -> int:
+        handle = original_open(path)
+        _protect(handle)
+        protected.append(handle)
+        return handle
+
+    def refuse_identity(handle: int) -> tuple[int, int, int]:
+        raise primary
+
+    failure: BaseException | None = None
+    try:
+        with monkeypatch.context() as patch:
+            patch.setitem(module, "_open_directory", open_probe)
+            patch.setitem(module, "_identity", refuse_identity)
+            try:
+                module["_directory_identity"](anchor)
+            except BaseException as refusal:
+                failure = refusal
+        assert isinstance(failure, _NAMESPACE["LeaseStranded"]), "cleanup refusal was discarded"
+        assert failure.__cause__ is primary
+        assert [(kind, number) for kind, number, _error in failure.strands] == [
+            ("directory-probe", protected[0])
+        ]
+    finally:
+        for handle in protected:
+            _unprotect_and_close(handle)
+
+
+@pytest.mark.parametrize("protected_opens", [(1,), (2,), (3,), (1, 2, 3)])
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_shell_acquisition_reports_every_temporary_probe_close_refusal(
+    anchor: Path, host: str, protected_opens: tuple[int, ...]
+) -> None:
+    """Real protected handles cannot be returned as an ordinary acquisition."""
+    selected = ",".join(str(number) for number in protected_opens)
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+$script:RealDirectory = (Get-Command Open-MachineLeaseDirectory).ScriptBlock
+$script:ProbeCount = 0
+$script:ProtectedProbes = @()
+function Open-MachineLeaseDirectory {{
+    param([string]$Path)
+    $Handle = & $script:RealDirectory -Path $Path
+    $script:ProbeCount++
+    if (@({selected}) -contains $script:ProbeCount) {{
+        if (-not [LeaseNative.Kernel]::SetHandleInformation($Handle, 2, 2)) {{
+            throw "could not protect constructed probe"
+        }}
+        $script:ProtectedProbes += $Handle
+        Write-Host "PROTECTED:$Handle"
+    }}
+    return $Handle
+}}
+$Lease = Enter-MachineLease -RepositoryRoot "{anchor}" -Purpose "temporary-probe"
+Write-Output "RETURNED"
+if ($Lease) {{ Exit-MachineLease $Lease | Out-Null }}
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    out = result.stdout + result.stderr
+    protected = [
+        line.removeprefix("PROTECTED:")
+        for line in out.splitlines()
+        if line.startswith("PROTECTED:")
+    ]
+    assert protected, out
+    assert result.returncode == 4, out
+    assert "RETURNED" not in out, "the helper returned despite a refused temporary close"
+    for number in protected:
+        assert f"refused the directory probe {number} " in out, out
+    successor = _NAMESPACE["acquire"]("after-shell-temporary-probes", repo=anchor)
+    _NAMESPACE["release"](successor)
+
+
+def test_acquisition_reports_temporary_probes_and_pins_in_one_failure(
+    anchor: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _NAMESPACE["acquire"].__globals__
+    original_open: Callable[[Path], int] = module["_open_directory"]
+    original_pin = module["_open_pin"]
+    original_common: Callable[[Path | None], Path] = module["_common_dir"]
+    original_close = module["_close"]
+    protected: list[tuple[str, int]] = []
+    opens = 0
+    resolutions = 0
+    closes: list[int] = []
+    primary = LeaseRefused("constructed final resolution refusal")
+
+    def open_probe(path: Path) -> int:
+        nonlocal opens
+        handle = original_open(path)
+        opens += 1
+        if opens <= 2:
+            _protect(handle)
+            protected.append(("directory-probe", handle))
+        return handle
+
+    def open_pin(path: Path, role: str) -> object:
+        pin = original_pin(path, role)
+        if role == "the repository's .git entry" and not any(
+            kind == "pin" for kind, _number in protected
+        ):
+            _protect(pin.handle)
+            protected.append(("pin", pin.handle))
+        return pin
+
+    def resolve_common(repo: Path | None) -> Path:
+        nonlocal resolutions
+        resolutions += 1
+        if resolutions == 3:
+            raise primary
+        return original_common(repo)
+
+    def close_handle(handle: int) -> bool:
+        if any(number == handle for _kind, number in protected):
+            closes.append(handle)
+        return bool(original_close(handle))
+
+    failure: BaseException | None = None
+    try:
+        with monkeypatch.context() as patch:
+            patch.setitem(module, "_open_directory", open_probe)
+            patch.setitem(module, "_open_pin", open_pin)
+            patch.setitem(module, "_common_dir", resolve_common)
+            patch.setitem(module, "_close", close_handle)
+            try:
+                _NAMESPACE["acquire"]("several-temporary-refusals", repo=anchor)
+            except BaseException as refusal:
+                failure = refusal
+        assert len(protected) == 3
+        assert isinstance(failure, _NAMESPACE["LeaseStranded"])
+        assert failure.__cause__ is primary
+        assert sorted((kind, number) for kind, number, _error in failure.strands) == sorted(
+            protected
+        ), "the report omitted a temporary probe or pin"
+        assert sorted(closes) == sorted(number for _kind, number in protected)
+    finally:
+        for _kind, handle in protected:
+            _unprotect_and_close(handle)
+    successor = _NAMESPACE["acquire"]("after-several-temporary-refusals", repo=anchor)
+    _NAMESPACE["release"](successor)
+
+
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_shell_directory_probe_preserves_the_primary_failure(anchor: Path, host: str) -> None:
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+$script:RealDirectory = (Get-Command Open-MachineLeaseDirectory).ScriptBlock
+function Open-MachineLeaseDirectory {{
+    param([string]$Path)
+    $Handle = & $script:RealDirectory -Path $Path
+    if (-not [LeaseNative.Kernel]::SetHandleInformation($Handle, 2, 2)) {{
+        throw "could not protect constructed probe"
+    }}
+    Write-Host "PROTECTED:$Handle"
+    return $Handle
+}}
+function Get-MachineLeaseIdentity {{
+    param($Handle)
+    throw [System.InvalidOperationException]::new("constructed identity refusal")
+}}
+try {{
+    Get-MachineLeaseDirectoryIdentity -Path "{anchor}" | Out-Null
+    Write-Output "RETURNED"
+}} catch {{
+    Write-Output "CAUGHT:$($_.Exception.ToString())"
+}}
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "RETURNED" not in out
+    assert "CAUGHT:" in out and "constructed identity refusal" in out
+    assert "refused the directory probe " in out, "cleanup lost its own failure"
+
+
+@pytest.mark.parametrize("boundary", ["enumeration", "kernel_open"])
+def test_a_new_junction_cannot_leave_the_lease_mapping_unheld(
+    anchor: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    """The same final identity must not hide a newly removable path mapping."""
+    linked, _other, pointer, _original = _linked_worktree(anchor, tmp_path)
+    private = Path(pointer.read_text(encoding="utf-8").removeprefix("gitdir:").strip())
+    chosen = private.parent if boundary == "enumeration" else private
+    moved = chosen.with_name(chosen.name + "-held")
+    module = _NAMESPACE["acquire"].__globals__
+    real_chain: Callable[[Path], Iterator[tuple[Path, str]]] = module["_resolution_chain"]
+    kernel = module["_kernel32"]()
+    real_create = kernel.CreateFileW
+    attempted = False
+    switched = False
+    protected = False
+    lease = None
+
+    def switch_to_junction() -> None:
+        nonlocal attempted, switched, protected
+        attempted = True
+        identity = module["_directory_identity"](chosen)
+        try:
+            chosen.rename(moved)
+        except PermissionError:
+            protected = True
+            return
+        try:
+            _junction(chosen, moved)
+        except BaseException:
+            if chosen.exists():
+                os.rmdir(chosen)
+            moved.rename(chosen)
+            raise
+        switched = True
+        assert module["_directory_identity"](chosen) == identity
+
+    def after_enumeration(path: Path) -> Iterator[tuple[Path, str]]:
+        chain = real_chain(path)
+        if not attempted:
+            switch_to_junction()
+        return chain
+
+    def before_kernel_open(name: str, *rest: object) -> object:
+        if not attempted and Path(name) == chosen and rest[1] == module["_SHARE_READ"]:
+            switch_to_junction()
+        return real_create(name, *rest)
+
+    try:
+        with monkeypatch.context() as patch:
+            if boundary == "enumeration":
+                patch.setitem(module, "_resolution_chain", after_enumeration)
+            else:
+                patch.setattr(kernel, "CreateFileW", before_kernel_open)
+            try:
+                lease = _NAMESPACE["acquire"]("new-junction-mapping", repo=linked)
+            except LeaseRefused:
+                protected = True
+        assert attempted, "the constructed rename boundary was not reached"
+        if lease is not None and switched:
+            lease.assert_bound()
+            assert chosen.is_junction()
+            try:
+                os.rmdir(chosen)
+            except PermissionError:
+                protected = True
+        assert protected, "acquisition accepted a junction that remained removable"
+    finally:
+        if lease is not None:
+            _NAMESPACE["release"](lease)
+        if switched:
+            if chosen.is_junction():
+                os.rmdir(chosen)
+            assert not chosen.exists()
+            moved.rename(chosen)
+
+
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_shell_pinning_protects_a_junction_added_after_enumeration(
+    anchor: Path, tmp_path: Path, host: str
+) -> None:
+    linked, _other, pointer, _original = _linked_worktree(anchor, tmp_path)
+    private = Path(pointer.read_text(encoding="utf-8").removeprefix("gitdir:").strip())
+    chosen = private.parent
+    moved = chosen.with_name(chosen.name + "-held")
+    switch = (
+        "import os,sys,_winapi;"
+        "exec('try:\\n os.rename(sys.argv[1],sys.argv[2])\\n"
+        "except PermissionError:\\n sys.exit(73)');"
+        "_winapi.CreateJunction(sys.argv[2],sys.argv[1])"
+    )
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+$script:RealChain = (Get-Command Get-MachineLeaseResolutionChain).ScriptBlock
+$script:Attempted = $false
+function Get-MachineLeaseResolutionChain {{
+    param([string]$Anchor, $Pins)
+    if ($PSBoundParameters.ContainsKey("Pins")) {{
+        $Links = @(& $script:RealChain -Anchor $Anchor -Pins $Pins)
+    }} else {{
+        $Links = @(& $script:RealChain -Anchor $Anchor)
+    }}
+    if (-not $script:Attempted) {{
+        $script:Attempted = $true
+        $Before = Get-MachineLeaseDirectoryIdentity -Path "{chosen}"
+        & "{sys.executable}" -c "{switch}" "{chosen}" "{moved}"
+        if ($LASTEXITCODE -eq 73) {{ Write-Host "SWITCH-PROTECTED"; return $Links }}
+        if ($LASTEXITCODE -ne 0) {{ throw "constructed junction switch failed" }}
+        $After = Get-MachineLeaseDirectoryIdentity -Path "{chosen}"
+        if ($Before -ne $After) {{ throw "constructed directory identity changed" }}
+        Write-Host "SWITCHED"
+    }}
+    return $Links
+}}
+$Lease = Enter-MachineLease -RepositoryRoot "{linked}" -Purpose "new-junction-mapping"
+if (-not $Lease) {{ Write-Output "REFUSED"; exit 0 }}
+try {{
+    Assert-MachineLeaseHeld -Lease $Lease
+    try {{
+        [IO.Directory]::Delete("{chosen}")
+        Write-Output "MAPPING-REMOVED"
+    }} catch [IO.IOException] {{
+        Write-Output "MAPPING-PROTECTED"
+    }} catch [UnauthorizedAccessException] {{
+        Write-Output "MAPPING-PROTECTED"
+    }}
+}} finally {{
+    if (-not (Exit-MachineLease $Lease)) {{ exit 4 }}
+}}
+"""
+    try:
+        result = subprocess.run(
+            [host, "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        out = result.stdout + result.stderr
+        assert result.returncode == 0, out
+        assert "SWITCHED" in out or "SWITCH-PROTECTED" in out, out
+        assert "REFUSED" in out or "MAPPING-PROTECTED" in out, out
+        assert "MAPPING-REMOVED" not in out, "the accepted mapping remained removable"
+    finally:
+        if chosen.is_junction():
+            os.rmdir(chosen)
+        if moved.exists():
+            assert not chosen.exists()
+            moved.rename(chosen)
+
+
+def _write_example_config(directory: Path, value: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "config", "--file", str(directory / "example.config"), "example.value", value],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_holding_ancestors_allows_atomic_child_replacement(anchor: Path) -> None:
+    assert _write_example_config(anchor, "before").returncode == 0
+    lease = _NAMESPACE["acquire"]("atomic-child-replacement", repo=anchor)
+    try:
+        lease.assert_bound()
+        during = _write_example_config(anchor, "during")
+        with pytest.raises(PermissionError):
+            anchor.rename(anchor.with_name("moved-repository"))
+        lease.assert_bound()
+    finally:
+        _NAMESPACE["release"](lease)
+    assert _write_example_config(anchor, "after").returncode == 0
+    assert during.returncode == 0, during.stderr
+
+
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_shell_holding_ancestors_allows_atomic_child_replacement(anchor: Path, host: str) -> None:
+    assert _write_example_config(anchor, "before").returncode == 0
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+$Lease = Enter-MachineLease -RepositoryRoot "{anchor}" -Purpose "atomic-child-replacement"
+if (-not $Lease) {{ throw "lease was not acquired" }}
+try {{
+    & git config --file "{anchor / "example.config"}" example.value during
+    Write-Output "CONFIG-EXIT:$LASTEXITCODE"
+    try {{
+        [IO.Directory]::Move("{anchor}", "{anchor.with_name("moved-repository")}")
+        throw "the held repository could be moved"
+    }} catch [IO.IOException] {{
+        Write-Output "NAME-HELD"
+    }}
+    Assert-MachineLeaseHeld -Lease $Lease
+}} finally {{
+    if (-not (Exit-MachineLease $Lease)) {{ exit 4 }}
+}}
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script], capture_output=True, text=True, check=False
+    )
+    assert _write_example_config(anchor, "after").returncode == 0
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "NAME-HELD" in result.stdout
+    assert "CONFIG-EXIT:0" in result.stdout, result.stdout + result.stderr
+
+
+def test_an_ordinary_component_is_held_before_its_attributes_are_read(
+    anchor: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    linked, _other, pointer, _original = _linked_worktree(anchor, tmp_path)
+    private = Path(pointer.read_text(encoding="utf-8").removeprefix("gitdir:").strip())
+    chosen = private.parent
+    moved = chosen.with_name(chosen.name + "-during-read")
+    module = _NAMESPACE["acquire"].__globals__
+    original: Callable[[Path], int] = module["_attributes"]
+    attempts: list[bool] = []
+    open_pin = module["_open_pin"]
+    held: set[Path] = set()
+    inspected: set[Path] = set()
+
+    def pin(path: Path, role: str) -> object:
+        value = open_pin(path, role)
+        held.add(path)
+        return value
+
+    def read_attributes(path: Path) -> int:
+        assert path in held, "a component was inspected before its own pin opened"
+        inspected.add(path)
+        if path == chosen and not attempts:
+            try:
+                chosen.rename(moved)
+            except PermissionError:
+                attempts.append(False)
+            else:
+                attempts.append(True)
+                moved.rename(chosen)
+        return original(path)
+
+    monkeypatch.setitem(module, "_open_pin", pin)
+    monkeypatch.setitem(module, "_attributes", read_attributes)
+    lease = _NAMESPACE["acquire"]("hold-before-reading", repo=linked)
+    try:
+        lease.assert_bound()
+        assert {linked, pointer, private, private / "commondir", anchor / ".git"} <= inspected
+        assert attempts == [False], "the component could move at its attributes-read boundary"
+    finally:
+        _NAMESPACE["release"](lease)
+
+
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_shell_holds_an_ordinary_component_before_reading_it(
+    anchor: Path, tmp_path: Path, host: str
+) -> None:
+    linked, _other, pointer, _original = _linked_worktree(anchor, tmp_path)
+    private = Path(pointer.read_text(encoding="utf-8").removeprefix("gitdir:").strip())
+    chosen = private.parent
+    moved = chosen.with_name(chosen.name + "-during-read")
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+$script:Attempted = $false
+function Get-Item {{
+    [CmdletBinding()]
+    param([string]$LiteralPath, [switch]$Force)
+    if ($LiteralPath -eq "{chosen}" -and -not $script:Attempted) {{
+        $script:Attempted = $true
+        $Moved = $false
+        try {{
+            [IO.Directory]::Move("{chosen}", "{moved}")
+            $Moved = $true
+        }} catch [IO.IOException] {{
+            Write-Host "PROBE-HELD"
+        }}
+        if ($Moved) {{
+            [IO.Directory]::Move("{moved}", "{chosen}")
+            Write-Host "PROBE-UNHELD"
+        }}
+    }}
+    Microsoft.PowerShell.Management\\Get-Item -LiteralPath $LiteralPath -Force:$Force
+}}
+$Lease = Enter-MachineLease -RepositoryRoot "{linked}" -Purpose "hold-before-reading"
+if (-not $Lease) {{ throw "lease was not acquired" }}
+try {{
+    Assert-MachineLeaseHeld -Lease $Lease
+    if (-not $script:Attempted) {{ throw "the attributes read never ran" }}
+}} finally {{
+    if (-not (Exit-MachineLease $Lease)) {{ exit 4 }}
+}}
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PROBE-HELD" in result.stdout and "PROBE-UNHELD" not in result.stdout
+
+
+def _set_junction_in_place(directory: Path, target: Path) -> tuple[bool, bool, int]:
+    import ctypes
+    import struct
+
+    kernel = _NAMESPACE["_kernel32"]()
+    handle = kernel.CreateFileW(str(directory), 0x40000080, 7, None, 3, 0x02200000, None)
+    if handle is None or handle == _NAMESPACE["_INVALID_HANDLE"]:
+        return False, False, cast(Callable[[], int], vars(ctypes)["get_last_error"])()
+    substitute = ("\\??\\" + str(target)).encode("utf-16-le")
+    display = str(target).encode("utf-16-le")
+    names = substitute + b"\0\0" + display + b"\0\0"
+    payload = (
+        struct.pack(
+            "<IHHHHHH",
+            0xA0000003,
+            8 + len(names),
+            0,
+            0,
+            len(substitute),
+            len(substitute) + 2,
+            len(display),
+        )
+        + names
+    )
+    buffer = ctypes.create_string_buffer(payload)
+    returned = ctypes.c_uint32()
+    kernel.DeviceIoControl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.c_void_p,
+    ]
+    kernel.DeviceIoControl.restype = ctypes.c_int
+    try:
+        success = bool(
+            kernel.DeviceIoControl(
+                ctypes.c_void_p(handle),
+                0x900A4,
+                buffer,
+                len(payload),
+                None,
+                0,
+                ctypes.byref(returned),
+                None,
+            )
+        )
+        error = cast(Callable[[], int], vars(ctypes)["get_last_error"])()
+        return True, success, 0 if success else error
+    finally:
+        assert kernel.CloseHandle(ctypes.c_void_p(handle))
+
+
+def test_a_writable_parent_cannot_be_retargeted_with_its_child_held(
+    anchor: Path, tmp_path: Path
+) -> None:
+    empty = tmp_path / "empty-directory"
+    target = tmp_path / "junction-target"
+    empty.mkdir()
+    target.mkdir()
+    # Positive control: use the exact same write open and FSCTL on an empty directory.
+    try:
+        assert _set_junction_in_place(empty, target) == (True, True, 0)
+        assert empty.is_junction()
+    finally:
+        os.rmdir(empty)
+    lease = _NAMESPACE["acquire"]("nonempty-parent", repo=anchor)
+    try:
+        opened, changed, error = _set_junction_in_place(anchor, target)
+        assert opened, f"ordinary parent write access was refused: {error}"
+        assert not changed and error == 145, "the pinned child did not keep its parent ordinary"
+        with pytest.raises(PermissionError):
+            (anchor / ".git").rename(anchor / "moved-git-directory")
+        assert not anchor.is_junction()
+        lease.assert_bound()
+    finally:
+        _NAMESPACE["release"](lease)
+
+
+@pytest.mark.parametrize("location", ["repository", "common"])
+def test_a_refused_parent_pin_retirement_closes_the_replacement_once(
+    anchor: Path, monkeypatch: pytest.MonkeyPatch, location: str
+) -> None:
+    import ctypes
+
+    chosen = anchor if location == "repository" else anchor / ".git"
+    module = _NAMESPACE["acquire"].__globals__
+    original_pin = module["_open_pin"]
+    original_close = module["_close"]
+    kernel = module["_kernel32"]()
+    original_create = kernel.CreateFileW
+    taken: list[int] = []
+    opened: list[int] = []
+    closes: list[int] = []
+    lease = None
+    failure = None
+
+    def create(name: str, access: int, *arguments: object) -> object:
+        handle = original_create(name, access, *arguments)
+        if Path(name) == chosen and int(access) & 0x80000000:
+            assert handle is not None and handle != module["_INVALID_HANDLE"]
+            opened.append(int(handle))
+        return handle
+
+    def pin(path: Path, role: str) -> object:
+        value = original_pin(path, role)
+        if path == chosen and not taken:
+            taken.append(value.handle)
+            _protect(value.handle)
+        return value
+
+    def close(handle: int) -> bool:
+        if handle in taken:
+            closes.append(handle)
+        return bool(original_close(handle))
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(kernel, "CreateFileW", create)
+            patch.setitem(module, "_open_pin", pin)
+            patch.setitem(module, "_close", close)
+            try:
+                lease = module["acquire"]("refused-parent-retirement", repo=anchor)
+            except BaseException as exc:
+                failure = exc
+        assert isinstance(failure, module["LeaseStranded"])
+        assert failure.strands == (("pin", taken[0], failure.error),)
+        assert "strict parent hold could not be retired" in str(failure.__cause__)
+        assert closes == taken, "cleanup attempted the refused old handle twice"
+        assert len(opened) == (2 if location == "repository" else 3)
+        assert opened[0] == taken[0]
+        for handle in opened[1:]:
+            assert not kernel.GetFileInformationByHandle(
+                ctypes.c_void_p(handle), ctypes.byref(module["_ByHandleFileInformation"]())
+            ), "a replacement hold leaked when old-pin retirement failed"
+    finally:
+        if taken:
+            assert kernel.SetHandleInformation(ctypes.c_void_p(taken[0]), 2, 0)
+            if lease is None:
+                assert kernel.CloseHandle(ctypes.c_void_p(taken[0]))
+        if lease is not None:
+            module["release"](lease)
+    successor = module["acquire"]("after-parent-retirement-refusal", repo=anchor)
+    module["release"](successor)
+
+
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_shell_reports_a_refused_parent_pin_retirement(anchor: Path, host: str) -> None:
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+$script:OriginalPin = (Get-Command Open-MachineLeasePin).ScriptBlock
+$script:ProtectedParent = $false
+function Open-MachineLeasePin {{
+    param([string]$Path, [string]$Role)
+    $Pin = & $script:OriginalPin -Path $Path -Role $Role
+    if ($Path -eq "{anchor}" -and -not $script:ProtectedParent) {{
+        if (-not [LeaseNative.Kernel]::SetHandleInformation($Pin.Handle, 2, 2)) {{
+            throw "the constructed parent could not be protected"
+        }}
+        $script:ProtectedParent = $true
+        Write-Host "PARENT-PROTECTED"
+    }}
+    return $Pin
+}}
+$Lease = Enter-MachineLease -RepositoryRoot "{anchor}" -Purpose "refused-parent-retirement"
+if ($Lease) {{
+    Write-Host "RETURNED"
+    if (-not (Exit-MachineLease $Lease)) {{ exit 4 }}
+}}
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script], capture_output=True, text=True, check=False
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 4, output
+    assert "PARENT-PROTECTED" in output and "RETURNED" not in output
+    assert "after parent sharing adjustment" in output
+    assert output.count("CloseHandle refused the pin") == 1, output
+    successor = _NAMESPACE["acquire"]("after-shell-retirement-refusal", repo=anchor)
+    _NAMESPACE["release"](successor)
+
+
+def test_a_held_reparse_parent_refuses_write_access(anchor: Path, tmp_path: Path) -> None:
+    import ctypes
+
+    linked, jump, worktrees, pointer, original_pointer = _pointer_through_a_junction(
+        anchor, tmp_path
+    )
+    kernel = _NAMESPACE["_kernel32"]()
+
+    def writable() -> bool:
+        handle = kernel.CreateFileW(str(jump), 0x40000080, 7, None, 3, 0x02200000, None)
+        if handle is None or handle == _NAMESPACE["_INVALID_HANDLE"]:
+            assert cast(Callable[[], int], vars(ctypes)["get_last_error"])() == 32
+            return False
+        assert kernel.CloseHandle(ctypes.c_void_p(handle))
+        return True
+
+    try:
+        assert writable(), "the constructed junction cannot exercise a write open"
+        lease = _NAMESPACE["acquire"]("strict-reparse-parent", repo=linked)
+        try:
+            assert jump.is_junction()
+            assert any(Path(pin.path).parent == jump for pin in lease.binding.pins)
+            assert not writable(), "the held reparse parent admitted a write handle"
+            lease.assert_bound()
+        finally:
+            _NAMESPACE["release"](lease)
+        assert writable(), "release did not restore the junction's write access"
+    finally:
+        _repoint(pointer, original_pointer)
+        os.rmdir(jump)
+
+
+def test_parent_sharing_refuses_a_different_replacement_identity(
+    anchor: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = tmp_path / "other-directory"
+    other.mkdir()
+    module = _NAMESPACE["acquire"].__globals__
+    assert module["_directory_identity"](anchor) != module["_directory_identity"](other)
+    open_shared = module["_open_shared_pin"]
+    substituted: list[Path] = []
+
+    def different_directory(path: Path, role: str, share: int) -> object:
+        if path == anchor and share & 2:
+            substituted.append(path)
+            return open_shared(other, role, share)
+        return open_shared(path, role, share)
+
+    with monkeypatch.context() as patch:
+        patch.setitem(module, "_open_shared_pin", different_directory)
+        with pytest.raises(LeaseRefused, match="parent changed while its sharing was adjusted"):
+            lease = module["acquire"]("different-parent-identity", repo=anchor)
+            module["release"](lease)
+    assert substituted == [anchor], "the replacement boundary was not exercised once"
+    successor = module["acquire"]("after-parent-identity-refusal", repo=anchor)
+    module["release"](successor)
+
+
+def test_git_configuration_can_be_written_while_its_directory_is_held(anchor: Path) -> None:
+    lease = _NAMESPACE["acquire"]("configuration-write", repo=anchor)
+    try:
+        written = subprocess.run(
+            ["git", "-C", str(anchor), "config", "--local", "lease.example", "recorded"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert written.returncode == 0, written.stdout + written.stderr
+        actual = subprocess.run(
+            ["git", "-C", str(anchor), "config", "--local", "--get", "lease.example"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert actual.returncode == 0 and actual.stdout.strip() == "recorded"
+        with pytest.raises(PermissionError):
+            (anchor / ".git").rename(anchor / "moved-git-directory")
+        lease.assert_bound()
+    finally:
+        _NAMESPACE["release"](lease)
+
+
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_shell_lease_allows_git_configuration_without_allowing_a_swap(
+    anchor: Path, host: str
+) -> None:
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+$Lease = Enter-MachineLease -RepositoryRoot "{anchor}" -Purpose "configuration-write"
+if (-not $Lease) {{ throw "lease was not acquired" }}
+try {{
+    & git -C "{anchor}" config --local lease.example recorded
+    if ($LASTEXITCODE -ne 0) {{ throw "git configuration write failed" }}
+    $Actual = & git -C "{anchor}" config --local --get lease.example
+    if ($LASTEXITCODE -ne 0 -or $Actual -ne "recorded") {{
+        throw "git did not store the requested configuration"
+    }}
+    $Moved = $false
+    try {{
+        [IO.Directory]::Move("{anchor / ".git"}", "{anchor / "moved-git-directory"}")
+        $Moved = $true
+    }} catch [IO.IOException] {{}}
+    if ($Moved) {{
+        [IO.Directory]::Move("{anchor / "moved-git-directory"}", "{anchor / ".git"}")
+        throw "the held directory could be moved"
+    }}
+    Assert-MachineLeaseHeld -Lease $Lease
+}} finally {{
+    if (-not (Exit-MachineLease $Lease)) {{ exit 4 }}
+}}
+Write-Output "CONFIGURATION-STORED-AND-DIRECTORY-HELD"
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CONFIGURATION-STORED-AND-DIRECTORY-HELD" in result.stdout
+
+
+def test_the_writable_common_directory_keeps_its_lease_entry_held(
+    anchor: Path, tmp_path: Path
+) -> None:
+    target = tmp_path / "junction-target"
+    target.mkdir()
+    lease = _NAMESPACE["acquire"]("ordinary-common-directory", repo=anchor)
+    try:
+        opened, changed, error = _set_junction_in_place(anchor / ".git", target)
+        assert opened, f"ordinary common-directory writes were refused: {error}"
+        assert not changed and error == 145
+        with pytest.raises(PermissionError):
+            _lease_file(anchor).rename(anchor / ".git" / "moved-lease")
+        assert not (anchor / ".git").is_junction()
+        lease.assert_bound()
+    finally:
+        _NAMESPACE["release"](lease)
+
+
+def _lease_file_link(anchor: Path, tmp_path: Path) -> Path:
+    target = tmp_path / "lease-target"
+    target.write_bytes(b"untouched target")
+    try:
+        _lease_file(anchor).symlink_to(target)
+    except OSError as error:
+        if cast(_WindowsError, error).winerror == 1314:
+            pytest.skip("creating file links requires the Windows developer setting")
+        raise
+    return target
+
+
+def test_a_linked_lease_entry_is_refused_before_its_target_is_written(
+    anchor: Path, tmp_path: Path
+) -> None:
+    target = _lease_file_link(anchor, tmp_path)
+    lease = None
+    try:
+        with pytest.raises(LeaseRefused, match="not an ordinary file"):
+            lease = _NAMESPACE["acquire"]("linked-lease", repo=anchor)
+    finally:
+        if lease is not None:
+            _NAMESPACE["release"](lease)
+    assert target.read_bytes() == b"untouched target"
+
+
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_shell_refuses_a_linked_lease_entry_without_writing_its_target(
+    anchor: Path, tmp_path: Path, host: str
+) -> None:
+    target = _lease_file_link(anchor, tmp_path)
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+$Lease = Enter-MachineLease -RepositoryRoot "{anchor}" -Purpose "linked-lease"
+if ($Lease) {{
+    [void](Exit-MachineLease $Lease)
+    exit 7
+}}
+Write-Output "LINKED-LEASE-REFUSED"
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "not an ordinary file" in result.stdout
+    assert "LINKED-LEASE-REFUSED" in result.stdout
+    assert target.read_bytes() == b"untouched target"

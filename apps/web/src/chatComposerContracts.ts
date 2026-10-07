@@ -1,3 +1,5 @@
+import type { SourceFitSelection } from "./sourceFit";
+import type { TranscriptReads } from "./useChatTranscript";
 import type { VisualTarget } from "./libraryEditTargets";
 import type { TurnReference } from "./mentionDraft";
 import type {
@@ -7,18 +9,16 @@ import type {
 } from "./composerPromptSource";
 import type {
   ChatDetail,
+  ChatTranscriptContext,
   EngineCapabilities,
   EngineRole,
-  GenerationPreset,
-  ModelProfile,
   Project,
   PriorTurnEditAccepted,
   RoutingMode,
-  Workflow,
   WorkPlan,
 } from "./types";
 
-type SendFromComposer = (
+export type SendFromComposer = (
   text: string,
   mode: RoutingMode,
   artifacts: string[],
@@ -26,20 +26,20 @@ type SendFromComposer = (
   references: TurnReference[],
   outputCount?: number,
   promptSource?: ComposerPromptSource,
+  sourceFit?: SourceFitSelection,
 ) => void;
 
 export type PendingTurn = { id: string; text: string; mode: RoutingMode };
 
 export interface ComposerProps {
   chat: ChatDetail;
+  transcriptContext?: ChatTranscriptContext;
   engines: EngineCapabilities[];
-  profiles: ModelProfile[];
   stoppable: boolean;
   settings: Record<string, unknown>;
   onSettings: (settings: Record<string, unknown>, changedKeys?: string[]) => void;
   settingsRole: EngineRole;
   onSettingsRole: (role: EngineRole) => void;
-  presets: GenerationPreset[];
   presetId: string | null;
   onPreset: (presetId: string | null) => void;
   onMode: (mode: RoutingMode) => void;
@@ -47,7 +47,6 @@ export interface ComposerProps {
   onStop: () => void;
   onStopAndSend: SendFromComposer;
   maxMediaOutputsPerPlan: number;
-  workflows: Workflow[];
   project?: Project;
   visualTarget?: VisualTarget | null;
   quoteTarget?: { text: string; requestId: number } | null;
@@ -56,11 +55,10 @@ export interface ComposerProps {
 }
 
 export interface ChatViewProps {
+  transcript?: TranscriptReads;
   onOpenStudio: (artifactId: string) => void;
   chat?: ChatDetail;
   engines: EngineCapabilities[];
-  profiles: ModelProfile[];
-  workflows: Workflow[];
   project?: Project;
   liveText: Record<string, string>;
   pendingTurns: PendingTurn[];
@@ -68,7 +66,6 @@ export interface ChatViewProps {
   settings: Record<string, unknown>;
   settingsRole: EngineRole;
   onSettingsRole: (role: EngineRole) => void;
-  presets: GenerationPreset[];
   presetId: string | null;
   onSettings: (settings: Record<string, unknown>, changedKeys?: string[]) => void;
   onPreset: (presetId: string | null) => void;
@@ -88,6 +85,8 @@ export interface ChatViewProps {
   onRemoveItem: (messageId: string) => void;
   onForkThread: (messageId: string) => void;
   libraryEdit?: VisualTarget | null;
+  /** Called once the chat has taken `libraryEdit`, so whoever handed it down can let it go. */
+  onLibraryEditTaken?: () => void;
   composerDraft: ComposerDraft;
   onComposerDraft: (update: ComposerDraftUpdate) => void;
 }

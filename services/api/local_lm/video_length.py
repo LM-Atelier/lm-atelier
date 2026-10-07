@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any, Final
 
+from .graph_placeholders import binds_parameter
+from .saved_settings import unusable_as_a_number
 from .schemas import SettingField
 
 VIDEO_LENGTH_SCHEMA_KEY: Final = "x-lm-atelier-video-length"
@@ -126,6 +128,13 @@ def workflow_video_length(
     declared_fps = fps_schema.get("const", fps_schema.get("default"))
     if isinstance(declared_fps, bool) or not isinstance(declared_fps, (int, float)):
         raise ValueError("workflow video length FPS property must declare a default or const")
+    # Asked before the conversion below rather than after it. A whole number has
+    # no size limit and a float does, so a large enough one cannot be converted
+    # at all - and this is reached straight from the workflow writer, which never
+    # reads the schema any other way and would answer with a server error rather
+    # than naming the field.
+    if isinstance(declared_fps, int) and unusable_as_a_number(declared_fps):
+        raise ValueError("workflow video length FPS property must be a finite frame rate")
     if not math.isfinite(float(declared_fps)) or not math.isclose(
         float(declared_fps), float(fps), rel_tol=0.0, abs_tol=1e-12
     ):
@@ -140,6 +149,47 @@ def workflow_video_length(
         maximum_frames=maximum_frames,
         default_frames=default_frames,
     )
+
+
+def video_length_reaches_graph(
+    workflow: object,
+    input_schema: Mapping[str, Any] | None,
+) -> None:
+    """Refuse a declared length whose frame count the graph never consumes.
+
+    A workflow declares how its length works, and from that declaration the
+    product offers a duration in seconds and converts back to frames. Nothing
+    downstream checks the graph takes the number: the compiler replaces
+    `${name}` where it finds it and never notices a parameter it did not use.
+    So a workflow that declares the contract while hardcoding its frame count
+    offers a duration control that changes nothing, and the run still records
+    the length it believes it delivered - a false record rather than a silent
+    no-op, which is the worse of the two.
+
+    Only the FRAME COUNT is required here. The frame rate is frequently a
+    property of the model rather than a graph input, and demanding a
+    placeholder for it would refuse workflows that are behaving correctly.
+
+    WHAT THIS DOES NOT PROVE, stated because the gap is easy to overstate. It
+    closes the declared-but-completely-unconsumed case and nothing more. A
+    placeholder sitting in a node the graph never reaches, or one feeding an
+    input that is not the frame count, still passes here and still fails to
+    decide the emitted length. The `delivered_seconds` a run records therefore
+    remains a resolved estimate until a measured output is compared against it.
+
+    The stronger claim - that a declared input decides what comes OUT - is what
+    the geometry proof makes for width and height by walking from the save node
+    backwards, and it is deliberately not attempted here.
+    """
+
+    contract = workflow_video_length(input_schema)
+    if contract is None:
+        return
+    if not binds_parameter(workflow, contract.frames_parameter):
+        raise ValueError(
+            "workflow video length declares "
+            f"{contract.frames_parameter} but the graph never uses it"
+        )
 
 
 def video_duration_field(contract: WorkflowVideoLength) -> SettingField:

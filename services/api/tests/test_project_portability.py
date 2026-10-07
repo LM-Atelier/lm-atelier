@@ -76,7 +76,8 @@ async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
 
 def _manifest(archive_bytes: bytes) -> dict[str, Any]:
     with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
-        return json.loads(archive.read("manifest.json"))
+        manifest: dict[str, Any] = json.loads(archive.read("manifest.json"))
+        return manifest
 
 
 def _rewrite_archive(archive_bytes: bytes, manifest: dict[str, Any]) -> bytes:
@@ -830,7 +831,7 @@ def _field(key: str, kind: str = "number", **extra: object) -> SettingField:
         scope="request",
         visibility="basic",
         available=True,
-        **extra,  # type: ignore[arg-type]
+        **extra,
     )
 
 

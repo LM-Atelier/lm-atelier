@@ -154,10 +154,11 @@ async def test_shell_route_refuses_same_origin_comfyui(
         lambda: "runtime_one",
     )
     monkeypatch.setattr(app.state.services.settings, "comfy_url", "http://127.0.0.1:8188")
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://127.0.0.1:8188") as client:
-        await client.post("/api/session")
-        response = await client.get("/api/workflow-editor/shell")
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://127.0.0.1:8188") as client:
+            await client.post("/api/session")
+            response = await client.get("/api/workflow-editor/shell")
 
     assert response.status_code == 409
     assert response.json()["code"] == "workflow-editor-origin-conflict"

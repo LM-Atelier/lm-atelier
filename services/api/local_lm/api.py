@@ -11,17 +11,21 @@ import os
 import re
 import shutil
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
-from contextlib import suppress
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+from contextlib import AsyncExitStack, nullcontext, suppress
 from datetime import UTC, datetime
+from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from urllib.parse import quote
 
 import httpx
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
+    Form,
     HTTPException,
     Query,
     Request,
@@ -34,16 +38,19 @@ from fastapi import (
 from sqlalchemy import Select, and_, func, or_, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.sql.elements import ColumnElement
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import FileResponse, HTMLResponse
 
 from . import __version__
+from .accepted_turn_context import accepted_context, recorded_enlargement
 from .adapter_grammar_review import review_adapter_grammar
 from .api_errors import ApiError, api_error
+from .archive_key_store import ArchiveKeyVaultUnavailable
 from .artifact_library import (
     ArtifactLibraryConflict,
     ArtifactLibraryCursorError,
     ArtifactLibraryDataError,
-    ensure_library_entry,
     list_library_entries,
     set_library_favorite,
 )
@@ -52,16 +59,46 @@ from .artifacts import (
     RETENTION_BATCH_SECONDS,
     RetentionCleanupSummary,
 )
-from .auxiliary_assets import AUXILIARY_ASSET_KINDS, validate_lora_workflow_contract
+from .asset_adoption import AssetAdoptionError, adoptable_roots, measure_adoptable_file
+from .auxiliary_assets import (
+    AUXILIARY_ASSET_KINDS,
+    normalize_typed_trigger_words,
+    revision_accepts_added_loras,
+    validate_lora_workflow_contract,
+)
+from .backup_archives import (
+    PAYLOAD_FORMAT,
+    PAYLOAD_VERSION,
+    BackupInvalid,
+    BackupStorageInsufficient,
+    BackupTooLarge,
+    EncryptedBackupBusy,
+    check_uploaded_backup,
+    create_encrypted_backup,
+    stage_encrypted_restore,
+)
+from .backups import BackupFromNewerVersion
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
-from .catalog_sources import CatalogSource, CatalogSourceNotFound
+from .catalog_file_identity import hash_selected_catalog_files
+from .catalog_sources import CatalogSource, CatalogSourceNotFound, WorkflowCatalogSource
+from .chat_activity_history import chat_activity_history
+from .chat_activity_reads import chat_work_counts
+from .chat_composer_drafts import (
+    DraftAttachmentUnavailable,
+    DraftRevisionStale,
+    DraftSettingsUnsupported,
+)
+from .chat_composer_drafts import discard_draft as discard_composer_draft
+from .chat_composer_drafts import read_draft as read_composer_draft
+from .chat_composer_drafts import write_draft as write_composer_draft
 from .chat_deletion import (
     ExchangeBusy,
     ExchangeHasReplies,
     ExchangeNotFound,
     delete_exchange,
 )
+from .chat_edit_lineage import read_edit_lineage
 from .chat_forking import ForkSourceNotFound, fork_chat_from_message
 from .chat_item_removal import (
     ChatItemRemovalActiveWork,
@@ -73,9 +110,14 @@ from .chat_item_removal import (
     execute_chat_item_removal,
     preview_chat_item_removal,
 )
+from .chat_message_queries import message_ancestry_positions
+from .chat_recovery_visibility import chat_is_deleted, job_is_deleted, visible_chat, visible_job
+from .chat_search_pages import read_search_page
+from .chat_summary_reads import list_chat_summary_rows
+from .chat_transcript_context import read_transcript_context
 from .civitai_catalog import CivitaiCatalog
 from .comfy_editor_bridge import ComfyEditorBridgeError
-from .comfy_registry import ComfyRegistryClient
+from .comfy_registry import ComfyNodeResolution, ComfyRegistryClient
 from .comfy_registry_activation import (
     ComfyRegistryActivationError,
     activate_comfy_registry_install,
@@ -84,8 +126,9 @@ from .comfy_registry_activation import (
 )
 from .comfy_registry_closure_driver import ComfyRegistryWheelMetadataClient
 from .comfy_registry_downloads import ComfyRegistryArchiveDownloader
-from .comfy_registry_installs import installed_comfy_registry_versions
+from .comfy_registry_installs import ComfyRegistryInstallError, installed_comfy_registry_versions
 from .comfy_registry_interpreter import probe_comfy_registry_runtime_target
+from .comfy_registry_lifecycle import ComfyRegistryPreparation
 from .comfy_registry_paths import registry_wheel_environment_root
 from .comfy_registry_reconciliation import (
     ComfyRegistryReconciliationError,
@@ -102,7 +145,10 @@ from .comfy_templates import (
     ComfyTemplate,
     ComfyTemplateRegistry,
 )
-from .comfy_workflow_compiler import WorkflowCompilationError, compile_comfyui_ui_graph
+from .comfy_workflow_compiler import (
+    WorkflowCompilationError,
+    compile_comfyui_ui_graph,
+)
 from .comfy_workflow_packages import (
     ComfyWorkflowPackageAnalysis,
     WorkflowPackageError,
@@ -132,12 +178,39 @@ from .domain import (
 from .downloads import DownloadManager
 from .edit_recipes import capture_recipe
 from .edited_branches import activate_edited_branch, list_edited_branches
+from .empty_chats import (
+    DEFAULT_MINIMUM_AGE_HOURS,
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    EmptyChatClass,
+    EmptyChatDeletionResult,
+    EmptyChatExecuteError,
+    EmptyChatExecuteRefusal,
+    EmptyChatSelectionFilters,
+    empty_chat_page,
+    execute_deletion,
+    issue_preview,
+    preview_selection,
+    recorded_deletion,
+)
 from .engines import (
     EngineNotConfiguredError,
     EngineRegistry,
     EngineSchemaUnavailableError,
 )
 from .filesystem_links import is_link_or_reparse
+from .generation_experiment_api import router as generation_experiment_router
+from .generation_experiments_v1 import EXPERIMENT_CHAT_SCOPE
+from .generation_queue import (
+    GenerationQueueConflict,
+    change_generation_queue,
+    read_generation_queue,
+)
+from .generation_retry import (
+    GenerationRetryPolicyConflict,
+    read_retry_policy,
+    write_retry_policy,
+)
 from .gguf import (
     GGUFSelectionError,
     automatic_gguf_selection,
@@ -145,7 +218,17 @@ from .gguf import (
 )
 from .hardware import collect_system_info
 from .image_edit_strength import STRENGTH_MODE_PARAMETER
+from .install_plan_contract_v1 import (
+    LEGACY_INSTALL_RESOLVER_VERSION,
+    stored_install_plan_identity_matches,
+)
+from .lora_suggestions import lora_suggestion_scope, suggested_loras
+from .media_organization_api import router as media_organization_router
+from .media_reimport import recover_imported_membership
+from .message_window_v1 import DEFAULT_WINDOW, MAX_WINDOW
+from .model_library_reads import catalog_install_matches, read_library_matches, read_library_page
 from .model_manifests import (
+    COMFY_MODEL_ASSET_KINDS,
     MAX_METADATA_BYTES,
     MAX_WEIGHT_HEADER_BYTES,
     ModelManifestError,
@@ -159,6 +242,15 @@ from .model_planner import (
     resolve_install_plan,
     workflow_artifact_contract,
 )
+from .model_quarantine import (
+    _ensure_model_tree_link_free,
+    _finalize_model_quarantine,
+    _managed_model_path,
+    _new_model_quarantine,
+    _quarantine_model_files,
+    _restore_model_moves,
+    recover_model_delete_quarantines,
+)
 from .model_updates import (
     ModelUpdateBaselineUnavailable,
     installed_civitai_identities,
@@ -168,6 +260,7 @@ from .models import (
     AdapterPromptGrammar,
     AppSetting,
     Artifact,
+    ArtifactLibraryEntry,
     Chat,
     ChatWorkflowSelection,
     ComfyRegistryInstall,
@@ -179,6 +272,7 @@ from .models import (
     Message,
     MessagePart,
     ModelAssetInstall,
+    ModelCapabilityEvidence,
     ModelInstall,
     ModelProfile,
     Project,
@@ -197,6 +291,8 @@ from .models import (
     WorkflowDefinition,
     WorkflowFamily,
     WorkflowInstallOffer,
+    WorkflowInstallOfferPackage,
+    WorkflowPackageInstallPlan,
     WorkflowPreference,
     WorkflowProfileCompatibility,
     WorkflowRevision,
@@ -210,31 +306,95 @@ from .orchestrator import (
     ResponseRevisionConflict,
 )
 from .ordered_planning import OrderedPlanConfirmationRequired
+from .output_recipe import OutputRecipeUnavailable
+from .output_recipe_api import read_picture_generation_settings, read_record_body
+from .output_recipe_api import router as output_recipe_router
+from .output_recipe_check import OutputRecipeCheckRefused, read_record_file
+from .output_recipe_promotion import kept_edit_settings
+from .output_recipe_replay import (
+    REPLAYABLE_OPERATIONS,
+    AdaptationChoiceInvalid,
+    ReplayDiffers,
+    adaptation_choice_list,
+    adaptation_choices,
+    adapted_turn_request,
+    chat_is_clean_for_replay,
+    exact_replay_check,
+    mark_adaptation,
+    mark_replay,
+    plan_output_recipe_adaptation,
+    plan_output_recipe_replay,
+    replay_turn_request,
+    without_edit_check,
+)
+from .output_recipe_stand_ins import store_bundled_stand_ins
+from .picture_export import (
+    DEFAULT_EXPORT_QUALITY,
+    EXPORT_FORMATS,
+    ExportFormat,
+    PictureExportError,
+    export_file_name,
+    export_stored_picture,
+)
+from .picture_remix import (
+    REFUSAL_MESSAGES as REMIX_REFUSAL_MESSAGES,
+)
+from .picture_remix import (
+    RemixChoiceInvalid,
+    RemixDiffers,
+    preview_remix,
+    remix_check,
+)
+from .picture_remix_api import RemixQueueRequest, remix_source
+from .picture_remix_api import router as picture_remix_router
+from .picture_shape import MatchSourceRequest, shown_size
 from .platforms import list_platform_matrix
+from .portable_archive_v1 import ArchiveRefused
 from .preflight import (
     ExactCivitaiFileSelectionError,
     assess_catalog_install,
     catalog_file_index,
     safe_civitai_file_variants,
     selected_catalog_file_metadata,
+    with_catalog_file_hashes,
 )
 from .prior_turn_edits import (
     EditRequestConflict,
     classify_prior_turn_edit,
+    preview_prior_turn_source_fit,
     prior_turn_edit_source,
     queue_prior_turn_edit,
 )
+from .profile_model_updates import ProfileModelUpdateError, switch_profile_model
 from .profile_service import (
     AUTO_PROFILE_ID,
     LAST_CHAT_PROFILE_KEY,
     ensure_profile_for_install,
+    profiles_have_recovery_dependents,
     validate_profile_binding,
     validate_profile_install,
 )
 from .progress import update_job_progress
+from .project_archive_encryption import (
+    ExportUnverified,
+    StagingNotPrivate,
+    archive_api_error,
+    decrypt_import_owned,
+    is_encrypted,
+    passphrase_from_header,
+    staging_api_error,
+)
+from .project_recovery_visibility import (
+    effective_project_id,
+    live_project,
+    live_project_ids,
+    visible_project,
+)
+from .prompt_binding import ignores_the_description
 from .prompt_expansion import (
     PromptExpansionDistinctCapacityError,
     PromptExpansionError,
+    complete_prompt_expansion_with_model_result,
     complete_prompt_expansion_with_model_values,
     expand_prompt_template,
     parse_expansion_request,
@@ -267,7 +427,11 @@ from .prompt_library import (
     update_prompt_template,
 )
 from .prompt_model_invocation import PromptModelInvocationError, invoke_prompt_model_values
-from .prompt_model_values import PromptModelValuesError, prompt_model_slot_contract
+from .prompt_model_values import (
+    PromptModelValuesError,
+    PromptModelValuesResult,
+    prompt_model_slot_contract,
+)
 from .prompt_template_import import PromptTemplateImportError, commit_prompt_template_import
 from .prompt_template_portability import (
     PromptTemplatePortabilityError,
@@ -281,7 +445,13 @@ from .prompt_templates import (
     prompt_template_contract_payload,
     prompt_template_contract_sha256,
 )
-from .recipes import get_reference_recipe, list_reference_recipes
+from .queue_control import QueueControlConflict, QueueControlMissing, change_plan_control
+from .queue_lane_policy import QueueLaneConflict, change_lane_policy, read_lane_policy
+from .queue_order import QueueOrderConflict, QueueOrderLimit, change_queue_order, read_queue_order
+from .queue_order_v1 import QueueOrderCommand, QueueOrderPageOut, QueueOrderResultOut
+from .recipes import get_reference_recipe, list_reference_recipes, recipe_workflow_template
+from .recovery_api import router as recovery_router
+from .recovery_previews import RecoveryPreviewConflict, reserve_recovery_write
 from .reference_library import (
     DEFAULT_PAGE,
     attach_asset,
@@ -298,13 +468,24 @@ from .reference_library import (
 )
 from .reference_review import ReviewOutcome, ReviewRefusal, ReviewRefused, review_asset
 from .references import ReferenceError, ReferenceNotFoundError
+from .registry_preparation_jobs import RegistryPreparationInputs
+from .release_notices import read_third_party_notices, release_bundle_root
+from .retention_policy import RetentionPolicyStale, read_policy, windows_for, write_policy
+from .revision_dependency_contract import (
+    declared_dependency_contract,
+    declared_dependency_contract_sha256,
+    persist_dependency_contract,
+)
 from .routing import RouteConfirmationRequired
-from .runtime_config import persist_runtime_values
+from .runtime_config import RuntimeConfigError, persist_runtime_values
 from .saved_settings import normalize_saved_settings
+from .scheduler import JobClaim
 from .schemas import (
     AdapterPromptGrammarOut,
     AdapterPromptGrammarReview,
     ApplicationInfo,
+    ArtifactAlbumEntrySummary,
+    ArtifactAlbumPage,
     ArtifactCleanupRequest,
     ArtifactCleanupResult,
     ArtifactDeleteResult,
@@ -315,9 +496,11 @@ from .schemas import (
     ArtifactStorageInfo,
     ArtifactUpdate,
     BackupInfo,
+    BackupRestoreStateOut,
     BoundWorkflowAssetOut,
     CatalogDetail,
     CatalogFileVariant,
+    CatalogInstallMatches,
     CatalogModel,
     CatalogPage,
     CatalogPreflight,
@@ -325,12 +508,21 @@ from .schemas import (
     CatalogPreflightRequest,
     CatalogVersionRow,
     CatalogVersions,
+    ChatActivityOut,
+    ChatActivityReferenceOut,
+    ChatComposerDraftOut,
+    ChatComposerDraftWrite,
     ChatCreate,
     ChatDetail,
+    ChatEditLineagePage,
     ChatItemRemovalExecute,
     ChatItemRemovalExecutionOut,
     ChatItemRemovalImpactOut,
+    ChatMessageWindow,
     ChatOut,
+    ChatSearchPage,
+    ChatSummaryOut,
+    ChatTranscriptContext,
     ChatUpdate,
     ChatWorkflowSelectionIn,
     CredentialSet,
@@ -347,12 +539,30 @@ from .schemas import (
     EditedBranchPage,
     EditTemplateCreate,
     EditTemplateOut,
+    EmptyChatConflictOut,
+    EmptyChatDeletionOut,
+    EmptyChatEntryOut,
+    EmptyChatExecuteIn,
+    EmptyChatPageOut,
+    EmptyChatPreviewIn,
+    EmptyChatPreviewOut,
+    EncryptedBackupCheck,
+    EncryptedBackupRequest,
     EngineCapabilities,
     ExchangeDeletionOut,
     GenerationIdentityOut,
+    GenerationQueuePolicyOut,
+    GenerationRetryPolicyOut,
+    GenerationRetryPolicyUpdate,
     HealthOut,
+    InstallQueuePolicyOut,
+    JobActivityOut,
     JobOut,
+    KeepAwakeSetting,
+    KeepAwakeStatus,
+    LoraSuggestionsOut,
     MessageOut,
+    ModelAssetAdopt,
     ModelAssetOut,
     ModelAssetUpdate,
     ModelCapabilityEvidenceOut,
@@ -361,6 +571,7 @@ from .schemas import (
     ModelProfileBundle,
     ModelProfileClone,
     ModelProfileCreate,
+    ModelProfileModelUpdate,
     ModelProfileOut,
     ModelProfileUpdate,
     ModelStorageInfo,
@@ -375,6 +586,7 @@ from .schemas import (
     PriorTurnEditRequest,
     PriorTurnEditSource,
     ProjectCreate,
+    ProjectExportRequest,
     ProjectOut,
     ProjectUpdate,
     ProjectWorkflowSelectionIn,
@@ -400,6 +612,10 @@ from .schemas import (
     PromptTemplateRevisionOut,
     PromptTemplateUpdate,
     PromptTemplateWriteOut,
+    QueueActivityPageOut,
+    QueueControlCommand,
+    QueueControlResultOut,
+    QueuePlanStepsOut,
     ReferenceAssetAttach,
     ReferenceAssetAttached,
     ReferenceAssetOut,
@@ -420,21 +636,32 @@ from .schemas import (
     ResolvedSetup,
     ResponseFeedbackOut,
     ResponseFeedbackUpdate,
+    RetentionPolicyOut,
+    RetentionPolicyWrite,
+    RetentionWindowsIn,
     RunOut,
     RuntimeStatus,
     SettingField,
     SetupReadinessReport,
     SetupVerificationOut,
+    SourceFitRequest,
     StorageCleanupResult,
     StudioCapabilityReport,
+    StudioLocalEditCreate,
     StudioSessionCreate,
     StudioToolCapability,
     SystemInfo,
+    ThirdPartyNoticesOut,
     ToolCapabilityProbe,
+    TransferQueuePolicyOut,
     TrustDerivation,
     TurnAccepted,
     TurnRequest,
     VerifiedSetup,
+    WebSearchConfiguration,
+    WebSearchDecisionRequest,
+    WebSearchEditRequest,
+    WebSearchOut,
     WorkerLogLocation,
     WorkerLogTail,
     WorkerResetResult,
@@ -446,6 +673,7 @@ from .schemas import (
     WorkflowAssetReviewRequest,
     WorkflowAssetSelectionIn,
     WorkflowBundle,
+    WorkflowCatalogGraphOut,
     WorkflowClone,
     WorkflowCreate,
     WorkflowDependencyImpactOut,
@@ -457,6 +685,7 @@ from .schemas import (
     WorkflowEditorGraphDeltaOut,
     WorkflowEditorReturnOut,
     WorkflowEditorSessionOut,
+    WorkflowFamilyDependencySummaryOut,
     WorkflowFamilyOut,
     WorkflowFamilyPreferenceOut,
     WorkflowFamilyPreferenceUpdate,
@@ -465,6 +694,8 @@ from .schemas import (
     WorkflowFamilyVariantOut,
     WorkflowInstallOfferCreate,
     WorkflowInstallOfferOut,
+    WorkflowInstallProgressOut,
+    WorkflowLoraControlsOut,
     WorkflowMissingNodeOut,
     WorkflowOpenTarget,
     WorkflowOut,
@@ -477,15 +708,19 @@ from .schemas import (
     WorkflowPackageIssueOut,
     WorkflowPackagePrepareRequest,
     WorkflowPackageRequirementOut,
+    WorkflowReadyRevisionOut,
     WorkflowResourceConsumerOut,
     WorkflowResourceConsumersOut,
+    WorkflowRevisionChoiceOut,
     WorkflowRevisionCreate,
     WorkflowRevisionOut,
     WorkflowRevisionReviewRequest,
+    WorkflowRevisionSchemaOut,
     WorkflowSelectionOut,
     WorkflowSelectionResponseMode,
     WorkflowSelectorCapability,
     WorkflowSourceCandidateOut,
+    WorkflowSummaryOut,
     WorkflowUpdate,
     WorkflowVariantReadiness,
     WorkPlanOut,
@@ -493,8 +728,10 @@ from .schemas import (
 )
 from .security import SessionSecurity
 from .settings_registry import (
+    WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
     defaults,
     validate_settings,
+    validate_workflow_input_schema,
     workflow_settings,
 )
 from .setup_readiness import MEDIA_OPERATIONS_BY_ROLE, setup_readiness_report
@@ -508,14 +745,70 @@ from .setup_verification import (
     setup_verification_settings,
     verification_evidence_key,
 )
+from .source_fit_preview import (
+    SourceFitCapabilityOut,
+    SourceFitPreviewOut,
+    SourceFitPreviewRequest,
+    preview_source_fit,
+    source_fit_capability,
+)
+from .studio_adjustments import ColorAdjustments
 from .studio_capabilities import tool_capabilities
+from .studio_local_edits import (
+    CanvasChange,
+    CaptionOverlay,
+    CropBox,
+    LocalEditError,
+    PictureSize,
+    SelectionBlur,
+    SelectionPaint,
+    SelectionPixelate,
+    edited_picture,
+    marked_area,
+    paint_color,
+    perspective_corners,
+    picture_in_session,
+    record_local_edit,
+)
 from .studio_sessions import (
     STUDIO_SCOPE,
     find_studio_session,
     studio_session_title,
 )
+from .turn_inheritance import TurnInheritance, TurnSourceResolver
+from .upscale_preview import UpscalePreviewOut, UpscaleSelectionUnavailable
+from .use_case_summary_api import (
+    check_use_case_update,
+    prepare_use_case_update,
+)
+from .use_case_summary_api import (
+    router as use_case_summary_router,
+)
+from .user_queue_activity import (
+    QueueActivityCursorError,
+    QueueStepStateError,
+    list_queue_activity,
+    list_queue_plan_steps,
+)
 from .verified_setup import build_verified_setup, resolve_verified_setup
-from .video_length import workflow_video_length
+from .video_length import video_length_reaches_graph, workflow_video_length
+from .video_utility_api import router as video_utility_router
+from .web_search import CrwSearchProvider, WebSearchError
+from .web_search_configuration import configured_search_provider, search_provider_revision
+from .web_search_consent import SearchConsentConflict, decide_search, replace_search_proposal
+from .web_search_projection import chat_searches, search_for_run
+from .workflow_activation_preparation import (
+    WorkflowActivationPreparation,
+    prepare_workflow_activation,
+)
+from .workflow_activation_requests import (
+    WorkflowActivationCreate,
+    WorkflowActivationOut,
+    WorkflowActivationSubject,
+    activate_reviewed_revision,
+    activation_subject,
+)
+from .workflow_activations import WorkflowActivationError, materialize_comfy_runtime_dependency
 from .workflow_asset_aliases import (
     WorkflowAssetAliasError,
     materialize_workflow_asset_aliases,
@@ -529,6 +822,7 @@ from .workflow_asset_bindings import (
 from .workflow_asset_downloads import (
     WorkflowAssetDownloadError,
     compose_workflow_asset_download_requests,
+    install_plan_download_request,
 )
 from .workflow_compatibility import (
     WorkflowSelectionInvalid,
@@ -539,7 +833,18 @@ from .workflow_compatibility import (
     reconcile_legacy_workflow_compatibility,
     retire_legacy_profile_workflow,
 )
-from .workflow_edit_calibration import validate_workflow_edit_calibration
+from .workflow_completion_jobs import (
+    cancel_workflow_completion,
+    retry_workflow_completion,
+    stage_workflow_completion_job,
+    workflow_completion_offer,
+    workflow_download_jobs,
+)
+from .workflow_dependencies import workflow_dependency_contract_payload
+from .workflow_edit_calibration import (
+    edit_calibration_reaches_graph,
+    validate_workflow_edit_calibration,
+)
 from .workflow_editor_sessions import (
     WorkflowEditorSessionError,
     workflow_api_graph_sha256,
@@ -553,13 +858,31 @@ from .workflow_editor_shell import (
     workflow_editor_shell_csp,
     workflow_editor_shell_document,
 )
+from .workflow_family_dependencies import workflow_family_dependency_summaries
+from .workflow_family_reads import (
+    family_operation_choices,
+    family_supported_selector_capabilities,
+    read_family_page,
+    read_family_variants,
+    read_ready_revision_page,
+    selector_capabilities_for_operations,
+)
+from .workflow_graph_settings import (
+    bind_compiled_workflow_settings,
+    generated_workflow_setting_paths,
+    rebind_workflow_graph_settings,
+)
+from .workflow_graph_settings_v1 import GRAPH_SETTINGS_SCHEMA_KEY
 from .workflow_install_offers import (
     WorkflowInstallOfferError,
+    bind_workflow_offer_downloads,
     create_workflow_install_offer,
+    current_reviewed_workflow_install_offer,
     invalidate_workflow_install_offer,
     mark_workflow_install_offer_queued,
     revalidate_workflow_install_offer,
 )
+from .workflow_install_progress import latest_workflow_install_progress, workflow_install_progress
 from .workflow_library import (
     WorkflowFamilyRemovalImpact,
     workflow_family_removal_impact,
@@ -567,29 +890,63 @@ from .workflow_library import (
     workflow_resource_consumers,
     workflow_resource_name,
 )
+from .workflow_lora_admission import WorkflowLoraAdmissionError
+from .workflow_lora_overrides import WorkflowLoraOverrideError, WorkflowLoraOverrides
+from .workflow_lora_settings import (
+    WorkflowLoraSettingsError,
+    overlay_workflow_lora_overrides,
+    split_workflow_lora_overrides_setting,
+    workflow_lora_overrides_setting_value,
+)
+from .workflow_lora_slots import WorkflowLoraSlotError
+from .workflow_loras import WorkflowLoraProjectionError, workflow_lora_controls
 from .workflow_node_dependencies import node_dependency_errors
 from .workflow_output_geometry import (
     WorkflowOutputGeometryResult,
+    match_source_output_geometry,
     prove_workflow_output_geometry,
     resolve_workflow_output_geometry,
     workflow_output_geometry_payload,
     workflow_output_geometry_resolution_payload,
 )
 from .workflow_ownership import ensure_workflow_family_ownership
+from .workflow_package_acceptance import (
+    accept_workflow_package_install_plan,
+    source_workflow_install_offer,
+)
+from .workflow_package_activation import (
+    WorkflowPackageActivation,
+    activate_prepared_workflow_package,
+)
 from .workflow_package_drafts import (
-    is_workflow_package_draft,
+    WorkflowPackageDraftError,
+    canonical_package_graph,
+    stage_workflow_package_draft,
     workflow_package_draft_dependencies,
 )
+from .workflow_package_drafts import (
+    workflow_package_draft_identity as _workflow_package_draft_identity,
+)
+from .workflow_package_extension_preflight import preflight_workflow_extensions
 from .workflow_package_inputs import (
     WorkflowPackageInputError,
     prepare_workflow_package_compilation,
     prepare_workflow_revision_compilation,
+)
+from .workflow_package_install_plans import (
+    WorkflowPackageInstallPlanError,
+    WorkflowPackageInstallPlanOut,
+    WorkflowPackageInstallPlanRequest,
+    create_workflow_package_install_plan,
+    load_stored_workflow_package_install_plan,
+    revalidate_workflow_package_install_plan,
 )
 from .workflow_package_preparation import (
     PreparationContext,
     WorkflowPackagePreparationError,
     prepare_workflow_package,
 )
+from .workflow_package_runtime import workflow_package_runtime
 from .workflow_review_runtime import review_runtime_object_info, verify_reviewed_packages
 from .workflow_revision_reviews import (
     ReviewSnapshot as WorkflowReviewSnapshot,
@@ -609,13 +966,29 @@ from .workflow_revision_reviews import (
 from .workflow_revision_reviews import (
     review_is_current as workflow_review_is_current,
 )
+from .workflow_revision_writes import stage_workflow_revision
+from .workflow_runtime_nodes import preflight_workflow_runtime_nodes
+from .workflow_runtime_targets import preflight_workflow_runtime_plan
 from .workflow_source_candidates import collect_source_candidates
+from .workflow_summary_reads import (
+    list_workflow_definitions,
+    list_workflow_revision_choices,
+    list_workflow_summaries,
+    load_workflow_detail,
+    load_workflow_revision_schema,
+)
+from .workflow_supplied_settings import bind_api_workflow_settings, bind_supplied_workflow_settings
 from .workflow_trust import (
     TRUST_DERIVATION_VERSION,
     TrustDecision,
     derive_trust,
     recorded_template_identity,
 )
+from .workflow_use_case_errors import workflow_use_case_error
+from .workflow_use_case_execution import InheritedWorkflowUseCasePreset
+from .workflow_use_case_preset_api import router as workflow_use_case_preset_router
+from .workflow_use_case_preset_provenance import read_workflow_use_case_preset
+from .workspace_lock_api import router as workspace_lock_router
 
 if TYPE_CHECKING:
     from .main import Services
@@ -639,6 +1012,15 @@ def _services(request: Request) -> Services:
 
 
 router = APIRouter(prefix="/api")
+router.include_router(workflow_use_case_preset_router)
+router.include_router(use_case_summary_router)
+router.include_router(generation_experiment_router)
+router.include_router(media_organization_router)
+router.include_router(recovery_router)
+router.include_router(output_recipe_router)
+router.include_router(picture_remix_router)
+router.include_router(workspace_lock_router)
+router.include_router(video_utility_router)
 logger = logging.getLogger(__name__)
 
 
@@ -662,13 +1044,20 @@ async def _engine_role_fields(
 
 
 @router.post("/session")
-async def create_session(request: Request, response: Response) -> dict[str, str | int]:
+async def create_session(
+    request: Request, response: Response
+) -> dict[str, str | int | bool | None]:
     services = _services(request)
     security: SessionSecurity = services.security
+    lock = services.workspace_lock.status()
     return {
         "csrf_token": security.issue_session(response),
         "event_epoch": services.events.epoch,
         "event_sequence": services.events.sequence,
+        # The lock comes with the session, so a page learns it is locked
+        # without a request of its own; the epoch is null while the lock is off.
+        "workspace_locked": lock.locked,
+        "lock_epoch": lock.lock_epoch,
     }
 
 
@@ -725,7 +1114,7 @@ def _refresh_credential_clients(
         services.settings.hf_token = token
         services.catalog.set_token(token)
         services.downloads.set_token(token)
-    else:
+    elif provider == "civitai":
         services.settings.civitai_token = token
         try:
             civitai_source = services.catalog_sources.get("civitai")
@@ -733,6 +1122,8 @@ def _refresh_credential_clients(
             return
         if isinstance(civitai_source, CivitaiCatalog):
             civitai_source.set_token(token)
+    elif provider == "crw":
+        services.settings.crw_token = token
 
 
 @router.get("/credentials/{provider}", response_model=CredentialStatus)
@@ -770,6 +1161,120 @@ async def delete_credential(provider: str, request: Request) -> CredentialStatus
     return _credential_status(selected, request)
 
 
+def _refused_search_configuration(
+    settings: Settings,
+) -> Literal["search_provider_invalid", "search_credentials_invalid"]:
+    """Which part of a refused search configuration is at fault.
+
+    The provider refuses a bad address and a malformed token alike, which left
+    Settings blaming the address for a token with a stray space in it. Checking
+    the address on its own tells the two apart.
+    """
+
+    try:
+        CrwSearchProvider(settings.crw_endpoint or "")
+    except WebSearchError:
+        return "search_provider_invalid"
+    return "search_credentials_invalid"
+
+
+@router.get("/web-search/configuration", response_model=WebSearchConfiguration)
+async def web_search_configuration(request: Request) -> WebSearchConfiguration:
+    settings = _services(request).settings
+    try:
+        provider = configured_search_provider(settings)
+    except WebSearchError:
+        return WebSearchConfiguration(
+            installation_enabled=settings.web_access_enabled,
+            configured=False,
+            error_code=_refused_search_configuration(settings),
+        )
+    return WebSearchConfiguration(
+        installation_enabled=settings.web_access_enabled,
+        configured=provider is not None,
+        provider_endpoint=provider.endpoint if provider else None,
+        error_code=None if provider else "search_not_configured",
+    )
+
+
+@router.post("/jobs/{job_id}/search/decision", response_model=WebSearchOut)
+async def decide_web_search(
+    job_id: str,
+    payload: WebSearchDecisionRequest,
+    request: Request,
+    session: ConversationSessionDep,
+) -> WebSearchOut:
+    try:
+        decision = decide_search(session, job_id, payload.revision, payload.action)
+    except SearchConsentConflict:
+        raise api_error(
+            409, "search-consent-conflict", "The search is no longer waiting for this decision."
+        ) from None
+    result = search_for_run(session, decision.run_id)
+    if result is None:
+        raise api_error(409, "search-consent-conflict", "The search is no longer available.")
+    services = _services(request)
+    services.orchestrator.resume_search(job_id)
+    await services.scheduler.publish_job(job_id)
+    await services.events.publish(
+        "web.search.changed",
+        decision.run_id,
+        {"job_id": job_id, "state": decision.state},
+    )
+    return result
+
+
+@router.put("/jobs/{job_id}/search", response_model=WebSearchOut)
+async def edit_web_search(
+    job_id: str,
+    payload: WebSearchEditRequest,
+    request: Request,
+    session: ConversationSessionDep,
+) -> WebSearchOut:
+    services = _services(request)
+    try:
+        provider = configured_search_provider(services.settings)
+        if provider is None:
+            raise api_error(
+                409, "search-not-configured", "Configure the search provider in Settings."
+            )
+        proposal = replace_search_proposal(
+            session,
+            job_id,
+            payload.revision,
+            query=payload.query,
+            provider_endpoint=provider.endpoint,
+            provider_revision=search_provider_revision(provider),
+            installation_enabled=services.settings.web_access_enabled,
+        )
+    except WebSearchError as exc:
+        code = (
+            "search-query-invalid"
+            if exc.code == "search_query_invalid"
+            else "search-provider-invalid"
+        )
+        message = (
+            "Use one line of visible text, without tabs or hidden control characters "
+            "(1 to 2,000 characters)."
+            if exc.code == "search_query_invalid"
+            else "The search provider configuration is invalid. Check Settings."
+        )
+        raise api_error(422, code, message) from None
+    except SearchConsentConflict:
+        raise api_error(
+            409, "search-consent-conflict", "The search is no longer waiting for an edit."
+        ) from None
+    result = search_for_run(session, proposal.run_id)
+    if result is None:
+        raise api_error(409, "search-consent-conflict", "The search is no longer available.")
+    await services.events.publish(
+        "web.search.changed",
+        proposal.run_id,
+        {"job_id": job_id, "state": proposal.state},
+    )
+    return result
+
+
 @router.get("/system", response_model=SystemInfo)
 async def system_info(request: Request) -> SystemInfo:
     settings: Settings = _services(request).settings
@@ -792,6 +1297,14 @@ async def application_info(request: Request) -> ApplicationInfo:
         max_media_outputs_per_plan=settings.max_media_outputs_per_plan,
         web_access_enabled=settings.web_access_enabled,
     )
+
+
+@router.get("/about/third-party-notices", response_model=ThirdPartyNoticesOut)
+async def third_party_notices() -> ThirdPartyNoticesOut:
+    """The third-party software this release includes, and where its license texts are."""
+
+    notices = await asyncio.to_thread(read_third_party_notices, release_bundle_root())
+    return ThirdPartyNoticesOut(text=notices.text, license_folder=notices.license_folder)
 
 
 @router.get("/platforms", response_model=list[PlatformMatrixEntry])
@@ -821,6 +1334,203 @@ async def create_backup(request: Request, include_media: bool = False) -> Backup
     )
 
 
+@router.get("/backups/restore-state", response_model=BackupRestoreStateOut)
+async def backup_restore_state(request: Request) -> BackupRestoreStateOut:
+    state = await asyncio.to_thread(_services(request).backups.restore_state)
+    return BackupRestoreStateOut.model_validate(dataclasses.asdict(state))
+
+
+@router.post("/backups/restore-state/dismiss", status_code=204)
+async def dismiss_failed_restore(request: Request) -> Response:
+    await asyncio.to_thread(_services(request).backups.dismiss_failed_restore)
+    return Response(status_code=204)
+
+
+@router.post("/backups/restore-state/cancel", status_code=204)
+async def cancel_requested_restore(request: Request) -> Response:
+    # Withdrawing nothing is not an error: the restore may already be gone.
+    await asyncio.to_thread(_services(request).backups.withdraw_requested_restore)
+    return Response(status_code=204)
+
+
+def _encrypted_backup_error(
+    exc: ArchiveRefused
+    | StagingNotPrivate
+    | EncryptedBackupBusy
+    | BackupStorageInsufficient
+    | ExportUnverified,
+) -> ApiError:
+    if isinstance(exc, ArchiveRefused):
+        if exc.code == "archive-kind-mismatch":
+            return api_error(
+                422, "archive-kind-mismatch", "This file is not an encrypted LM Atelier backup."
+            )
+        return archive_api_error(exc)
+    if isinstance(exc, StagingNotPrivate):
+        return staging_api_error()
+    if isinstance(exc, EncryptedBackupBusy):
+        return api_error(
+            409,
+            "encrypted-backup-busy",
+            "An encrypted backup is already being made or checked. Try again when it finishes.",
+        )
+    if isinstance(exc, BackupStorageInsufficient):
+        return api_error(
+            507,
+            "backup-storage-insufficient",
+            "There is not enough free disk space for this backup. Nothing was written.",
+        )
+    return api_error(
+        500,
+        "backup-export-unverified",
+        "The encrypted backup could not be checked after it was written, so it was not kept.",
+    )
+
+
+@router.post("/backups/encrypted", response_model=ArtifactOut, status_code=201)
+def create_encrypted_backup_file(
+    payload: EncryptedBackupRequest, request: Request, session: SessionDep
+) -> ArtifactOut:
+    # Synchronous: copying the data is disk work, and sealing and checking the
+    # copy derives a memory-hard key twice, so it runs off the event loop.
+    services = _services(request)
+    try:
+        sealed = create_encrypted_backup(
+            services.backups,
+            services.settings,
+            payload.passphrase.encode("utf-8"),
+            include_media=payload.include_media,
+        )
+    except BackupTooLarge as exc:
+        raise api_error(
+            422, "backup-too-large", "This data is larger than an encrypted backup can hold."
+        ) from exc
+    except ValueError as exc:
+        raise api_error(422, "backup-invalid", str(exc)) from exc
+    except (
+        ArchiveRefused,
+        StagingNotPrivate,
+        EncryptedBackupBusy,
+        BackupStorageInsufficient,
+        ExportUnverified,
+    ) as exc:
+        raise _encrypted_backup_error(exc) from exc
+    try:
+        artifact = services.artifacts.ingest_path(
+            session,
+            sealed,
+            kind=ArtifactKind.EXPORT,
+            media_type="application/octet-stream",
+            original_name=(
+                f"lm-atelier-backup-{datetime.now(UTC):%Y%m%d-%H%M%S}.lm-atelier.encrypted"
+            ),
+            metadata={
+                "format": PAYLOAD_FORMAT,
+                "version": PAYLOAD_VERSION,
+                "media_included": payload.include_media,
+                "encrypted": True,
+            },
+        )
+    finally:
+        sealed.unlink(missing_ok=True)
+    session.commit()
+    result = ArtifactOut.model_validate(artifact)
+    result.url = f"/api/artifacts/{artifact.id}/content"
+    return result
+
+
+@router.post("/backups/encrypted/check", response_model=EncryptedBackupCheck)
+async def check_encrypted_backup_file(request: Request, response: Response) -> EncryptedBackupCheck:
+    # The body is the encrypted file itself, streamed to disk, so its passphrase
+    # travels in a header and is read before any of the body is.
+    passphrase = passphrase_from_header(request)
+    declared = request.headers.get("content-length")
+    services = _services(request)
+    try:
+        report = await check_uploaded_backup(
+            services.backups,
+            services.settings,
+            request.stream(),
+            passphrase,
+            declared_bytes=(
+                int(declared) if declared and declared.isascii() and declared.isdigit() else None
+            ),
+        )
+    except BackupTooLarge as exc:
+        raise api_error(
+            413, "backup-file-too-large", "This file is larger than an encrypted backup can be."
+        ) from exc
+    except BackupInvalid as exc:
+        raise api_error(
+            422,
+            "backup-invalid",
+            "This file opened, but it does not hold a complete LM Atelier backup.",
+        ) from exc
+    except (
+        ArchiveRefused,
+        StagingNotPrivate,
+        EncryptedBackupBusy,
+        BackupStorageInsufficient,
+    ) as exc:
+        raise _encrypted_backup_error(exc) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return EncryptedBackupCheck.model_validate(dataclasses.asdict(report))
+
+
+@router.post("/backups/encrypted/restore", response_model=EncryptedBackupCheck)
+async def restore_encrypted_backup_file(
+    request: Request, response: Response
+) -> EncryptedBackupCheck:
+    # Received and checked exactly as a check is, then kept, still encrypted,
+    # for the next start to put in place of the current data.
+    passphrase = passphrase_from_header(request)
+    declared = request.headers.get("content-length")
+    services = _services(request)
+    try:
+        report = await stage_encrypted_restore(
+            services.backups,
+            services.settings,
+            request.stream(),
+            passphrase,
+            declared_bytes=(
+                int(declared) if declared and declared.isascii() and declared.isdigit() else None
+            ),
+        )
+    except ArchiveKeyVaultUnavailable as exc:
+        raise api_error(
+            503,
+            "restore-needs-key-vault",
+            "Restoring an encrypted backup needs this computer's credential vault, which is "
+            "not available. Nothing was scheduled.",
+        ) from exc
+    except BackupTooLarge as exc:
+        raise api_error(
+            413, "backup-file-too-large", "This file is larger than an encrypted backup can be."
+        ) from exc
+    except BackupInvalid as exc:
+        raise api_error(
+            422,
+            "backup-invalid",
+            "This file opened, but it does not hold a complete LM Atelier backup.",
+        ) from exc
+    except BackupFromNewerVersion as exc:
+        raise api_error(
+            422,
+            "backup-newer",
+            "This backup was made by a newer version of LM Atelier, so this version cannot "
+            "restore it.",
+        ) from exc
+    except (
+        ArchiveRefused,
+        StagingNotPrivate,
+        EncryptedBackupBusy,
+        BackupStorageInsufficient,
+    ) as exc:
+        raise _encrypted_backup_error(exc) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return EncryptedBackupCheck.model_validate(dataclasses.asdict(report))
+
+
 @router.post("/backups/{name}/verify", response_model=BackupInfo)
 async def verify_backup(name: str, request: Request) -> BackupInfo:
     try:
@@ -834,7 +1544,11 @@ async def verify_backup(name: str, request: Request) -> BackupInfo:
 @router.post("/backups/{name}/restore", response_model=BackupInfo)
 async def restore_backup(name: str, request: Request) -> BackupInfo:
     try:
-        return await asyncio.to_thread(_services(request).backups.request_restore, name)
+        # Asked for by a person, so if it cannot be applied the next start
+        # keeps the current data and says why instead of failing.
+        return await asyncio.to_thread(
+            _services(request).backups.request_restore, name, requested=True
+        )
     except FileNotFoundError as exc:
         raise api_error(404, "backup-not-found", "That backup no longer exists.") from exc
     except ValueError as exc:
@@ -850,6 +1564,180 @@ async def delete_backup(name: str, request: Request) -> Response:
     except ValueError as exc:
         raise api_error(422, "backup-invalid", str(exc)) from exc
     return Response(status_code=204)
+
+
+@router.get("/maintenance/empty-chats", response_model=EmptyChatPageOut)
+async def get_empty_chats(
+    session: SessionDep,
+    min_age_hours: Annotated[float, Query(ge=0)] = DEFAULT_MINIMUM_AGE_HOURS,
+    include_archived: bool = False,
+    include_configured: bool = False,
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+    cursor: Annotated[str | None, Query(max_length=40)] = None,
+) -> EmptyChatPageOut:
+    """Chats with nothing in them, and why each one would or would not be offered.
+
+    Read-only. The age floor is applied here rather than in the reader, because
+    it is a choice about what somebody may still be looking at.
+    """
+
+    evaluated_at = utcnow()
+    page = empty_chat_page(
+        session,
+        limit=limit,
+        after_id=cursor,
+        minimum_age_hours=min_age_hours,
+        include_archived=include_archived,
+        include_configured=include_configured,
+        now=evaluated_at,
+    )
+    counts: dict[str, int] = {}
+    entries: list[EmptyChatEntryOut] = []
+    for entry in page.entries:
+        counts[entry.classification.value] = counts.get(entry.classification.value, 0) + 1
+        # SQLite keeps timestamps naive and they are UTC. Subtracting an aware
+        # instant from a naive one raises, so the coercion is not cosmetic.
+        created = (
+            entry.created_at.replace(tzinfo=UTC)
+            if entry.created_at.tzinfo is None
+            else entry.created_at.astimezone(UTC)
+        )
+        entries.append(
+            EmptyChatEntryOut(
+                id=entry.chat_id,
+                classification=entry.classification.value,
+                created_at=entry.created_at,
+                updated_at=entry.updated_at,
+                age_hours=max(0.0, (evaluated_at - created).total_seconds() / 3600.0),
+                reasons=list(entry.reasons),
+                deletable=entry.classification is not EmptyChatClass.INCONSISTENT,
+            )
+        )
+    return EmptyChatPageOut(
+        entries=entries,
+        next_cursor=page.next_cursor,
+        counts=counts,
+        evaluated_at=evaluated_at,
+    )
+
+
+def _empty_chat_filters(payload: EmptyChatPreviewIn) -> EmptyChatSelectionFilters:
+    return EmptyChatSelectionFilters(
+        minimum_age_hours=payload.min_age_hours,
+        include_archived=payload.include_archived,
+        include_configured=payload.include_configured,
+    )
+
+
+@router.post("/maintenance/empty-chats/preview", response_model=EmptyChatPreviewOut)
+async def preview_empty_chats(
+    payload: EmptyChatPreviewIn, session: SessionDep
+) -> EmptyChatPreviewOut:
+    """Bind a chosen set of empty chats to a digest and a short deadline.
+
+    Nothing is deleted. The preview says which of the chosen chats still belong
+    to the selection and why the rest do not, and it is the only thing a
+    deletion may be spent against.
+    """
+
+    evaluated_at = utcnow()
+    preview = preview_selection(
+        session,
+        chat_ids=payload.chat_ids,
+        filters=_empty_chat_filters(payload),
+        now=evaluated_at,
+    )
+    preview_id, expires_at = issue_preview(
+        session, digest=preview.digest, chat_states=preview.chat_states, now=evaluated_at
+    )
+    session.commit()
+    return EmptyChatPreviewOut(
+        preview_id=preview_id,
+        digest=preview.digest,
+        expires_at=expires_at,
+        strict_count=preview.strict_count,
+        configured_count=preview.configured_count,
+        conflicts=[
+            EmptyChatConflictOut(chat_id=entry.chat_id, reason=entry.reason)
+            for entry in preview.conflicts
+        ],
+    )
+
+
+_EMPTY_CHAT_REFUSALS: dict[EmptyChatExecuteRefusal, tuple[int, str]] = {
+    EmptyChatExecuteRefusal.PREVIEW_UNKNOWN: (
+        409,
+        "That cleanup was not previewed. Preview the selection again.",
+    ),
+    EmptyChatExecuteRefusal.PREVIEW_EXPIRED: (
+        409,
+        "That preview has expired. Preview the selection again.",
+    ),
+    EmptyChatExecuteRefusal.SELECTION_DRIFTED: (
+        409,
+        "Some of the selected chats changed since the preview. Nothing was deleted.",
+    ),
+    EmptyChatExecuteRefusal.COUNT_MISMATCH: (
+        422,
+        "The confirmed number of chats does not match the preview. Nothing was deleted.",
+    ),
+    EmptyChatExecuteRefusal.CONFIGURED_NOT_ACKNOWLEDGED: (
+        422,
+        "The selection includes chats with settings of their own. Confirm those too.",
+    ),
+}
+
+
+def _empty_chat_deletion_out(result: EmptyChatDeletionResult) -> EmptyChatDeletionOut:
+    return EmptyChatDeletionOut(
+        operation_id=result.operation_id,
+        deleted_ids=list(result.deleted_ids),
+        deleted_at=result.deleted_at,
+        replayed=result.replayed,
+    )
+
+
+@router.post("/maintenance/empty-chats/execute", response_model=EmptyChatDeletionOut)
+async def execute_empty_chat_deletion(
+    payload: EmptyChatExecuteIn, request: Request, session: ConversationSessionDep
+) -> EmptyChatDeletionOut:
+    """Delete a previewed selection of empty chats, all of them or none.
+
+    Each chosen chat's lifecycle guard is held, in a stable order, from before
+    the selection is revalidated until the deletion commits, so no turn can
+    start in one of them in between. The guard is taken WITHOUT cancelling
+    anything: a chat that gained work since the preview is refused as drift,
+    and the work somebody just started is left running.
+    """
+
+    replay = recorded_deletion(session, payload.operation_id)
+    if replay is not None:
+        return _empty_chat_deletion_out(replay)
+    orchestrator = _services(request).orchestrator
+    async with AsyncExitStack() as guards:
+        for chat_id in sorted(set(payload.chat_ids)):
+            await guards.enter_async_context(orchestrator.chat_guard(chat_id))
+        session.expire_all()
+        try:
+            result = execute_deletion(
+                session,
+                operation_id=payload.operation_id,
+                preview_id=payload.preview_id,
+                digest=payload.digest,
+                acknowledged_count=payload.acknowledged_count,
+                acknowledged_configured=payload.acknowledged_configured,
+                chat_ids=payload.chat_ids,
+                filters=_empty_chat_filters(payload),
+                now=utcnow(),
+            )
+        except EmptyChatExecuteError as refusal:
+            session.rollback()
+            status_code, message = _EMPTY_CHAT_REFUSALS[refusal.refusal]
+            raise api_error(
+                status_code, refusal.refusal.value, message, chat_ids=list(refusal.chat_ids)
+            ) from refusal
+        session.commit()
+    return _empty_chat_deletion_out(result)
 
 
 @router.get("/engines", response_model=list[EngineCapabilities])
@@ -975,6 +1863,47 @@ async def update_worker_settings(payload: WorkerSettings, request: Request) -> W
     return WorkerSettings(worker_startup_seconds=services.settings.worker_startup_seconds)
 
 
+def _keep_awake_status(services: Services) -> KeepAwakeStatus:
+    state = services.power.state()
+    return KeepAwakeStatus(
+        enabled=state.enabled,
+        supported=state.supported,
+        active=state.active,
+        running_jobs=state.holder_count,
+    )
+
+
+@router.get("/settings/keep-awake", response_model=KeepAwakeStatus)
+def get_keep_awake(request: Request) -> KeepAwakeStatus:
+    return _keep_awake_status(_services(request))
+
+
+@router.put("/settings/keep-awake", response_model=KeepAwakeStatus)
+def put_keep_awake(payload: KeepAwakeSetting, request: Request) -> KeepAwakeStatus:
+    """Turn keeping the computer awake on or off; running work is never cancelled either way.
+
+    Saved first, so a setting that could not be kept for the next start is not
+    applied to this one either. Synchronous: saving touches the disk and the
+    change may ask the operating system, so it runs off the event loop.
+    """
+
+    services = _services(request)
+    try:
+        persist_runtime_values(
+            services.settings.data_dir,
+            {"LOCAL_LM_KEEP_AWAKE_DURING_WORK": "true" if payload.enabled else "false"},
+        )
+    except RuntimeConfigError as exc:
+        raise api_error(
+            409,
+            "keep-awake-setting-not-saved",
+            "The setting could not be saved, so it was not changed.",
+        ) from exc
+    services.settings.keep_awake_during_work = payload.enabled
+    services.power.set_enabled(payload.enabled)
+    return _keep_awake_status(services)
+
+
 @router.get("/runtimes", response_model=list[RuntimeStatus])
 def runtime_status(request: Request) -> list[RuntimeStatus]:
     # Deliberately synchronous: reading runtime status touches the filesystem, so
@@ -1065,7 +1994,7 @@ def export_verified_setup(
             409, "setup-evidence-missing", "This setup has no current activation evidence."
         )
     verification = current_setup_verification(session, role, install, profile, workflow, evidence)
-    if not verification or verification.state != "verified":
+    if not verification or verification.state != "ready":
         raise api_error(
             409,
             "setup-not-verified",
@@ -1475,6 +2404,15 @@ def worker_log_tail(name: str, request: Request) -> WorkerLogTail:
     if name not in {"chat", "media"}:
         raise api_error(422, "worker-unknown", "worker must be chat or media")
     path = _services(request).settings.log_dir / f"{name}-worker.log"
+    # stat and open follow a link, so a worker log name that points somewhere
+    # else would be returned as the log. Skip that name before either call.
+    if is_link_or_reparse(path, missing="assume_regular", unreadable="assume_link"):
+        return WorkerLogTail(
+            name=cast(Literal["chat", "media"], name),
+            text="",
+            truncated=False,
+            log_bytes=0,
+        )
     try:
         size = path.stat().st_size
         with path.open("rb") as handle:
@@ -1497,13 +2435,59 @@ async def list_projects(
     session: SessionDep,
     include_archived: bool = False,
     query: str = Query(default="", max_length=500),
+    limit: int | None = Query(default=None, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=2**63 - 1),
+    project_id: Annotated[list[str] | None, Query(max_length=200)] = None,
+    literal_search: bool = False,
 ) -> list[Project]:
-    statement = select(Project).order_by(Project.pinned.desc(), Project.updated_at.desc())
+    statement = (
+        select(Project)
+        .where(visible_project(Project.id))
+        .order_by(Project.pinned.desc(), Project.updated_at.desc(), Project.id.desc())
+    )
     if not include_archived:
         statement = statement.where(Project.archived.is_(False))
+    if project_id is not None:
+        statement = statement.where(Project.id.in_(project_id))
+    if literal_search and query.strip():
+        # Match browser name searches, including Unicode and literal wildcard
+        # characters. Read names in batches and hydrate only the selected page.
+        needle = query.strip().lower()
+        matches: list[str] = []
+        skipped = 0
+        names = session.execute(
+            statement.with_only_columns(Project.id, Project.name).execution_options(yield_per=200)
+        )
+        try:
+            for identity, name in names:
+                if needle not in name.lower():
+                    continue
+                if skipped < offset:
+                    skipped += 1
+                    continue
+                matches.append(identity)
+                if limit is not None and len(matches) >= limit:
+                    break
+        finally:
+            names.close()
+        if not matches:
+            return []
+        return list(session.scalars(statement.where(Project.id.in_(matches))).all())
     if query.strip():
         statement = statement.where(Project.name.ilike(f"%{query.strip()}%"))
+    if limit is not None:
+        statement = statement.limit(limit)
+    if offset:
+        statement = statement.offset(offset)
     return list(session.scalars(statement).all())
+
+
+@router.get("/projects/{project_id}", response_model=ProjectOut)
+async def get_project(project_id: str, session: SessionDep) -> Project:
+    project = live_project(session, project_id)
+    if project is None:
+        raise api_error(404, "project-not-found", "Project not found")
+    return project
 
 
 def _validate_project_workflow_pins(session: Session, values: dict[str, Any]) -> None:
@@ -1537,6 +2521,47 @@ def _validate_project_workflow_pins(session: Session, values: dict[str, Any]) ->
             )
 
 
+def _split_workflow_lora_setting_or_422(
+    settings: Mapping[str, Any] | None,
+    *,
+    role: str,
+    code: str,
+) -> tuple[WorkflowLoraOverrides | None, dict[str, Any]]:
+    """Separate a saved layer's workflow LoRA edits, refusing them without echoing them."""
+
+    try:
+        return split_workflow_lora_overrides_setting(settings, role=role)
+    except (WorkflowLoraOverrideError, WorkflowLoraSettingsError) as exc:
+        raise api_error(422, code, "The workflow LoRA settings are invalid.") from exc
+
+
+def _with_workflow_lora_setting(
+    ordinary: dict[str, Any],
+    overrides: WorkflowLoraOverrides | None,
+) -> dict[str, Any]:
+    if overrides is None:
+        return ordinary
+    return {
+        **ordinary,
+        WORKFLOW_LORA_OVERRIDES_SETTING_KEY: workflow_lora_overrides_setting_value(overrides),
+    }
+
+
+def _without_workflow_lora_setting(settings: object) -> dict[str, Any]:
+    if not isinstance(settings, dict):
+        return {}
+    return {
+        key: value for key, value in settings.items() if key != WORKFLOW_LORA_OVERRIDES_SETTING_KEY
+    }
+
+
+def _refuse_imported_workflow_lora_setting(settings: Mapping[str, Any], *, code: str) -> None:
+    # Workflow LoRA edits name a revision and activation on this machine, so a
+    # bundle from anywhere else cannot carry them truthfully.
+    if WORKFLOW_LORA_OVERRIDES_SETTING_KEY in settings:
+        raise api_error(422, code, "Imported settings cannot include workflow LoRA edits.")
+
+
 async def _validate_generation_defaults(
     request: Request,
     session: Session,
@@ -1554,9 +2579,15 @@ async def _validate_generation_defaults(
                     "generation-defaults-too-large",
                     f"{role} generation defaults are too large",
                 )
-            request_settings = settings
-            if STRENGTH_MODE_PARAMETER in settings:
-                mode = settings[STRENGTH_MODE_PARAMETER]
+            workflow_lora_overrides, ordinary = _split_workflow_lora_setting_or_422(
+                settings,
+                role=role,
+                code="generation-defaults-invalid",
+            )
+            scoped[role] = _with_workflow_lora_setting(ordinary, workflow_lora_overrides)
+            request_settings = ordinary
+            if STRENGTH_MODE_PARAMETER in ordinary:
+                mode = ordinary[STRENGTH_MODE_PARAMETER]
                 if role != ModelRole.IMAGE.value or mode not in {"auto", "manual"}:
                     raise api_error(
                         422,
@@ -1564,7 +2595,7 @@ async def _validate_generation_defaults(
                         "image edit strength mode must be auto or manual for image defaults",
                     )
                 request_settings = {
-                    key: value for key, value in settings.items() if key != STRENGTH_MODE_PARAMETER
+                    key: value for key, value in ordinary.items() if key != STRENGTH_MODE_PARAMETER
                 }
             fields = await _engine_role_fields(request, role)
             request_fields = [field for field in fields if field.scope != "load"]
@@ -1629,6 +2660,7 @@ async def import_project(
     request: Request,
     session: SessionDep,
     archive: Annotated[UploadFile, File()],
+    passphrase: Annotated[str | None, Form()] = None,
 ) -> Project:
     archive.file.seek(0, 2)
     size = archive.file.tell()
@@ -1651,15 +2683,36 @@ async def import_project(
             )
         except HTTPException:
             continue
+    staged: Path | None = None
+    if is_encrypted(archive.file):
+        if not passphrase:
+            raise api_error(
+                422,
+                "archive-passphrase-required",
+                "This archive is encrypted. Import it from Settings, under Data & backups, "
+                "where its passphrase can be entered.",
+            )
+        try:
+            staged = await decrypt_import_owned(
+                archive.file, _services(request).settings.export_dir, passphrase.encode("utf-8")
+            )
+        except ArchiveRefused as exc:
+            raise archive_api_error(exc) from exc
+        except StagingNotPrivate as exc:
+            raise staging_api_error() from exc
     try:
-        project = _services(request).exports.import_archive(
-            session,
-            archive.file,
-            known_fields=known_fields,
-        )
+        with staged.open("rb") if staged is not None else nullcontext(archive.file) as source:
+            project = _services(request).exports.import_archive(
+                session,
+                source,
+                known_fields=known_fields,
+            )
     except ValueError as exc:
         session.rollback()
         raise api_error(422, "project-import-invalid", str(exc)) from exc
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
     reconcile_legacy_workflow_compatibility(session)
     session.commit()
     session.refresh(project)
@@ -1673,12 +2726,15 @@ async def update_project(
     request: Request,
     session: SessionDep,
 ) -> Project:
-    project = session.get(Project, project_id)
+    project = live_project(session, project_id)
     if not project:
         raise api_error(404, "project-not-found", "project not found")
     values = payload.model_dump(exclude_unset=True)
     _validate_project_workflow_pins(session, values)
     await _validate_generation_defaults(request, session, values)
+    project = live_project(session, project_id)
+    if project is None:
+        raise api_error(404, "project-not-found", "project not found")
     for key, value in values.items():
         setattr(project, key, value)
     changed_capabilities = [
@@ -1702,33 +2758,62 @@ async def update_project(
 
 @router.delete("/projects/{project_id}", status_code=204)
 async def delete_project(project_id: str, session: SessionDep) -> Response:
-    project = session.get(Project, project_id)
+    project = live_project(session, project_id)
     if not project:
         raise api_error(404, "project-not-found", "project not found")
-    for chat in project.chats:
-        chat.project_id = None
-    session.delete(project)
-    session.commit()
-    return Response(status_code=204)
+    raise api_error(
+        409,
+        "recovery-preview-required",
+        "Check this project's deletion details before moving it to Recently Deleted.",
+    )
 
 
 @router.post("/projects/{project_id}/export", response_model=ArtifactOut, status_code=201)
-async def export_project(
+def export_project(
     project_id: str,
     request: Request,
     session: SessionDep,
     include_media: bool = True,
+    payload: ProjectExportRequest | None = None,
 ) -> ArtifactOut:
+    # Synchronous: writing an archive is disk work, and encrypting and checking
+    # one derives a memory-hard key twice, so it runs off the event loop.
+    passphrase = (
+        payload.passphrase.encode("utf-8")
+        if payload is not None and payload.passphrase is not None
+        else None
+    )
     try:
         artifact = _services(request).exports.export(
-            session, project_id, include_media=include_media
+            session, project_id, include_media=include_media, passphrase=passphrase
         )
     except LookupError as exc:
         raise api_error(404, "project-not-found", str(exc)) from exc
+    except ArchiveRefused as exc:
+        raise archive_api_error(exc) from exc
+    except StagingNotPrivate as exc:
+        raise staging_api_error() from exc
+    except ExportUnverified as exc:
+        raise api_error(
+            500,
+            "project-export-unverified",
+            "The encrypted archive could not be checked after it was written, so it was not kept.",
+        ) from exc
     session.commit()
     result = ArtifactOut.model_validate(artifact)
     result.url = f"/api/artifacts/{artifact.id}/content"
     return result
+
+
+def _chat_outputs(session: Session, chats: list[Chat]) -> list[ChatOut]:
+    """Return unfiled projections without rewriting canonical chat foreign keys."""
+    projects = live_project_ids(session, {chat.project_id for chat in chats if chat.project_id})
+    return [
+        ChatOut.model_validate(chat).model_copy(
+            update={"project_id": chat.project_id if chat.project_id in projects else None}
+        )
+        for chat in chats
+    ]
 
 
 @router.get("/chats", response_model=list[ChatOut])
@@ -1737,19 +2822,87 @@ async def list_chats(
     project_id: str | None = None,
     include_archived: bool = False,
     query: str = Query(default="", max_length=500),
-) -> list[Chat]:
+    search_projects: bool = False,
+    limit: int | None = Query(default=None, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=9_223_372_036_854_775_807),
+) -> list[ChatOut]:
     statement = (
         select(Chat)
-        .where(Chat.scope == STANDARD_CHAT_SCOPE)
-        .order_by(Chat.pinned.desc(), Chat.updated_at.desc())
+        .where(Chat.scope == STANDARD_CHAT_SCOPE, visible_chat(Chat.id))
+        .order_by(Chat.pinned.desc(), Chat.updated_at.desc(), Chat.id.desc())
     )
     if project_id:
-        statement = statement.where(Chat.project_id == project_id)
+        statement = statement.where(effective_project_id(Chat.project_id) == project_id)
     if not include_archived:
         statement = statement.where(Chat.archived.is_(False))
     if query.strip():
-        statement = statement.where(Chat.title.ilike(f"%{query.strip()}%"))
-    return list(session.scalars(statement).all())
+        if search_projects:
+            # SQLite's lowercase function only folds ASCII. Match the browser's
+            # Unicode search over streamed names, then hydrate only this page.
+            names = statement.with_only_columns(Chat.id, Chat.title, Project.name).outerjoin(
+                Project, (Chat.project_id == Project.id) & visible_project(Project.id)
+            )
+            normalized = query.strip().lower()
+            with session.execute(names.execution_options(yield_per=200)) as candidates:
+                matches = (
+                    identity
+                    for identity, title, project_name in candidates
+                    if normalized in title.lower() or normalized in (project_name or "").lower()
+                )
+                identities = list(islice(islice(matches, offset, None), limit))
+            return _chat_outputs(
+                session, list(session.scalars(statement.where(Chat.id.in_(identities))).all())
+            )
+        else:
+            statement = statement.where(Chat.title.ilike(f"%{query.strip()}%"))
+    if limit is not None:
+        statement = statement.limit(limit)
+    statement = statement.offset(offset)
+    return _chat_outputs(session, list(session.scalars(statement).all()))
+
+
+@router.get("/chats/summaries", response_model=list[ChatSummaryOut])
+async def list_chat_summaries(
+    session: ConversationSessionDep,
+    project_id: str | None = None,
+    include_archived: bool = False,
+    query: str = Query(default="", max_length=500),
+    search_projects: bool = False,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=9_223_372_036_854_775_807),
+) -> list[ChatSummaryOut]:
+    rows = list_chat_summary_rows(
+        session,
+        project_id=project_id,
+        include_archived=include_archived,
+        query=query,
+        search_projects=search_projects,
+        limit=limit,
+        offset=offset,
+    )
+    identities = [row.id for row in rows]
+    counts = chat_work_counts(session, identities)
+    history = chat_activity_history(session, identities)
+    return [
+        ChatSummaryOut(
+            **dataclasses.asdict(row),
+            activity=ChatActivityOut(
+                active_work_count=counts[row.id].active_work_count,
+                unresolved_failed_count=counts[row.id].unresolved_failed_count,
+                last_output=(
+                    ChatActivityReferenceOut.model_validate(history[row.id].last_output)
+                    if history[row.id].last_output is not None
+                    else None
+                ),
+                last_failure=(
+                    ChatActivityReferenceOut.model_validate(history[row.id].last_failure)
+                    if history[row.id].last_failure is not None
+                    else None
+                ),
+            ),
+        )
+        for row in rows
+    ]
 
 
 @router.post("/chats", response_model=ChatOut, status_code=201)
@@ -1757,11 +2910,13 @@ async def create_chat(
     payload: ChatCreate,
     request: Request,
     session: ConversationSessionDep,
-) -> Chat:
-    if payload.project_id and not session.get(Project, payload.project_id):
+) -> ChatOut:
+    if payload.project_id and live_project(session, payload.project_id) is None:
         raise api_error(404, "project-not-found", "project not found")
     values = payload.model_dump(mode="json")
     await _validate_generation_defaults(request, session, values)
+    if payload.project_id and live_project(session, payload.project_id) is None:
+        raise api_error(404, "project-not-found", "project not found")
     chat = Chat(
         title=payload.title,
         project_id=payload.project_id,
@@ -1779,11 +2934,41 @@ async def create_chat(
     mirror_legacy_chat_workflow_selections(session, chat)
     session.commit()
     session.refresh(chat)
-    return chat
+    return _chat_outputs(session, [chat])[0]
 
 
 @router.get("/chats/{chat_id}", response_model=ChatDetail)
-async def get_chat(chat_id: str, session: ConversationSessionDep) -> Chat:
+async def get_chat(
+    chat_id: str,
+    session: ConversationSessionDep,
+    limit: int | None = Query(default=None, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=2**63 - 1),
+) -> ChatDetail:
+    if limit is not None or offset:
+        chat = session.scalar(
+            select(Chat).where(
+                Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE, visible_chat(Chat.id)
+            )
+        )
+        if not chat:
+            raise api_error(404, "chat-not-found", "chat not found")
+        messages = list(
+            session.scalars(
+                select(Message)
+                .where(Message.chat_id == chat_id)
+                .order_by(Message.created_at, Message.id)
+                .limit(limit if limit is not None else 50)
+                .offset(offset)
+                .options(*_MESSAGE_WINDOW_LOADERS)
+            ).all()
+        )
+        return ChatDetail(
+            **_chat_outputs(session, [chat])[0].model_dump(),
+            messages=[MessageOut.model_validate(message) for message in messages],
+            web_searches=chat_searches(
+                session, chat_id, message_ids=[message.id for message in messages]
+            ),
+        )
     chat = session.scalar(
         select(Chat)
         .options(
@@ -1804,11 +2989,237 @@ async def get_chat(chat_id: str, session: ConversationSessionDep) -> Chat:
             .selectinload(Message.response_revisions)
             .selectinload(ResponseRevision.feedback_rows),
         )
-        .where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE)
+        .where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE, visible_chat(Chat.id))
     )
     if not chat:
         raise api_error(404, "chat-not-found", "chat not found")
-    return chat
+    return ChatDetail.model_validate(chat).model_copy(
+        update={
+            "web_searches": chat_searches(session, chat_id),
+            "project_id": _chat_outputs(session, [chat])[0].project_id,
+        }
+    )
+
+
+@router.get("/chats/{chat_id}/metadata", response_model=ChatOut)
+async def get_chat_metadata(chat_id: str, session: ConversationSessionDep) -> ChatOut:
+    """Read conversation settings without loading messages or search history."""
+    chat = session.scalar(
+        select(Chat).where(
+            Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE, visible_chat(Chat.id)
+        )
+    )
+    if not chat:
+        raise api_error(404, "chat-not-found", "chat not found")
+    return _chat_outputs(session, [chat])[0]
+
+
+@router.get("/chats/{chat_id}/context", response_model=ChatTranscriptContext)
+async def get_chat_transcript_context(
+    chat_id: str, session: ConversationSessionDep, head_id: str | None = None
+) -> ChatTranscriptContext:
+    if (
+        session.scalar(
+            select(Chat.id).where(
+                Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE, visible_chat(Chat.id)
+            )
+        )
+        is None
+    ):
+        raise api_error(404, "chat-not-found", "chat not found")
+    if (
+        head_id is not None
+        and session.scalar(
+            select(Message.id).where(Message.id == head_id, Message.chat_id == chat_id)
+        )
+        is None
+    ):
+        raise api_error(404, "message-not-found", "This message is not in this conversation")
+    return read_transcript_context(session, chat_id, head_id)
+
+
+@router.get("/chats/{chat_id}/searches", response_model=ChatSearchPage)
+async def get_chat_search_page(
+    chat_id: str,
+    session: ConversationSessionDep,
+    head_id: str | None = None,
+    oldest_message_id: str | None = None,
+    before: str | None = None,
+    pending_only: bool = False,
+    limit: int = 40,
+) -> ChatSearchPage:
+    return read_search_page(
+        session,
+        chat_id,
+        head_id=head_id,
+        oldest_message_id=oldest_message_id,
+        before=before,
+        pending_only=pending_only,
+        limit=limit,
+    )
+
+
+@router.get(
+    "/chats/{chat_id}/messages/{result_message_id}/lineage", response_model=ChatEditLineagePage
+)
+async def get_chat_edit_lineage(
+    chat_id: str,
+    result_message_id: str,
+    session: ConversationSessionDep,
+    before: str | None = None,
+    limit: int = 40,
+) -> ChatEditLineagePage:
+    return read_edit_lineage(session, chat_id, result_message_id, before=before, limit=limit)
+
+
+# Load only the relationships needed to render the requested message page.
+_MESSAGE_WINDOW_LOADERS = (
+    selectinload(Message.parts).selectinload(MessagePart.artifact),
+    selectinload(Message.response_revisions)
+    .selectinload(ResponseRevision.parts)
+    .selectinload(ResponseRevisionPart.artifact),
+    selectinload(Message.feedback_rows),
+    selectinload(Message.references),
+    selectinload(Message.response_revisions).selectinload(ResponseRevision.feedback_rows),
+)
+
+
+@router.get("/chats/{chat_id}/messages", response_model=ChatMessageWindow)
+async def get_chat_messages(
+    chat_id: str,
+    session: ConversationSessionDep,
+    head_id: str | None = None,
+    before: str | None = None,
+    after: str | None = None,
+    around: str | None = None,
+    limit: int = DEFAULT_WINDOW,
+) -> ChatMessageWindow:
+    """One bounded page of a conversation, anchored on a message or its end.
+
+    The endpoint that returns a whole chat loads every message with its parts,
+    artifacts, revisions, feedback and references, so its cost is the length of
+    the conversation. This endpoint limits message hydration in SQL before
+    loading those relationships. Branch ancestry remains a walk over parent
+    identities in the database; it does not load the rest of the transcript.
+
+    One anchor at most. Without one the newest page is returned, which is what
+    opening a conversation asks for.
+
+    ``head_id`` names the branch being read, and it matters more than it looks:
+    a transcript is a lineage, not everything a conversation has ever held. A
+    chat that has been edited or forked holds messages from branches nobody is
+    looking at, and a page taken by time alone can hold those and can omit a
+    parent the lineage needs. With a head, the page walks that head's ancestry
+    through parent links and returns them in parent order. Without one, the whole
+    conversation is paged by time, which is what a caller wanting everything
+    means.
+    """
+
+    anchors = [value for value in (before, after, around) if value is not None]
+    if len(anchors) > 1:
+        raise api_error(
+            400, "chat-window-ambiguous", "Ask for one of before, after or around, not several."
+        )
+    if limit < 1 or limit > MAX_WINDOW:
+        raise api_error(
+            400, "chat-window-invalid", f"A page holds between 1 and {MAX_WINDOW} messages."
+        )
+    chat = session.scalar(
+        select(Chat).where(
+            Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE, visible_chat(Chat.id)
+        )
+    )
+    if not chat:
+        raise api_error(404, "chat-not-found", "chat not found")
+    lineage = None
+    if head_id is not None:
+        head = session.scalar(
+            select(Message).where(Message.id == head_id, Message.chat_id == chat_id)
+        )
+        if not head:
+            raise api_error(404, "message-not-found", "This message is not in this conversation")
+        lineage = message_ancestry_positions(chat_id, head_id)
+    anchor_at = None
+    older_than_anchor: ColumnElement[bool] | None = None
+    newer_than_anchor: ColumnElement[bool] | None = None
+    if anchors:
+        anchor_message = session.scalar(
+            select(Message).where(Message.id == anchors[0], Message.chat_id == chat_id)
+        )
+        if not anchor_message:
+            raise api_error(404, "message-not-found", "This message is not in this conversation")
+        anchor_at = anchor_message.created_at
+        if lineage is not None:
+            anchor_depth = session.scalar(
+                select(lineage.c.depth).where(lineage.c.id == anchor_message.id)
+            )
+            if anchor_depth is None:
+                raise api_error(
+                    400, "chat-window-invalid", "The anchor is not in the selected branch."
+                )
+            older_than_anchor = lineage.c.depth > anchor_depth
+            newer_than_anchor = lineage.c.depth < anchor_depth
+        else:
+            older_than_anchor = or_(
+                Message.created_at < anchor_at,
+                and_(Message.created_at == anchor_at, Message.id < anchor_message.id),
+            )
+            newer_than_anchor = or_(
+                Message.created_at > anchor_at,
+                and_(Message.created_at == anchor_at, Message.id > anchor_message.id),
+            )
+
+    def page(
+        newest_first: bool, *, strictly: ColumnElement[bool] | None, count: int
+    ) -> list[Message]:
+        query = select(Message).where(Message.chat_id == chat_id)
+        if lineage is not None:
+            query = query.join(lineage, Message.id == lineage.c.id).order_by(
+                lineage.c.depth.asc() if newest_first else lineage.c.depth.desc()
+            )
+        else:
+            query = query.order_by(
+                Message.created_at.desc() if newest_first else Message.created_at.asc(),
+                Message.id.desc() if newest_first else Message.id.asc(),
+            )
+        if strictly is not None:
+            query = query.where(strictly)
+        return list(session.scalars(query.limit(count).options(*_MESSAGE_WINDOW_LOADERS)).all())
+
+    if around is not None and anchor_at is not None:
+        older_half = max(0, (limit - 1) // 2)
+        newer_half = limit - 1 - older_half
+        older = page(True, strictly=older_than_anchor, count=older_half + 1)
+        newer = page(False, strictly=newer_than_anchor, count=newer_half + 1)
+        has_older = len(older) > older_half
+        has_newer = len(newer) > newer_half
+        anchor_row = session.get(Message, anchors[0])
+        messages = (
+            list(reversed(older[:older_half]))
+            + ([anchor_row] if anchor_row is not None else [])
+            + newer[:newer_half]
+        )
+    elif after is not None and anchor_at is not None:
+        found = page(False, strictly=newer_than_anchor, count=limit + 1)
+        has_newer = len(found) > limit
+        messages = found[:limit]
+        has_older = True
+    elif before is not None and anchor_at is not None:
+        found = page(True, strictly=older_than_anchor, count=limit + 1)
+        has_older = len(found) > limit
+        messages = list(reversed(found[:limit]))
+        has_newer = True
+    else:
+        found = page(True, strictly=None, count=limit + 1)
+        has_older = len(found) > limit
+        messages = list(reversed(found[:limit]))
+        has_newer = False
+    return ChatMessageWindow(
+        chat_id=chat_id,
+        messages=[MessageOut.model_validate(message) for message in messages],
+        has_older=has_older,
+        has_newer=has_newer,
+    )
 
 
 @router.put("/messages/{message_id}/feedback", response_model=ResponseFeedbackOut)
@@ -1821,6 +3232,9 @@ async def set_response_feedback(
     settings already live there - so nothing is copied and nothing trains.
     """
 
+    _refuse_comparison_message(
+        session, message_id, "message-not-found", "This response no longer exists"
+    )
     message = session.get(Message, message_id)
     if not message or message.role != MessageRole.ASSISTANT.value:
         raise api_error(404, "message-not-found", "This response no longer exists")
@@ -1910,6 +3324,13 @@ async def studio_capabilities(
 
     orchestrator: ConversationOrchestrator = _services(request).orchestrator
     schemas = orchestrator.installed_edit_input_schemas(session)
+    capabilities = tool_capabilities(
+        edit_input_schemas=schemas,
+        relight_workflow_ids=orchestrator.installed_relight_workflow_ids(session),
+        lighting_adapter_ids=orchestrator.installed_lighting_adapter_ids(session),
+        matting_workflow_ids=orchestrator.installed_matting_workflow_ids(session),
+        waiting_input_schemas=orchestrator.waiting_edit_input_schemas(session),
+    )
     return StudioCapabilityReport(
         tools=[
             StudioToolCapability(
@@ -1917,8 +3338,10 @@ async def studio_capabilities(
                 workflow_class=capability.workflow_class,
                 available=capability.available,
                 reason=capability.reason,
+                workflow_revision_id=capability.workflow_revision_id,
+                adapter_asset_id=capability.adapter_asset_id,
             )
-            for capability in tool_capabilities(edit_input_schemas=schemas)
+            for capability in capabilities
         ]
     )
 
@@ -1933,17 +3356,33 @@ async def open_studio_session(
     the filmstrip is durable edit history rather than view state.
     """
 
+    try:
+        reserve_recovery_write(session)
+    except RecoveryPreviewConflict:
+        raise api_error(
+            409, "studio-session-busy", "The studio session could not be opened safely. Try again."
+        ) from None
     artifact = session.get(Artifact, payload.source_artifact_id)
     if not artifact:
         raise api_error(404, "artifact-not-found", "This media item no longer exists")
     if not _is_editable_image(artifact):
         raise api_error(422, "studio-image-only", "The studio edits images")
+    source = (
+        session.scalar(
+            select(Chat).where(
+                Chat.id == payload.source_chat_id,
+                Chat.scope == STANDARD_CHAT_SCOPE,
+                visible_chat(Chat.id),
+            )
+        )
+        if payload.source_chat_id
+        else None
+    )
+    if payload.source_chat_id and source is None:
+        raise api_error(404, "chat-not-found", "The source chat no longer exists")
     existing = find_studio_session(session, artifact.id)
     if existing:
         return session.scalar(_studio_session_query(existing.id)) or existing
-    source = session.get(Chat, payload.source_chat_id) if payload.source_chat_id else None
-    if payload.source_chat_id and (not source or source.scope != STANDARD_CHAT_SCOPE):
-        raise api_error(404, "chat-not-found", "The source chat no longer exists")
     studio = Chat(
         title=studio_session_title(artifact),
         archived=True,
@@ -1980,6 +3419,147 @@ async def get_studio_session(session_id: str, session: ConversationSessionDep) -
     if not studio:
         raise api_error(404, "studio-session-not-found", "This studio session no longer exists")
     return studio
+
+
+@router.post("/studio/sessions/{session_id}/local-edits", response_model=ChatDetail)
+async def apply_studio_local_edit(
+    session_id: str,
+    payload: StudioLocalEditCreate,
+    request: Request,
+    session: ConversationSessionDep,
+) -> Chat:
+    """Make an edit that needs no model to a picture in a studio session.
+
+    The result becomes one more step in the session, after whatever step is
+    newest, so it is taken under the chat's guard like an apply.
+    """
+
+    services = _services(request)
+    async with services.orchestrator.chat_guard(session_id):
+        session.expire_all()
+        studio = session.scalar(
+            select(Chat).where(Chat.id == session_id, Chat.scope == STUDIO_SCOPE)
+        )
+        if studio is None:
+            raise api_error(404, "studio-session-not-found", "This studio session no longer exists")
+        source = session.get(Artifact, payload.source_artifact_id)
+        if source is None:
+            raise api_error(404, "artifact-not-found", "This media item no longer exists")
+        if not _is_editable_image(source) or not picture_in_session(session, studio, source.id):
+            raise api_error(
+                422,
+                "studio-edit-source-not-in-session",
+                "Only a picture in this studio session can be edited here.",
+            )
+        crop = CropBox(**payload.crop.model_dump()) if payload.crop is not None else None
+        straighten = payload.straighten.degrees if payload.straighten is not None else None
+        perspective = (
+            perspective_corners(payload.perspective) if payload.perspective is not None else None
+        )
+        size = PictureSize(**payload.size.model_dump()) if payload.size is not None else None
+        adjustments = (
+            ColorAdjustments.from_request(payload.adjustments.model_dump())
+            if payload.adjustments is not None
+            else None
+        )
+        canvas = CanvasChange(**payload.canvas.model_dump()) if payload.canvas is not None else None
+        blur = None
+        pixelate = None
+        paint = None
+        caption = None
+        # Drawn words and a placed subject are both pictures the browser made
+        # at the picture's size, so they are found and read the same way.
+        overlaid = payload.caption or payload.subject
+        if overlaid is not None:
+            drawn = session.get(Artifact, overlaid.overlay_artifact_id)
+            if drawn is None or not _is_editable_image(drawn):
+                if payload.subject is not None:
+                    raise api_error(
+                        422,
+                        "studio-subject-missing",
+                        "The placed subject could not be found. Replace it again.",
+                    )
+                raise api_error(
+                    422,
+                    "studio-caption-missing",
+                    "The drawn words could not be found. Write them again.",
+                )
+            try:
+                overlay = await run_in_threadpool(marked_area, services.artifacts, drawn)
+            except LocalEditError as exc:
+                raise api_error(422, exc.code, str(exc)) from exc
+            caption = CaptionOverlay(overlay=overlay, overlay_artifact_id=drawn.id)
+        # A blur, a pixelation and a paint each work through a marked area
+        # uploaded first.
+        marking = payload.blur or payload.pixelate or payload.paint
+        if marking is not None:
+            marked = session.get(Artifact, marking.mask_artifact_id)
+            if marked is None or not _is_editable_image(marked):
+                raise api_error(
+                    422,
+                    "studio-marked-area-missing",
+                    "The marked area could not be found. Mark it again.",
+                )
+            try:
+                mask = await run_in_threadpool(marked_area, services.artifacts, marked)
+            except LocalEditError as exc:
+                raise api_error(422, exc.code, str(exc)) from exc
+            if payload.blur is not None:
+                blur = SelectionBlur(
+                    mask=mask, radius=payload.blur.radius, mask_artifact_id=marked.id
+                )
+            if payload.pixelate is not None:
+                pixelate = SelectionPixelate(
+                    mask=mask, block=payload.pixelate.block, mask_artifact_id=marked.id
+                )
+            if payload.paint is not None:
+                paint = SelectionPaint(
+                    mask=mask,
+                    color=paint_color(payload.paint.color),
+                    opacity=payload.paint.opacity,
+                    mask_artifact_id=marked.id,
+                )
+        try:
+            # Decoding and encoding a large picture takes a while and holds
+            # nothing, so it runs off the loop; everything after it writes.
+            edited = await run_in_threadpool(
+                edited_picture,
+                services.artifacts,
+                source,
+                payload.operation,
+                crop,
+                size,
+                adjustments,
+                blur,
+                canvas,
+                paint,
+                caption,
+                pixelate,
+                straighten,
+                perspective,
+            )
+        except LocalEditError as exc:
+            raise api_error(422, exc.code, str(exc)) from exc
+        record_local_edit(
+            session,
+            studio,
+            source,
+            payload.operation,
+            edited,
+            services.artifacts,
+            crop,
+            size,
+            adjustments,
+            blur,
+            canvas,
+            paint,
+            caption,
+            pixelate,
+            straighten,
+            perspective,
+        )
+        session.commit()
+    return session.scalar(_studio_session_query(session_id)) or studio
 
 
 def _studio_session_query(session_id: str) -> Select[tuple[Chat]]:
@@ -2102,8 +3682,13 @@ def _prompt_expansion_out(stored: StoredExpansion) -> PromptExpansionBatchOut:
         prompt_template_revision_id=batch.prompt_template_revision_id,
         schema_version=cast(Literal[1], batch.schema_version),
         contract_sha256=batch.contract_sha256,
-        codec_version=cast(Literal[2], batch.codec_version),
+        codec_version=cast(Literal[2, 3], batch.codec_version),
         requested_count=request.item_count,
+        unfilled_ordinals=[
+            ordinal
+            for ordinal in range(1, request.item_count + 1)
+            if ordinal not in {item.ordinal for item in stored.items}
+        ],
         selection_seed=request.selection_seed,
         plan_sha256=batch.plan_sha256,
         state=cast(Literal["draft", "queued"], batch.state),
@@ -2660,7 +4245,7 @@ async def _create_prompt_batch_locked(
     session: Session,
 ) -> PromptExpansionBatchOut:
     chat = session.get(Chat, chat_id)
-    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, chat_id):
         raise api_error(404, "chat-not-found", "chat not found")
     revision = session.get(PromptTemplateRevision, payload.template_revision_id)
     if revision is None:
@@ -2784,11 +4369,14 @@ async def _create_prompt_batch_locked(
                     contract=model_contract,
                     data=invocation_data,
                 )
-                plan = complete_prompt_expansion_with_model_values(
-                    contract,
-                    plan,
-                    result.values,
-                )
+                if isinstance(result.values, PromptModelValuesResult):
+                    plan = complete_prompt_expansion_with_model_result(
+                        contract, plan, result.values
+                    )
+                else:
+                    plan = complete_prompt_expansion_with_model_values(
+                        contract, plan, result.values
+                    )
             except (
                 PromptExpansionError,
                 PromptModelValuesError,
@@ -2855,7 +4443,7 @@ async def get_prompt_batch(
     if batch is None:
         raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
     chat = session.get(Chat, batch.chat_id)
-    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, batch.chat_id):
         raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
     try:
         stored = read_expansion(session, batch.chat_id, batch.id)
@@ -2878,7 +4466,7 @@ async def patch_prompt_batch_item(
     if batch is None:
         raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
     chat = session.get(Chat, batch.chat_id)
-    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, batch.chat_id):
         raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
     try:
         current = read_expansion(session, batch.chat_id, batch.id)
@@ -2918,7 +4506,7 @@ async def queue_prompt_batch(
     if batch is None:
         raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
     chat = session.get(Chat, batch.chat_id)
-    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, batch.chat_id):
         raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
     try:
         _, replayed = await _services(request).orchestrator.create_prompt_batch_turn(
@@ -2942,6 +4530,9 @@ async def queue_prompt_batch(
     except EngineSchemaUnavailableError as exc:
         session.rollback()
         raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
+    except WorkflowLoraAdmissionError as exc:
+        session.rollback()
+        raise api_error(409 if exc.conflict else 422, exc.code, str(exc)) from exc
     except ValueError as exc:
         session.rollback()
         raise api_error(422, "generation-settings-invalid", str(exc)) from exc
@@ -2955,7 +4546,7 @@ async def create_prompt_helper(
     session: ConversationSessionDep,
 ) -> Chat:
     source = session.get(Chat, payload.source_chat_id)
-    if not source or source.scope != STANDARD_CHAT_SCOPE:
+    if not source or source.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, source.id):
         raise api_error(404, "chat-not-found", "source chat not found")
     generation_settings = copy.deepcopy(source.generation_settings_json)
     for role in (ModelRole.IMAGE.value, ModelRole.VIDEO.value):
@@ -3052,16 +4643,25 @@ async def update_chat(
     payload: ChatUpdate,
     request: Request,
     session: ConversationSessionDep,
-) -> Chat:
+) -> ChatOut:
     chat = session.get(Chat, chat_id)
-    if not chat or chat.scope != STANDARD_CHAT_SCOPE:
+    if not chat or chat.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, chat_id):
         raise api_error(404, "chat-not-found", "chat not found")
     values = payload.model_dump(exclude_unset=True, mode="json")
+    if (
+        "project_id" in values
+        and values["project_id"] is None
+        and chat.project_id is not None
+        and live_project(session, chat.project_id) is None
+    ):
+        values.pop("project_id")
+    if "web_settings_json" in values and values["web_settings_json"] is None:
+        raise api_error(422, "web-settings-invalid", "Web permissions must be an object.")
     await _validate_generation_defaults(request, session, values)
     if (
         "project_id" in values
         and values["project_id"]
-        and not session.get(Project, values["project_id"])
+        and live_project(session, values["project_id"]) is None
     ):
         raise api_error(404, "project-not-found", "project not found")
     profile_fields = {
@@ -3117,7 +4717,7 @@ async def update_chat(
         mirror_legacy_chat_workflow_selections(session, chat, changed_capabilities)
     session.commit()
     session.refresh(chat)
-    return chat
+    return _chat_outputs(session, [chat])[0]
 
 
 @router.delete("/chats/{chat_id}", status_code=204)
@@ -3128,23 +4728,111 @@ async def delete_chat(
     delete_generated_media: bool = Query(False),
 ) -> Response:
     chat = session.get(Chat, chat_id)
-    if not chat or chat.scope != STANDARD_CHAT_SCOPE:
+    if not chat or chat.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, chat_id):
         raise api_error(404, "chat-not-found", "chat not found")
-    services = _services(request)
-    async with services.orchestrator.prepare_chat_deletion(chat_id):
-        session.expire_all()
-        chat = session.get(Chat, chat_id)
-        if not chat or chat.scope != STANDARD_CHAT_SCOPE:
-            raise api_error(404, "chat-not-found", "chat not found")
-        artifact_ids = (
-            services.artifacts.generated_media_artifact_ids_for_chat(session, chat_id)
-            if delete_generated_media
-            else ()
-        )
-        session.delete(chat)
-        session.flush()
-        services.artifacts.delete_generated_media_artifacts(session, artifact_ids)
-        session.commit()
+    raise api_error(
+        409,
+        "recovery-preview-required",
+        "Check this chat's deletion details before moving it to Recently Deleted.",
+    )
+
+
+def _standard_chat_or_404(session: Session, chat_id: str) -> Chat:
+    chat = session.get(Chat, chat_id)
+    if not chat or chat.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, chat_id):
+        raise api_error(404, "chat-not-found", "chat not found")
+    return chat
+
+
+def _refuse_comparison_chat(
+    session: Session, chat_id: str, code: str = "chat-not-found", detail: str = "chat not found"
+) -> None:
+    """Keep hidden comparison and deleted conversations out of ordinary chat routes.
+
+    It takes no turns, edits, stop, selections or reads by chat id; the
+    caller's own not-found answer is given, so the chat's existence is not shown.
+    """
+
+    chat = session.get(Chat, chat_id)
+    if (chat is not None and chat.scope == EXPERIMENT_CHAT_SCOPE) or chat_is_deleted(
+        session, chat_id
+    ):
+        raise api_error(404, code, detail)
+
+
+def _refuse_comparison_message(session: Session, message_id: str, code: str, detail: str) -> None:
+    """The same refusal for a route that names one of the hidden chat's messages."""
+
+    message = session.get(Message, message_id)
+    if message is not None:
+        _refuse_comparison_chat(session, message.chat_id, code, detail)
+
+
+@router.get("/chats/{chat_id}/composer-draft", response_model=ChatComposerDraftOut)
+async def get_chat_composer_draft(
+    chat_id: str, session: ConversationSessionDep
+) -> ChatComposerDraftOut:
+    """The chat's unsent draft, or an empty draft at revision 0 if it never had one."""
+
+    _standard_chat_or_404(session, chat_id)
+    return read_composer_draft(session, chat_id)
+
+
+@router.put("/chats/{chat_id}/composer-draft", response_model=ChatComposerDraftOut)
+async def put_chat_composer_draft(
+    chat_id: str, payload: ChatComposerDraftWrite, session: ConversationSessionDep
+) -> ChatComposerDraftOut:
+    """Replace the chat's draft, refusing a write based on an older revision."""
+
+    _standard_chat_or_404(session, chat_id)
+    try:
+        stored = write_composer_draft(session, chat_id, payload.expected_revision, payload.draft)
+    except DraftRevisionStale as stale:
+        session.rollback()
+        raise api_error(
+            409,
+            "chat-draft-revision-stale",
+            "The draft changed since it was read. Read it again before saving.",
+            current_revision=stale.current_revision,
+        ) from None
+    except DraftAttachmentUnavailable:
+        session.rollback()
+        raise api_error(
+            422,
+            "chat-draft-attachment-unavailable",
+            "A draft attachment is missing or is not a picture or video.",
+        ) from None
+    except DraftSettingsUnsupported:
+        session.rollback()
+        raise api_error(
+            422,
+            "chat-draft-settings-unsupported",
+            "The draft's template settings cannot be kept with a draft.",
+        ) from None
+    session.commit()
+    return stored
+
+
+@router.delete("/chats/{chat_id}/composer-draft", status_code=204)
+async def delete_chat_composer_draft(
+    chat_id: str,
+    session: ConversationSessionDep,
+    expected_revision: int = Query(ge=1),
+) -> Response:
+    """Empty the chat's draft under its next revision, releasing the files it held."""
+
+    _standard_chat_or_404(session, chat_id)
+    try:
+        discard_composer_draft(session, chat_id, expected_revision)
+    except DraftRevisionStale as stale:
+        session.rollback()
+        raise api_error(
+            409,
+            "chat-draft-revision-stale",
+            "The draft changed since it was read. Read it again before saving.",
+            current_revision=stale.current_revision,
+        ) from None
+    session.commit()
     return Response(status_code=204)
 
 
@@ -3154,6 +4842,295 @@ async def create_turn(
 ) -> TurnAccepted:
     orchestrator: ConversationOrchestrator = _services(request).orchestrator
     return await _accept_turn(orchestrator, session, chat_id, payload)
+
+
+@router.post("/chats/{chat_id}/replays", response_model=TurnAccepted, status_code=202)
+async def replay_a_generation_record(
+    chat_id: str, request: Request, session: ConversationSessionDep
+) -> TurnAccepted:
+    """Generate a record again exactly, as one turn in a chat with nothing in it yet.
+
+    The record arrives as its own file, or as a bundle saved with its picture.
+    Each requirement must resolve to exactly one thing here, and the run
+    admission accepts is described and compared with the record before it is
+    committed; any difference refuses the whole turn and writes nothing. No
+    default, preset, recipe or Auto choice is applied or changed.
+    """
+
+    content = await read_record_body(request)
+    try:
+        record = read_record_file(content).record
+    except OutputRecipeCheckRefused as exc:
+        raise api_error(exc.status, exc.code, exc.message) from exc
+    _refuse_comparison_chat(session, chat_id)
+    chat = session.get(Chat, chat_id)
+    if chat is None:
+        raise api_error(404, "chat-not-found", "chat not found")
+    services = _services(request)
+    plan = plan_output_recipe_replay(session, record, media_engine=services.settings.media_engine)
+    if not plan["ready"]:
+        raise api_error(
+            409,
+            "replay-unavailable",
+            "This record cannot be generated again exactly here.",
+            refusals=plan["refusals"],
+        )
+    if record["operation"] not in REPLAYABLE_OPERATIONS:
+        raise api_error(
+            422,
+            "replay-operation-unsupported",
+            "This kind of generation cannot be generated again yet.",
+        )
+    if not chat_is_clean_for_replay(session, chat):
+        raise api_error(
+            409,
+            "replay-chat-not-clean",
+            "A record is generated again only in a new chat with nothing in it.",
+        )
+    check = exact_replay_check(record)
+    restore_edit_check = (
+        without_edit_check(chat) if record["operation"] == "image_to_image" else None
+    )
+
+    def check_then_restore(transaction: Session, first: Run) -> None:
+        check(transaction, first)
+        mark_replay(first, record)
+        if restore_edit_check is not None:
+            restore_edit_check()
+
+    try:
+        return await _accept_turn(
+            services.orchestrator,
+            session,
+            chat_id,
+            await replay_turn_request(session, services.engines, record, plan["resolved"]),
+            freeze_context=True,
+            # No use-case recipe for this turn, without writing anything.
+            inherited_use_case_preset=InheritedWorkflowUseCasePreset(None),
+            before_commit=check_then_restore,
+        )
+    except ReplayDiffers as exc:
+        raise api_error(
+            409,
+            "replay-differs",
+            "Generating this here would not match the record exactly.",
+            sections=exc.sections,
+        ) from exc
+
+
+@router.post("/chats/{chat_id}/adaptations", response_model=TurnAccepted, status_code=202)
+async def adapt_a_generation_record(
+    chat_id: str, request: Request, session: ConversationSessionDep
+) -> TurnAccepted:
+    """Generate a new version of a record, with chosen stand-ins for what does not match here.
+
+    The record's prompt, seed, settings and inputs are sent as they are; the
+    workflow, the model and each LoRA can be chosen, each as `workflow_revision_id`,
+    `profile_id` and `lora=<position>:<asset id>` (or `:omit`), and each input as
+    `input=<position>:sha256:<hex>`, a picture here, or `input=<position>:bundle`,
+    the copy the record's bundle carries, which is then kept here as an input, as
+    a picture attached to a turn is. Anything not chosen must match exactly. It is never called a
+    reproduction: the run keeps which record it came from, what was chosen and
+    which of its sections differ from the record, which is never changed.
+    """
+
+    content = await read_record_body(request)
+    try:
+        read = read_record_file(content)
+    except OutputRecipeCheckRefused as exc:
+        raise api_error(exc.status, exc.code, exc.message) from exc
+    record = read.record
+    params = request.query_params
+    try:
+        choices = adaptation_choices(
+            workflow_revision_ids=params.getlist("workflow_revision_id"),
+            profile_ids=params.getlist("profile_id"),
+            loras=params.getlist("lora"),
+            lora_count=len(record["loras"]),
+            inputs=params.getlist("input"),
+            input_count=len(record["inputs"]),
+        )
+    except AdaptationChoiceInvalid:
+        raise api_error(
+            422,
+            "adaptation-choice-invalid",
+            "A choice names nothing this record needs.",
+        ) from None
+    _refuse_comparison_chat(session, chat_id)
+    chat = session.get(Chat, chat_id)
+    if chat is None:
+        raise api_error(404, "chat-not-found", "chat not found")
+    services = _services(request)
+    try:
+        choices = store_bundled_stand_ins(session, services.artifacts, read.bundle, choices)
+    except AdaptationChoiceInvalid:
+        raise api_error(
+            422,
+            "adaptation-choice-invalid",
+            "A choice names nothing this record needs.",
+        ) from None
+    # Kept before the plan reads it; a copy no generation ends up using is let go
+    # like any other unreferenced input.
+    session.commit()
+    plan = plan_output_recipe_adaptation(
+        session, record, choices, media_engine=services.settings.media_engine
+    )
+    if not plan["ready"]:
+        raise api_error(
+            409,
+            "adaptation-unavailable",
+            "This record cannot be generated here with these choices.",
+            refusals=plan["refusals"],
+        )
+    if record["operation"] not in REPLAYABLE_OPERATIONS:
+        raise api_error(
+            422,
+            "replay-operation-unsupported",
+            "This kind of generation cannot be generated again yet.",
+        )
+    if not chat_is_clean_for_replay(session, chat):
+        raise api_error(
+            409,
+            "replay-chat-not-clean",
+            "A record is generated again only in a new chat with nothing in it.",
+        )
+    turn, left_out = await adapted_turn_request(session, services.engines, record, plan["resolved"])
+    restore_edit_check = (
+        without_edit_check(chat) if record["operation"] == "image_to_image" else None
+    )
+
+    def mark_then_restore(transaction: Session, first: Run) -> None:
+        mark_adaptation(transaction, first, record, adaptation_choice_list(choices), left_out)
+        if restore_edit_check is not None:
+            restore_edit_check()
+
+    try:
+        return await _accept_turn(
+            services.orchestrator,
+            session,
+            chat_id,
+            turn,
+            freeze_context=True,
+            # No use-case recipe for this turn, without writing anything.
+            inherited_use_case_preset=InheritedWorkflowUseCasePreset(None),
+            before_commit=mark_then_restore,
+        )
+    except ReplayDiffers as exc:
+        raise api_error(
+            409,
+            "adaptation-output-count",
+            "A new version makes one result, as its record did; this would make several.",
+        ) from exc
+
+
+@router.post("/chats/{chat_id}/remixes", response_model=TurnAccepted, status_code=202)
+async def remix_a_picture(
+    chat_id: str, payload: RemixQueueRequest, request: Request, session: ConversationSessionDep
+) -> TurnAccepted:
+    """Make one picture from the settings a picture made elsewhere carries, as previewed.
+
+    The picture is read again and the remix resolved again with the same
+    workflow, model and applied settings; it is queued only when that comes to
+    the digest the preview showed, and only into a new chat with nothing in it.
+    No saved preset or settings recipe enters it. The run keeps which picture
+    and choices it came from, never a value from the picture's file, and the
+    picture itself is never changed. A remix that starts from the picture uses
+    it as the starting image, and is not checked again after it is made: the
+    check would make a second, different picture.
+    """
+
+    services = _services(request)
+    try:
+        metadata = await run_in_threadpool(
+            read_picture_generation_settings, services.artifacts, payload.artifact_id
+        )
+    except OutputRecipeUnavailable as exc:
+        raise api_error(exc.status, exc.code, exc.message) from exc
+    _refuse_comparison_chat(session, chat_id)
+    chat = session.get(Chat, chat_id)
+    if chat is None:
+        raise api_error(404, "chat-not-found", "chat not found")
+    if not chat_is_clean_for_replay(session, chat):
+        raise api_error(
+            409,
+            "remix-chat-not-clean",
+            "A remix is made only in a new chat with nothing in it.",
+        )
+    try:
+        preview = await preview_remix(
+            services.orchestrator,
+            session,
+            payload.artifact_id,
+            metadata,
+            payload.workflow_revision_id,
+            payload.profile_id,
+            payload.apply,
+            payload.role,
+            await remix_source(services, payload.artifact_id, payload.role),
+        )
+    except RemixChoiceInvalid as exc:
+        raise api_error(
+            422,
+            "remix-choice-invalid",
+            "Only settings the chosen workflow takes as they are can be applied, "
+            "and a size only whole.",
+        ) from exc
+    if not preview.ready or preview.text is None:
+        raise api_error(
+            409,
+            "remix-unavailable",
+            "This picture cannot be remixed with these choices.",
+            refusals=[
+                {"code": code, "message": REMIX_REFUSAL_MESSAGES[code]} for code in preview.refusals
+            ],
+        )
+    if preview.review_digest != payload.review_digest:
+        raise api_error(
+            409,
+            "remix-review-changed",
+            "What this remix would run changed since it was shown. Check it again.",
+        )
+    edit = preview.role == "edit"
+    turn = TurnRequest(
+        text=preview.text,
+        mode="image",
+        profile_id=preview.profile_id,
+        workflow_revision_id=preview.workflow_revision_id,
+        # Null on purpose: every preset layer stays out of the remix.
+        preset_id=None,
+        output_count=1,
+        settings=preview.request_settings,
+        input_artifact_ids=[payload.artifact_id] if edit else [],
+    )
+    check = remix_check(payload.artifact_id, preview)
+    # Only after the preview, which reads a clean session: the chat's own setting
+    # is put back before the commit, so later edits in it are checked as before.
+    restore_edit_check = without_edit_check(chat) if edit else None
+
+    def check_then_restore(transaction: Session, first: Run) -> None:
+        try:
+            check(transaction, first)
+        finally:
+            if restore_edit_check is not None:
+                restore_edit_check()
+
+    try:
+        return await _accept_turn(
+            services.orchestrator,
+            session,
+            chat_id,
+            turn,
+            freeze_context=True,
+            # No settings recipe for this turn, without writing anything.
+            inherited_use_case_preset=InheritedWorkflowUseCasePreset(None),
+            before_commit=check_then_restore,
+        )
+    except RemixDiffers as exc:
+        raise api_error(
+            409,
+            "remix-differs",
+            "This remix would not run as it was shown. Check it again.",
+        ) from exc
 
 
 async def _accept_turn(
@@ -3171,7 +5148,11 @@ async def _accept_turn(
     edit_source_message_id: str | None = None,
     chat_guard_held: bool = False,
     before_commit: Callable[[Session, Run], None] | None = None,
+    resolve_source: TurnSourceResolver | None = None,
+    inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
+    freeze_context: bool = False,
 ) -> TurnAccepted:
+    _refuse_comparison_chat(session, chat_id)
     try:
         if edit_source_message_id is not None and isinstance(payload, PriorTurnEditRequest):
             return await queue_prior_turn_edit(
@@ -3193,6 +5174,9 @@ async def _accept_turn(
             inherited_prompt_source=inherited_prompt_source,
             reference_source_message_id=reference_source_message_id,
             before_commit=before_commit,
+            resolve_source=resolve_source,
+            inherited_use_case_preset=inherited_use_case_preset,
+            freeze_context=freeze_context,
         )
     except EditRequestConflict as exc:
         raise api_error(409, "edit-request-conflict", str(exc)) from exc
@@ -3255,12 +5239,26 @@ async def _accept_turn(
         raise api_error(409, "prompt-source-conflict", str(exc)) from exc
     except PromptExpansionUseError as exc:
         raise api_error(422, "prompt-source-invalid", str(exc)) from exc
+    except WorkflowLoraAdmissionError as exc:
+        raise api_error(409 if exc.conflict else 422, exc.code, str(exc)) from exc
+    except UpscaleSelectionUnavailable:
+        raise api_error(
+            409,
+            "upscale-selection-unavailable",
+            "The selected enlargement workflow is no longer available. Refresh Enhance "
+            "before applying this edit.",
+        ) from None
     except ValueError as exc:
+        recipe_error = workflow_use_case_error(exc)
+        if recipe_error is not None:
+            code, message = recipe_error
+            raise api_error(422, code, message) from exc
         raise api_error(422, "turn-invalid", str(exc)) from exc
 
 
 @router.get("/messages/{message_id}", response_model=MessageOut)
 async def get_message(message_id: str, session: ConversationSessionDep) -> Message:
+    _refuse_comparison_message(session, message_id, "message-not-found", "message not found")
     message = session.scalar(
         select(Message)
         .options(
@@ -3277,18 +5275,28 @@ async def get_message(message_id: str, session: ConversationSessionDep) -> Messa
 
 
 @router.post("/messages/{message_id}/fork", response_model=ChatOut, status_code=201)
-async def fork_thread_from_message(message_id: str, session: ConversationSessionDep) -> Chat:
+async def fork_thread_from_message(message_id: str, session: ConversationSessionDep) -> ChatOut:
     """Start a new chat carrying the history up to this message."""
 
+    _refuse_comparison_message(
+        session, message_id, "fork-source-not-found", "the message to fork from was not found"
+    )
     try:
         fork = fork_chat_from_message(session, message_id)
+    except RecoveryPreviewConflict:
+        session.rollback()
+        raise api_error(
+            409,
+            "fork-source-busy",
+            "The conversation could not be forked safely. Try again.",
+        ) from None
     except ForkSourceNotFound as exc:
         raise api_error(404, "fork-source-not-found", str(exc)) from exc
     session.commit()
     created = session.get(Chat, fork.chat_id)
     if not created:  # pragma: no cover - the row was just committed
         raise api_error(500, "fork-unavailable", "the forked chat could not be read back")
-    return created
+    return _chat_outputs(session, [created])[0]
 
 
 @router.get(
@@ -3301,6 +5309,7 @@ async def get_chat_item_removal_impact(
 ) -> ChatItemRemovalImpactOut:
     """Preview target-owned payload detachment without authorizing mutation."""
 
+    _refuse_comparison_message(session, message_id, "message-not-found", "message not found")
     try:
         impact = preview_chat_item_removal(session, message_id)
     except ChatItemRemovalNotFound as exc:
@@ -3329,6 +5338,7 @@ async def remove_chat_item_content(
     message = session.get(Message, message_id)
     if message is None:
         raise api_error(404, "message-not-found", "message not found")
+    _refuse_comparison_chat(session, message.chat_id, "message-not-found", "message not found")
     services = _services(request)
     chat_id = message.chat_id
     # End the path-to-chat lookup transaction before waiting for the lock.
@@ -3384,6 +5394,7 @@ async def delete_message_exchange(
     (`exchange-busy`).
     """
 
+    _refuse_comparison_message(session, message_id, "exchange-not-found", "exchange not found")
     try:
         result = delete_exchange(session, message_id)
     except ExchangeHasReplies as exc:
@@ -3475,6 +5486,7 @@ async def _regenerate_message_locked(
         not source_assistant
         or not source_assistant.transcript_visible
         or source_assistant.status != MessageStatus.COMPLETE.value
+        or chat_is_deleted(session, source_assistant.chat_id)
     ):
         raise api_error(
             409, "response-not-regenerable", "only a completed visible response can be regenerated"
@@ -3529,6 +5541,24 @@ async def _regenerate_message_locked(
     if not prior_run:
         raise api_error(404, "assistant-run-not-found", "assistant run not found")
     _require_run_replay_sources(session, prior_run)
+    prior_context = accepted_context(session, prior_run)
+    upscale = recorded_enlargement(prior_run, prior_context)
+    source_context = (
+        prior_context
+        if prior_context is not None and (prior_context.source_fit is not None or upscale)
+        else None
+    )
+    source_fit = (
+        SourceFitRequest(
+            mode=source_context.source_fit.mode,
+            width=source_context.source_fit.canvas_width,
+            height=source_context.source_fit.canvas_height,
+        )
+        if source_context is not None and source_context.source_fit is not None
+        else None
+    )
+    source_run_id = prior_run.id
+    source_digest = prior_run.provenance_json.get("accepted_context_sha256")
     user_message = session.scalar(
         select(Message)
         .options(selectinload(Message.parts))
@@ -3553,28 +5583,65 @@ async def _regenerate_message_locked(
     prior_profile = (
         session.get(ModelProfile, prior_run.profile_id) if prior_run.profile_id else None
     )
+    # The workflow the settings are rebuilt against also says whether it takes added LoRAs.
+    settings_document = (
+        source_context.workflow
+        if source_context is not None and source_context.workflow is not None
+        else prior_revision
+    )
     try:
         prior_settings = await orchestrator.request_settings_for_operation(
             Operation(prior_run.operation),
-            prior_run.settings_json,
-            input_schema=prior_revision.input_schema_json if prior_revision else None,
-            engine=prior_profile.engine if prior_profile else None,
+            source_context.settings if source_context is not None else prior_run.settings_json,
+            api_graph=settings_document.api_graph_json if settings_document is not None else None,
+            input_schema=(
+                source_context.workflow.input_schema_json
+                if source_context is not None and source_context.workflow is not None
+                else prior_revision.input_schema_json
+                if prior_revision
+                else None
+            ),
+            engine=(
+                source_context.profile.engine
+                if source_context is not None and source_context.profile is not None
+                else prior_profile.engine
+                if prior_profile
+                else None
+            ),
+            accepts_added_loras=(
+                settings_document is not None and revision_accepts_added_loras(settings_document)
+            ),
         )
     except EngineNotConfiguredError as exc:
         raise api_error(409, "engine-not-configured", str(exc)) from exc
     except EngineSchemaUnavailableError as exc:
         raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
+    except WorkflowLoraAdmissionError as exc:
+        raise api_error(409, exc.code, str(exc)) from exc
     except ValueError as exc:
         raise api_error(422, "generation-settings-invalid", str(exc)) from exc
+    if source_fit is not None:
+        prior_settings.pop("width", None)
+        prior_settings.pop("height", None)
     turn = TurnRequest(
+        source_fit=source_fit,
+        upscale=upscale,
         text=text,
         mode=mode,
         parent_message_id=user_message.parent_id,
-        input_artifact_ids=orchestrator.input_artifact_ids_for_run(session, prior_run),
+        input_artifact_ids=(
+            list(source_context.input_artifact_ids)
+            if source_context is not None
+            else orchestrator.input_artifact_ids_for_run(session, prior_run)
+        ),
         settings={**prior_settings, **payload.settings},
         idempotency_key=payload.idempotency_key,
     )
-    prior_strength = _inherited_auto_image_edit_strength(prior_run)
+    prior_strength = (
+        source_context.image_edit_strength
+        if source_context is not None
+        else _inherited_auto_image_edit_strength(prior_run)
+    )
     inherited_parameter = (
         prior_strength.get("parameter")
         if prior_strength and isinstance(prior_strength.get("parameter"), str)
@@ -3587,7 +5654,50 @@ async def _regenerate_message_locked(
     if inherited_prompt_source is None:
         inherited_prompt_source = _message_prompt_source(user_message)
 
+    async def resolve_regeneration_source(
+        _transaction: Session, resolved: TurnRequest, operation: Operation, ordinal: int | None
+    ) -> tuple[TurnRequest, TurnInheritance]:
+        if source_context is None or operation != Operation.IMAGE_TO_IMAGE or ordinal is not None:
+            raise ValueError("Accepted source-canvas configuration is unavailable.")
+        return resolved.model_copy(
+            update={
+                "profile_id": source_context.profile_id,
+                "workflow_revision_id": source_context.workflow_revision_id,
+                "workflow_selection": None,
+                "preset_id": None,
+            }
+        ), TurnInheritance(
+            profile=source_context.profile,
+            workflow=source_context.workflow,
+            source_fit=source_context.source_fit,
+            image_edit_strength=inherited_image_edit_strength,
+            use_case_preset=InheritedWorkflowUseCasePreset(source_context.workflow_use_case_preset),
+        )
+
     def bind_request(_transaction: Session, run: Run) -> None:
+        if source_context is not None:
+            _transaction.flush()
+            _transaction.expire_all()
+            current = _transaction.get(Run, source_run_id)
+            if current is None or accepted_context(_transaction, current) != source_context:
+                raise ValueError("The accepted regeneration source changed.")
+            _require_run_replay_sources(_transaction, current)
+            run.provenance_json = {
+                **run.provenance_json,
+                "regeneration_source": {
+                    "source_run_id": source_run_id,
+                    "source_message_id": user_message.id,
+                    "source_snapshot_sha256": source_digest,
+                },
+            }
+            orchestrator._freeze_turn_context(
+                _transaction,
+                run,
+                inherited_context=source_context,
+                inherit_profile_configuration=True,
+                inherit_workflow_configuration=True,
+                inherit_vision_configuration=True,
+            )
         if payload.idempotency_key is not None:
             run.provenance_json = {
                 **run.provenance_json,
@@ -3602,11 +5712,20 @@ async def _regenerate_message_locked(
         use_explicit_parent=True,
         replacement_message_id=message_id,
         source_action="regenerate",
+        inherited_use_case_preset=InheritedWorkflowUseCasePreset(
+            prior_context.workflow_use_case_preset
+            if prior_context
+            else read_workflow_use_case_preset(
+                prior_run.provenance_json.get("workflow_use_case_preset"),
+                workflow_revision_id=prior_run.workflow_revision_id,
+            )
+        ),
         inherited_image_edit_strength=inherited_image_edit_strength,
         inherited_prompt_source=inherited_prompt_source,
         reference_source_message_id=user_message.id,
         chat_guard_held=True,
         before_commit=bind_request,
+        resolve_source=resolve_regeneration_source if source_context is not None else None,
     )
 
     if payload.idempotency_key is not None:
@@ -3623,17 +5742,23 @@ async def select_response_revision(
     revision_id: str,
     request: Request,
     session: ConversationSessionDep,
-) -> Message:
-    try:
-        return _services(request).orchestrator.select_response_revision(
-            session,
-            message_id,
-            revision_id,
-        )
-    except LookupError as exc:
-        raise api_error(404, "response-revision-not-found", str(exc)) from exc
-    except ValueError as exc:
-        raise api_error(409, "response-revision-not-selectable", str(exc)) from exc
+) -> MessageOut:
+    message = session.get(Message, message_id)
+    if message is None:
+        raise api_error(404, "response-revision-not-found", "assistant message not found")
+    orchestrator = _services(request).orchestrator
+    async with orchestrator.chat_guard(message.chat_id):
+        session.expire_all()
+        message = session.get(Message, message_id)
+        if message is None or chat_is_deleted(session, message.chat_id):
+            raise api_error(404, "response-revision-not-found", "assistant message not found")
+        try:
+            selected = orchestrator.select_response_revision(session, message_id, revision_id)
+        except LookupError as exc:
+            raise api_error(404, "response-revision-not-found", str(exc)) from exc
+        except ValueError as exc:
+            raise api_error(409, "response-revision-not-selectable", str(exc)) from exc
+        return MessageOut.model_validate(selected)
 
 
 @router.get("/messages/{message_id}/edit-source", response_model=PriorTurnEditSource)
@@ -3726,13 +5851,19 @@ async def edit_and_branch(
                     Operation(prior_run.operation),
                     prior_run.settings_json,
                     input_schema=(prior_revision.input_schema_json if prior_revision else None),
+                    api_graph=prior_revision.api_graph_json if prior_revision else None,
                     engine=prior_profile.engine if prior_profile else None,
+                    accepts_added_loras=(
+                        prior_revision is not None and revision_accepts_added_loras(prior_revision)
+                    ),
                 )
                 inherited_image_edit_strength = _inherited_auto_image_edit_strength(prior_run)
             except EngineNotConfiguredError as exc:
                 raise api_error(409, "engine-not-configured", str(exc)) from exc
             except EngineSchemaUnavailableError as exc:
                 raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
+            except WorkflowLoraAdmissionError as exc:
+                raise api_error(409, exc.code, str(exc)) from exc
             except ValueError as exc:
                 raise api_error(422, "generation-settings-invalid", str(exc)) from exc
     turn = payload.model_copy(update=updates)
@@ -3773,7 +5904,7 @@ def _mode_for_operation(operation: Operation) -> RoutingMode:
 @router.get("/runs/{run_id}", response_model=RunOut)
 async def get_run(run_id: str, session: ConversationSessionDep) -> Run:
     run = session.get(Run, run_id)
-    if not run:
+    if not run or chat_is_deleted(session, run.chat_id):
         raise api_error(404, "run-not-found", "run not found")
     return run
 
@@ -3828,6 +5959,7 @@ async def list_work_plans(
 ) -> list[WorkPlan]:
     statement = (
         select(WorkPlan)
+        .where(visible_chat(WorkPlan.chat_id))
         .options(selectinload(WorkPlan.steps))
         .order_by(WorkPlan.created_at.desc(), WorkPlan.id.desc())
         .limit(limit)
@@ -3842,7 +5974,7 @@ async def get_work_plan(plan_id: str, session: ConversationSessionDep) -> WorkPl
     plan = session.scalar(
         select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
     )
-    if not plan:
+    if not plan or chat_is_deleted(session, plan.chat_id):
         raise api_error(404, "work-plan-not-found", "work plan not found")
     return plan
 
@@ -3851,6 +5983,9 @@ async def get_work_plan(plan_id: str, session: ConversationSessionDep) -> WorkPl
 async def get_work_step(step_id: str, session: ConversationSessionDep) -> WorkStep:
     step = session.get(WorkStep, step_id)
     if not step:
+        raise api_error(404, "work-step-not-found", "work step not found")
+    plan = session.get(WorkPlan, step.plan_id)
+    if plan is None or chat_is_deleted(session, plan.chat_id):
         raise api_error(404, "work-step-not-found", "work step not found")
     return step
 
@@ -3864,7 +5999,7 @@ async def cancel_work_plan(
     plan = session.scalar(
         select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
     )
-    if not plan:
+    if not plan or chat_is_deleted(session, plan.chat_id):
         raise api_error(404, "work-plan-not-found", "work plan not found")
     jobs = list(
         session.scalars(
@@ -3910,7 +6045,7 @@ async def retry_work_plan(
     plan = session.scalar(
         select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
     )
-    if not plan:
+    if not plan or chat_is_deleted(session, plan.chat_id):
         raise api_error(404, "work-plan-not-found", "work plan not found")
     jobs = list(
         session.scalars(
@@ -3924,10 +6059,17 @@ async def retry_work_plan(
     )
     if not jobs:
         raise api_error(409, "work-plan-not-retryable", "work plan has no retryable steps")
+    orchestrator = _services(request).orchestrator
     for job in jobs:
         source_run = _job_replay_source_run(session, job)
         if source_run is not None:
             _require_run_replay_sources(session, source_run)
+        run = session.get(Run, job.run_id) if job.run_id else None
+        if run is not None:
+            try:
+                orchestrator.preflight_workflow_lora_replay(session, run)
+            except WorkflowLoraAdmissionError as exc:
+                raise api_error(409, exc.code, str(exc)) from exc
     for job in jobs:
         await retry_job(job.id, request, session)
     session.expire_all()
@@ -3951,6 +6093,14 @@ async def retry_work_step(
     return await retry_job(job.id, request, session)
 
 
+@router.get("/downloads/{job_id}", response_model=JobOut)
+async def get_download_job(job_id: str, session: SessionDep) -> Job:
+    job = session.get(Job, job_id)
+    if job is None or job.kind != JobKind.DOWNLOAD.value:
+        raise api_error(404, "download-not-found", "Download not found.")
+    return job
+
+
 @router.get("/jobs", response_model=list[JobOut])
 async def list_jobs(
     session: ConversationSessionDep,
@@ -3959,13 +6109,304 @@ async def list_jobs(
 ) -> list[Job]:
     statement = (
         select(Job)
-        .where(Job.kind != JobKind.EDIT_VERIFY.value)
+        .where(Job.kind != JobKind.EDIT_VERIFY.value, visible_job())
         .order_by(Job.created_at.desc())
         .limit(limit)
     )
     if status:
         statement = statement.where(Job.status == status)
     return list(session.scalars(statement).all())
+
+
+@router.get("/queue/plans/{plan_id}/steps", response_model=QueuePlanStepsOut)
+async def queue_plan_steps(
+    plan_id: str,
+    session: ConversationSessionDep,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=9_223_372_036_854_775_807),
+) -> QueuePlanStepsOut:
+    try:
+        page = list_queue_plan_steps(session, plan_id, limit=limit, offset=offset)
+    except QueueStepStateError as exc:
+        raise api_error(
+            409, "queue-step-state-invalid", "Stored work step state is invalid."
+        ) from exc
+    if page is None:
+        raise api_error(404, "queue-plan-not-found", "The submitted work could not be found.")
+    return page
+
+
+@router.get("/queue/activity", response_model=QueueActivityPageOut)
+async def queue_activity(
+    request: Request,
+    session: ConversationSessionDep,
+    limit: int = Query(default=50, ge=1, le=100),
+    lane: Literal["generation", "transfer", "install", "utility"] | None = None,
+    cursor: str | None = Query(default=None, min_length=1, max_length=2_048),
+) -> QueueActivityPageOut:
+    try:
+        return list_queue_activity(
+            session,
+            signing_key=_services(request).security.local_state_signing_key(b"user-queue-activity"),
+            limit=limit,
+            lane=lane,
+            cursor=cursor,
+        )
+    except QueueActivityCursorError as exc:
+        raise api_error(
+            422,
+            "queue-activity-cursor-invalid",
+            "The accepted work page request is invalid. Refresh to start again.",
+        ) from exc
+
+
+@router.get("/queue/lanes/{lane}/order", response_model=QueueOrderPageOut)
+def queue_order(
+    lane: Literal["generation", "transfer", "install", "utility"],
+    session: ConversationSessionDep,
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None, min_length=1, max_length=2_048),
+) -> QueueOrderPageOut:
+    try:
+        return read_queue_order(session, lane, limit=limit, cursor=cursor)
+    except QueueOrderLimit as exc:
+        raise api_error(
+            409,
+            "queue-order-limit-exceeded",
+            f"Manual ordering supports up to {exc.maximum_jobs:,} unfinished jobs in a category.",
+            maximum_jobs=exc.maximum_jobs,
+        ) from exc
+    except QueueOrderConflict as exc:
+        raise api_error(
+            409, "queue-order-conflict", "The queue changed. Refresh before trying again."
+        ) from exc
+
+
+@router.post("/queue/lanes/{lane}/reorder", response_model=QueueOrderResultOut)
+async def reorder_queue(
+    lane: Literal["generation", "transfer", "install", "utility"],
+    request: Request,
+    payload: QueueOrderCommand,
+    session: ConversationSessionDep,
+) -> QueueOrderResultOut:
+    try:
+        result = await run_in_threadpool(change_queue_order, session, lane, payload)
+    except QueueOrderLimit as exc:
+        raise api_error(
+            409,
+            "queue-order-limit-exceeded",
+            f"Manual ordering supports up to {exc.maximum_jobs:,} unfinished jobs in a category.",
+            maximum_jobs=exc.maximum_jobs,
+        ) from exc
+    except QueueOrderConflict as exc:
+        raise api_error(
+            409, "queue-order-conflict", "The queue changed. Refresh before trying again."
+        ) from exc
+    await _services(request).scheduler.queue_control_changed(lane)
+    return result
+
+
+async def _change_queue_control(
+    request: Request,
+    plan_id: str,
+    action: Literal["hold", "release"],
+    payload: QueueControlCommand,
+    session: Session,
+) -> QueueControlResultOut:
+    try:
+        result = change_plan_control(session, plan_id, action, payload)
+    except QueueControlMissing as exc:
+        raise api_error(
+            404, "queue-plan-not-found", "The submitted work could not be found."
+        ) from exc
+    except QueueControlConflict as exc:
+        raise api_error(
+            409, "queue-control-conflict", "The queue changed. Refresh before trying again."
+        ) from exc
+    await _services(request).scheduler.queue_control_changed(plan_id)
+    return result
+
+
+@router.post("/queue/items/{plan_id}/hold", response_model=QueueControlResultOut)
+async def hold_queue_plan(
+    request: Request,
+    plan_id: str,
+    payload: QueueControlCommand,
+    session: ConversationSessionDep,
+) -> QueueControlResultOut:
+    return await _change_queue_control(request, plan_id, "hold", payload, session)
+
+
+@router.post("/queue/items/{plan_id}/release", response_model=QueueControlResultOut)
+async def release_queue_plan(
+    request: Request,
+    plan_id: str,
+    payload: QueueControlCommand,
+    session: ConversationSessionDep,
+) -> QueueControlResultOut:
+    return await _change_queue_control(request, plan_id, "release", payload, session)
+
+
+@router.get("/queue/lanes/generation", response_model=GenerationQueuePolicyOut)
+def generation_queue_policy(session: ConversationSessionDep) -> GenerationQueuePolicyOut:
+    try:
+        return read_generation_queue(session)
+    except GenerationQueueConflict as exc:
+        raise api_error(
+            409, "queue-lane-conflict", "The generation queue changed. Refresh before trying again."
+        ) from exc
+
+
+async def _change_generation_policy(
+    request: Request,
+    action: Literal["pause_after_current", "resume"],
+    payload: QueueControlCommand,
+    session: Session,
+) -> GenerationQueuePolicyOut:
+    try:
+        result = await run_in_threadpool(change_generation_queue, session, action, payload)
+    except GenerationQueueConflict as exc:
+        raise api_error(
+            409, "queue-lane-conflict", "The generation queue changed. Refresh before trying again."
+        ) from exc
+    await _services(request).scheduler.queue_control_changed("generation")
+    return result
+
+
+@router.post("/queue/lanes/generation/pause-after-current", response_model=GenerationQueuePolicyOut)
+async def pause_generation_queue(
+    request: Request, payload: QueueControlCommand, session: ConversationSessionDep
+) -> GenerationQueuePolicyOut:
+    return await _change_generation_policy(request, "pause_after_current", payload, session)
+
+
+@router.post("/queue/lanes/generation/resume", response_model=GenerationQueuePolicyOut)
+async def resume_generation_queue(
+    request: Request, payload: QueueControlCommand, session: ConversationSessionDep
+) -> GenerationQueuePolicyOut:
+    return await _change_generation_policy(request, "resume", payload, session)
+
+
+@router.get("/queue/lanes/transfer", response_model=TransferQueuePolicyOut)
+def transfer_queue_policy(session: ConversationSessionDep) -> TransferQueuePolicyOut:
+    try:
+        result = read_lane_policy(session, "transfer")
+    except QueueLaneConflict as exc:
+        raise api_error(
+            409, "queue-lane-conflict", "The transfer queue changed. Refresh before trying again."
+        ) from exc
+    return TransferQueuePolicyOut.model_validate(dataclasses.asdict(result))
+
+
+async def _change_transfer_policy(
+    request: Request,
+    action: Literal["pause_after_current", "resume"],
+    payload: QueueControlCommand,
+    session: Session,
+) -> TransferQueuePolicyOut:
+    try:
+        result = await run_in_threadpool(change_lane_policy, session, "transfer", action, payload)
+    except QueueLaneConflict as exc:
+        raise api_error(
+            409, "queue-lane-conflict", "The transfer queue changed. Refresh before trying again."
+        ) from exc
+    await _services(request).scheduler.queue_control_changed("transfer")
+    return TransferQueuePolicyOut.model_validate(dataclasses.asdict(result))
+
+
+@router.post("/queue/lanes/transfer/pause-after-current", response_model=TransferQueuePolicyOut)
+async def pause_transfer_queue(
+    request: Request, payload: QueueControlCommand, session: ConversationSessionDep
+) -> TransferQueuePolicyOut:
+    return await _change_transfer_policy(request, "pause_after_current", payload, session)
+
+
+@router.post("/queue/lanes/transfer/resume", response_model=TransferQueuePolicyOut)
+async def resume_transfer_queue(
+    request: Request, payload: QueueControlCommand, session: ConversationSessionDep
+) -> TransferQueuePolicyOut:
+    return await _change_transfer_policy(request, "resume", payload, session)
+
+
+@router.get("/queue/lanes/install", response_model=InstallQueuePolicyOut)
+def install_queue_policy(session: ConversationSessionDep) -> InstallQueuePolicyOut:
+    try:
+        result = read_lane_policy(session, "install")
+    except QueueLaneConflict as exc:
+        raise api_error(
+            409,
+            "queue-lane-conflict",
+            "The installation queue changed. Refresh before trying again.",
+        ) from exc
+    return InstallQueuePolicyOut.model_validate(dataclasses.asdict(result))
+
+
+async def _change_install_policy(
+    request: Request,
+    action: Literal["pause_after_current", "resume"],
+    payload: QueueControlCommand,
+    session: Session,
+) -> InstallQueuePolicyOut:
+    try:
+        result = await run_in_threadpool(change_lane_policy, session, "install", action, payload)
+    except QueueLaneConflict as exc:
+        raise api_error(
+            409,
+            "queue-lane-conflict",
+            "The installation queue changed. Refresh before trying again.",
+        ) from exc
+    await _services(request).scheduler.queue_control_changed("install")
+    return InstallQueuePolicyOut.model_validate(dataclasses.asdict(result))
+
+
+@router.post("/queue/lanes/install/pause-after-current", response_model=InstallQueuePolicyOut)
+async def pause_install_queue(
+    request: Request, payload: QueueControlCommand, session: ConversationSessionDep
+) -> InstallQueuePolicyOut:
+    return await _change_install_policy(request, "pause_after_current", payload, session)
+
+
+@router.post("/queue/lanes/install/resume", response_model=InstallQueuePolicyOut)
+async def resume_install_queue(
+    request: Request, payload: QueueControlCommand, session: ConversationSessionDep
+) -> InstallQueuePolicyOut:
+    return await _change_install_policy(request, "resume", payload, session)
+
+
+@router.get("/jobs/activity", response_model=JobActivityOut)
+async def job_activity(
+    session: ConversationSessionDep,
+    active_limit: int = Query(default=100, ge=1, le=500),
+) -> JobActivityOut:
+    active_rows = session.execute(
+        select(Job, func.count(Job.id).over())
+        .where(
+            Job.kind != JobKind.EDIT_VERIFY.value,
+            visible_job(),
+            Job.status.in_(
+                (JobStatus.QUEUED.value, JobStatus.RUNNING.value, JobStatus.PAUSED.value)
+            ),
+        )
+        .order_by(Job.created_at.asc(), Job.id.asc())
+        .limit(active_limit)
+    ).all()
+    recent_issues = session.scalars(
+        select(Job)
+        .where(
+            Job.kind != JobKind.EDIT_VERIFY.value,
+            visible_job(),
+            Job.status.in_(
+                (JobStatus.FAILED.value, JobStatus.CANCELLED.value, JobStatus.INTERRUPTED.value)
+            ),
+        )
+        .order_by(Job.updated_at.desc(), Job.id.desc())
+        .limit(3)
+    ).all()
+    return JobActivityOut(
+        active=[JobOut.model_validate(row[0]) for row in active_rows],
+        active_count=int(active_rows[0][1]) if active_rows else 0,
+        recent_issues=[JobOut.model_validate(job) for job in recent_issues],
+    )
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=JobOut)
@@ -3975,7 +6416,7 @@ async def cancel_job(
     session: ConversationSessionDep,
 ) -> Job | JobOut:
     job = session.get(Job, job_id)
-    if not job:
+    if not job or job_is_deleted(session, job_id):
         raise api_error(404, "job-not-found", "job not found")
     verification_snapshot = (
         JobOut.model_validate(job)
@@ -3983,10 +6424,37 @@ async def cancel_job(
         and isinstance(job.payload_json.get("setup_verification_id"), str)
         else None
     )
-    if job.kind == JobKind.DOWNLOAD.value:
+    if job.kind == JobKind.WORKFLOW_INSTALL.value:
+        try:
+            session.execute(text("UPDATE workflow_install_offers SET status = status WHERE 0"))
+            session.expire_all()
+            offer = workflow_completion_offer(session, job_id)
+            cancelled = cancel_workflow_completion(
+                session,
+                offer,
+                media_worker_stopped=_media_worker_truly_stopped(_services(request)),
+            )
+            download_ids = [item.id for item in workflow_download_jobs(session, offer)]
+            cancelled_offer_id = offer.id
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            raise api_error(
+                409, "job-not-cancellable", "Workflow installation cannot be cancelled."
+            ) from exc
+        changed = cancelled is not None
+        if changed:
+            for download_id in download_ids:
+                await _services(request).downloads.cancel(
+                    download_id, cancelled_offer_id=cancelled_offer_id
+                )
+            await _services(request).scheduler.publish_job(job_id)
+    elif job.kind in {JobKind.DOWNLOAD.value, JobKind.ACTIVATE.value}:
         changed = await _services(request).downloads.cancel(job_id)
     elif job.kind == JobKind.REGISTRY_PREPARE.value:
         changed = await _cancel_registry_preparation(job_id)
+    elif job.kind == JobKind.MEDIA_UTILITY.value:
+        changed = await _services(request).video_utilities.cancel(job_id)
     else:
         changed = await _services(request).orchestrator.cancel(job_id)
     if not changed:
@@ -4033,6 +6501,7 @@ async def classify_chat_draft(
     drifted every time the router learned a new phrasing, so the composer showed
     the wrong controls for exactly the wording the server handled correctly.
     """
+    _refuse_comparison_chat(session, chat_id)
     chat = session.get(Chat, chat_id)
     if not chat:
         raise api_error(404, "chat-not-found", "chat not found")
@@ -4075,6 +6544,7 @@ async def cancel_active_chat_run(
 ) -> Job:
     if not session.get(Chat, chat_id):
         raise api_error(404, "chat-not-found", "chat not found")
+    _refuse_comparison_chat(session, chat_id)
     if not _current_chat_job(session, chat_id):
         raise api_error(409, "chat-run-absent", "chat has no cancellable run")
     refreshed = await _cancel_current_chat_work(request, session, chat_id)
@@ -4098,6 +6568,7 @@ async def stop_and_send_turn(
 ) -> TurnAccepted:
     if not session.get(Chat, chat_id):
         raise api_error(404, "chat-not-found", "chat not found")
+    _refuse_comparison_chat(session, chat_id)
     await _cancel_current_chat_work(request, session, chat_id)
     return await _accept_turn(
         _services(request).orchestrator,
@@ -4190,12 +6661,42 @@ async def retry_job(
     session: ConversationSessionDep,
 ) -> Job:
     job = session.get(Job, job_id)
-    if not job:
+    if not job or job_is_deleted(session, job_id):
         raise api_error(404, "job-not-found", "job not found")
     if job.status not in {"failed", "cancelled", "interrupted"}:
         raise api_error(
             409, "job-not-retryable-state", "only terminal unsuccessful jobs can be retried"
         )
+    if job.kind == JobKind.WORKFLOW_INSTALL.value:
+        try:
+            session.execute(text("UPDATE workflow_install_offers SET status = status WHERE 0"))
+            session.expire_all()
+            offer = workflow_completion_offer(session, job_id)
+            job, downloads = retry_workflow_completion(session, offer)
+            source_offer_id = offer.id
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            raise api_error(
+                409,
+                "workflow-installation-not-retryable",
+                "Workflow installation cannot be retried.",
+            ) from exc
+        manager = _services(request).downloads
+        for download in downloads:
+            if download.status == JobStatus.QUEUED.value:
+                manager.start(download.id)
+        manager.start_workflow_installation(source_offer_id)
+        return job
+    if job.kind == JobKind.REGISTRY_PREPARE.value:
+        return _retry_registry_preparation(session, _services(request), job_id)
+    if job.kind == JobKind.MEDIA_UTILITY.value:
+        utilities = _services(request).video_utilities
+        utilities.stage_retry(job)
+        session.commit()
+        utilities.start(job.id)
+        session.refresh(job)
+        return job
     if job.kind == JobKind.DOWNLOAD.value:
         job.status = "queued"
         job.progress = 0
@@ -4241,6 +6742,10 @@ async def retry_job(
         if not run:
             raise api_error(422, "job-not-retryable", "job has no retryable operation")
         _require_run_replay_sources(session, run)
+        try:
+            orchestrator.preflight_workflow_lora_replay(session, run)
+        except WorkflowLoraAdmissionError as exc:
+            raise api_error(409, exc.code, str(exc)) from exc
         job.status = "queued"
         job.progress = 0
         job.error = None
@@ -4263,6 +6768,8 @@ async def retry_job(
             orchestrator.prepare_retry(session, run)
         except LookupError as exc:
             raise api_error(422, "job-not-retryable", str(exc)) from exc
+        except WorkflowLoraAdmissionError as exc:
+            raise api_error(409, exc.code, str(exc)) from exc
         session.commit()
         orchestrator.start(job.id, run.id)
         session.refresh(job)
@@ -4290,10 +6797,23 @@ async def upload_artifact(
         original_name=file.filename,
         metadata={"uploaded": True},
     )
-    ensure_library_entry(session, artifact)
+    try:
+        recovered_id = recover_imported_membership(session, artifact, utcnow())
+    except RecoveryPreviewConflict as error:
+        session.rollback()
+        raise api_error(
+            409,
+            error.code,
+            "This file's Media Library recovery state could not be restored. "
+            "Check Recently Deleted in Settings > Data & backups.",
+        ) from None
+    if artifact.metadata_json.get("uploaded") is not True:
+        artifact.metadata_json = {**artifact.metadata_json, "uploaded": True}
     session.commit()
     result = ArtifactOut.model_validate(artifact)
     result.url = f"/api/artifacts/{artifact.id}/content"
+    if recovered_id is not None:
+        await services.events.publish("recovery.updated", recovered_id, {})
     return result
 
 
@@ -4350,7 +6870,7 @@ def _artifact_generation_identity(
     return _generation_identity(run.provenance_json) if run is not None else None
 
 
-@router.get("/artifact-library", response_model=ArtifactLibraryPage)
+@router.get("/artifact-library", response_model=ArtifactAlbumPage | ArtifactLibraryPage)
 async def list_artifact_library(
     request: Request,
     session: ConversationSessionDep,
@@ -4360,7 +6880,9 @@ async def list_artifact_library(
     state: Literal["visible", "trashed"] = "visible",
     favorite: Literal["true", "false"] | None = None,
     query: str = Query(default="", max_length=200),
-) -> ArtifactLibraryPage:
+    collection_id: str | None = Query(default=None, pattern=r"^collection_[0-9a-f]{32}$"),
+    tag_id: str | None = Query(default=None, pattern=r"^mediatag_[0-9a-f]{32}$"),
+) -> ArtifactAlbumPage | ArtifactLibraryPage:
     """Return one bounded page of durable Media Library memberships."""
 
     favorite_value = None if favorite is None else favorite == "true"
@@ -4374,6 +6896,8 @@ async def list_artifact_library(
             state=state,
             favorite=favorite_value,
             query=query,
+            collection_id=collection_id,
+            tag_id=tag_id,
         )
     except ArtifactLibraryCursorError as exc:
         raise api_error(
@@ -4387,25 +6911,33 @@ async def list_artifact_library(
             "artifact-library-conflict",
             "The Media Library could not be read safely. Refresh and try again.",
         ) from exc
-    return ArtifactLibraryPage(
-        items=[
-            ArtifactLibraryEntrySummary(
-                id=row.entry.id,
-                artifact_id=row.artifact.id,
-                version=row.entry.version,
-                state=cast(Literal["visible", "trashed"], row.entry.state),
-                display_name=row.entry.display_name,
-                favorite=row.entry.favorite,
-                kind=cast(Literal["image", "video"], row.artifact.kind),
-                media_type=row.artifact.media_type,
-                size_bytes=row.artifact.size_bytes,
-                created_at=row.entry.created_at,
-                updated_at=row.entry.updated_at,
-            )
-            for row in rows
-        ],
-        next_cursor=next_cursor,
-    )
+    items = [
+        ArtifactLibraryEntrySummary(
+            id=row.entry.id,
+            artifact_id=row.artifact.id,
+            version=row.entry.version,
+            state=cast(Literal["visible", "trashed"], row.entry.state),
+            display_name=row.entry.display_name,
+            favorite=row.entry.favorite,
+            kind=cast(Literal["image", "video"], row.artifact.kind),
+            media_type=row.artifact.media_type,
+            size_bytes=row.artifact.size_bytes,
+            created_at=row.entry.created_at,
+            updated_at=row.entry.updated_at,
+        )
+        for row in rows
+    ]
+    if collection_id is not None:
+        return ArtifactAlbumPage(
+            items=[
+                ArtifactAlbumEntrySummary(
+                    **item.model_dump(), collection_position=cast(int, row.collection_position)
+                )
+                for item, row in zip(items, rows, strict=True)
+            ],
+            next_cursor=next_cursor,
+        )
+    return ArtifactLibraryPage(items=items, next_cursor=next_cursor)
 
 
 @router.get("/artifacts", response_model=list[ArtifactLibraryItem])
@@ -4419,8 +6951,13 @@ async def list_artifacts(
     limit: Annotated[int | None, Query(ge=1, le=200)] = None,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[ArtifactLibraryItem]:
-    statement = select(Artifact).where(
-        Artifact.kind.in_([ArtifactKind.IMAGE.value, ArtifactKind.VIDEO.value])
+    statement = (
+        select(Artifact)
+        .join(ArtifactLibraryEntry, ArtifactLibraryEntry.artifact_id == Artifact.id)
+        .where(
+            ArtifactLibraryEntry.state == "visible",
+            Artifact.kind.in_([ArtifactKind.IMAGE.value, ArtifactKind.VIDEO.value]),
+        )
     )
     if kind:
         statement = statement.where(Artifact.kind == kind)
@@ -4437,13 +6974,15 @@ async def list_artifacts(
         select(MessagePart.id)
         .join(Message, Message.id == MessagePart.message_id)
         .join(Chat, Chat.id == Message.chat_id)
-        .where(MessagePart.artifact_id == Artifact.id)
+        .where(MessagePart.artifact_id == Artifact.id, visible_chat(Chat.id))
     )
     # Each filter describes membership of the artifact, not necessarily one reference.
     if chat_id:
         statement = statement.where(membership.where(Message.chat_id == chat_id).exists())
     if project_id:
-        statement = statement.where(membership.where(Chat.project_id == project_id).exists())
+        statement = statement.where(
+            membership.where(effective_project_id(Chat.project_id) == project_id).exists()
+        )
     if limit is not None or offset:
         statement = statement.order_by(Artifact.created_at.desc(), Artifact.id.desc()).offset(
             offset
@@ -4458,10 +6997,14 @@ async def list_artifacts(
     for batch_offset in range(0, len(artifact_ids), 400):
         batch = artifact_ids[batch_offset : batch_offset + 400]
         reference_rows = session.execute(
-            select(MessagePart.artifact_id, Message.chat_id, Chat.project_id)
+            select(
+                MessagePart.artifact_id,
+                Message.chat_id,
+                effective_project_id(Chat.project_id).label("project_id"),
+            )
             .join(Message, Message.id == MessagePart.message_id)
             .join(Chat, Chat.id == Message.chat_id)
-            .where(MessagePart.artifact_id.in_(batch))
+            .where(MessagePart.artifact_id.in_(batch), visible_chat(Chat.id))
         ).all()
         for artifact_id, referenced_chat_id, referenced_project_id in reference_rows:
             references.setdefault(artifact_id, []).append(
@@ -4477,7 +7020,10 @@ async def list_artifacts(
     for offset in range(0, len(ordered_run_ids), 400):
         batch = ordered_run_ids[offset : offset + 400]
         runs_by_id.update(
-            (run.id, run) for run in session.scalars(select(Run).where(Run.id.in_(batch))).all()
+            (run.id, run)
+            for run in session.scalars(
+                select(Run).where(Run.id.in_(batch), visible_chat(Run.chat_id))
+            ).all()
         )
     results: list[ArtifactLibraryItem] = []
     for artifact in artifacts:
@@ -4532,10 +7078,11 @@ async def artifact_storage(
     services = _services(request)
     artifacts = session.scalars(select(Artifact)).all()
     referenced = services.artifacts.referenced_artifact_ids(session)
+    windows = windows_for(session, services.settings)
     retention = services.artifacts.cleanup_retention(
         session,
-        retention_days=services.settings.artifact_retention_days,
-        temporary_hours=services.settings.temporary_retention_hours,
+        retention_days=windows.media_days,
+        temporary_hours=windows.temporary_hours,
         dry_run=True,
     )
     temporary = [
@@ -4562,8 +7109,8 @@ async def artifact_storage(
         retention_pending_count=retention.pending_count,
         disk_free_bytes=disk_free,
         warning=disk_free < services.settings.storage_warning_free_bytes,
-        retention_days=services.settings.artifact_retention_days,
-        temporary_retention_hours=services.settings.temporary_retention_hours,
+        retention_days=windows.media_days,
+        temporary_retention_hours=windows.temporary_hours,
     )
 
 
@@ -4612,8 +7159,7 @@ async def cleanup_artifacts(
             try:
                 summary = services.artifacts.cleanup_retention(
                     session,
-                    retention_days=settings.artifact_retention_days,
-                    temporary_hours=settings.temporary_retention_hours,
+                    windows_from=lambda held: windows_for(held, settings),
                     dry_run=payload.dry_run,
                     max_deletions=max_deletions,
                     should_stop=should_stop,
@@ -4637,6 +7183,102 @@ async def cleanup_artifacts(
         removed_count=cleanup.removed_count,
         reclaimed_bytes=cleanup.reclaimed_bytes,
         truncated=cleanup.truncated,
+    )
+
+
+@router.get("/settings/generation-retries", response_model=GenerationRetryPolicyOut)
+def get_generation_retry_policy(session: ConversationSessionDep) -> GenerationRetryPolicyOut:
+    try:
+        return read_retry_policy(session)
+    except ValueError as exc:
+        raise api_error(
+            409,
+            "generation-retry-setting-invalid",
+            "The saved generation retry setting is invalid.",
+        ) from exc
+
+
+@router.put("/settings/generation-retries", response_model=GenerationRetryPolicyOut)
+def put_generation_retry_policy(
+    payload: GenerationRetryPolicyUpdate, session: ConversationSessionDep
+) -> GenerationRetryPolicyOut:
+    try:
+        result = write_retry_policy(session, payload)
+    except GenerationRetryPolicyConflict as exc:
+        session.rollback()
+        raise api_error(
+            409,
+            "generation-retry-setting-changed",
+            "The generation retry setting changed. Refresh it.",
+        ) from exc
+    session.commit()
+    return result
+
+
+@router.get("/artifacts/retention", response_model=RetentionPolicyOut)
+async def get_retention_policy(
+    request: Request, session: ConversationSessionDep
+) -> RetentionPolicyOut:
+    """The retention windows in force, at revision 0 while they are the installation's."""
+
+    return read_policy(session, _services(request).settings)
+
+
+@router.put("/artifacts/retention", response_model=RetentionPolicyOut)
+async def put_retention_policy(
+    payload: RetentionPolicyWrite, request: Request, session: ConversationSessionDep
+) -> RetentionPolicyOut:
+    """Choose both retention windows, refusing a choice based on an older revision.
+
+    Nothing is cleared here. The windows apply from the next clearing pass, at
+    start or from Clear now.
+    """
+
+    try:
+        chosen = write_policy(
+            session, _services(request).settings, payload.expected_revision, payload
+        )
+    except RetentionPolicyStale as stale:
+        session.rollback()
+        raise api_error(
+            409,
+            "retention-policy-stale",
+            "Retention was changed since it was read. Read it again before choosing.",
+            current_revision=stale.current_revision,
+        ) from None
+    session.commit()
+    return chosen
+
+
+@router.post("/artifacts/retention/preview", response_model=ArtifactCleanupResult)
+async def preview_retention_policy(
+    payload: RetentionWindowsIn, request: Request
+) -> ArtifactCleanupResult:
+    """What a clearing pass would clear now under proposed windows, clearing nothing.
+
+    The pass examines every stored file, so it runs off the event loop in a
+    session of its own, as Clear now does.
+    """
+
+    artifacts = _services(request).artifacts
+
+    def run() -> RetentionCleanupSummary:
+        with SessionLocal() as session:
+            return artifacts.cleanup_retention(
+                session,
+                retention_days=payload.media_days,
+                temporary_hours=payload.temporary_hours,
+                dry_run=True,
+            )
+
+    preview = await asyncio.to_thread(run)
+    return ArtifactCleanupResult(
+        dry_run=True,
+        marked_count=preview.marked_count,
+        retention_pending_count=preview.pending_count,
+        removed_count=preview.removed_count,
+        reclaimed_bytes=preview.reclaimed_bytes,
+        truncated=preview.truncated,
     )
 
 
@@ -4688,7 +7330,11 @@ async def artifact_content(
     if not artifact:
         raise api_error(404, "artifact-not-found", "artifact not found")
     try:
-        path, media_type, disposition = _services(request).artifacts.delivery_metadata(artifact)
+        # Off the event loop: the first delivery of a stored file hashes all of
+        # it, and an encrypted backup can be gigabytes.
+        path, media_type, disposition = await asyncio.to_thread(
+            _services(request).artifacts.delivery_metadata, artifact
+        )
     except (FileNotFoundError, ValueError) as exc:
         raise api_error(
             410, "artifact-file-unreadable", "artifact file is missing or corrupt"
@@ -4704,6 +7350,47 @@ async def artifact_content(
             "Content-Security-Policy": "sandbox; default-src 'none'",
             "Cross-Origin-Resource-Policy": "same-origin",
             "ETag": f'"{artifact.sha256}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/artifacts/{artifact_id}/export")
+async def export_artifact(
+    artifact_id: str,
+    request: Request,
+    session: ConversationSessionDep,
+    file_format: Annotated[ExportFormat, Query(alias="format")],
+    quality: Annotated[int, Query(ge=1, le=100)] = DEFAULT_EXPORT_QUALITY,
+) -> Response:
+    """A picture written out as PNG, JPEG or WebP, upright and with its color profile.
+
+    Made from the stored bytes on each request and never stored itself, so
+    exporting cannot change the picture or add to the library.
+    """
+
+    artifact = session.get(Artifact, artifact_id)
+    if artifact is None:
+        raise api_error(404, "artifact-not-found", "artifact not found")
+    if not _is_editable_image(artifact):
+        raise api_error(
+            422, "artifact-not-a-picture", "Only a picture can be exported in another format."
+        )
+    try:
+        content = await run_in_threadpool(
+            export_stored_picture, _services(request).artifacts, artifact, file_format, quality
+        )
+    except PictureExportError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    name = quote(export_file_name(artifact.original_name, file_format), safe="")
+    return Response(
+        content,
+        media_type=EXPORT_FORMATS[file_format][1],
+        headers={
+            "Content-Disposition": f"attachment; filename*=utf-8''{name}",
+            "Cache-Control": "private, no-store",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+            "Cross-Origin-Resource-Policy": "same-origin",
             "X-Content-Type-Options": "nosniff",
         },
     )
@@ -4884,6 +7571,113 @@ async def catalog_search(
             "catalog-unavailable",
             f"{catalog.display_name} is temporarily unavailable. Check your connection and retry.",
         ) from exc
+
+
+@router.get("/workflow-catalog", response_model=CatalogPage)
+async def workflow_catalog_search(
+    request: Request,
+    source: str = Query(default="civitai", min_length=1, max_length=32),
+    query: str = "",
+    sort: str = "trending",
+    limit: int = Query(default=30, ge=1, le=100),
+    cursor: str | None = None,
+) -> CatalogPage:
+    """Find workflows on a remote source, the way models are already found.
+
+    Deliberately NOT a parameter on `/catalog`. That route answers a question
+    about models - role, quantization, architecture, parameter counts - and a
+    workflow can answer none of it. Two routes keep each one honest about what
+    it accepts, instead of one route with filters that mean nothing on half its
+    inputs.
+
+    Serving workflows is a RUNTIME capability: a source satisfies
+    `WorkflowCatalogSource` structurally or it does not. A source that does not
+    is a 404 naming that specific fact, rather than a 500 or an empty page.
+    An empty page would be the worst of the three - indistinguishable from a
+    source that serves workflows and happens to have none.
+    """
+
+    services = _services(request)
+    try:
+        catalog: CatalogSource = services.catalog_sources.get(source)
+    except CatalogSourceNotFound as exc:
+        raise api_error(404, "catalog-source-not-found", str(exc)) from exc
+    if getattr(catalog, "search_workflows", None) is None:
+        raise api_error(
+            404,
+            "catalog-source-serves-no-workflows",
+            f"{catalog.display_name} does not offer workflows.",
+        )
+    source_with_workflows = cast(WorkflowCatalogSource, catalog)
+    try:
+        return await source_with_workflows.search_workflows(
+            query=query,
+            sort=sort,
+            limit=limit,
+            cursor=cursor,
+        )
+    except ValueError as exc:
+        raise api_error(422, "catalog-request-invalid", f"invalid catalog request: {exc}") from exc
+    except Exception as exc:
+        raise api_error(
+            503,
+            "catalog-unavailable",
+            f"{catalog.display_name} is temporarily unavailable. Check your connection and retry.",
+        ) from exc
+
+
+@router.get(
+    "/workflow-catalog/versions/{version_id}/graph",
+    response_model=WorkflowCatalogGraphOut,
+)
+async def workflow_catalog_graph(
+    request: Request,
+    version_id: str = PathParam(min_length=1, max_length=32),
+    source: str = Query(default="civitai", min_length=1, max_length=32),
+) -> WorkflowCatalogGraphOut:
+    """One discovered workflow's graph, so it can be reviewed before anything is added.
+
+    A workflow found in Discover is a ComfyUI export somebody else published,
+    which is exactly what a person can already bring in as a file. So it takes
+    the same road a file does: this hands the graph back, and the existing
+    package review analyzes it, prepares what it needs, and imports it. Nothing
+    here is stored, trusted or run, and no second install path exists for a
+    workflow that happened to come from a catalog.
+
+    Only an export is accepted. A different kind of JSON would reach the review
+    as a refusal about graph structure, which is true and does not tell anyone
+    that the file they chose is simply not a workflow this can add.
+    """
+
+    services = _services(request)
+    try:
+        catalog: CatalogSource = services.catalog_sources.get(source)
+    except CatalogSourceNotFound as exc:
+        raise api_error(404, "catalog-source-not-found", str(exc)) from exc
+    if getattr(catalog, "fetch_workflow_graph", None) is None:
+        raise api_error(
+            404,
+            "catalog-source-serves-no-workflows",
+            f"{catalog.display_name} does not offer workflows.",
+        )
+    source_with_workflows = cast(WorkflowCatalogSource, catalog)
+    try:
+        artifact = await source_with_workflows.fetch_workflow_graph(version_id)
+    except ValueError as exc:
+        raise api_error(422, "workflow-catalog-graph-unusable", str(exc)) from exc
+    except Exception as exc:
+        raise api_error(
+            503,
+            "catalog-unavailable",
+            f"{catalog.display_name} is temporarily unavailable. Check your connection and retry.",
+        ) from exc
+    if not isinstance(artifact.graph.get("nodes"), list):
+        raise api_error(
+            422,
+            "workflow-catalog-graph-not-an-export",
+            "This workflow is not published as a ComfyUI workflow export, so it cannot be added.",
+        )
+    return WorkflowCatalogGraphOut(version_id=artifact.version_id, ui_graph=artifact.graph)
 
 
 @router.get("/catalog/workflow-models", response_model=list[CatalogModel])
@@ -5292,6 +8086,18 @@ async def resolve_catalog_preflight(
             )
         except ExactCivitaiFileSelectionError as exc:
             raise api_error(422, "catalog-file-variant-invalid", str(exc)) from exc
+        file_verification_detail: str | None = None
+        if result.can_install and callable(inspect_prefix):
+            file_verification = await hash_selected_catalog_files(
+                selected_metadata,
+                provider=source,
+                remote_id=resolved_detail.model.remote_id,
+                revision=resolved_detail.revision,
+                read=inspect_prefix,
+            )
+            selected_metadata = file_verification.files
+            file_verification_detail = file_verification.detail
+            result = with_catalog_file_hashes(result, selected_metadata)
         workflow_component_folders: dict[str, str] = {}
         workflow_contract_error: str | None = None
         if result.workflow_template_id:
@@ -5354,7 +8160,31 @@ async def resolve_catalog_preflight(
             validate_resolved(resolved)
         plan = persist_install_plan(session, resolved)
         session.commit()
-        return result.model_copy(update={"install_plan": plan, "file_variants": variants})
+        checks = result.checks
+        if result.can_install and resolved.compatibility != "supported":
+            checks = [
+                *checks,
+                CatalogPreflightCheck(
+                    id="install-evidence",
+                    label="File verification",
+                    status="block",
+                    detail=(
+                        file_verification_detail
+                        if resolved.failure_code == "preflight_blocked"
+                        else None
+                    )
+                    or resolved.failure_reason
+                    or "The install plan could not be verified.",
+                ),
+            ]
+        return result.model_copy(
+            update={
+                "install_plan": plan,
+                "file_variants": variants,
+                "checks": checks,
+                "can_install": result.can_install and resolved.compatibility == "supported",
+            }
+        )
 
     if payload.auxiliary_kind:
         auxiliary_folder = comfy_folder_for_kind(payload.auxiliary_kind)
@@ -5699,8 +8529,30 @@ def _planned_download_fields(plan: InstallPlan | None) -> dict[str, Any]:
         raise ValueError("install plan is no longer active; run the install check again")
     if plan.compatibility != "supported":
         raise ValueError(plan.failure_reason or "this model layout is unsupported")
-    if plan.resolver_version != INSTALL_RESOLVER_VERSION:
+    if plan.resolver_version == INSTALL_RESOLVER_VERSION:
+        request = install_plan_download_request(plan).model_dump(mode="json")
+        return {
+            key: request[key]
+            for key in (
+                "remote_id",
+                "revision",
+                "role",
+                "engine",
+                "allow_patterns",
+                "expected_sha256",
+                "file_sources",
+                "source_remote_id",
+                "comfy_paths",
+                "workflow_template_id",
+                "workflow_template_sha256",
+                "auxiliary_kind",
+                "workflow_asset_kind",
+            )
+        }
+    if plan.resolver_version != LEGACY_INSTALL_RESOLVER_VERSION:
         raise ValueError("install contract changed; run the install check again")
+    if not stored_install_plan_identity_matches(plan):
+        raise ValueError("install plan evidence changed; run the install check again")
     runtime = plan.runtime_contract_json
     if (
         runtime.get("workflow_template_id")
@@ -5822,17 +8674,21 @@ async def create_edit_template(payload: EditTemplateCreate, session: SessionDep)
     # the run's, not the machine's current state - those differ the moment a
     # profile is switched between the edit and the save.
     capture = None
+    settings = payload.settings_json
     if payload.from_run_id:
         run = session.get(Run, payload.from_run_id)
-        if not run:
+        if not run or chat_is_deleted(session, run.chat_id):
             raise api_error(404, "run-not-found", "That run no longer exists.")
         capture = capture_recipe(run.provenance_json)
+        settings = kept_edit_settings(
+            session, capture.settings, capture.workflow_revision_id, run.provenance_json
+        )
     template = EditTemplate(
         name=payload.name,
         description=payload.description,
         instruction=payload.instruction,
         operation="image_to_image",
-        settings_json=capture.settings if capture else payload.settings_json,
+        settings_json=settings,
         trigger_words_json=[],
         content_rating="general",
         workflow_revision_id=capture.workflow_revision_id if capture else None,
@@ -5894,6 +8750,7 @@ async def install_recipe(recipe_id: str, request: Request, session: SessionDep) 
             "reference-recipe-repository-invalid",
             "this recipe does not name a valid repository",
         )
+    template = recipe_workflow_template(recipe)
     try:
         preflight = await resolve_catalog_preflight(
             _services(request),
@@ -5904,6 +8761,7 @@ async def install_recipe(recipe_id: str, request: Request, session: SessionDep) 
                 role=recipe.role,
                 engine=recipe.engine,
                 selected_files=[file.path for file in recipe.files],
+                workflow_template_id=template[0] if template else None,
             ),
             validate_resolved=lambda resolved: _assert_recipe_pins_hold(recipe, resolved),
         )
@@ -5961,30 +8819,102 @@ def _assert_recipe_pins_hold(recipe: ReferenceRecipe, plan: ResolvedInstallPlan 
     unverified = [path for path, digest in resolved.items() if not digest]
     if unverified:
         raise ValueError("this recipe resolved files without a verifiable checksum")
+    template = recipe_workflow_template(recipe)
+    contract = plan.runtime_contract
+    if template and (
+        contract.get("workflow_template_id") != template[0]
+        or contract.get("workflow_template_sha256") != template[1]
+    ):
+        raise ValueError("this recipe resolved to a different workflow template")
 
 
 @router.get("/models", response_model=list[ModelInstallOut])
-async def list_models(request: Request, session: SessionDep) -> list[ModelInstallOut]:
-    installs = list(
-        session.scalars(
-            select(ModelInstall)
-            .where(ModelInstall.active.is_(True))
-            .order_by(ModelInstall.updated_at.desc())
-        ).all()
-    )
+async def list_models(
+    request: Request,
+    session: SessionDep,
+    install_id: str | None = None,
+    role: Literal["chat", "image", "video"] | None = None,
+    chat_capability: Literal["text", "vision"] | None = None,
+    limit: int | None = Query(None, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=2**63 - 1),
+    search: str = Query("", max_length=500),
+    model_ids: Annotated[list[str] | None, Query(alias="model_id", max_length=200)] = None,
+) -> list[ModelInstallOut]:
+    query = select(ModelInstall).where(ModelInstall.active.is_(True))
+    if install_id is not None:
+        query = query.where(ModelInstall.id == install_id)
+    if model_ids:
+        query = query.where(ModelInstall.id.in_(model_ids))
+    if role is not None:
+        query = query.where(ModelInstall.role == role)
+    query = query.order_by(ModelInstall.updated_at.desc(), ModelInstall.id)
     services = _services(request)
-    evidence_by_install = {
-        install.id: evidence
-        for install in installs
-        if (
-            evidence := current_capability_evidence(
-                session,
-                install,
-                services.settings,
-                services.runtimes,
+    if chat_capability is not None:
+        query = query.where(
+            ModelInstall.role == "chat",
+            select(ModelProfile.id)
+            .where(
+                ModelProfile.model_install_id == ModelInstall.id,
+                ModelProfile.role == ModelInstall.role,
+                ModelProfile.engine == ModelInstall.engine,
             )
+            .exists(),
+            select(ModelCapabilityEvidence.id)
+            .where(
+                ModelCapabilityEvidence.model_install_id == ModelInstall.id,
+            )
+            .exists(),
         )
-    }
+
+        def matching_model(
+            install: ModelInstall,
+        ) -> tuple[ModelInstall, ModelCapabilityEvidence] | None:
+            evidence = current_capability_evidence(
+                session, install, services.settings, services.runtimes
+            )
+            if evidence is None:
+                return None
+            modalities = evidence_input_modalities(evidence)
+            if chat_capability == "vision":
+                matches = "image" in modalities
+            else:
+                matches = "text" in modalities and "image" not in modalities
+            return (install, evidence) if matches else None
+
+        matches = read_library_matches(
+            session,
+            query,
+            ModelInstall.id,
+            ModelInstall.name,
+            match=matching_model,
+            limit=limit,
+            offset=offset,
+            search=search,
+        )
+        installs = [install for install, _ in matches]
+        evidence_by_install = {install.id: evidence for install, evidence in matches}
+    else:
+        installs = read_library_page(
+            session,
+            query,
+            ModelInstall.id,
+            ModelInstall.name,
+            limit=limit,
+            offset=offset,
+            search=search,
+        )
+        evidence_by_install = {
+            install.id: evidence
+            for install in installs
+            if (
+                evidence := current_capability_evidence(
+                    session,
+                    install,
+                    services.settings,
+                    services.runtimes,
+                )
+            )
+        }
     return [
         ModelInstallOut.model_validate(install).model_copy(
             update={
@@ -6006,6 +8936,18 @@ async def list_models(request: Request, session: SessionDep) -> list[ModelInstal
         )
         for install in installs
     ]
+
+
+@router.get("/models/catalog-matches", response_model=CatalogInstallMatches)
+async def read_catalog_install_matches(
+    session: SessionDep,
+    role: Literal["chat", "image", "video"],
+    remote_ids: Annotated[list[str] | None, Query(alias="remote_id", max_length=200)] = None,
+    workflow_template_ids: Annotated[
+        list[str] | None, Query(alias="workflow_template_id", max_length=200)
+    ] = None,
+) -> CatalogInstallMatches:
+    return catalog_install_matches(session, role, remote_ids or [], workflow_template_ids or [])
 
 
 @router.post("/references", response_model=ReferenceSubjectOut, status_code=201)
@@ -6407,6 +9349,108 @@ async def read_model_asset_prompt_grammar(
     return row
 
 
+#: The settings that only ever describe a LoRA: what it is for, whether to
+#: reach for it unprompted, and how strongly to apply it when something does.
+#: Automatic selection reads them and selects on kind, so on any other asset
+#: they are text nothing will ever consult.
+LORA_ONLY_ASSET_SETTINGS = frozenset(
+    {"use_case", "auto_apply", "default_model_strength", "default_clip_strength"}
+)
+
+
+def _refuse_lora_only_settings(kind: str, requested: set[str]) -> None:
+    """Refuse LoRA settings on an asset that can never act on them.
+
+    Both the route that registers an asset and the route that edits one have
+    to answer this the same way. They did not: editing refused them, while
+    registering stored a use case for any kind, so a checkpoint or a matting
+    model could be given one at the door and never be able to correct or clear
+    it afterwards.
+    """
+
+    if requested and kind != "lora":
+        raise api_error(
+            422,
+            "automatic-selection-lora-only",
+            "automatic selection metadata is only available for LoRAs",
+        )
+
+
+@router.post("/model-assets", response_model=ModelAssetOut, status_code=201)
+async def adopt_model_asset(
+    payload: ModelAssetAdopt, request: Request, session: SessionDep
+) -> ModelAssetInstall:
+    """Register a model file that is already where the runtime loads it from.
+
+    Every other asset here arrived by download, which is what holds its digest.
+    A file put in place by hand has none, so nothing will accept it however
+    correct its bytes are. This measures the file where it lies and records
+    what it found: the digest, the name a graph will pass to the loader, the
+    family it declares, and any activation words its own header names.
+
+    It does not move, copy or fetch anything, and it exposes no new directory:
+    the file has to be in one of the folders already named to the runtime, so
+    what it can reach afterwards is exactly what it could reach before.
+    """
+
+    services = _services(request)
+    if payload.kind not in COMFY_MODEL_ASSET_KINDS or comfy_folder_for_kind(payload.kind) is None:
+        raise api_error(422, "asset-kind-unsupported", "This kind of asset cannot be adopted.")
+    _refuse_lora_only_settings(
+        payload.kind, {"use_case"} if payload.use_case and payload.use_case.strip() else set()
+    )
+    roots = adoptable_roots(session, services.settings, payload.kind)
+    if not roots:
+        raise api_error(
+            409,
+            "asset-runtime-unconfigured",
+            "No runtime folder is configured to adopt a file from.",
+        )
+    try:
+        measured = await run_in_threadpool(measure_adoptable_file, roots, payload.comfy_name)
+    except AssetAdoptionError as exc:
+        status = 404 if exc.code == "asset-file-missing" else 422
+        raise api_error(status, exc.code, exc.detail) from exc
+    existing = session.scalar(
+        select(ModelAssetInstall).where(
+            ModelAssetInstall.kind == payload.kind,
+            ModelAssetInstall.manifest_json["sha256"].as_string() == measured.sha256,
+        )
+    )
+    if existing is not None:
+        raise api_error(
+            409,
+            "asset-already-registered",
+            f"These exact bytes are already registered as {existing.name}.",
+        )
+    trigger_words = measured.trigger_words
+    asset = ModelAssetInstall(
+        id=new_id("asset"),
+        name=payload.name or PurePosixPath(measured.comfy_name).stem,
+        kind=payload.kind,
+        family=payload.family or measured.declared_family,
+        local_path=str(measured.path.parent),
+        size_bytes=measured.size_bytes,
+        manifest_json={
+            "adopted": True,
+            "comfy_name": measured.comfy_name,
+            "sha256": measured.sha256,
+            "metadata": {
+                "trigger_words": trigger_words,
+                "declared_architecture": measured.metadata.get("modelspec.architecture"),
+                "usage_hint": measured.metadata.get("modelspec.usage_hint"),
+            },
+        },
+        active=True,
+        use_case=(payload.use_case or "").strip(),
+        verified_at=utcnow(),
+    )
+    session.add(asset)
+    session.commit()
+    session.refresh(asset)
+    return asset
+
+
 @router.patch("/model-assets/{asset_id}", response_model=ModelAssetOut)
 async def update_model_asset(
     asset_id: str,
@@ -6421,20 +9465,34 @@ async def update_model_asset(
     values = payload.model_dump(exclude_unset=True, exclude_none=True)
     if not values:
         return asset
-    lora_fields = {
-        "use_case",
-        "auto_apply",
-        "default_model_strength",
-        "default_clip_strength",
-    }
-    if set(values) & lora_fields and asset.kind != "lora":
-        raise api_error(
-            422,
-            "automatic-selection-lora-only",
-            "automatic selection metadata is only available for LoRAs",
-        )
+    expected_use_case = prepare_use_case_update(values)
+    _refuse_lora_only_settings(asset.kind, set(values) & LORA_ONLY_ASSET_SETTINGS)
+    if "typed_trigger_words" in values:
+        # A trigger word is something a LoRA answers to; nothing else reads one.
+        if asset.kind != "lora":
+            raise api_error(
+                422,
+                "trigger-words-lora-only",
+                "trigger words can only be recorded for a LoRA",
+            )
+        try:
+            values["typed_trigger_words"] = normalize_typed_trigger_words(
+                values["typed_trigger_words"], asset
+            )
+        except ValueError as exc:
+            raise api_error(422, "trigger-words-invalid", str(exc)) from exc
     if "use_case" in values:
         values["use_case"] = values["use_case"].strip()
+    if "family" in values:
+        # Any kind carries one: a LoRA is admitted by it, and a diffusion
+        # model is where a workflow built around one reads its own. A value
+        # with nothing to compare by is refused rather than stored.
+        family = values["family"].strip()
+        if family and not any(character.isalnum() for character in family):
+            raise api_error(
+                422, "asset-family-invalid", "A model family needs at least one letter or digit."
+            )
+        values["family"] = family or None
     for field in ("default_model_strength", "default_clip_strength"):
         value = values.get(field)
         if value is not None and not math.isfinite(value):
@@ -6461,6 +9519,7 @@ async def update_model_asset(
     active_changed = "active" in values and values["active"] != asset.active
 
     def apply_values() -> None:
+        check_use_case_update(session, asset, expected_use_case)
         for field, value in values.items():
             setattr(asset, field, value)
         session.commit()
@@ -6469,7 +9528,9 @@ async def update_model_asset(
         async with services.scheduler.lease("primary"):
             previous_values = {field: getattr(asset, field) for field in values}
             was_running = next(
-                worker.running for worker in services.processes.statuses() if worker.name == "media"
+                worker.running or worker.state == "stopping"
+                for worker in services.processes.statuses()
+                if worker.name == "media"
             )
             apply_values()
             if was_running:
@@ -6500,7 +9561,9 @@ async def delete_model_asset(
         if not asset:
             raise api_error(404, "model-asset-not-found", "model asset not found")
         was_running = next(
-            worker.running for worker in services.processes.statuses() if worker.name == "media"
+            worker.running or worker.state == "stopping"
+            for worker in services.processes.statuses()
+            if worker.name == "media"
         )
         deletion_error: BaseException | None = None
         try:
@@ -6519,9 +9582,7 @@ async def delete_model_asset(
             deletion_error = exc
             raise
         finally:
-            if was_running and not next(
-                worker.running for worker in services.processes.statuses() if worker.name == "media"
-            ):
+            if was_running and _media_worker_truly_stopped(services):
                 try:
                     await services.processes.start_media()
                 except Exception:
@@ -6834,7 +9895,8 @@ async def delete_model(
         worker_name = "chat" if install.role == ModelRole.CHAT.value else "media"
         _ensure_worker_idle(session, worker_name)
         if worker_name == "media" and any(
-            worker.name == "media" and worker.running for worker in services.processes.statuses()
+            worker.name == "media" and (worker.running or worker.state == "stopping")
+            for worker in services.processes.statuses()
         ):
             raise api_error(
                 409, "media-worker-running", "stop the media worker before deleting this model"
@@ -6858,6 +9920,17 @@ async def delete_model(
         return Response(status_code=204)
 
 
+def _reserve_recovery_dependency_write(session: Session) -> None:
+    try:
+        reserve_recovery_write(session)
+    except RecoveryPreviewConflict:
+        raise api_error(
+            409,
+            "recovery-dependency-busy",
+            "Recently Deleted is changing. Try again after it finishes.",
+        ) from None
+
+
 def _delete_model_locked(
     model_id: str,
     request: Request,
@@ -6865,6 +9938,7 @@ def _delete_model_locked(
     *,
     delete_profiles: bool,
 ) -> Path | None:
+    _reserve_recovery_dependency_write(session)
     install = session.get(ModelInstall, model_id)
     if not install:
         raise api_error(404, "model-not-found", "model not found")
@@ -6885,8 +9959,14 @@ def _delete_model_locked(
             409, "model-in-use-by-profile", "delete profiles that use this model before deleting it"
         )
     profile_ids = {profile.id for profile in profiles}
+    if profiles_have_recovery_dependents(session, profile_ids):
+        raise api_error(
+            409,
+            "model-used-in-recently-deleted",
+            "Restore or permanently delete items in Recently Deleted before deleting this model.",
+        )
     if profile_ids and any(
-        worker.running and worker.profile_id in profile_ids
+        (worker.running or worker.state == "stopping") and worker.profile_id in profile_ids
         for worker in _services(request).processes.statuses()
     ):
         raise api_error(
@@ -6976,10 +10056,6 @@ def _delete_model_locked(
     return quarantine
 
 
-_MODEL_DELETE_QUARANTINE = ".delete-pending"
-_MODEL_DELETE_MARKER = ".model-id"
-
-
 def _model_delete_was_committed(model_id: str) -> bool | None:
     """Resolve an ambiguous commit error from a fresh database transaction."""
 
@@ -6989,393 +10065,6 @@ def _model_delete_was_committed(model_id: str) -> bool | None:
     except Exception:
         logger.exception("Could not verify the model deletion database outcome")
         return None
-
-
-def _managed_model_path(model_root: Path, value: str) -> Path | None:
-    """Return a confined, link-free managed path or None for external imports."""
-
-    raw = Path(os.path.abspath(os.fspath(Path(value).expanduser())))
-    try:
-        relative = raw.relative_to(model_root)
-    except ValueError:
-        return None
-    if not relative.parts or relative.parts[0] == _MODEL_DELETE_QUARANTINE:
-        return None
-    cursor = model_root
-    for part in relative.parts:
-        cursor /= part
-        if cursor.exists() and _model_path_is_link(cursor):
-            raise ValueError("managed model paths cannot use filesystem links")
-    resolved = raw.resolve(strict=False)
-    if model_root not in resolved.parents or resolved == model_root:
-        raise ValueError("managed model path escapes model storage")
-    return resolved
-
-
-def _model_path_is_link(path: Path) -> bool:
-    return is_link_or_reparse(
-        path,
-        missing="assume_regular",
-        unreadable="assume_link",
-    )
-
-
-def _ensure_model_tree_link_free(path: Path) -> None:
-    if _model_path_is_link(path):
-        raise ValueError("managed model paths cannot use filesystem links")
-    if not path.is_dir():
-        return
-    pending = [path]
-    while pending:
-        directory = pending.pop()
-        with os.scandir(directory) as entries:
-            for entry in entries:
-                candidate = Path(entry.path)
-                if _model_path_is_link(candidate):
-                    raise ValueError("managed model directories cannot contain filesystem links")
-                if entry.is_dir(follow_symlinks=False):
-                    pending.append(candidate)
-
-
-def _quarantine_model_files(
-    session: Session,
-    install: ModelInstall,
-    model_root: Path,
-    path: Path,
-) -> tuple[list[tuple[Path, Path]], Path | None]:
-    if not path.exists():
-        return [], None
-    siblings = _related_model_installs(session, install, model_root, path)
-    quarantine: Path | None = None
-    moves: list[tuple[Path, Path]] = []
-    try:
-        if not siblings:
-            _ensure_model_tree_link_free(path)
-            quarantine = _new_model_quarantine(model_root, install.id)
-            staged = quarantine / "payload"
-            os.replace(path, staged)
-            return [(staged, path)], quarantine
-
-        if not path.is_dir():
-            # Another install owns the same managed file.
-            return [], None
-
-        retained_paths, retained_roots = _retained_model_paths(
-            siblings,
-            model_root,
-        )
-        for relative in _manifest_model_files(install):
-            candidate = _confined_manifest_file(path, relative)
-            if not candidate.exists():
-                continue
-            if _model_path_is_link(candidate):
-                raise ValueError("managed model files cannot use filesystem links")
-            if not candidate.is_file():
-                raise ValueError("managed model manifests may only reference files")
-            if candidate in retained_paths or any(
-                candidate == root or root in candidate.parents for root in retained_roots
-            ):
-                continue
-            if quarantine is None:
-                quarantine = _new_model_quarantine(model_root, install.id)
-            staged = _safe_quarantine_file_path(quarantine, relative)
-            os.replace(candidate, staged)
-            moves.append((staged, candidate))
-        return moves, quarantine
-    except Exception:
-        try:
-            _restore_model_moves(moves)
-        except Exception:
-            logger.exception(
-                "Model staging failure left recoverable files in quarantine %s",
-                quarantine,
-            )
-        else:
-            try:
-                _finalize_model_quarantine(quarantine)
-            except Exception:
-                logger.warning(
-                    "Could not prune a failed model deletion quarantine %s",
-                    quarantine,
-                    exc_info=True,
-                )
-        raise
-
-
-def _related_model_installs(
-    session: Session,
-    install: ModelInstall,
-    model_root: Path,
-    path: Path,
-) -> list[tuple[ModelInstall, Path]]:
-    related: list[tuple[ModelInstall, Path]] = []
-    for sibling in session.scalars(select(ModelInstall).where(ModelInstall.id != install.id)).all():
-        try:
-            sibling_path = _managed_model_path(model_root, sibling.local_path)
-        except ValueError:
-            # A linked sibling is never evidence that it is safe to remove
-            # content through the current install.
-            continue
-        if sibling_path is None:
-            continue
-        if sibling_path == path or sibling_path in path.parents or path in sibling_path.parents:
-            related.append((sibling, sibling_path))
-    return related
-
-
-def _retained_model_paths(
-    siblings: list[tuple[ModelInstall, Path]],
-    model_root: Path,
-) -> tuple[set[Path], set[Path]]:
-    retained_paths: set[Path] = set()
-    retained_roots: set[Path] = set()
-    for sibling, sibling_path in siblings:
-        if sibling_path.is_file():
-            retained_paths.add(sibling_path)
-            continue
-        try:
-            files = _manifest_model_files(sibling)
-        except ValueError:
-            retained_roots.add(sibling_path)
-            continue
-        if not files:
-            retained_roots.add(sibling_path)
-            continue
-        for relative in files:
-            try:
-                candidate = _confined_manifest_file(sibling_path, relative)
-            except ValueError:
-                retained_roots.add(sibling_path)
-                break
-            if candidate == model_root or model_root not in candidate.parents:
-                retained_roots.add(sibling_path)
-                break
-            retained_paths.add(candidate)
-    return retained_paths, retained_roots
-
-
-def _manifest_model_files(install: ModelInstall) -> list[PurePosixPath]:
-    raw_files = install.manifest_json.get("files", [])
-    if not isinstance(raw_files, list):
-        raise ValueError("managed model manifest files must be a list")
-    files: list[PurePosixPath] = []
-    seen: set[str] = set()
-    for value in raw_files:
-        if not isinstance(value, str) or not value:
-            raise ValueError("managed model manifest contains an invalid file path")
-        relative = PurePosixPath(value.replace("\\", "/"))
-        if (
-            relative.is_absolute()
-            or not relative.parts
-            or any(part in {"", ".", ".."} or ":" in part for part in relative.parts)
-        ):
-            raise ValueError("managed model manifest contains an unsafe file path")
-        identity = relative.as_posix().casefold()
-        if identity in seen:
-            continue
-        seen.add(identity)
-        files.append(relative)
-    return files
-
-
-def _confined_manifest_file(root: Path, relative: PurePosixPath) -> Path:
-    candidate = root.joinpath(*relative.parts)
-    cursor = root
-    for part in relative.parts:
-        cursor /= part
-        if cursor.exists() and _model_path_is_link(cursor):
-            raise ValueError("managed model files cannot use filesystem links")
-    resolved = candidate.resolve(strict=False)
-    if root not in resolved.parents:
-        raise ValueError("managed model manifest path escapes its install directory")
-    return resolved
-
-
-def _new_model_quarantine(model_root: Path, model_id: str) -> Path:
-    parent = model_root / _MODEL_DELETE_QUARANTINE
-    if parent.exists() and _model_path_is_link(parent):
-        raise ValueError("model deletion quarantine cannot use a filesystem link")
-    parent.mkdir(parents=True, exist_ok=True)
-    if not parent.is_dir() or parent.resolve().parent != model_root:
-        raise ValueError("model deletion quarantine escapes model storage")
-    quarantine = parent / new_id("delete")
-    quarantine.mkdir(mode=0o700)
-    try:
-        marker = quarantine / _MODEL_DELETE_MARKER
-        with marker.open("x", encoding="utf-8") as handle:
-            handle.write(model_id)
-            handle.flush()
-            os.fsync(handle.fileno())
-        marker.chmod(0o600)
-    except Exception:
-        with suppress(OSError):
-            quarantine.rmdir()
-        raise
-    return quarantine
-
-
-def _safe_quarantine_file_path(
-    quarantine: Path,
-    relative: PurePosixPath,
-) -> Path:
-    if _model_path_is_link(quarantine) or not quarantine.is_dir():
-        raise ValueError("model deletion quarantine contains a filesystem link")
-    files = quarantine / "files"
-    if _model_path_is_link(files):
-        raise ValueError("model deletion quarantine contains a filesystem link")
-    if not files.exists():
-        files.mkdir()
-    if _model_path_is_link(files) or not files.is_dir():
-        raise ValueError("model deletion quarantine contains an unsafe files directory")
-    files_root = files.resolve()
-    if files_root.parent != quarantine.resolve():
-        raise ValueError("model deletion quarantine escapes model storage")
-    cursor = files
-    for part in relative.parts[:-1]:
-        cursor /= part
-        if _model_path_is_link(cursor):
-            raise ValueError("model deletion quarantine contains a filesystem link")
-        if cursor.exists():
-            if not cursor.is_dir():
-                raise ValueError("model deletion quarantine contains a filesystem link")
-        else:
-            cursor.mkdir()
-            if _model_path_is_link(cursor) or not cursor.is_dir():
-                raise ValueError("model deletion quarantine contains a filesystem link")
-    staged = cursor / relative.name
-    if staged.exists() or _model_path_is_link(staged):
-        raise ValueError("model deletion quarantine contains an unexpected file")
-    resolved_parent = staged.parent.resolve()
-    if resolved_parent != files_root and files_root not in resolved_parent.parents:
-        raise ValueError("model deletion quarantine escapes model storage")
-    return staged
-
-
-def _restore_model_moves(moves: list[tuple[Path, Path]]) -> None:
-    for staged, original in reversed(moves):
-        if not staged.exists():
-            continue
-        if original.exists():
-            raise RuntimeError("cannot restore a quarantined model over an existing path")
-        original.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(staged, original)
-
-
-def _finalize_model_quarantine(quarantine: Path | None) -> None:
-    if quarantine is None or not quarantine.exists():
-        return
-    if _model_path_is_link(quarantine) or not quarantine.is_dir():
-        raise OSError("refusing to follow an unsafe model deletion quarantine")
-    marker = quarantine / _MODEL_DELETE_MARKER
-    if _model_path_is_link(marker) or not marker.is_file():
-        raise OSError("model deletion quarantine has no safe ownership marker")
-    for child in quarantine.iterdir():
-        if child == marker:
-            continue
-        if _model_path_is_link(child):
-            raise OSError("refusing to follow a link in model deletion quarantine")
-        if child.is_dir():
-            try:
-                _ensure_model_tree_link_free(child)
-            except ValueError as exc:
-                raise OSError("refusing to follow a link in model deletion quarantine") from exc
-            shutil.rmtree(child)
-        elif child.is_file():
-            child.unlink()
-        else:
-            raise OSError("model deletion quarantine contains an unsupported entry")
-    # Remove the ownership marker last. If payload cleanup fails partway
-    # through, the next recovery pass can still determine whether to restore
-    # the remaining files or finish deleting them.
-    marker.unlink(missing_ok=True)
-    quarantine.rmdir()
-    with suppress(OSError):
-        quarantine.parent.rmdir()
-
-
-def recover_model_delete_quarantines(
-    session: Session,
-    model_root: Path,
-    *,
-    strict: bool = False,
-) -> None:
-    parent = model_root / _MODEL_DELETE_QUARANTINE
-    if not parent.exists():
-        return
-    if _model_path_is_link(parent) or not parent.is_dir():
-        raise ValueError("model deletion quarantine is not a safe directory")
-    for quarantine in list(parent.iterdir()):
-        if not quarantine.name.startswith("delete_"):
-            continue
-        try:
-            if not quarantine.is_dir() or _model_path_is_link(quarantine):
-                raise ValueError("model deletion quarantine contains a filesystem link")
-            marker = quarantine / _MODEL_DELETE_MARKER
-            if not marker.exists():
-                if not any(quarantine.iterdir()):
-                    quarantine.rmdir()
-                    continue
-                raise ValueError("model deletion quarantine has no ownership marker")
-            if _model_path_is_link(marker) or not marker.is_file():
-                raise ValueError("model deletion quarantine contains an unsafe marker")
-            marker_model_id = marker.read_text(encoding="utf-8")
-            if (
-                not marker_model_id
-                or marker_model_id != marker_model_id.strip()
-                or len(marker_model_id) > 200
-            ):
-                raise ValueError("model deletion quarantine has an invalid owner")
-            install: ModelInstall | ModelAssetInstall | None = session.get(
-                ModelInstall, marker_model_id
-            )
-            if install is None:
-                install = session.get(ModelAssetInstall, marker_model_id)
-            if install is None:
-                _finalize_model_quarantine(quarantine)
-                continue
-            path = _managed_model_path(model_root, install.local_path)
-            if path is None:
-                raise ValueError("model deletion quarantine belongs to an external model")
-            _restore_model_quarantine(quarantine, path)
-        except (OSError, UnicodeError, ValueError):
-            if strict:
-                raise
-            logger.warning(
-                "Could not reconcile model deletion quarantine %s",
-                quarantine,
-                exc_info=True,
-            )
-    with suppress(OSError):
-        parent.rmdir()
-
-
-def _restore_model_quarantine(quarantine: Path, path: Path) -> None:
-    moves: list[tuple[Path, Path]] = []
-    payload = quarantine / "payload"
-    if payload.exists():
-        _ensure_model_tree_link_free(payload)
-        moves.append((payload, path))
-    files = quarantine / "files"
-    if files.exists():
-        if _model_path_is_link(files) or not files.is_dir():
-            raise ValueError("model deletion quarantine contains an unsafe files directory")
-        _ensure_model_tree_link_free(files)
-        for staged in files.rglob("*"):
-            if _model_path_is_link(staged):
-                raise ValueError("model deletion quarantine contains a filesystem link")
-            if not staged.is_file():
-                continue
-            relative = staged.relative_to(files)
-            original = _confined_manifest_file(
-                path,
-                PurePosixPath(*relative.parts),
-            )
-            moves.append((staged, original))
-    try:
-        _restore_model_moves(moves)
-    except RuntimeError as exc:
-        raise ValueError("model deletion recovery needs manual conflict resolution") from exc
-    _finalize_model_quarantine(quarantine)
 
 
 def _path_size(path: Path) -> int:
@@ -7391,6 +10080,14 @@ async def list_profiles(
     request: Request,
     session: SessionDep,
     role: str | None = None,
+    engine: str | None = None,
+    input_modality: Literal["text", "image"] | None = None,
+    limit: int | None = Query(None, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=2**63 - 1),
+    search: str = Query("", max_length=500),
+    profile_ids: Annotated[list[str] | None, Query(alias="profile_id", max_length=200)] = None,
+    install_ids: Annotated[list[str] | None, Query(alias="install_id", max_length=200)] = None,
+    defaults_only: bool = False,
 ) -> list[ModelProfileOut]:
     statement = (
         select(ModelProfile)
@@ -7405,13 +10102,21 @@ async def list_profiles(
                 ),
             )
         )
-        .order_by(ModelProfile.role, ModelProfile.name)
+        .order_by(ModelProfile.role, ModelProfile.name, ModelProfile.id)
     )
     if role:
         statement = statement.where(ModelProfile.role == role)
+    if engine:
+        statement = statement.where(ModelProfile.engine == engine)
+    if profile_ids:
+        statement = statement.where(ModelProfile.id.in_(profile_ids))
+    if install_ids:
+        statement = statement.where(ModelProfile.model_install_id.in_(install_ids))
+    if defaults_only:
+        statement = statement.where(ModelProfile.is_default.is_(True))
     services = _services(request)
-    results: list[ModelProfileOut] = []
-    for profile in session.scalars(statement).all():
+
+    def project(profile: ModelProfile) -> ModelProfileOut:
         evidence = None
         if profile.model_install_id:
             install = session.get(ModelInstall, profile.model_install_id)
@@ -7422,12 +10127,36 @@ async def list_profiles(
                     services.settings,
                     services.runtimes,
                 )
-        results.append(
-            ModelProfileOut.model_validate(profile).model_copy(
-                update={"input_modalities": evidence_input_modalities(evidence)}
-            )
+        return ModelProfileOut.model_validate(profile).model_copy(
+            update={"input_modalities": evidence_input_modalities(evidence)}
         )
-    return results
+
+    if input_modality:
+
+        def match(profile: ModelProfile) -> ModelProfileOut | None:
+            projected = project(profile)
+            return projected if input_modality in projected.input_modalities else None
+
+        return read_library_matches(
+            session,
+            statement,
+            ModelProfile.id,
+            ModelProfile.name,
+            match=match,
+            limit=limit,
+            offset=offset,
+            search=search,
+        )
+    profiles = read_library_page(
+        session,
+        statement,
+        ModelProfile.id,
+        ModelProfile.name,
+        limit=limit,
+        offset=offset,
+        search=search,
+    )
+    return [project(profile) for profile in profiles]
 
 
 @router.post("/profiles", response_model=ModelProfileOut, status_code=201)
@@ -7463,12 +10192,25 @@ async def _create_profile(
             select(ModelProfile).where(ModelProfile.role == payload.role)
         ).all():
             profile.is_default = False
+    _, load_ordinary = _split_workflow_lora_setting_or_422(
+        payload.load_settings,
+        role="load",
+        code="profile-settings-invalid",
+    )
+    request_overrides, request_ordinary = _split_workflow_lora_setting_or_422(
+        payload.request_settings,
+        role=payload.role,
+        code="profile-settings-invalid",
+    )
     try:
         load_settings = validate_settings(
-            payload.load_settings, [field for field in fields if field.scope == "load"]
+            load_ordinary, [field for field in fields if field.scope == "load"]
         )
-        request_settings = validate_settings(
-            payload.request_settings, [field for field in fields if field.scope != "load"]
+        request_settings = _with_workflow_lora_setting(
+            validate_settings(
+                request_ordinary, [field for field in fields if field.scope != "load"]
+            ),
+            request_overrides,
         )
     except ValueError as exc:
         raise api_error(422, "profile-settings-invalid", str(exc)) from exc
@@ -7489,6 +10231,27 @@ async def _create_profile(
     session.commit()
     session.refresh(profile)
     return profile
+
+
+@router.post("/profiles/{profile_id}/model-update", response_model=ModelProfileOut)
+async def update_profile_model(
+    profile_id: str,
+    payload: ModelProfileModelUpdate,
+    request: Request,
+    session: SessionDep,
+) -> ModelProfile:
+    services = _services(request)
+    try:
+        return switch_profile_model(
+            session,
+            profile_id,
+            expected_install_id=payload.expected_install_id,
+            download_job_id=payload.download_job_id,
+            settings=services.settings,
+            runtimes=services.runtimes,
+        )
+    except ProfileModelUpdateError as exc:
+        raise api_error(exc.status, exc.code, str(exc)) from exc
 
 
 @router.patch("/profiles/{profile_id}", response_model=ModelProfileOut)
@@ -7527,23 +10290,36 @@ async def update_profile(
                 sibling.is_default = False
         profile.is_default = is_default
     if "load_settings" in values:
+        _, load_ordinary = _split_workflow_lora_setting_or_422(
+            values.pop("load_settings") or {},
+            role="load",
+            code="profile-load-settings-invalid",
+        )
         try:
             profile.load_settings_json = validate_settings(
-                values.pop("load_settings") or {},
+                load_ordinary,
                 [field for field in fields if field.scope == "load"],
             )
         except ValueError as exc:
             raise api_error(422, "profile-load-settings-invalid", str(exc)) from exc
     if "request_settings" in values:
+        request_overrides, request_ordinary = _split_workflow_lora_setting_or_422(
+            values.pop("request_settings") or {},
+            role=profile.role,
+            code="profile-request-settings-invalid",
+        )
         try:
-            profile.request_settings_json = validate_settings(
-                normalize_saved_settings(values.pop("request_settings") or {}, profile.role),
-                [field for field in fields if field.scope != "load"],
+            profile.request_settings_json = _with_workflow_lora_setting(
+                validate_settings(
+                    normalize_saved_settings(request_ordinary, profile.role),
+                    [field for field in fields if field.scope != "load"],
+                ),
+                request_overrides,
             )
         except ValueError as exc:
             raise api_error(422, "profile-request-settings-invalid", str(exc)) from exc
-    if "use_case" in values:
-        profile.use_case_derived = False
+    expected_use_case = prepare_use_case_update(values)
+    check_use_case_update(session, profile, expected_use_case)
     for key, value in values.items():
         setattr(profile, key, value)
     reconcile_legacy_workflow_compatibility(session)
@@ -7556,13 +10332,21 @@ async def update_profile(
 async def delete_profile(profile_id: str, request: Request, session: SessionDep) -> Response:
     services = _services(request)
     async with services.scheduler.lease("primary"):
+        _reserve_recovery_dependency_write(session)
         profile = session.get(ModelProfile, profile_id)
         if not profile:
             raise api_error(404, "profile-not-found", "profile not found")
+        if profiles_have_recovery_dependents(session, {profile.id}):
+            raise api_error(
+                409,
+                "profile-used-in-recently-deleted",
+                "Restore or permanently delete items in Recently Deleted "
+                "before deleting this profile.",
+            )
         worker_name = "chat" if profile.role == ModelRole.CHAT.value else "media"
         _ensure_worker_idle(session, worker_name)
         if any(
-            worker.running and worker.profile_id == profile.id
+            (worker.running or worker.state == "stopping") and worker.profile_id == profile.id
             for worker in services.processes.statuses()
         ):
             raise api_error(
@@ -7635,8 +10419,8 @@ async def export_profile(profile_id: str, session: SessionDep) -> ModelProfileBu
         role=cast(Literal["chat", "image", "video"], profile.role),
         engine=profile.engine,
         model_install_id=profile.model_install_id,
-        load_settings=profile.load_settings_json,
-        request_settings=profile.request_settings_json,
+        load_settings=_without_workflow_lora_setting(profile.load_settings_json),
+        request_settings=_without_workflow_lora_setting(profile.request_settings_json),
     )
 
 
@@ -7646,6 +10430,10 @@ async def import_profile(
     request: Request,
     session: SessionDep,
 ) -> ModelProfile:
+    _refuse_imported_workflow_lora_setting(payload.load_settings, code="profile-settings-invalid")
+    _refuse_imported_workflow_lora_setting(
+        payload.request_settings, code="profile-settings-invalid"
+    )
     return await _create_profile(
         ModelProfileCreate(
             name=payload.name,
@@ -7663,11 +10451,34 @@ async def import_profile(
 
 
 @router.get("/presets", response_model=list[PresetOut])
-async def list_presets(session: SessionDep, role: str | None = None) -> list[GenerationPreset]:
-    statement = select(GenerationPreset).order_by(GenerationPreset.role, GenerationPreset.name)
+async def list_presets(
+    session: SessionDep,
+    role: str | None = None,
+    limit: int | None = Query(None, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=2**63 - 1),
+    search: str = Query("", max_length=500),
+    preset_ids: Annotated[list[str] | None, Query(alias="preset_id", max_length=200)] = None,
+    defaults_only: bool = False,
+) -> list[GenerationPreset]:
+    statement = select(GenerationPreset).order_by(
+        GenerationPreset.role, GenerationPreset.name, GenerationPreset.id
+    )
     if role:
         statement = statement.where(GenerationPreset.role == role)
-    return list(session.scalars(statement).all())
+    if preset_ids:
+        statement = statement.where(GenerationPreset.id.in_(preset_ids))
+    if defaults_only:
+        statement = statement.where(GenerationPreset.is_default.is_(True))
+    presets = read_library_page(
+        session,
+        statement,
+        GenerationPreset.id,
+        GenerationPreset.name,
+        limit=limit,
+        offset=offset,
+        search=search,
+    )
+    return presets
 
 
 @router.post("/presets", response_model=PresetOut, status_code=201)
@@ -7677,10 +10488,18 @@ async def create_preset(
     session: SessionDep,
 ) -> GenerationPreset:
     fields = await _engine_role_fields(request, payload.role)
+    overrides, ordinary = _split_workflow_lora_setting_or_422(
+        payload.settings,
+        role=payload.role,
+        code="preset-invalid",
+    )
     try:
-        values = validate_settings(
-            payload.settings,
-            [field for field in fields if field.scope != "load"],
+        values = _with_workflow_lora_setting(
+            validate_settings(
+                ordinary,
+                [field for field in fields if field.scope != "load"],
+            ),
+            overrides,
         )
     except ValueError as exc:
         raise api_error(422, "preset-invalid", str(exc)) from exc
@@ -7714,10 +10533,18 @@ async def update_preset(
     values = payload.model_dump(exclude_unset=True)
     if "settings" in values:
         fields = await _engine_role_fields(request, preset.role)
+        overrides, ordinary = _split_workflow_lora_setting_or_422(
+            values.pop("settings") or {},
+            role=preset.role,
+            code="preset-invalid",
+        )
         try:
-            preset.settings_json = validate_settings(
-                normalize_saved_settings(values.pop("settings") or {}, preset.role),
-                [field for field in fields if field.scope != "load"],
+            preset.settings_json = _with_workflow_lora_setting(
+                validate_settings(
+                    normalize_saved_settings(ordinary, preset.role),
+                    [field for field in fields if field.scope != "load"],
+                ),
+                overrides,
             )
         except ValueError as exc:
             raise api_error(422, "preset-invalid", str(exc)) from exc
@@ -7738,6 +10565,7 @@ async def update_preset(
 
 @router.delete("/presets/{preset_id}", status_code=204)
 async def delete_preset(preset_id: str, session: SessionDep) -> Response:
+    _reserve_recovery_dependency_write(session)
     preset = session.get(GenerationPreset, preset_id)
     if not preset:
         raise api_error(404, "preset-not-found", "preset not found")
@@ -7752,6 +10580,15 @@ async def delete_preset(preset_id: str, session: SessionDep) -> Response:
         )
         if bindings.get(preset.role) != preset.id:
             continue
+        if (isinstance(owner, Chat) and chat_is_deleted(session, owner.id)) or (
+            isinstance(owner, Project) and live_project(session, owner.id) is None
+        ):
+            raise api_error(
+                409,
+                "preset-used-in-recently-deleted",
+                "Restore or permanently delete items in Recently Deleted "
+                "before deleting this preset.",
+            )
         bindings.pop(preset.role, None)
         scoped = (
             dict(owner.generation_settings_json)
@@ -7759,10 +10596,32 @@ async def delete_preset(preset_id: str, session: SessionDep) -> Response:
             else {}
         )
         direct = scoped.get(preset.role)
-        scoped[preset.role] = {
+        merged = {
             **normalize_saved_settings(preset.settings_json, preset.role),
             **normalize_saved_settings(direct if isinstance(direct, dict) else {}, preset.role),
         }
+        # The preset's workflow LoRA edits sat below the chat's or project's own,
+        # field by field; folding them in keeps that order instead of letting one
+        # side replace the other wholesale.
+        merged.pop(WORKFLOW_LORA_OVERRIDES_SETTING_KEY, None)
+        try:
+            preset_overrides, _ = split_workflow_lora_overrides_setting(
+                preset.settings_json, role=preset.role
+            )
+            direct_overrides, _ = split_workflow_lora_overrides_setting(
+                direct if isinstance(direct, dict) else {}, role=preset.role
+            )
+            if preset_overrides is not None or direct_overrides is not None:
+                merged[WORKFLOW_LORA_OVERRIDES_SETTING_KEY] = workflow_lora_overrides_setting_value(
+                    overlay_workflow_lora_overrides(preset_overrides, direct_overrides)
+                )
+        except (WorkflowLoraOverrideError, WorkflowLoraSettingsError) as exc:
+            raise api_error(
+                409,
+                "workflow-lora-settings-stale",
+                "The workflow LoRA settings no longer match the selected workflow.",
+            ) from exc
+        scoped[preset.role] = merged
         owner.generation_preset_ids_json = bindings
         owner.generation_settings_json = scoped
     session.delete(preset)
@@ -7810,7 +10669,7 @@ async def export_preset(preset_id: str, session: SessionDep) -> PresetBundle:
     return PresetBundle(
         name=preset.name,
         role=cast(Literal["chat", "image", "video"], preset.role),
-        settings=preset.settings_json,
+        settings=_without_workflow_lora_setting(preset.settings_json),
     )
 
 
@@ -7820,6 +10679,7 @@ async def import_preset(
     request: Request,
     session: SessionDep,
 ) -> GenerationPreset:
+    _refuse_imported_workflow_lora_setting(payload.settings, code="preset-invalid")
     return await create_preset(
         PresetCreate(name=payload.name, role=payload.role, settings=payload.settings),
         request,
@@ -7828,10 +10688,7 @@ async def import_preset(
 
 
 def _require_media_worker_stopped(request: Request) -> None:
-    if any(
-        worker.name == "media" and worker.running
-        for worker in _services(request).processes.statuses()
-    ):
+    if not _media_worker_truly_stopped(_services(request)):
         raise api_error(
             409, "media-worker-running", "stop the media worker before changing custom nodes"
         )
@@ -8127,6 +10984,10 @@ def _revision_readiness(
         return "unavailable", "engine_mismatch"
     if operation != Operation.TEXT and expected_engine != "mock" and not revision.api_graph_json:
         return "unavailable", "revision_not_executable"
+    if ignores_the_description(
+        revision.engine, operation.value, revision.api_graph_json, revision.input_schema_json
+    ):
+        return "unavailable", "revision_ignores_the_description"
     if not revision.trusted:
         return "review_required", "revision_untrusted"
     if revision.dependency_contract_sha256 is None:
@@ -8221,6 +11082,23 @@ def _workflow_family_variant_out(
         readiness, reason = "unavailable", "family_archived"
     elif not family.enabled:
         readiness, reason = "unavailable", "family_disabled"
+    setup_resolution: Literal["reviewed_download_available", "attention_required"] | None = None
+    install_offer: WorkflowInstallOfferOut | None = None
+    if readiness == "setup_required":
+        setup_resolution = "attention_required"
+        if revision is not None and revision.id == definition.current_revision_id:
+            offer = current_reviewed_workflow_install_offer(
+                session,
+                workflow_id=definition.id,
+                revision_id=revision.id,
+            )
+            if offer is not None:
+                try:
+                    install_offer = _workflow_install_offer_out(offer)
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    setup_resolution = "reviewed_download_available"
     return WorkflowFamilyVariantOut(
         id=definition.id,
         variant_key=definition.variant_key or "",
@@ -8233,6 +11111,11 @@ def _workflow_family_variant_out(
         trusted=revision.trusted if revision else compatibility is not None,
         readiness=readiness,
         readiness_reason=reason,
+        setup_resolution=setup_resolution,
+        install_offer=install_offer,
+        install_progress=latest_workflow_install_progress(session, revision.id)
+        if revision
+        else None,
     )
 
 
@@ -8240,6 +11123,13 @@ def _workflow_family_out(
     session: Session,
     services: Services,
     family: WorkflowFamily,
+    *,
+    variant_limit: int | None = None,
+    variant_offset: int = 0,
+    operation: Operation | None = None,
+    readiness: WorkflowVariantReadiness | None = None,
+    variant_capability: WorkflowSelectorCapability | None = None,
+    workflow_ids: Sequence[str] = (),
 ) -> WorkflowFamilyOut:
     compatibility = session.scalar(
         select(WorkflowProfileCompatibility).where(
@@ -8247,6 +11137,32 @@ def _workflow_family_out(
         )
     )
     profile = session.get(ModelProfile, compatibility.model_profile_id) if compatibility else None
+    page = (
+        read_family_variants(
+            session,
+            family.id,
+            lambda definition: _workflow_family_variant_out(
+                session,
+                services,
+                family,
+                definition,
+                compatibility,
+            ),
+            limit=variant_limit,
+            offset=variant_offset,
+            operation=operation,
+            readiness=readiness,
+            capability=variant_capability,
+            workflow_ids=workflow_ids,
+        )
+        if variant_limit is not None
+        or variant_offset
+        or operation is not None
+        or readiness is not None
+        or variant_capability is not None
+        or workflow_ids
+        else None
+    )
     return WorkflowFamilyOut(
         id=family.id,
         name=family.name,
@@ -8259,7 +11175,14 @@ def _workflow_family_out(
         enabled=family.enabled,
         archived=family.archived,
         compatibility=compatibility is not None,
-        variants=[
+        supported_selector_capabilities=(
+            selector_capabilities_for_operations(page.operations)
+            if page is not None and operation is None and not workflow_ids
+            else family_supported_selector_capabilities(session, family.id)
+        ),
+        variants=page.variants
+        if page is not None
+        else [
             _workflow_family_variant_out(
                 session,
                 services,
@@ -8272,6 +11195,9 @@ def _workflow_family_out(
                 key=lambda item: (item.operation, item.variant_key or "", item.id),
             )
         ],
+        variant_count=page.count if page is not None else None,
+        ready_variant_count=page.ready_count if page is not None else None,
+        best_readiness=page.best_readiness if page is not None else None,
         preferences=[
             WorkflowFamilyPreferenceOut(
                 selector_capability=_workflow_selector_capability(preference.selector_capability),
@@ -8290,13 +11216,15 @@ def _workflow_family_out(
 
 
 def _workflow_family_row(session: Session, family_id: str) -> WorkflowFamily:
+    from .workflow_recovery_visibility import visible_workflow_family
+
     family = session.scalar(
         select(WorkflowFamily)
         .options(
             selectinload(WorkflowFamily.definitions),
             selectinload(WorkflowFamily.preferences),
         )
-        .where(WorkflowFamily.id == family_id)
+        .where(WorkflowFamily.id == family_id, visible_workflow_family(WorkflowFamily.id))
     )
     if family is None:
         raise api_error(404, "workflow-family-not-found", "workflow family not found")
@@ -8354,10 +11282,81 @@ async def list_workflow_families(
     session: SessionDep,
     selector_capability: WorkflowSelectorCapability | None = None,
     include_archived: bool = False,
+    include_dependencies: bool = False,
+    limit: int | None = Query(None, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=2**63 - 1),
+    variant_limit: int | None = Query(None, ge=1, le=200),
+    variant_offset: int = Query(0, ge=0, le=2**63 - 1),
+    search: str = Query("", max_length=500),
+    operation: Operation | None = None,
+    readiness: WorkflowVariantReadiness | None = None,
+    variant_capability: WorkflowSelectorCapability | None = None,
+    source: Literal["profile", "workflow"] | None = None,
+    order: Literal["name", "readiness", "preference"] = "name",
+    defaults_only: bool = False,
+    enabled_only: bool = False,
+    family_ids: Annotated[list[str] | None, Query(max_length=200)] = None,
+    workflow_ids: Annotated[list[str] | None, Query(max_length=200)] = None,
 ) -> list[WorkflowFamilyOut]:
-    query = select(WorkflowFamily).options(
-        selectinload(WorkflowFamily.definitions),
-        selectinload(WorkflowFamily.preferences),
+    from .workflow_recovery_visibility import visible_workflow_family
+
+    if (
+        limit is not None
+        or offset
+        or variant_limit is not None
+        or variant_offset
+        or search
+        or operation is not None
+        or readiness is not None
+        or variant_capability is not None
+        or source is not None
+        or order != "name"
+        or defaults_only
+        or enabled_only
+        or family_ids
+        or workflow_ids
+    ):
+        services = _services(request)
+        return read_family_page(
+            session,
+            lambda family: _workflow_family_out(
+                session,
+                services,
+                family,
+                variant_limit=variant_limit or 50,
+                variant_offset=variant_offset,
+                operation=operation,
+                readiness=readiness,
+                variant_capability=variant_capability,
+                workflow_ids=workflow_ids or (),
+            ),
+            limit=limit,
+            offset=offset,
+            search=search,
+            selector_capability=selector_capability,
+            include_archived=include_archived,
+            include_dependencies=include_dependencies,
+            family_ids=family_ids or (),
+            workflow_ids=workflow_ids or (),
+            defaults_only=defaults_only,
+            enabled_only=enabled_only,
+            source=source,
+            order=order,
+            require_variants=not family_ids
+            and (
+                limit is not None
+                or operation is not None
+                or readiness is not None
+                or variant_capability is not None
+            ),
+        )
+    query = (
+        select(WorkflowFamily)
+        .where(visible_workflow_family(WorkflowFamily.id))
+        .options(
+            selectinload(WorkflowFamily.definitions),
+            selectinload(WorkflowFamily.preferences),
+        )
     )
     if not include_archived:
         query = query.where(WorkflowFamily.archived.is_(False))
@@ -8369,7 +11368,59 @@ async def list_workflow_families(
         session.scalars(query.order_by(WorkflowFamily.name, WorkflowFamily.id)).unique()
     )
     services = _services(request)
-    return [_workflow_family_out(session, services, family) for family in families]
+    summaries = (
+        workflow_family_dependency_summaries(session, [family.id for family in families])
+        if include_dependencies
+        else {}
+    )
+    result = []
+    for family in families:
+        output = _workflow_family_out(session, services, family)
+        summary = summaries.get(family.id)
+        if summary is not None:
+            output.dependency_summary = WorkflowFamilyDependencySummaryOut(
+                dependency_count=summary.dependency_count, names=list(summary.names)
+            )
+        result.append(output)
+    return result
+
+
+@router.get("/workflow-ready-revisions", response_model=list[WorkflowReadyRevisionOut])
+async def workflow_ready_revisions(
+    request: Request,
+    session: SessionDep,
+    selector_capability: WorkflowSelectorCapability = "image",
+    operation: Operation = Operation.TEXT_TO_IMAGE,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=2**63 - 1),
+    search: str = Query("", max_length=500),
+    revision_id: Annotated[list[str] | None, Query(max_length=200)] = None,
+) -> list[WorkflowReadyRevisionOut]:
+    services = _services(request)
+    return read_ready_revision_page(
+        session,
+        lambda definition, family, compatibility: _workflow_family_variant_out(
+            session,
+            services,
+            family,
+            definition,
+            compatibility,
+        ),
+        capability=selector_capability,
+        operation=operation,
+        limit=limit,
+        offset=offset,
+        search=search,
+        revision_ids=revision_id or (),
+    )
+
+
+@router.get("/workflow-family-operations", response_model=list[Operation])
+async def list_workflow_family_operations(
+    session: SessionDep,
+    include_archived: bool = False,
+) -> list[Operation]:
+    return family_operation_choices(session, include_archived=include_archived)
 
 
 @router.get("/workflow-families/{family_id}", response_model=WorkflowFamilyOut)
@@ -8377,7 +11428,32 @@ async def get_workflow_family(
     family_id: str,
     request: Request,
     session: SessionDep,
+    variant_limit: int | None = Query(None, ge=1, le=200),
+    variant_offset: int = Query(0, ge=0, le=2**63 - 1),
+    operation: Operation | None = None,
+    readiness: WorkflowVariantReadiness | None = None,
+    variant_capability: WorkflowSelectorCapability | None = None,
 ) -> WorkflowFamilyOut:
+    if (
+        variant_limit is not None
+        or variant_offset
+        or operation is not None
+        or readiness is not None
+        or variant_capability is not None
+    ):
+        family = session.get(WorkflowFamily, family_id)
+        if family is None:
+            raise api_error(404, "workflow-family-not-found", "workflow family not found")
+        return _workflow_family_out(
+            session,
+            _services(request),
+            family,
+            variant_limit=variant_limit or 50,
+            variant_offset=variant_offset,
+            operation=operation,
+            readiness=readiness,
+            variant_capability=variant_capability,
+        )
     family = _workflow_family_row(session, family_id)
     return _workflow_family_out(session, _services(request), family)
 
@@ -8611,6 +11687,7 @@ async def list_chat_workflow_selections(
     chat_id: str,
     session: ConversationSessionDep,
 ) -> list[WorkflowSelectionOut]:
+    _refuse_comparison_chat(session, chat_id)
     chat = session.get(Chat, chat_id)
     if chat is None:
         raise api_error(404, "chat-not-found", "chat not found")
@@ -8630,6 +11707,7 @@ async def set_chat_workflow_selection(
     payload: ChatWorkflowSelectionIn,
     session: ConversationSessionDep,
 ) -> WorkflowSelectionOut:
+    _refuse_comparison_chat(session, chat_id)
     chat = session.get(Chat, chat_id)
     if chat is None:
         raise api_error(404, "chat-not-found", "chat not found")
@@ -8686,7 +11764,7 @@ async def list_project_workflow_selections(
     project_id: str,
     session: SessionDep,
 ) -> list[WorkflowSelectionOut]:
-    project = session.get(Project, project_id)
+    project = live_project(session, project_id)
     if project is None:
         raise api_error(404, "project-not-found", "project not found")
     return [
@@ -8705,7 +11783,15 @@ async def set_project_workflow_selection(
     payload: ProjectWorkflowSelectionIn,
     session: SessionDep,
 ) -> WorkflowSelectionOut:
-    project = session.get(Project, project_id)
+    try:
+        reserve_recovery_write(session)
+    except RecoveryPreviewConflict:
+        raise api_error(
+            409,
+            "workflow-selection-busy",
+            "The workflow selection could not be changed safely. Try again.",
+        ) from None
+    project = live_project(session, project_id)
     if project is None:
         raise api_error(404, "project-not-found", "project not found")
     selection = session.scalar(
@@ -8732,10 +11818,16 @@ async def set_project_workflow_selection(
         elif payload.mode == "revision":
             revision = session.get(WorkflowRevision, payload.workflow_revision_id)
             definition = session.get(WorkflowDefinition, revision.workflow_id) if revision else None
+            from .workflow_recovery_visibility import workflow_family_deleted
+
             operations = {
                 operation.value for operation in _SELECTOR_OPERATIONS[selector_capability]
             }
-            if revision is None or definition is None:
+            if (
+                revision is None
+                or definition is None
+                or workflow_family_deleted(session, definition.family_id)
+            ):
                 raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
             if definition.operation not in operations:
                 raise api_error(
@@ -8762,50 +11854,267 @@ async def set_project_workflow_selection(
     return _project_workflow_selection_out(session, project, selector_capability)
 
 
-@router.get("/workflows", response_model=list[WorkflowOut])
-async def list_workflows(session: SessionDep) -> list[WorkflowDefinition]:
-    definitions = list(
-        session.scalars(
-            select(WorkflowDefinition)
-            .options(selectinload(WorkflowDefinition.revisions))
-            .order_by(WorkflowDefinition.name)
-        ).all()
+@router.get("/workflow-summaries", response_model=list[WorkflowSummaryOut])
+async def workflow_summaries(
+    session: SessionDep,
+    limit: int | None = Query(default=None, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=2**63 - 1),
+    search: str = Query(default="", max_length=500),
+    operation: str | None = Query(default=None, max_length=100),
+    workflow_id: Annotated[list[str] | None, Query(max_length=200)] = None,
+    ungrouped_only: bool = False,
+) -> list[WorkflowSummaryOut]:
+    return list_workflow_summaries(
+        session,
+        limit=limit,
+        offset=offset,
+        search=search,
+        operation=operation,
+        workflow_ids=workflow_id or (),
+        ungrouped_only=ungrouped_only,
     )
-    # Package drafts exist only to give dependency preparation a saved subject.
-    # Until compilation creates the executable revision, presenting one as an
-    # ordinary selectable workflow makes the library look broken.
-    return [
-        definition
-        for definition in definitions
-        if not is_workflow_package_draft(
-            next(
-                (
-                    revision
-                    for revision in definition.revisions
-                    if revision.id == definition.current_revision_id
-                ),
-                None,
-            )
+
+
+@router.get("/workflow-revision-choices", response_model=list[WorkflowRevisionChoiceOut])
+async def workflow_revision_choices(
+    session: SessionDep,
+    limit: int | None = Query(default=None, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=2**63 - 1),
+    search: str = Query(default="", max_length=500),
+    operation: str | None = Query(default=None, max_length=100),
+    workflow_id: Annotated[list[str] | None, Query(max_length=200)] = None,
+    revision_id: Annotated[list[str] | None, Query(max_length=200)] = None,
+    role: Literal["chat", "image", "video"] | None = None,
+) -> list[WorkflowRevisionChoiceOut]:
+    return list_workflow_revision_choices(
+        session,
+        limit=limit,
+        offset=offset,
+        search=search,
+        operation=operation,
+        workflow_ids=workflow_id or (),
+        revision_ids=revision_id or (),
+        role=role,
+    )
+
+
+@router.get(
+    "/workflow-revisions/{revision_id}/settings-schema", response_model=WorkflowRevisionSchemaOut
+)
+async def workflow_revision_settings_schema(
+    revision_id: str, session: SessionDep
+) -> WorkflowRevisionSchemaOut:
+    schema = load_workflow_revision_schema(session, revision_id)
+    if schema is None:
+        raise api_error(404, "workflow-revision-not-found", "Workflow revision not found.")
+    return schema
+
+
+@router.get(
+    "/workflow-revisions/{revision_id}/lora-controls",
+    response_model=WorkflowLoraControlsOut,
+)
+def get_workflow_lora_controls(revision_id: str, session: SessionDep) -> WorkflowLoraControlsOut:
+    """Project embedded LoRAs without exposing or changing workflow graph locations."""
+
+    try:
+        projection = workflow_lora_controls(session, revision_id=revision_id)
+    except WorkflowLoraProjectionError as exc:
+        if exc.code == "workflow_revision_not_found":
+            raise api_error(
+                404, "workflow-revision-not-found", "Workflow revision not found."
+            ) from exc
+        raise api_error(
+            409,
+            "workflow-lora-controls-unavailable",
+            "Workflow LoRA controls cannot be derived from this stored revision.",
+        ) from exc
+    except WorkflowLoraSlotError as exc:
+        raise api_error(
+            409,
+            "workflow-lora-controls-unavailable",
+            "Workflow LoRA controls cannot be derived from this stored revision.",
+        ) from exc
+    return WorkflowLoraControlsOut.model_validate(projection)
+
+
+@router.get(
+    "/workflow-revisions/{revision_id}/lora-suggestions",
+    response_model=LoraSuggestionsOut,
+)
+async def get_workflow_lora_suggestions(
+    revision_id: str,
+    request: Request,
+    session: SessionDep,
+    cursor: str | None = Query(default=None, max_length=2048),
+) -> LoraSuggestionsOut:
+    """Ask CivitAI for well-rated LoRAs that fit the model this workflow runs."""
+
+    revision = session.get(WorkflowRevision, revision_id)
+    if revision is None:
+        raise api_error(404, "workflow-revision-not-found", "Workflow revision not found.")
+    scope = lora_suggestion_scope(session, revision)
+    if scope.gap is not None:
+        return LoraSuggestionsOut(family=scope.family, gap=scope.gap)
+    catalog = _services(request).catalog_sources.get("civitai")
+    if not isinstance(catalog, CivitaiCatalog):
+        raise api_error(503, "catalog-unavailable", "CivitAI is not available here.")
+    try:
+        page = await catalog.search(
+            role="lora",
+            sort="likes",
+            limit=30,
+            cursor=cursor,
+            base_models=scope.base_models,
         )
-    ]
+    except ValueError as exc:
+        raise api_error(422, "catalog-request-invalid", "The suggestion page is invalid.") from exc
+    except Exception as exc:
+        raise api_error(
+            503,
+            "catalog-unavailable",
+            "CivitAI is temporarily unavailable. Check your connection and retry.",
+        ) from exc
+    return LoraSuggestionsOut(
+        family=scope.family,
+        items=suggested_loras(scope, page),
+        next_cursor=page.next_cursor,
+        stale=page.stale,
+    )
+
+
+@router.get("/workflows/{workflow_id}", response_model=WorkflowOut)
+async def workflow_detail(workflow_id: str, session: SessionDep) -> WorkflowDefinition:
+    definition = load_workflow_detail(session, workflow_id)
+    if definition is None:
+        raise api_error(404, "workflow-not-found", "Workflow not found.")
+    return definition
+
+
+@router.get("/workflows", response_model=list[WorkflowOut])
+async def list_workflows(
+    session: SessionDep,
+    limit: int | None = Query(None, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=2**63 - 1),
+) -> list[WorkflowDefinition]:
+    return list_workflow_definitions(session, limit=limit, offset=offset)
 
 
 @router.post("/workflows", response_model=WorkflowOut, status_code=201)
-async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> WorkflowDefinition:
+async def create_workflow(
+    payload: WorkflowCreate, request: Request, session: SessionDep
+) -> WorkflowDefinition:
+    payload = await _map_workflow_write(payload, request, payload.operation, payload.engine)
     return await _persist_workflow(payload, session, trusted=False)
+
+
+async def _map_workflow_write[T: (WorkflowCreate, WorkflowRevisionCreate)](
+    payload: T,
+    request: Request,
+    operation: Operation | str,
+    engine: str,
+    *,
+    changed_native_graph: bool = False,
+) -> T:
+    if engine != "comfyui":
+        return payload
+    code = (
+        "workflow-revision-invalid"
+        if isinstance(payload, WorkflowRevisionCreate)
+        else "workflow-invalid"
+    )
+    try:
+        video_length_reaches_graph(payload.api_graph, payload.input_schema)
+        edit_calibration_reaches_graph(payload.api_graph, payload.input_schema)
+    except ValueError as exc:
+        raise api_error(422, code, str(exc)) from exc
+    if GRAPH_SETTINGS_SCHEMA_KEY in payload.input_schema:
+        try:
+            generated_workflow_setting_paths(payload.input_schema, payload.api_graph)
+        except WorkflowPackageInputError as exc:
+            raise api_error(422, code, str(exc)) from exc
+        if not changed_native_graph:
+            return payload
+    describe_nodes = getattr(_services(request).engines.media, "object_info", None)
+    if not callable(describe_nodes):
+        raise api_error(
+            503, "media-runtime-unavailable", "Start the media worker to map workflow settings"
+        )
+    try:
+        object_info = await describe_nodes()
+    except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
+        raise api_error(
+            503, "media-runtime-unavailable", "Start the media worker to map workflow settings"
+        ) from exc
+    if not isinstance(object_info, Mapping):
+        raise api_error(
+            503, "media-runtime-unavailable", "The media runtime returned an invalid node inventory"
+        )
+    try:
+        if payload.ui_graph:
+            prepared = prepare_workflow_revision_compilation(
+                payload.ui_graph, object_info, operation, payload.api_graph, payload.input_schema
+            )
+            compilation = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
+            bound = bind_supplied_workflow_settings(
+                compilation, payload.api_graph, payload.input_schema, operation=operation
+            )
+        else:
+            bound = bind_api_workflow_settings(
+                payload.api_graph, object_info, payload.input_schema, operation=operation
+            )
+    except (WorkflowCompilationError, WorkflowPackageError, WorkflowPackageInputError) as exc:
+        raise api_error(422, code, str(exc)) from exc
+    return payload.model_copy(
+        update={"api_graph": bound.api_graph, "input_schema": bound.input_schema}
+    )
 
 
 async def _persist_workflow(
     payload: WorkflowCreate, session: Session, *, trusted: bool
 ) -> WorkflowDefinition:
+    return await _run_workflow_write(
+        lambda: _persist_workflow_sync(payload, session, trusted=trusted)
+    )
+
+
+async def _run_workflow_write[T: (WorkflowDefinition, WorkflowRevision)](
+    operation: Callable[[], T],
+) -> T:
+    task = asyncio.create_task(asyncio.to_thread(operation))
     try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # The request owns the session until its worker finishes. Repeated
+        # cancellation must not close it while SQLite uses it.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        with suppress(Exception):
+            task.result()
+        raise
+
+
+def _persist_workflow_sync(
+    payload: WorkflowCreate, session: Session, *, trusted: bool
+) -> WorkflowDefinition:
+    try:
+        generated_workflow_setting_paths(payload.input_schema, payload.api_graph)
         validate_lora_workflow_contract(
             payload.api_graph,
             payload.input_schema,
             payload.dependencies,
         )
         validate_workflow_edit_calibration(payload.input_schema)
+        validate_workflow_input_schema(payload.input_schema)
         workflow_video_length(payload.input_schema)
+        video_length_reaches_graph(payload.api_graph, payload.input_schema)
+        edit_calibration_reaches_graph(payload.api_graph, payload.input_schema)
+        declared_dependency_contract(payload.dependencies)
     except ValueError as exc:
         raise api_error(422, "workflow-invalid", str(exc)) from exc
     definition = WorkflowDefinition(
@@ -8838,6 +12147,7 @@ async def _persist_workflow(
     )
     session.add(revision)
     session.flush()
+    persist_dependency_contract(session, revision)
     definition.current_revision_id = revision.id
     ensure_workflow_family_ownership(session, definition, revision)
     session.commit()
@@ -8856,7 +12166,9 @@ async def update_workflow(
     workflow_id: str, payload: WorkflowUpdate, session: SessionDep
 ) -> WorkflowDefinition:
     definition = session.get(WorkflowDefinition, workflow_id)
-    if not definition:
+    from .workflow_recovery_visibility import workflow_family_deleted
+
+    if not definition or workflow_family_deleted(session, definition.family_id):
         raise api_error(404, "workflow-not-found", "workflow not found")
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(definition, key, value)
@@ -9140,7 +12452,14 @@ async def start_workflow_editor_session(
             prepared.ui_graph,
             prepared.object_info,
         )
-        compiled_api_graph = prepared.bind(compilation.api_graph)
+        bound_settings = rebind_workflow_graph_settings(
+            compilation,
+            prepared.bind(compilation.api_graph),
+            revision.api_graph_json,
+            revision.input_schema_json,
+            operation=definition.operation,
+        )
+        compiled_api_graph = bound_settings.api_graph
         compiled_sha256 = workflow_api_graph_sha256(compiled_api_graph)
         stored_sha256 = workflow_api_graph_sha256(revision.api_graph_json)
     except (
@@ -9161,7 +12480,10 @@ async def start_workflow_editor_session(
             "This workflow cannot be opened for verified native editing.",
             reason_code=exc.code,
         ) from exc
-    if compiled_sha256 != stored_sha256:
+    if compiled_sha256 != stored_sha256 or (
+        GRAPH_SETTINGS_SCHEMA_KEY in revision.input_schema_json
+        and bound_settings.input_schema != revision.input_schema_json
+    ):
         raise api_error(
             409,
             "workflow-editor-graph-prompt-mismatch",
@@ -9285,7 +12607,7 @@ async def consume_workflow_editor_session(
         )
 
     try:
-        workflow_ui_graph_sha256(payload.ui_graph)
+        returned_graph_sha256 = workflow_ui_graph_sha256(payload.ui_graph)
         returned_prompt_sha256 = workflow_api_graph_sha256(payload.api_prompt)
     except WorkflowEditorSessionError as exc:
         raise api_error(
@@ -9333,7 +12655,15 @@ async def consume_workflow_editor_session(
         )
         raw_compiled_api_graph = {key: dict(value) for key, value in compilation.api_graph.items()}
         raw_compiled_prompt_sha256 = workflow_api_graph_sha256(raw_compiled_api_graph)
-        compiled_api_graph = prepared.bind(raw_compiled_api_graph)
+        bound_settings = rebind_workflow_graph_settings(
+            compilation,
+            prepared.bind(raw_compiled_api_graph),
+            base_revision.api_graph_json,
+            base_revision.input_schema_json,
+            operation=definition.operation,
+            map_unmapped=returned_graph_sha256 != base_graph_sha256,
+        )
+        compiled_api_graph = bound_settings.api_graph
     except (
         WorkflowCompilationError,
         WorkflowPackageError,
@@ -9382,6 +12712,7 @@ async def consume_workflow_editor_session(
             returned_ui_graph=payload.ui_graph,
             returned_api_graph=compiled_api_graph,
             runtime_identity=runtime_identity,
+            returned_input_schema=bound_settings.input_schema,
         )
     except WorkflowEditorSessionError as exc:
         if exc.code == "workflow-editor-session-not-found":
@@ -9499,7 +12830,7 @@ def _workflow_editor_draft_matches(
         and revision.input_schema_json == dict(input_schema)
         and revision.capabilities_json == capabilities
         and revision.dependencies_json == dict(dependencies)
-        and revision.dependency_contract_sha256 is None
+        and revision.dependency_contract_sha256 == declared_dependency_contract_sha256(dependencies)
         and revision.artifact_sha256 == artifact_sha256
         and not revision.trusted
     )
@@ -9561,13 +12892,22 @@ async def create_workflow_editor_draft(
     try:
         returned_ui_graph = json.loads(validated.returned_ui_graph_json)
         returned_api_graph = json.loads(validated.returned_api_graph_json)
+        input_schema = (
+            json.loads(validated.returned_input_schema_json)
+            if validated.returned_input_schema_json is not None
+            else dict(base_revision.input_schema_json)
+        )
     except json.JSONDecodeError as exc:
         raise api_error(
             409,
             "workflow-editor-validated-return-corrupt",
             "The validated editor return can no longer be read.",
         ) from exc
-    if not isinstance(returned_ui_graph, dict) or not isinstance(returned_api_graph, dict):
+    if (
+        not isinstance(returned_ui_graph, dict)
+        or not isinstance(returned_api_graph, dict)
+        or not isinstance(input_schema, dict)
+    ):
         raise api_error(
             409,
             "workflow-editor-validated-return-corrupt",
@@ -9591,9 +12931,21 @@ async def create_workflow_editor_draft(
             "workflow-editor-draft-dependencies-changed",
             "Review and prepare dependency-changing edits before saving them as a revision.",
         )
-    if _workflow_runtime_binding_paths(
-        base_revision.api_graph_json
-    ) != _workflow_runtime_binding_paths(returned_api_graph):
+    try:
+        base_settings_paths = generated_workflow_setting_paths(
+            base_revision.input_schema_json, base_revision.api_graph_json
+        )
+        returned_settings_paths = generated_workflow_setting_paths(input_schema, returned_api_graph)
+    except WorkflowPackageInputError as exc:
+        raise api_error(
+            422,
+            "workflow-editor-draft-contract-invalid",
+            "The generated settings cannot be verified.",
+        ) from exc
+    if (
+        _workflow_runtime_binding_paths(base_revision.api_graph_json) - base_settings_paths
+        != _workflow_runtime_binding_paths(returned_api_graph) - returned_settings_paths
+    ):
         raise api_error(
             422,
             "workflow-editor-draft-bindings-changed",
@@ -9602,10 +12954,14 @@ async def create_workflow_editor_draft(
     try:
         validate_lora_workflow_contract(
             returned_api_graph,
-            base_revision.input_schema_json,
+            input_schema,
             base_revision.dependencies_json,
         )
-        validate_workflow_edit_calibration(base_revision.input_schema_json)
+        validate_workflow_edit_calibration(input_schema)
+        validate_workflow_input_schema(input_schema)
+        workflow_video_length(input_schema)
+        video_length_reaches_graph(returned_api_graph, input_schema)
+        edit_calibration_reaches_graph(returned_api_graph, input_schema)
     except ValueError as exc:
         raise api_error(
             422,
@@ -9638,7 +12994,6 @@ async def create_workflow_editor_draft(
 
     capabilities: list[str] = []
     dependencies = _workflow_editor_draft_dependencies(base_revision.dependencies_json)
-    input_schema = dict(base_revision.input_schema_json)
     artifact_sha256 = workflow_artifact_contract(
         operation=definition.operation,
         engine=base_revision.engine,
@@ -9668,12 +13023,13 @@ async def create_workflow_editor_draft(
             input_schema_json=input_schema,
             capabilities_json=capabilities,
             dependencies_json=dependencies,
-            dependency_contract_sha256=None,
             trusted=False,
             artifact_sha256=artifact_sha256,
         )
         session.add(existing)
         try:
+            session.flush()
+            persist_dependency_contract(session, existing)
             session.commit()
             created = True
         except IntegrityError:
@@ -9986,20 +13342,33 @@ async def _cancel_registry_preparation(job_id: str) -> bool:
     a later success write COMPLETE over CANCELLED.
     """
 
+    with SessionLocal() as session:
+        initial = session.get(Job, job_id)
+        if initial is None:
+            return False
+        attempt, queue_ticket = initial.attempt, initial.queue_ticket
     task = _REGISTRY_PREPARE_TASKS.get(job_id)
     if task is not None and not task.done():
         task.cancel()
         with suppress(asyncio.CancelledError, Exception):
             await task
     with SessionLocal() as session:
+        session.execute(text("UPDATE jobs SET status = status WHERE 0"))
         job = session.get(Job, job_id)
-        if not job or job.status in {
-            JobStatus.COMPLETE.value,
-            JobStatus.FAILED.value,
-            JobStatus.CANCELLED.value,
-        }:
+        if (
+            job is None
+            or job.attempt != attempt
+            or job.queue_ticket != queue_ticket
+            or job.status
+            in {
+                JobStatus.COMPLETE.value,
+                JobStatus.FAILED.value,
+                JobStatus.CANCELLED.value,
+            }
+        ):
             return False
         job.status = JobStatus.CANCELLED.value
+        job.completed_at = utcnow()
         update_job_progress(job, stage="cancelled", indeterminate=True)
         session.commit()
     return True
@@ -10092,36 +13461,11 @@ def _analyzed_package_node_types(
     return _prepared_node_types(list(requirement.node_types))
 
 
-#: A comparison is only worth doing if it is bounded; a graph larger than this
-#: is refused rather than serialized twice to find out it did not match.
-MAX_COMPARED_GRAPH_CHARACTERS = 8_000_000
-
-
 def _canonical_graph(graph: dict[str, Any]) -> str:
-    """One bounded string for a graph, so two of them can be compared exactly.
-
-    Node-type names alone are not the graph. Two workflows can require the
-    same class names while declaring different packages, versions, or links -
-    which is exactly the substitution this comparison exists to catch.
-    """
-    encoded = json.dumps(
-        graph, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    )
-    if len(encoded) > MAX_COMPARED_GRAPH_CHARACTERS:
-        raise api_error(
-            422,
-            "workflow-graph-too-large",
-            "That workflow is too large to compare against the stored revision.",
-        )
-    return encoded
-
-
-def _workflow_package_draft_identity(canonical_graph: str) -> tuple[str, str, str]:
-    """Return stable local identities for one exact source graph."""
-
-    digest = hashlib.sha256(canonical_graph.encode("utf-8")).hexdigest()
-    short = digest[:24]
-    return f"wfpkgdraft_{short}", f"wfpkgdrev_{short}", digest
+    try:
+        return canonical_package_graph(graph)
+    except WorkflowPackageDraftError as exc:
+        raise api_error(exc.status_code, exc.code, str(exc)) from exc
 
 
 def _workflow_with_revisions(session: Session, workflow_id: str) -> WorkflowDefinition:
@@ -10220,6 +13564,21 @@ def _authorized_workflow_context(
     return revision.id, tuple(sorted(set(analysis.required_node_types))), stored
 
 
+def _current_registry_preparation(
+    session: Session, job_id: str, claim: JobClaim, *, require_running: bool = True
+) -> Job | None:
+    session.execute(text("UPDATE jobs SET status = status WHERE 0"))
+    job = session.get(Job, job_id, populate_existing=True)
+    if (
+        job is None
+        or (require_running and job.status != JobStatus.RUNNING.value)
+        or job.claim_owner != claim.token
+        or job.attempt != claim.attempt
+    ):
+        return None
+    return job
+
+
 async def _run_workflow_package_preparation(
     services: Services,
     job_id: str,
@@ -10231,11 +13590,72 @@ async def _run_workflow_package_preparation(
 ) -> None:
     """One durable preparation job: lease held, worker state told truthfully."""
 
-    def report(name: str, done: int | None, total: int | None) -> None:
-        with SessionLocal() as session:
-            job = session.get(Job, job_id)
-            if not job:
+    with SessionLocal() as session:
+        initial = session.get(Job, job_id)
+        if initial is None:
+            return
+        initial_attempt = initial.attempt
+        initial_ticket = initial.queue_ticket
+    claim: JobClaim | None = None
+    execution = asyncio.current_task()
+    displaced = False
+
+    def stop_displaced() -> None:
+        nonlocal displaced
+        displaced = True
+        if execution is not None:
+            execution.cancel()
+
+    def require_current() -> None:
+        if claim is not None:
+            with SessionLocal() as session:
+                current = session.scalar(
+                    select(Job.id).where(
+                        Job.id == job_id,
+                        Job.status == JobStatus.RUNNING.value,
+                        Job.claim_owner == claim.token,
+                        Job.attempt == claim.attempt,
+                    )
+                )
+            if current is not None:
                 return
+        raise WorkflowPackagePreparationError(
+            "registry_preparation_claim_lost",
+            "Package preparation no longer owns its execution. Try again after cleanup.",
+        )
+
+    def guard_write(session: Session) -> None:
+        if claim is None or _current_registry_preparation(session, job_id, claim) is None:
+            raise WorkflowPackagePreparationError(
+                "registry_preparation_claim_lost",
+                "Package preparation no longer owns its execution. Try again after cleanup.",
+            )
+
+    def guard_cleanup(session: Session) -> None:
+        if (
+            claim is None
+            or _current_registry_preparation(session, job_id, claim, require_running=False) is None
+        ):
+            raise WorkflowPackagePreparationError(
+                "registry_preparation_claim_lost",
+                "Package preparation no longer owns its execution. Try again after cleanup.",
+            )
+
+    def require_retained_claim() -> None:
+        with SessionLocal() as session:
+            guard_cleanup(session)
+
+    def report(name: str, done: int | None, total: int | None) -> None:
+        if claim is None:
+            require_current()
+            return
+        with SessionLocal() as session:
+            job = _current_registry_preparation(session, job_id, claim)
+            if job is None:
+                raise WorkflowPackagePreparationError(
+                    "registry_preparation_claim_lost",
+                    "Package preparation no longer owns its execution. Try again after cleanup.",
+                )
             update_job_progress(
                 job,
                 stage=name,
@@ -10247,73 +13667,160 @@ async def _run_workflow_package_preparation(
             session.commit()
 
     try:
-        async with services.scheduler.job_lease(job_id, resource="media_compute", group="primary"):
-            media_stopped = _media_worker_truly_stopped(services)
-            # The composition opens its session only around the atomic
-            # prepare step; resolution and closure run session-free.
-            preparation = await prepare_workflow_package(
-                SessionLocal,
-                package_id=package_id,
-                version=version,
-                node_types=node_types,
-                context=PreparationContext.from_settings(services.settings),
-                media_worker_stopped=media_stopped,
-                interpreter_probe=probe_comfy_registry_runtime_target,
-                registry_client=ComfyRegistryClient(),
-                project_client=ComfyRegistryWheelProjectClient(),
-                metadata_client=ComfyRegistryWheelMetadataClient(),
-                archive_downloader=ComfyRegistryArchiveDownloader(),
-                wheel_downloader=ComfyRegistryWheelDownloader(),
-                phase=report,
-                renew_install_id=renew_install_id,
-                authorized_workflow=authorized_workflow,
-            )
-            with SessionLocal() as session:
-                job = session.get(Job, job_id)
-                if job and job.status != JobStatus.CANCELLED.value:
-                    job.status = JobStatus.COMPLETE.value
-                    job.payload_json = {
-                        **job.payload_json,
-                        "preparation": {
-                            "install_id": preparation.install_id,
-                            "installed_path": preparation.installed_path,
-                            "wheel_environment_path": preparation.wheel_environment_path,
-                            "archive_sha256": preparation.archive_sha256,
-                            "manifest_sha256": preparation.manifest_sha256,
-                            "wheel_closure_sha256": preparation.wheel_closure_sha256,
-                            "wheel_environment_sha256": preparation.wheel_environment_sha256,
-                            "reused_wheel_environment": preparation.reused_wheel_environment,
-                        },
-                    }
-                    update_job_progress(
-                        job,
-                        stage=(
-                            "Dependencies refreshed; trust unchanged"
-                            if renew_install_id is not None
-                            else "Prepared, inactive and untrusted"
-                        ),
+        async with services.scheduler.job_lease(
+            job_id, resource="media_compute", group="primary", on_claim_lost=stop_displaced
+        ) as acquired:
+            claim = acquired
+            try:
+                context = PreparationContext.from_settings(services.settings)
+                activation_result: WorkflowPackageActivation | None = None
+
+                async def finish_preparation(
+                    session: Session,
+                    preparation: ComfyRegistryPreparation,
+                    resolution: ComfyNodeResolution,
+                ) -> None:
+                    nonlocal activation_result
+                    require_current()
+                    activation_result = await activate_prepared_workflow_package(
+                        session,
+                        preparation,
+                        resolution,
+                        context=context,
+                        processes=services.processes,
+                        session_factory=SessionLocal,
+                        write_guard=guard_write,
+                        cleanup_guard=guard_cleanup,
                     )
-                session.commit()
-    except asyncio.CancelledError:
-        raise
-    except WorkflowPackagePreparationError as exc:
+
+                require_current()
+                async with workflow_package_runtime(
+                    services.processes, context, require_claim=require_retained_claim
+                ):
+                    media_stopped = _media_worker_truly_stopped(services)
+                    # The composition opens its session only around the atomic
+                    # prepare step; resolution and closure run session-free.
+                    preparation = await prepare_workflow_package(
+                        SessionLocal,
+                        package_id=package_id,
+                        version=version,
+                        node_types=node_types,
+                        context=context,
+                        media_worker_stopped=media_stopped,
+                        interpreter_probe=probe_comfy_registry_runtime_target,
+                        registry_client=ComfyRegistryClient(),
+                        project_client=ComfyRegistryWheelProjectClient(),
+                        metadata_client=ComfyRegistryWheelMetadataClient(),
+                        archive_downloader=ComfyRegistryArchiveDownloader(),
+                        wheel_downloader=ComfyRegistryWheelDownloader(),
+                        phase=report,
+                        renew_install_id=renew_install_id,
+                        authorized_workflow=authorized_workflow,
+                        on_prepared=finish_preparation if renew_install_id is None else None,
+                        write_guard=guard_write,
+                    )
+                with SessionLocal() as session:
+                    job = _current_registry_preparation(session, job_id, claim)
+                    if job is not None:
+                        job.status = JobStatus.COMPLETE.value
+                        job.completed_at = utcnow()
+                        job.payload_json = {
+                            **job.payload_json,
+                            "preparation": {
+                                "install_id": preparation.install_id,
+                                "installed_path": preparation.installed_path,
+                                "wheel_environment_path": preparation.wheel_environment_path,
+                                "archive_sha256": preparation.archive_sha256,
+                                "manifest_sha256": preparation.manifest_sha256,
+                                "wheel_closure_sha256": preparation.wheel_closure_sha256,
+                                "wheel_environment_sha256": preparation.wheel_environment_sha256,
+                                "reused_wheel_environment": preparation.reused_wheel_environment,
+                            },
+                        }
+                        if activation_result is not None:
+                            job.payload_json = {
+                                **job.payload_json,
+                                "activation": activation_result.payload(),
+                            }
+                        update_job_progress(
+                            job,
+                            stage=(
+                                "Dependencies refreshed; trust unchanged"
+                                if renew_install_id is not None
+                                else "Extension installed and active"
+                                if activation_result is not None
+                                and activation_result.state == "active"
+                                else "Extension prepared; review required"
+                            ),
+                        )
+                    session.commit()
+            except asyncio.CancelledError:
+                with SessionLocal() as session:
+                    job = _current_registry_preparation(session, job_id, claim)
+                    if job is not None:
+                        job.status = JobStatus.INTERRUPTED.value
+                        job.completed_at = utcnow()
+                        job.error = "The application stopped before preparation completed."
+                        update_job_progress(
+                            job, stage="Preparation interrupted", indeterminate=True
+                        )
+                    session.commit()
+                raise
+            except WorkflowPackagePreparationError as exc:
+                with SessionLocal() as session:
+                    job = _current_registry_preparation(session, job_id, claim)
+                    if job is not None:
+                        job.status = JobStatus.FAILED.value
+                        job.completed_at = utcnow()
+                        job.error = str(exc)
+                        job.payload_json = {**job.payload_json, "error_code": exc.code}
+                        update_job_progress(job, stage="Preparation refused")
+                    session.commit()
+            except Exception as exc:  # noqa: BLE001 - the job must never die silently
+                with SessionLocal() as session:
+                    job = _current_registry_preparation(session, job_id, claim)
+                    if job is not None:
+                        job.status = JobStatus.FAILED.value
+                        job.completed_at = utcnow()
+                        job.error = str(exc)
+                        update_job_progress(job, stage="Preparation failed")
+                    session.commit()
+    except Exception:  # noqa: BLE001 - retain a retryable job when dispatch or release fails
         with SessionLocal() as session:
-            job = session.get(Job, job_id)
-            if job and job.status != JobStatus.CANCELLED.value:
-                job.status = JobStatus.FAILED.value
-                job.error = str(exc)
-                job.payload_json = {**job.payload_json, "error_code": exc.code}
-                update_job_progress(job, stage="Preparation refused")
+            session.execute(text("UPDATE jobs SET status = status WHERE 0"))
+            job = session.get(Job, job_id, populate_existing=True)
+            if (
+                not displaced
+                and job is not None
+                and job.kind == JobKind.REGISTRY_PREPARE.value
+                and job.attempt == (claim.attempt if claim is not None else initial_attempt)
+                and (
+                    (
+                        claim is None
+                        and job.status == JobStatus.QUEUED.value
+                        and job.claim_owner is None
+                        and job.queue_ticket in (initial_ticket, initial_ticket or job_id)
+                    )
+                    or (
+                        claim is not None
+                        and job.status == JobStatus.RUNNING.value
+                        and job.claim_owner in (None, claim.token)
+                    )
+                )
+            ):
+                job.status = (
+                    JobStatus.FAILED.value if claim is None else JobStatus.INTERRUPTED.value
+                )
+                job.error = (
+                    "Package preparation could not start. Try again."
+                    if claim is None
+                    else "Package preparation stopped before its result was saved."
+                )
+                job.completed_at = utcnow()
+                update_job_progress(job, stage="Preparation interrupted", indeterminate=True)
             session.commit()
-    except Exception as exc:  # noqa: BLE001 - the job must never die silently
-        with SessionLocal() as session:
-            job = session.get(Job, job_id)
-            if job and job.status != JobStatus.CANCELLED.value:
-                job.status = JobStatus.FAILED.value
-                job.error = str(exc)
-                update_job_progress(job, stage="Preparation failed")
-            session.commit()
-    await services.scheduler.publish_job(job_id)
+    if not displaced:
+        await services.scheduler.publish_job(job_id)
 
 
 def _queue_registry_preparation(
@@ -10339,6 +13846,7 @@ def _queue_registry_preparation(
         }
     if renew_install_id is not None:
         payload["renew_install_id"] = renew_install_id
+    inputs = RegistryPreparationInputs.model_validate(payload)
     job = Job(
         kind=JobKind.REGISTRY_PREPARE.value,
         status=JobStatus.QUEUED.value,
@@ -10347,25 +13855,126 @@ def _queue_registry_preparation(
     )
     session.add(job)
     session.commit()
+    _start_registry_preparation(services, job.id, inputs)
+    return job
+
+
+def _retry_registry_preparation(session: Session, services: Services, job_id: str) -> Job:
+    session.execute(text("UPDATE jobs SET status = status WHERE 0"))
+    session.expire_all()
+    job = session.get(Job, job_id)
+    task = _REGISTRY_PREPARE_TASKS.get(job_id)
+    child = session.scalar(
+        select(WorkflowInstallOfferPackage.id).where(WorkflowInstallOfferPackage.job_id == job_id)
+    )
+    if (
+        job is None
+        or job.kind != JobKind.REGISTRY_PREPARE.value
+        or job.status not in {"failed", "cancelled", "interrupted"}
+        or job.claim_owner is not None
+        or job.run_id is not None
+        or job.work_plan_id is not None
+        or job.work_step_id is not None
+        or child is not None
+        or (task is not None and not task.done())
+    ):
+        raise api_error(
+            409,
+            "registry-preparation-not-retryable",
+            "Package preparation cannot be retried while its previous work is still active.",
+        )
+    try:
+        inputs = RegistryPreparationInputs.model_validate(
+            {
+                key: value
+                for key, value in job.payload_json.items()
+                if key not in {"error_code", "preparation", "activation"}
+            }
+        )
+    except ValueError as exc:
+        raise api_error(
+            409,
+            "registry-preparation-inputs-unavailable",
+            "The accepted preparation inputs are unavailable.",
+        ) from exc
+    job.payload_json = inputs.model_dump(exclude_none=True)
+    job.queue_ticket = new_id("retry")
+    job.status = JobStatus.QUEUED.value
+    job.progress = 0
+    job.error = None
+    job.started_at = None
+    job.completed_at = None
+    job.enqueued_at = utcnow()
+    job.claim_expires_at = None
+    job.heartbeat_at = None
+    update_job_progress(job, stage="retry queued", indeterminate=True)
+    session.commit()
+    _start_registry_preparation(services, job.id, inputs)
+    return job
+
+
+def _start_registry_preparation(
+    services: Services, job_id: str, inputs: RegistryPreparationInputs
+) -> None:
+    previous = _REGISTRY_PREPARE_TASKS.get(job_id)
+    if previous is not None and not previous.done():
+        return
+    authorized = inputs.authorized_workflow
     task = asyncio.create_task(
         _run_workflow_package_preparation(
             services,
-            job.id,
-            package_id,
-            version,
-            node_types,
-            renew_install_id,
-            authorized_workflow,
+            job_id,
+            inputs.package_id,
+            inputs.version,
+            tuple(inputs.node_types),
+            inputs.renew_install_id,
+            (authorized.workflow_revision_id, tuple(authorized.required_node_types))
+            if authorized is not None
+            else None,
         ),
-        name=f"registry-prepare-{job.id}",
+        name=f"registry-prepare-{job_id}",
     )
-    _REGISTRY_PREPARE_TASKS[job.id] = task
+    _REGISTRY_PREPARE_TASKS[job_id] = task
 
-    def _discard(done: asyncio.Task[None], key: str = job.id) -> None:
-        _REGISTRY_PREPARE_TASKS.pop(key, None)
+    def _discard(done: asyncio.Task[None]) -> None:
+        if _REGISTRY_PREPARE_TASKS.get(job_id) is done:
+            _REGISTRY_PREPARE_TASKS.pop(job_id, None)
 
     task.add_done_callback(_discard)
-    return job
+
+
+def recover_registry_preparations(services: Services) -> None:
+    """Resume queued standalone preparations without replaying interrupted installation work."""
+    queued: list[tuple[str, RegistryPreparationInputs]] = []
+    with SessionLocal() as session:
+        session.execute(text("UPDATE jobs SET status = status WHERE 0"))
+        jobs = session.scalars(
+            select(Job)
+            .outerjoin(WorkflowInstallOfferPackage, WorkflowInstallOfferPackage.job_id == Job.id)
+            .where(
+                Job.kind == JobKind.REGISTRY_PREPARE.value,
+                Job.status == JobStatus.QUEUED.value,
+                Job.claim_owner.is_(None),
+                Job.run_id.is_(None),
+                Job.work_plan_id.is_(None),
+                Job.work_step_id.is_(None),
+                WorkflowInstallOfferPackage.job_id.is_(None),
+            )
+            .order_by(Job.enqueued_at, Job.queue_ticket, Job.created_at, Job.id)
+        ).all()
+        for job in jobs:
+            try:
+                inputs = RegistryPreparationInputs.model_validate(job.payload_json)
+            except ValueError:
+                job.status = JobStatus.FAILED.value
+                job.error = "The accepted preparation inputs are unavailable."
+                job.completed_at = utcnow()
+                update_job_progress(job, stage="Preparation needs attention", indeterminate=True)
+                continue
+            queued.append((job.id, inputs))
+        session.commit()
+    for job_id, inputs in queued:
+        _start_registry_preparation(services, job_id, inputs)
 
 
 @router.post("/workflows/packages/drafts", response_model=WorkflowOut, status_code=201)
@@ -10375,66 +13984,11 @@ async def ensure_workflow_package_draft(
     """Persist an exact package graph without making it executable."""
 
     try:
-        analyze_comfyui_workflow_package(payload.ui_graph)
+        definition, _revision = stage_workflow_package_draft(session, payload)
     except WorkflowPackageError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
-    canonical = _canonical_graph(payload.ui_graph)
-    workflow_id, revision_id, digest = _workflow_package_draft_identity(canonical)
-    definition = session.get(WorkflowDefinition, workflow_id)
-    revision = session.get(WorkflowRevision, revision_id)
-    if bool(definition) != bool(revision):
-        raise api_error(
-            409,
-            "workflow-package-draft-collision",
-            "The workflow draft identity is already in use.",
-        )
-    if definition and revision:
-        if (
-            revision.workflow_id != definition.id
-            or revision.dependencies_json != workflow_package_draft_dependencies(digest)
-            or _canonical_graph(revision.ui_graph_json) != canonical
-        ):
-            raise api_error(
-                409,
-                "workflow-package-draft-collision",
-                "The workflow draft identity is already in use.",
-            )
-        # Metadata remains editable while the graph is still only a draft.
-        if definition.current_revision_id == revision.id:
-            definition.name = payload.name
-            definition.description = payload.description
-            session.commit()
-        return _workflow_with_revisions(session, definition.id)
-
-    dependencies = workflow_package_draft_dependencies(digest)
-    definition = WorkflowDefinition(
-        id=workflow_id,
-        name=payload.name,
-        operation=payload.operation.value,
-        description=payload.description,
-    )
-    session.add(definition)
-    revision = WorkflowRevision(
-        id=revision_id,
-        workflow_id=workflow_id,
-        version=1,
-        engine="comfyui",
-        ui_graph_json=payload.ui_graph,
-        api_graph_json={},
-        input_schema_json={},
-        dependencies_json=dependencies,
-        trusted=False,
-        artifact_sha256=workflow_artifact_contract(
-            operation=payload.operation.value,
-            engine="comfyui",
-            api_graph={},
-            input_schema={},
-            dependencies=dependencies,
-        ),
-    )
-    session.add(revision)
-    session.flush()
-    definition.current_revision_id = revision.id
+    except WorkflowPackageDraftError as exc:
+        raise api_error(exc.status_code, exc.code, str(exc)) from exc
     session.commit()
     return _workflow_with_revisions(session, definition.id)
 
@@ -10443,7 +13997,7 @@ async def ensure_workflow_package_draft(
 async def prepare_workflow_package_endpoint(
     payload: WorkflowPackagePrepareRequest, request: Request, session: SessionDep
 ) -> Job:
-    """Queue one package preparation; the result stays inactive and untrusted."""
+    """Queue verified extension setup and retain any required review."""
 
     services = _services(request)
     # Re-analyze the source graph before judging the machine. The package name,
@@ -10562,12 +14116,14 @@ def _media_worker_truly_stopped(services: Services) -> bool:
         (status for status in services.processes.statuses() if status.name == "media"),
         None,
     )
-    return media is None or (not media.running and media.state != "starting")
+    return media is None or (not media.running and media.state not in {"starting", "stopping"})
 
 
 def _registry_activation_context(services: Services) -> PreparationContext:
     try:
-        return PreparationContext.from_settings(services.settings)
+        return dataclasses.replace(
+            PreparationContext.from_settings(services.settings), source_store=services.artifacts
+        )
     except WorkflowPackagePreparationError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
 
@@ -10657,6 +14213,28 @@ def _queue_registry_install_renewal(
     )
 
 
+def _waiting_source_registry_reviews(session: Session, install_id: str) -> list[str]:
+    return list(
+        session.scalars(
+            select(WorkflowInstallOffer.id)
+            .join(
+                WorkflowInstallOfferPackage,
+                WorkflowInstallOfferPackage.offer_id == WorkflowInstallOffer.id,
+            )
+            .join(Job, Job.id == WorkflowInstallOffer.completion_job_id)
+            .where(
+                WorkflowInstallOfferPackage.registry_install_id == install_id,
+                WorkflowInstallOffer.status == "queued",
+                WorkflowInstallOffer.source_plan_id.is_not(None),
+                WorkflowInstallOffer.completion_error_code == "workflow-extension-review-required",
+                Job.kind == "workflow_install",
+                Job.status == "paused",
+            )
+            .distinct()
+        )
+    )
+
+
 @router.post(
     "/workflows/packages/installs/{install_id}/review",
     response_model=RegistryInstallOut,
@@ -10673,16 +14251,46 @@ async def review_registry_install(
     context = _registry_activation_context(services)
     async with services.scheduler.lease("primary"):
         try:
-            review_comfy_registry_install(
-                session,
-                install_id=install_id,
-                trusted=payload.trusted,
-                custom_node_root=context.custom_node_root,
-                environment_root=registry_wheel_environment_root(context.state_root),
-                media_worker_stopped=_media_worker_truly_stopped(services),
-            )
+            async with AsyncExitStack() as temporary:
+                if payload.trusted and _waiting_source_registry_reviews(session, install_id):
+                    await temporary.enter_async_context(
+                        workflow_package_runtime(services.processes, context)
+                    )
+                verified = None
+                if payload.trusted:
+                    _loaded_registry_install(session, install_id)
+                    if not _media_worker_truly_stopped(services):
+                        raise ComfyRegistryActivationError(
+                            "media_worker_running",
+                            "The media worker must be stopped before changing Registry activation",
+                        )
+                    target = context.verification_target(SessionLocal, services.settings)
+                    verified = await target.verify((install_id,))
+                    session.expire_all()
+                review_comfy_registry_install(
+                    session,
+                    install_id=install_id,
+                    trusted=payload.trusted,
+                    custom_node_root=context.custom_node_root,
+                    environment_root=registry_wheel_environment_root(context.state_root),
+                    media_worker_stopped=_media_worker_truly_stopped(services),
+                    verified_launch=verified,
+                )
+        except ComfyRegistryInstallError as exc:
+            session.rollback()
+            raise _registry_activation_failure(
+                ComfyRegistryActivationError(
+                    "registry_install_verification_failed",
+                    "Registry package files or dependencies failed verification",
+                )
+            ) from exc
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
+        except WorkflowPackagePreparationError as exc:
+            raise api_error(409, exc.code, str(exc)) from exc
+    if payload.trusted:
+        for offer_id in _waiting_source_registry_reviews(session, install_id):
+            services.downloads.start_workflow_installation(offer_id)
     install = _loaded_registry_install(session, install_id)
     return _registry_install_out(install, _registry_install_disk_state(services, install))
 
@@ -10710,6 +14318,7 @@ async def activate_registry_install(
                 # The same read startup verifies against, so a proof cannot be
                 # made about an inventory nobody else saw.
                 read_node_inventory=services.processes.comfy_node_inventory,
+                verification_target=context.verification_target(SessionLocal, services.settings),
             )
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
@@ -10914,6 +14523,114 @@ async def _workflow_install_inventory(
     )
 
 
+async def _workflow_package_plan_inventory(
+    request: Request, session: Session
+) -> tuple[set[str] | None, set[str], dict[str, set[str]]]:
+    try:
+        return await _workflow_install_inventory(request, session)
+    except ApiError as exc:
+        if exc.status_code != 503:
+            raise
+        return None, _local_asset_filenames(session), _installed_package_versions(session)
+
+
+@router.post(
+    "/workflows/packages/install-plans",
+    response_model=WorkflowPackageInstallPlanOut,
+    status_code=201,
+)
+async def preflight_workflow_package_installation(
+    payload: WorkflowPackageInstallPlanRequest, request: Request, session: SessionDep
+) -> WorkflowPackageInstallPlanOut:
+    """Save a source and dependency preview without creating an executable workflow."""
+
+    nodes, assets, packages = await _workflow_package_plan_inventory(request, session)
+    try:
+        declared = declared_dependency_contract(payload.dependencies)
+        if payload.dependencies and declared is None:
+            raise ValueError("The dependency declaration must use the version 1 contract.")
+        services = _services(request)
+        runtime_plan = await preflight_workflow_runtime_plan(services.runtimes)
+        runtime_nodes = await preflight_workflow_runtime_nodes(services.runtimes, runtime_plan)
+        execution = await preflight_workflow_extensions(
+            payload.ui_graph,
+            services.settings,
+            session_factory=SessionLocal,
+            source_store=services.artifacts,
+            runtimes=services.runtimes,
+            runtime_plan=runtime_plan,
+        )
+        if await preflight_workflow_runtime_plan(services.runtimes) != runtime_plan:
+            raise WorkflowPackageInstallPlanError(
+                "workflow-package-install-plan-changed", "The runtime setup changed during preview."
+            )
+        result = create_workflow_package_install_plan(
+            session,
+            payload,
+            available_node_types=nodes,
+            available_asset_filenames=assets,
+            installed_package_versions=packages,
+            extension_execution=execution,
+            runtime_plan=runtime_plan,
+            runtime_node_inventory=runtime_nodes,
+        )
+    except ValueError as exc:
+        raise api_error(
+            422,
+            getattr(exc, "code", "workflow-package-install-plan-invalid"),
+            "The workflow installation plan could not be prepared.",
+        ) from exc
+    session.commit()
+    return result
+
+
+@router.get(
+    "/workflows/packages/install-plans/{plan_id}", response_model=WorkflowPackageInstallPlanOut
+)
+async def get_workflow_package_install_plan(
+    plan_id: str, request: Request, session: SessionDep
+) -> WorkflowPackageInstallPlanOut:
+    """Revalidate the stored source and download identities before showing the plan."""
+
+    nodes, assets, packages = await _workflow_package_plan_inventory(request, session)
+    try:
+        record, _saved = load_stored_workflow_package_install_plan(session, plan_id)
+        payload = WorkflowPackageInstallPlanRequest.model_validate(record.request_json)
+        services = _services(request)
+        runtime_plan = await preflight_workflow_runtime_plan(services.runtimes)
+        runtime_nodes = await preflight_workflow_runtime_nodes(services.runtimes, runtime_plan)
+        execution = await preflight_workflow_extensions(
+            payload.ui_graph,
+            services.settings,
+            session_factory=SessionLocal,
+            source_store=services.artifacts,
+            runtimes=services.runtimes,
+            runtime_plan=runtime_plan,
+        )
+        if await preflight_workflow_runtime_plan(services.runtimes) != runtime_plan:
+            raise WorkflowPackageInstallPlanError(
+                "workflow-package-install-plan-changed", "The runtime setup changed during preview."
+            )
+        session.expire_all()
+        return revalidate_workflow_package_install_plan(
+            session,
+            plan_id,
+            available_node_types=nodes,
+            available_asset_filenames=assets,
+            installed_package_versions=packages,
+            extension_execution=execution,
+            runtime_plan=runtime_plan,
+            runtime_node_inventory=runtime_nodes,
+        )
+    except ValueError as exc:
+        code = getattr(exc, "code", "workflow-package-install-plan-invalid")
+        raise api_error(
+            404 if code == "workflow-package-install-plan-not-found" else 409,
+            code,
+            "The workflow installation plan is unavailable or has changed.",
+        ) from exc
+
+
 @router.post("/workflows/packages/assets/review", response_model=WorkflowAssetReviewOut)
 async def review_workflow_assets(
     payload: WorkflowAssetReviewRequest, session: SessionDep
@@ -11003,6 +14720,20 @@ async def review_workflow_install_offer(
     return _workflow_install_offer_out(offer)
 
 
+@router.get(
+    "/workflow-install-offers/{offer_id}/progress", response_model=WorkflowInstallProgressOut
+)
+async def get_workflow_install_progress(
+    offer_id: str, session: SessionDep
+) -> WorkflowInstallProgressOut:
+    offer = source_workflow_install_offer(session, offer_id)
+    if offer is None:
+        raise api_error(
+            404, "workflow-install-offer-not-found", "Workflow installation is unavailable."
+        )
+    return workflow_install_progress(session, offer)
+
+
 @router.post(
     "/workflow-install-offers/{offer_id}/install",
     response_model=list[JobOut],
@@ -11014,6 +14745,50 @@ async def install_workflow_offer(
     session: SessionDep,
 ) -> list[Job]:
     """Queue only an opaque offer after rebuilding every server-owned identity."""
+
+    existing = source_workflow_install_offer(session, offer_id)
+    source_plan_id = existing.source_plan_id if existing is not None else None
+    if source_plan_id is None and session.get(WorkflowPackageInstallPlan, offer_id) is not None:
+        source_plan_id = offer_id
+    manager: DownloadManager = _services(request).downloads
+    if source_plan_id is not None:
+        nodes, assets, packages = await _workflow_package_plan_inventory(request, session)
+        try:
+            runtime_plan = (
+                await preflight_workflow_runtime_plan(_services(request).runtimes)
+                if existing is None
+                else None
+            )
+            runtime_nodes = await preflight_workflow_runtime_nodes(
+                _services(request).runtimes, runtime_plan
+            )
+            _accepted, jobs = accept_workflow_package_install_plan(
+                session,
+                source_plan_id,
+                manager,
+                available_node_types=nodes,
+                available_asset_filenames=assets,
+                installed_package_versions=packages,
+                runtime_plan=runtime_plan,
+                runtime_node_inventory=runtime_nodes,
+            )
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            raise api_error(
+                409,
+                getattr(exc, "code", "workflow-package-installation-refused"),
+                "The workflow installation is unavailable or has changed.",
+            ) from exc
+        if _accepted.status == "queued":
+            for job in jobs:
+                if job.kind == JobKind.DOWNLOAD.value and job.status in {
+                    JobStatus.QUEUED.value,
+                    JobStatus.RUNNING.value,
+                }:
+                    manager.start(job.id)
+            manager.start_workflow_installation(_accepted.id)
+        return jobs
 
     node_types, asset_filenames, package_versions = await _workflow_install_inventory(
         request,
@@ -11031,7 +14806,6 @@ async def install_workflow_offer(
         session.commit()
         raise api_error(422, exc.code, str(exc)) from exc
 
-    manager: DownloadManager = _services(request).downloads
     try:
         validated = [manager.validated_request(session, download) for download in downloads]
     except ValueError as exc:
@@ -11042,10 +14816,16 @@ async def install_workflow_offer(
         )
         session.commit()
         raise api_error(422, "asset-download-refused", str(exc)) from exc
-    jobs = [manager.create(session, download) for download in validated]
+    jobs = [manager.stage(session, download) for download in validated]
+    bind_workflow_offer_downloads(session, offer, jobs)
     mark_workflow_install_offer_queued(offer)
+    completion = stage_workflow_completion_job(session, offer)
     session.commit()
-    return jobs
+    for job in jobs:
+        if job.status != JobStatus.PAUSED.value:
+            manager.start(job.id)
+    manager.start_workflow_installation(offer.id)
+    return [*jobs, completion]
 
 
 @router.post("/workflows/packages/import", response_model=WorkflowOut, status_code=201)
@@ -11060,6 +14840,15 @@ async def import_workflow_package(
     behavior silently.
     """
 
+    try:
+        declared = declared_dependency_contract(payload.dependencies)
+        if payload.dependencies and declared is None:
+            raise ValueError("Imported dependency declarations must use the version 1 contract.")
+        dependencies = (
+            workflow_dependency_contract_payload(declared) if declared is not None else {}
+        )
+    except ValueError as exc:
+        raise api_error(422, "workflow-invalid", str(exc)) from exc
     draft = _validated_workflow_package_draft(session, payload)
     services = _services(request)
     describe_nodes = getattr(services.engines.media, "object_info", None)
@@ -11192,14 +14981,20 @@ async def import_workflow_package(
             payload.operation,
         )
         compilation = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
-        compiled_api_graph = prepared.bind(compilation.api_graph)
+        bound_settings = bind_compiled_workflow_settings(
+            compilation,
+            prepared.bind(compilation.api_graph),
+            prepared.input_schema,
+            operation=payload.operation,
+        )
+        compiled_api_graph = bound_settings.api_graph
     except (
         WorkflowCompilationError,
         WorkflowPackageError,
         WorkflowPackageInputError,
     ) as exc:
         raise api_error(422, exc.code, str(exc)) from exc
-    input_schema = prepared.input_schema
+    input_schema = bound_settings.input_schema
     if draft:
         definition, initial_revision = draft
         current_revision = session.get(WorkflowRevision, definition.current_revision_id)
@@ -11216,6 +15011,7 @@ async def import_workflow_package(
                 != _canonical_graph(payload.ui_graph)
                 or current_revision.api_graph_json != compiled_api_graph
                 or current_revision.input_schema_json != input_schema
+                or current_revision.dependencies_json != dependencies
             ):
                 raise api_error(
                     409,
@@ -11236,17 +15032,19 @@ async def import_workflow_package(
         definition.operation = payload.operation.value
         definition.description = payload.description
         session.flush()
-        await create_workflow_revision(
+        await _persist_workflow_revision(
             definition.id,
             WorkflowRevisionCreate(
                 ui_graph=payload.ui_graph,
                 api_graph=compiled_api_graph,
                 input_schema=input_schema,
+                dependencies=dependencies,
             ),
             session,
+            trusted=False,
         )
         return _workflow_with_revisions(session, definition.id)
-    return await create_workflow(
+    return await _persist_workflow(
         WorkflowCreate(
             name=payload.name,
             operation=payload.operation,
@@ -11255,8 +15053,10 @@ async def import_workflow_package(
             ui_graph=payload.ui_graph,
             api_graph=compiled_api_graph,
             input_schema=input_schema,
+            dependencies=dependencies,
         ),
         session,
+        trusted=False,
     )
 
 
@@ -11379,7 +15179,9 @@ async def analyze_workflow_package(
 
 
 @router.post("/workflows/import", response_model=WorkflowOut, status_code=201)
-async def import_workflow(payload: WorkflowBundle, session: SessionDep) -> WorkflowDefinition:
+async def import_workflow(
+    payload: WorkflowBundle, request: Request, session: SessionDep
+) -> WorkflowDefinition:
     return await create_workflow(
         WorkflowCreate(
             name=payload.name,
@@ -11392,6 +15194,7 @@ async def import_workflow(payload: WorkflowBundle, session: SessionDep) -> Workf
             input_schema=payload.input_schema,
             dependencies=payload.dependencies,
         ),
+        request,
         session,
     )
 
@@ -11432,62 +15235,187 @@ async def clone_workflow(
     status_code=201,
 )
 async def create_workflow_revision(
-    workflow_id: str, payload: WorkflowRevisionCreate, session: SessionDep
+    workflow_id: str, payload: WorkflowRevisionCreate, request: Request, session: SessionDep
 ) -> WorkflowRevision:
+    definition, current = _workflow_and_revision(session, workflow_id)
+    payload = await _map_workflow_write(
+        payload,
+        request,
+        definition.operation,
+        current.engine,
+        changed_native_graph=(
+            payload.ui_graph != current.ui_graph_json or payload.api_graph != current.api_graph_json
+        ),
+    )
     return await _persist_workflow_revision(workflow_id, payload, session, trusted=False)
 
 
 async def _persist_workflow_revision(
     workflow_id: str, payload: WorkflowRevisionCreate, session: Session, *, trusted: bool
 ) -> WorkflowRevision:
+    return await _run_workflow_write(
+        lambda: _persist_workflow_revision_sync(workflow_id, payload, session, trusted=trusted)
+    )
+
+
+def _persist_workflow_revision_sync(
+    workflow_id: str, payload: WorkflowRevisionCreate, session: Session, *, trusted: bool
+) -> WorkflowRevision:
+    session.execute(text("UPDATE workflow_revisions SET version = version WHERE 0"))
+    session.expire_all()
     definition = session.get(WorkflowDefinition, workflow_id)
-    if not definition:
+    from .workflow_recovery_visibility import workflow_family_deleted
+
+    if not definition or workflow_family_deleted(session, definition.family_id):
         raise api_error(404, "workflow-not-found", "workflow not found")
     try:
-        validate_lora_workflow_contract(
-            payload.api_graph,
-            payload.input_schema,
-            payload.dependencies,
-        )
-        validate_workflow_edit_calibration(payload.input_schema)
-        workflow_video_length(payload.input_schema)
+        revision = stage_workflow_revision(session, definition, payload, trusted=trusted)
     except ValueError as exc:
         raise api_error(422, "workflow-revision-invalid", str(exc)) from exc
-    version = (
-        session.scalar(
-            select(func.max(WorkflowRevision.version)).where(
-                WorkflowRevision.workflow_id == workflow_id
-            )
-        )
-        or 0
-    )
-    current = session.get(WorkflowRevision, definition.current_revision_id)
-    engine = current.engine if current else "comfyui"
-    revision = WorkflowRevision(
-        workflow_id=workflow_id,
-        version=version + 1,
-        engine=engine,
-        engine_version=payload.engine_version,
-        ui_graph_json=payload.ui_graph,
-        api_graph_json=payload.api_graph,
-        input_schema_json=payload.input_schema,
-        dependencies_json=payload.dependencies,
-        trusted=trusted,
-        artifact_sha256=workflow_artifact_contract(
-            operation=definition.operation,
-            engine=engine,
-            api_graph=payload.api_graph,
-            input_schema=payload.input_schema,
-            dependencies=payload.dependencies,
-        ),
-    )
-    session.add(revision)
-    session.flush()
-    definition.current_revision_id = revision.id
-    ensure_workflow_family_ownership(session, definition, revision)
     session.commit()
     session.refresh(revision)
     return revision
+
+
+def _stored_source_fit_revision(
+    revision_id: str, session: Session
+) -> tuple[WorkflowDefinition, WorkflowRevision]:
+    revision = session.get(WorkflowRevision, revision_id)
+    if revision is None:
+        raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
+    definition = session.get(WorkflowDefinition, revision.workflow_id)
+    from .workflow_recovery_visibility import workflow_family_deleted
+
+    if definition is None or workflow_family_deleted(session, definition.family_id):
+        raise api_error(404, "workflow-not-found", "workflow not found")
+    return definition, revision
+
+
+@router.get(
+    "/workflow-revisions/{revision_id}/source-fit",
+    response_model=SourceFitCapabilityOut,
+)
+async def get_workflow_revision_source_fit(
+    revision_id: str,
+    session: SessionDep,
+) -> SourceFitCapabilityOut:
+    definition, revision = _stored_source_fit_revision(revision_id, session)
+    return source_fit_capability(definition, revision)
+
+
+@router.post(
+    "/workflow-revisions/{revision_id}/source-fit/preview",
+    response_model=SourceFitPreviewOut,
+)
+async def preview_workflow_revision_source_fit(
+    revision_id: str,
+    payload: SourceFitPreviewRequest,
+    request: Request,
+    session: ConversationSessionDep,
+) -> SourceFitPreviewOut:
+    """Re-read selected source/revision bytes without retaining media or queuing work."""
+    definition, revision = _stored_source_fit_revision(revision_id, session)
+    source = session.get(Artifact, payload.source_artifact_id)
+    if source is None:
+        raise api_error(404, "artifact-not-found", "source image not found")
+    try:
+        return await run_in_threadpool(
+            preview_source_fit,
+            definition,
+            revision,
+            _services(request).artifacts,
+            source,
+            payload.source_fit,
+        )
+    except ValueError:
+        raise api_error(
+            422,
+            "source-fit-preview-unavailable",
+            "The source image or requested canvas cannot be used with this workflow.",
+        ) from None
+
+
+@router.post("/chats/{chat_id}/upscale/preview", response_model=UpscalePreviewOut)
+async def preview_chat_upscale(
+    chat_id: str, payload: TurnRequest, request: Request, session: ConversationSessionDep
+) -> UpscalePreviewOut:
+    try:
+        return _services(request).orchestrator.preview_turn_upscale(session, chat_id, payload)
+    except LookupError:
+        raise api_error(
+            404, "upscale-preview-not-found", "The conversation or source image is unavailable."
+        ) from None
+    except ValueError as exc:
+        recipe_error = workflow_use_case_error(exc)
+        if recipe_error is not None:
+            code, message = recipe_error
+            raise api_error(409, code, message) from None
+        raise api_error(
+            409,
+            "upscale-preview-unavailable",
+            "Choose a ready enlargement workflow. Review its dependencies in Workflows "
+            "before applying this edit.",
+        ) from None
+
+
+@router.post("/chats/{chat_id}/source-fit/preview", response_model=SourceFitPreviewOut)
+async def preview_chat_source_fit(
+    chat_id: str, payload: TurnRequest, request: Request, session: ConversationSessionDep
+) -> SourceFitPreviewOut:
+    _refuse_comparison_chat(session, chat_id)
+    return await _preview_context_source_fit(
+        _services(request).orchestrator, session, payload, chat_id=chat_id
+    )
+
+
+@router.post("/messages/{message_id}/edits/source-fit/preview", response_model=SourceFitPreviewOut)
+async def preview_edit_source_fit(
+    message_id: str,
+    payload: PriorTurnEditRequest,
+    request: Request,
+    session: ConversationSessionDep,
+) -> SourceFitPreviewOut:
+    return await _preview_context_source_fit(
+        _services(request).orchestrator, session, payload, message_id=message_id
+    )
+
+
+async def _preview_context_source_fit(
+    orchestrator: ConversationOrchestrator,
+    session: Session,
+    payload: TurnRequest,
+    *,
+    chat_id: str | None = None,
+    message_id: str | None = None,
+) -> SourceFitPreviewOut:
+    try:
+        if message_id is not None and isinstance(payload, PriorTurnEditRequest):
+            return await preview_prior_turn_source_fit(orchestrator, session, message_id, payload)
+        if chat_id is None:
+            raise ValueError("A preview requires its conversation context.")
+        return await orchestrator.preview_turn_source_fit(session, chat_id, payload)
+    except EditRequestConflict:
+        raise api_error(
+            409, "source-fit-preview-conflict", "The edit source changed. Reload it."
+        ) from None
+    except LookupError:
+        raise api_error(
+            404, "source-fit-preview-not-found", "The preview source is unavailable."
+        ) from None
+    except (RouteConfirmationRequired, OrderedPlanConfirmationRequired):
+        raise api_error(
+            409, "source-fit-preview-confirmation", "Confirm the selected plan before previewing."
+        ) from None
+    except (EngineNotConfiguredError, EngineSchemaUnavailableError):
+        raise api_error(
+            503, "source-fit-preview-engine-unavailable", "The selected engine is unavailable."
+        ) from None
+    except ValueError:
+        raise api_error(
+            422,
+            "source-fit-preview-unavailable",
+            "The selected source and workflow cannot use this canvas.",
+        ) from None
 
 
 def _prove_stored_revision_geometry(
@@ -11495,12 +15423,7 @@ def _prove_stored_revision_geometry(
 ) -> WorkflowOutputGeometryResult:
     """Re-load and re-prove one stored revision, from the stored bytes only."""
 
-    revision = session.get(WorkflowRevision, revision_id)
-    if revision is None:
-        raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
-    definition = session.get(WorkflowDefinition, revision.workflow_id)
-    if definition is None:
-        raise api_error(404, "workflow-not-found", "workflow not found")
+    definition, revision = _stored_source_fit_revision(revision_id, session)
     return prove_workflow_output_geometry(
         workflow_id=definition.id,
         revision_id=revision.id,
@@ -11554,6 +15477,44 @@ async def resolve_workflow_revision_output_geometry(
 
 
 @router.post(
+    "/workflow-revisions/{revision_id}/output-geometry/match-source",
+    response_model=WorkflowOutputGeometryResolutionOut,
+)
+async def match_workflow_revision_output_geometry_to_source(
+    revision_id: str,
+    payload: MatchSourceRequest,
+    request: Request,
+    session: SessionDep,
+) -> dict[str, object]:
+    """The size a stored revision makes in the exact shape of one source picture.
+
+    Read-only like resolving a preset, and bound to the revision as it is now.
+    The shape is the one the picture is shown in, read from its verified bytes.
+    A shape the revision cannot make exactly is refused rather than snapped to a
+    near one, and nothing here admits, queues or generates anything.
+    """
+
+    result = _prove_stored_revision_geometry(revision_id, session)
+    source = session.get(Artifact, payload.source_artifact_id)
+    if source is None:
+        raise api_error(404, "artifact-not-found", "source image not found")
+    try:
+        width, height = await run_in_threadpool(shown_size, _services(request).artifacts, source)
+    except ValueError:
+        raise api_error(
+            422, "source-shape-unavailable", "The source picture's shape cannot be read."
+        ) from None
+    resolution = match_source_output_geometry(result, width, height)
+    if resolution is None:
+        raise api_error(
+            422,
+            "workflow-geometry-request-invalid",
+            "This workflow cannot make a picture in this source's exact shape.",
+        )
+    return workflow_output_geometry_resolution_payload(resolution)
+
+
+@router.post(
     "/workflows/{workflow_id}/revisions/{revision_id}/restore",
     response_model=WorkflowRevisionOut,
     status_code=201,
@@ -11590,12 +15551,7 @@ async def restore_workflow_revision(
 async def validate_workflow(
     workflow_id: str, request: Request, session: SessionDep
 ) -> dict[str, Any]:
-    definition = session.get(WorkflowDefinition, workflow_id)
-    if not definition or not definition.current_revision_id:
-        raise api_error(404, "workflow-not-found", "workflow not found")
-    revision = session.get(WorkflowRevision, definition.current_revision_id)
-    if not revision:
-        raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
+    definition, revision = _workflow_and_revision(session, workflow_id)
     errors = await _services(request).engines.media.validate_workflow(revision.api_graph_json)
     warnings: list[str] = []
     if revision.engine == "comfyui" and not workflow_review_is_current(
@@ -11622,6 +15578,8 @@ async def validate_workflow(
         validate_settings(defaults(declared_fields), declared_fields)
         validate_workflow_edit_calibration(revision.input_schema_json)
         workflow_video_length(revision.input_schema_json)
+        video_length_reaches_graph(revision.api_graph_json, revision.input_schema_json)
+        edit_calibration_reaches_graph(revision.api_graph_json, revision.input_schema_json)
     except ValueError as exc:
         # Explaining why a schema is invalid is what this endpoint is for, so the
         # message survives - but it now comes only from our own validators,
@@ -11684,7 +15642,13 @@ def _workflow_and_revision(
     session: Session, workflow_id: str
 ) -> tuple[WorkflowDefinition, WorkflowRevision]:
     definition = session.get(WorkflowDefinition, workflow_id)
-    if not definition or not definition.current_revision_id:
+    from .workflow_recovery_visibility import workflow_family_deleted
+
+    if (
+        not definition
+        or not definition.current_revision_id
+        or workflow_family_deleted(session, definition.family_id)
+    ):
         raise api_error(404, "workflow-not-found", "workflow not found")
     revision = session.get(WorkflowRevision, definition.current_revision_id)
     if not revision:
@@ -11790,16 +15754,23 @@ async def decide_workflow_revision_review(
                     409, "workflow-review-changed", "The workflow review changed. Review it again."
                 )
             approved = payload.action == "approve"
+            registry_verification = None
             if approved:
                 if snapshot.reasons:
                     raise WorkflowReviewError("workflow_review_node_unavailable")
-                await verify_reviewed_packages(
-                    services.settings, session, snapshot, custom_nodes=services.custom_nodes
+                registry_verification = await verify_reviewed_packages(
+                    services.settings,
+                    session,
+                    snapshot,
+                    session_factory=SessionLocal,
+                    custom_nodes=services.custom_nodes,
                 )
                 refreshed_info = await _workflow_review_object_info(services)
                 if refreshed_info is None:
                     raise WorkflowReviewError("workflow_review_runtime_unavailable")
                 info = refreshed_info
+                if registry_verification is not None:
+                    registry_verification = await registry_verification.refresh()
             # No writer spans worker I/O or code verification. Take the writer
             # before the final durable-state read and compare the full subject.
             session.connection().exec_driver_sql(
@@ -11812,6 +15783,8 @@ async def decide_workflow_revision_review(
                 raise api_error(
                     409, "workflow-review-changed", "The workflow review changed. Review it again."
                 )
+            if registry_verification is not None:
+                registry_verification.require_current(session)
             record_workflow_review(session, revision, fresh, approved=approved)
             session.commit()
         except (WorkflowReviewError, ValueError, OSError, RuntimeError, TimeoutError) as exc:
@@ -11822,3 +15795,109 @@ async def decide_workflow_revision_review(
                 "The exact workflow or its node code could not be verified.",
             ) from exc
         return _workflow_review_out(session, definition, revision, fresh)
+
+
+@router.get(
+    "/workflows/{workflow_id}/revisions/{revision_id}/activation",
+    response_model=WorkflowActivationSubject,
+)
+def get_workflow_activation_subject(
+    workflow_id: str, revision_id: str, session: SessionDep
+) -> WorkflowActivationSubject:
+    try:
+        return activation_subject(session, workflow_id, revision_id)
+    except (WorkflowActivationError, ValueError) as exc:
+        missing = (
+            isinstance(exc, WorkflowActivationError) and exc.code == "workflow_revision_unavailable"
+        )
+        raise api_error(
+            404 if missing else 409,
+            "workflow-activation-unavailable",
+            "The workflow or its dependencies changed. Review the workflow again.",
+        ) from exc
+
+
+@router.post(
+    "/workflows/{workflow_id}/revisions/{revision_id}/activation",
+    response_model=WorkflowActivationOut,
+)
+def create_workflow_activation(
+    workflow_id: str,
+    revision_id: str,
+    payload: WorkflowActivationCreate,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    session: SessionDep,
+) -> WorkflowActivationOut:
+    services = _services(request)
+    provisioner = services.processes.runtimes
+    try:
+        # SQLite's legacy transaction mode does not start a transaction for a
+        # SELECT. An explicit outer transaction keeps the helper's savepoint
+        # from committing an activation before final approval is rechecked.
+        session.connection().exec_driver_sql("BEGIN")
+        result = activate_reviewed_revision(
+            session,
+            workflow_id,
+            revision_id,
+            payload,
+            runtime_materializer=(
+                lambda requirement, selection: materialize_comfy_runtime_dependency(
+                    provisioner, requirement, selection
+                )
+            )
+            if provisioner is not None
+            else None,
+            custom_node_root=services.settings.custom_node_dir,
+            registry_environment_root=registry_wheel_environment_root(
+                services.settings.registry_dir
+            ),
+        )
+        session.commit()
+        background_tasks.add_task(
+            services.downloads.reconcile_workflow_install_offers,
+            workflow_revision_id=revision_id,
+        )
+        return result
+    except (WorkflowActivationError, ValueError, OSError, SQLAlchemyError) as exc:
+        session.rollback()
+        missing = (
+            isinstance(exc, WorkflowActivationError) and exc.code == "workflow_revision_unavailable"
+        )
+        raise api_error(
+            404 if missing else 409,
+            "workflow-activation-unavailable",
+            "The workflow or its dependencies changed. Review the workflow again.",
+        ) from exc
+
+
+@router.get(
+    "/workflows/{workflow_id}/revisions/{revision_id}/activation/prepare",
+    response_model=WorkflowActivationPreparation,
+)
+def get_workflow_activation_preparation(
+    workflow_id: str, revision_id: str, request: Request, session: SessionDep
+) -> WorkflowActivationPreparation:
+    provisioner = _services(request).processes.runtimes
+    try:
+        return prepare_workflow_activation(
+            session,
+            workflow_id,
+            revision_id,
+            runtime_materializer=(
+                lambda requirement, selection: materialize_comfy_runtime_dependency(
+                    provisioner, requirement, selection
+                )
+            )
+            if provisioner is not None
+            else None,
+        )
+    except (WorkflowActivationError, ValueError, OSError, SQLAlchemyError) as exc:
+        missing = (
+            isinstance(exc, WorkflowActivationError) and exc.code == "workflow_revision_unavailable"
+        )
+        raise api_error(
+            404 if missing else 409,
+            "workflow-activation-unavailable",
+            "The workflow or its dependencies changed. Review the workflow again.",
+        ) from exc

@@ -10,8 +10,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 from urllib.parse import unquote, urlparse
 
+from .comfy_subgraphs import BYPASS_MODE, _bypass_source, _Link, _slot_types
 from .comfy_workflow_packages import FRONTEND_SYSTEM_NODE_TYPES
 from .config import Settings
+from .filesystem_links import is_link_or_reparse
 from .schemas import SettingField
 from .settings_registry import (
     IMAGE_SETTINGS,
@@ -44,7 +46,7 @@ _RUNTIME_PARAMETERS = {
 _SUPPRESSED_RUNTIME_NAMES = frozenset({"motion_strength"})
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "COMFY_DYNAMICCOMBO_V3", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 20
+COMFY_TEMPLATE_COMPILER_VERSION = 25
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -273,7 +275,7 @@ class ComfyTemplateRegistry:
             template_role = _role_for_template(path.stem, raw)
             if template_role != role:
                 continue
-            operation = _operation_for_template(path.stem, role)
+            operation = _operation_for_template(path.stem, role, raw)
             if operation is None:
                 continue
             dependencies = tuple(_model_dependencies(raw))
@@ -291,7 +293,7 @@ class ComfyTemplateRegistry:
                     role=role,
                     operation=operation,
                     score=0,
-                    sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                    sha256=hashlib.sha256(_template_bytes(path)).hexdigest(),
                     dependencies=dependencies,
                     published_date=_metadata_string(template_metadata, "date"),
                     general_purpose=_is_general_purpose_template(
@@ -402,7 +404,7 @@ class ComfyTemplateRegistry:
                 continue
             raw = _read_json(path)
             dependencies = tuple(_model_dependencies(raw))
-            operation = _operation_for_template(path.stem, role)
+            operation = _operation_for_template(path.stem, role, raw)
             if (
                 _role_for_template(path.stem, raw) != role
                 or operation is None
@@ -418,7 +420,7 @@ class ComfyTemplateRegistry:
                 role=role,
                 operation=operation,
                 score=0,
-                sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                sha256=hashlib.sha256(_template_bytes(path)).hexdigest(),
                 dependencies=dependencies,
                 published_date=_metadata_string(template_metadata, "date"),
                 general_purpose=_is_general_purpose_template(
@@ -543,8 +545,9 @@ class ComfyTemplateRegistry:
 
     def _template_files(self) -> list[Path]:
         for candidate in self._template_directories():
-            if candidate.is_dir():
-                return sorted(candidate.glob("*.json"))
+            if _is_link(candidate) or not candidate.is_dir():
+                continue
+            return [path for path in sorted(candidate.glob("*.json")) if not _is_link(path)]
         return []
 
     def _template_directories(self) -> list[Path]:
@@ -595,7 +598,7 @@ def _tokens(value: str) -> set[str]:
 
 def _template_index_metadata(paths: list[Path]) -> dict[str, dict[str, Any]]:
     index_path = next((path for path in paths if path.name == "index.json"), None)
-    if index_path is None:
+    if index_path is None or _is_link(index_path):
         return {}
     try:
         raw = json.loads(index_path.read_text(encoding="utf-8"))
@@ -699,7 +702,30 @@ def _supports_dependency_bundle(
     return all(len(revisions) == 1 for revisions in repository_revisions.values())
 
 
+#: The node types, casefolded, through which a graph answers with a picture.
+_PICTURE_OUTPUTS = frozenset({"previewimage", "saveimage"})
+#: The node types, casefolded, through which a graph answers with a video.
+_VIDEO_OUTPUTS = frozenset({"saveanimatedpng", "saveanimatedwebp", "savevideo", "savewebm"})
+
+
 def _role_for_template(template_id: str, value: dict[str, Any] | None = None) -> str | None:
+    """Whether a template makes pictures or videos, read from what its graph saves.
+
+    The id prefix is only a catalog convention, and some templates break it: an
+    image editing template can carry a "video_" prefix and a first-frame video
+    template an "image_" one. Offered under the wrong role, a template is
+    installed as the wrong kind of workflow. The prefix and the node names
+    decide only for a graph that saves neither.
+    """
+
+    if value:
+        saved = {
+            str(node.get("type") or "").casefold() for node in _all_nodes(value) if _runs(node)
+        }
+        if saved & (_VIDEO_OUTPUTS | {"vhs_videocombine"}):
+            return "video"
+        if saved & _PICTURE_OUTPUTS:
+            return "image"
     if template_id.startswith("image_"):
         return "image"
     if template_id.startswith("video_"):
@@ -711,7 +737,7 @@ def _role_for_template(template_id: str, value: dict[str, Any] | None = None) ->
             for node_type in node_types
         ):
             return "video"
-        if node_types & {"previewimage", "saveimage"}:
+        if node_types & _PICTURE_OUTPUTS:
             return "image"
     return None
 
@@ -723,27 +749,80 @@ def _operation_markers(template_id: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", template_id.lower()))
 
 
-def _operation_for_template(template_id: str, role: str) -> str | None:
-    """Map a template id to a supported operation, or None for none.
+def _runs(node: dict[str, Any]) -> bool:
+    return int(node.get("mode") or 0) not in {2, 4}
+
+
+def _loads_a_picture(value: dict[str, Any], answers: frozenset[str] = _PICTURE_OUTPUTS) -> bool:
+    """Whether a LoadImage that runs reads a picture and the graph answers through `answers`.
+
+    Such a graph edits or animates the picture it is given, whatever its id
+    says: fill, outpaint and first-frame workflows are named for what they do.
+    Its LoadImage names the sample picture the template was authored with,
+    which a runtime does not hold, so only with the turn's picture in that
+    sample's place can the workflow compile at all.
+    """
+
+    nodes = _all_nodes(value)
+    answers_through = any(str(node.get("type") or "").casefold() in answers for node in nodes)
+    return answers_through and any(
+        str(node.get("type") or "") == "LoadImage" and _runs(node) for node in nodes
+    )
+
+
+def _loads_audio_or_video(value: dict[str, Any]) -> bool:
+    """Whether a loader that runs reads an audio or video file, which no turn supplies."""
+
+    for node in _all_nodes(value):
+        kind = str(node.get("type") or "").casefold()
+        if _runs(node) and kind.startswith("load") and ("audio" in kind or "video" in kind):
+            return True
+    return False
+
+
+def _operation_for_template(
+    template_id: str, role: str, value: dict[str, Any] | None = None
+) -> str | None:
+    """Map a template to a supported operation, or None for none.
 
     None means the workflow needs an input LM Atelier cannot provide - an
-    audio- or speech-driven video template offered for a text prompt would
-    install a workflow whose required input never arrives.
+    audio- or speech-driven video template, or any graph that loads an audio
+    or video file, would install a workflow whose required input never
+    arrives. For the same reason a template whose graph loads a picture edits
+    it, or animates it into a video, even when its id does not say so.
     """
 
     markers = _operation_markers(template_id)
+    if value and _loads_audio_or_video(value):
+        return None
     if role == "video":
-        if {"i2v", "image2video", "img2video"} & markers:
+        if {"i2v", "image2video", "img2video"} & markers or (
+            value and _loads_a_picture(value, _VIDEO_OUTPUTS)
+        ):
             return "image_to_video"
         if {"s2v", "a2v", "speech2video", "audio2video"} & markers:
             return None
         return "text_to_video"
-    return (
-        "image_to_image" if {"img2img", "image2image", "i2i", "edit"} & markers else "text_to_image"
-    )
+    if {"img2img", "image2image", "i2i", "edit"} & markers or (value and _loads_a_picture(value)):
+        return "image_to_image"
+    return "text_to_image"
+
+
+def _is_link(path: Path) -> bool:
+    return is_link_or_reparse(path, missing="assume_link", unreadable="assume_link")
+
+
+def _template_bytes(path: Path) -> bytes:
+    """Return the template bytes, and refuse a filesystem link."""
+
+    if _is_link(path):
+        raise ValueError("ComfyUI template is a filesystem link")
+    return path.read_bytes()
 
 
 def _read_json(path: Path) -> dict[str, Any]:
+    if _is_link(path):
+        raise ValueError("ComfyUI template is a filesystem link")
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError(f"ComfyUI template must contain an object: {path.name}")
@@ -949,6 +1028,34 @@ def derive_image_to_image(
         api_graph=graph,
         input_schema=schema,
     )
+
+
+def compile_authored_workflow(
+    ui_graph: dict[str, Any],
+    object_info: dict[str, Any],
+    *,
+    operation: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Compile a workflow the application writes itself, exactly as a template compiles.
+
+    The same compiler rather than a second one, so an authored workflow binds
+    its source picture, its runtime settings and its model choices by the rules
+    every catalog workflow already follows. That includes the rule for model
+    choices: one the runtime lists is checked, and an empty list is let
+    through, so a caller that needs one exact file present checks it first.
+    """
+
+    api_graph, input_schema = _compile_ui_graph(
+        deepcopy(ui_graph),
+        object_info,
+        operation=operation,
+    )
+    if not any(
+        bool((object_info.get(str(node.get("class_type"))) or {}).get("output_node"))
+        for node in api_graph.values()
+    ):
+        raise ValueError("authored workflow has no runnable output node")
+    return api_graph, input_schema
 
 
 def _parse_huggingface_url(url: str) -> tuple[str, str, str] | None:
@@ -1587,7 +1694,9 @@ def _compile_ui_graph(
     links: list[tuple[str, int, str, int]] = []
     group_inputs: dict[str, dict[int, list[tuple[str, int, str, str]]]] = {}
     group_outputs: dict[str, dict[int, tuple[str, int]]] = {}
+    instance_slots: dict[str, dict[int, int]] = {}
     parameter_overrides: dict[tuple[str, str], str] = {}
+    shared_widget_targets: list[set[tuple[str, str]]] = []
 
     for node in ui_graph.get("nodes", []):
         if not isinstance(node, dict) or node.get("id") is None:
@@ -1625,9 +1734,18 @@ def _compile_ui_graph(
             if not isinstance(inner, dict) or inner.get("id") in {-10, -20, "-10", "-20"}:
                 continue
             flat_nodes[f"{node_id}:{inner['id']}"] = inner
+        # An instance lists only the inputs it shows as sockets, so its slot
+        # numbers need not match the definition's. The name is what they share.
+        declared = {str(item.get("name")): index for index, item in enumerate(subgraph_inputs)}
+        instance_slots[node_id] = {
+            slot: declared[str(item.get("name"))]
+            for slot, item in enumerate(node.get("inputs") or [])
+            if isinstance(item, dict) and str(item.get("name")) in declared
+        }
         group_inputs[node_id] = subgraph_input_targets
         group_outputs[node_id] = outputs
         for targets in subgraph_input_targets.values():
+            filled: set[tuple[str, str]] = set()
             for target_key, target_slot, parameter, parameter_label in targets:
                 target_node = flat_nodes.get(target_key)
                 if not target_node:
@@ -1636,6 +1754,7 @@ def _compile_ui_graph(
                 if target_slot >= len(target_inputs):
                     continue
                 input_name = str(target_inputs[target_slot].get("name") or "")
+                filled.add((target_key, input_name))
                 input_type = str(target_inputs[target_slot].get("type") or "")
                 runtime_name = _subgraph_runtime_parameter(
                     parameter,
@@ -1646,6 +1765,7 @@ def _compile_ui_graph(
                 )
                 if runtime_name:
                     parameter_overrides[(target_key, input_name)] = runtime_name
+            shared_widget_targets.append(filled)
 
     for raw_link in ui_graph.get("links", []):
         normalized = _normalize_link(raw_link)
@@ -1654,10 +1774,22 @@ def _compile_ui_graph(
         origin, origin_slot, target, target_slot = normalized
         resolved_origin = group_outputs.get(origin, {}).get(origin_slot, (origin, origin_slot))
         if target in group_inputs:
-            for inner_target, inner_slot, _, _ in group_inputs[target].get(target_slot, []):
+            declared_slot = instance_slots[target].get(target_slot, target_slot)
+            for inner_target, inner_slot, _, _ in group_inputs[target].get(declared_slot, []):
                 links.append((*resolved_origin, inner_target, inner_slot))
         else:
             links.append((*resolved_origin, target, target_slot))
+    links, primitive_values, primitive_targets = _route_links_as_queued(flat_nodes, links)
+    for widget_targets in primitive_targets.values():
+        filled = set()
+        for target, slot in widget_targets:
+            target_node = flat_nodes.get(target)
+            if target_node is None:
+                continue
+            target_inputs = target_node.get("inputs") or []
+            if slot < len(target_inputs):
+                filled.add((target, str(target_inputs[slot].get("name") or "")))
+        shared_widget_targets.append(filled)
 
     linked_inputs: dict[tuple[str, str], list[Any]] = {}
     for origin, origin_slot, target, target_slot in links:
@@ -1717,6 +1849,10 @@ def _compile_ui_graph(
             validate_model_choices=validate_model_choices,
             runtime_input_names={"image"} if node_id in source_indices else set(),
         )
+        node_inputs = node.get("inputs") or []
+        for (target_id, target_slot), value in primitive_values.items():
+            if target_id == node_id and target_slot < len(node_inputs):
+                inputs[str(node_inputs[target_slot].get("name") or "")] = value
         for (target_id, input_name), connection in linked_inputs.items():
             if target_id == node_id:
                 inputs[input_name] = connection
@@ -1780,6 +1916,18 @@ def _compile_ui_graph(
                 "title": str(node.get("title") or node_info.get("display_name") or class_type)
             },
         }
+    # The frontend drops an input still linked to a node it does not queue, such
+    # as a muted one. The runtime rejects a link to a node the graph lacks.
+    for compiled in api_graph.values():
+        for input_name, value in list(compiled["inputs"].items()):
+            if isinstance(value, list) and len(value) == 2 and str(value[0]) not in api_graph:
+                del compiled["inputs"][input_name]
+    if operation.endswith("_video"):
+        _bind_video_frame_settings(
+            api_graph, object_info, schema_properties, default_candidates, shared_widget_targets
+        )
+
+    _bind_image_scale_setting(api_graph, object_info, schema_properties)
     for runtime_name in sorted(
         set(_RUNTIME_PARAMETERS.values()) | _SUPPRESSED_RUNTIME_NAMES | {"negative_prompt"}
     ):
@@ -1795,6 +1943,155 @@ def _compile_ui_graph(
             prop["maximum"] = min(prop["maximum"], field.maximum)
     _resolve_widget_defaults(fields, schema_properties, default_candidates)
     return api_graph, {"type": "object", "properties": schema_properties}
+
+
+def _bind_video_frame_settings(
+    graph: dict[str, Any],
+    object_info: dict[str, Any],
+    properties: dict[str, Any],
+    default_candidates: dict[str, list[Any]],
+    shared_widget_targets: list[set[tuple[str, str]]],
+) -> None:
+    """Bind integer lengths on executed spatial latent producers in video graphs."""
+    executed = _executed_workflow_nodes(graph, object_info)
+    lengths: dict[str, Any] = {}
+    for key in sorted(executed):
+        node = graph[key]
+        info = object_info.get(node["class_type"])
+        outputs = info.get("output") if isinstance(info, dict) else None
+        if not isinstance(info, dict) or not isinstance(outputs, list) or "LATENT" not in outputs:
+            continue
+        specs = {name: _node_widget_spec(info, name) for name in ("width", "height", "length")}
+        if not all(_is_widget_spec(spec) and spec[0] == "INT" for spec in specs.values()):
+            continue
+        if any(
+            isinstance(spec, list) and spec and spec[0] == "LATENT"
+            for section in ("required", "optional")
+            for spec in ((info.get("input") or {}).get(section) or {}).values()
+        ):
+            continue
+        value = node["inputs"].get("length")
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            or not float(value).is_integer()
+        ):
+            return
+        lengths[key] = specs["length"]
+    if not lengths or "frames" in default_candidates:
+        return
+    if len({graph[key]["inputs"]["length"] for key in lengths}) != 1:
+        return
+    if any(
+        key not in lengths
+        and _node_widget_spec(object_info.get(graph[key]["class_type"]), "length") is not None
+        for key in executed
+    ):
+        return
+    eligible = {(key, "length") for key in lengths}
+    for targets in shared_widget_targets:
+        active_targets = {target for target in targets if target[0] in executed}
+        if active_targets & eligible and not active_targets <= eligible:
+            return
+    for key, spec in lengths.items():
+        _bind_runtime_parameter(
+            graph[key]["inputs"], "length", "frames", properties, spec, default_candidates
+        )
+
+
+def _bind_image_scale_setting(
+    graph: dict[str, Any],
+    object_info: dict[str, Any],
+    properties: dict[str, Any],
+) -> None:
+    """Expose a multiplier when one resample connects the source to every output."""
+    executed = _executed_workflow_nodes(graph, object_info)
+    scales = [key for key in executed if graph[key]["class_type"] == "ImageScaleBy"]
+    sources = [key for key in executed if graph[key]["class_type"] == "LoadImage"]
+    if len(scales) != 1 or len(sources) != 1:
+        return
+    scale_id, source_id = scales[0], sources[0]
+    inputs = graph[scale_id]["inputs"]
+    if inputs.get("image") != [source_id, 0]:
+        return
+    if graph[source_id]["inputs"].get("image") != "${input_image}":
+        return
+    for key in executed - {scale_id, source_id}:
+        node = graph[key]
+        if node["class_type"] not in {"SaveImage", "PreviewImage"}:
+            return
+        if node["inputs"].get("images") != [scale_id, 0]:
+            return
+    value = inputs.get("scale_by")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return
+    spec = _node_widget_spec(object_info.get("ImageScaleBy"), "scale_by")
+    if not _is_widget_spec(spec) or spec[0] not in {"FLOAT", "INT"}:
+        return
+    _bind_runtime_parameter(inputs, "scale_by", "upscale_factor", properties, spec)
+
+
+def _route_links_as_queued(
+    nodes: dict[str, dict[str, Any]],
+    links: list[tuple[str, int, str, int]],
+) -> tuple[
+    list[tuple[str, int, str, int]],
+    dict[tuple[str, int], Any],
+    dict[str, set[tuple[str, int]]],
+]:
+    """Resolve the connections the ComfyUI frontend resolves before it queues a graph.
+
+    A reroute carries whatever feeds it. A bypassed node passes each output
+    through from the input the frontend picks for it, the same rule subgraph
+    expansion uses, and an output with no such input simply ends. A primitive
+    node puts its own value into the widget it drives. Unresolved, each of these
+    would reach the runtime as a link to a node the compiled graph does not
+    hold, and the runtime refuses such a graph outright.
+
+    Returns the routed links, each primitive's value by the target node and
+    input slot it fills, and the targets sharing each primitive's value.
+    """
+
+    feeding: dict[tuple[str, int], _Link] = {
+        (target, target_slot): _Link("", origin, origin_slot, target, target_slot, None)
+        for origin, origin_slot, target, target_slot in links
+    }
+    routed: list[tuple[str, int, str, int]] = []
+    primitive_values: dict[tuple[str, int], Any] = {}
+    primitive_targets: dict[str, set[tuple[str, int]]] = {}
+    for origin, origin_slot, target, target_slot in links:
+        current: tuple[str, int] | None = (origin, origin_slot)
+        visited: set[tuple[str, int]] = set()
+        while current is not None and current[0] in nodes:
+            carrier = nodes[current[0]]
+            if str(carrier.get("type")) == "Reroute":
+                source = feeding.get((current[0], 0))
+            elif carrier.get("mode") == BYPASS_MODE:
+                source = _bypass_source(
+                    _slot_types(carrier.get("inputs")),
+                    {slot: link for (fed, slot), link in feeding.items() if fed == current[0]},
+                    _slot_types(carrier.get("outputs")).get(current[1]),
+                    current[1],
+                )
+            else:
+                break
+            if current in visited:
+                raise ValueError(
+                    f"ComfyUI template routes a connection through node {current[0]} in a loop"
+                )
+            visited.add(current)
+            current = None if source is None else (source.origin_id, source.origin_slot)
+        if current is None:
+            continue
+        if str(nodes.get(current[0], {}).get("type")) == "PrimitiveNode":
+            values = nodes[current[0]].get("widgets_values")
+            if isinstance(values, list) and values:
+                primitive_values[(target, target_slot)] = values[0]
+                primitive_targets.setdefault(current[0], set()).add((target, target_slot))
+            continue
+        routed.append((current[0], current[1], target, target_slot))
+    return routed, primitive_values, primitive_targets
 
 
 def _source_reaches_conditioning(
@@ -1861,6 +2158,48 @@ def _widget_values(
         values = []
     result: dict[str, Any] = {}
     cursor = 0
+
+    def take(name: str, spec: list[Any]) -> None:
+        nonlocal cursor
+        if cursor < len(values):
+            selected = values[cursor]
+            choices = _widget_choices(spec)
+            if (
+                validate_model_choices
+                and isinstance(choices, list)
+                and choices
+                and selected not in choices
+                and name not in (runtime_input_names or set())
+            ):
+                raise ValueError(
+                    f"ComfyUI does not advertise the template value for {name}: {selected}"
+                )
+            result[name] = selected
+            cursor += 1
+        else:
+            default = _widget_default(spec)
+            if default is not None:
+                result[name] = default
+        options = spec[1] if len(spec) > 1 else {}
+        if (
+            isinstance(options, dict)
+            and options.get("control_after_generate")
+            and cursor < len(values)
+            and str(values[cursor]).lower() in _CONTROL_AFTER_GENERATE
+        ):
+            cursor += 1
+        # A dynamic combo's chosen option brings its own widgets, saved right
+        # after the choice and sent to the runtime under the combo's name.
+        if spec[0] == "COMFY_DYNAMICCOMBO_V3" and isinstance(options, dict):
+            for option in options.get("options") or []:
+                if isinstance(option, dict) and option.get("key") == result.get(name):
+                    nested = option.get("inputs") or {}
+                    for nested_section in ("required", "optional"):
+                        for nested_name, nested_spec in (nested.get(nested_section) or {}).items():
+                            if _is_widget_spec(nested_spec):
+                                take(f"{name}.{nested_name}", cast(list[Any], nested_spec))
+                    break
+
     input_info = node_info.get("input") or {}
     input_order = node_info.get("input_order") or {}
     for section in ("required", "optional"):
@@ -1868,36 +2207,8 @@ def _widget_values(
         names = input_order.get(section) or list(definitions)
         for name in names:
             spec = definitions.get(name)
-            if not _is_widget_spec(spec):
-                continue
-            spec = cast(list[Any], spec)
-            if cursor < len(values):
-                selected = values[cursor]
-                choices = _widget_choices(spec)
-                if (
-                    validate_model_choices
-                    and isinstance(choices, list)
-                    and choices
-                    and selected not in choices
-                    and str(name) not in (runtime_input_names or set())
-                ):
-                    raise ValueError(
-                        f"ComfyUI does not advertise the template value for {name}: {selected}"
-                    )
-                result[str(name)] = selected
-                cursor += 1
-            else:
-                default = _widget_default(spec)
-                if default is not None:
-                    result[str(name)] = default
-            options = spec[1] if isinstance(spec, list) and len(spec) > 1 else {}
-            if (
-                isinstance(options, dict)
-                and options.get("control_after_generate")
-                and cursor < len(values)
-                and str(values[cursor]).lower() in _CONTROL_AFTER_GENERATE
-            ):
-                cursor += 1
+            if _is_widget_spec(spec):
+                take(str(name), cast(list[Any], spec))
     return result
 
 
@@ -2025,7 +2336,7 @@ def _bind_runtime_parameter(
     property_schema: dict[str, Any]
     if runtime_name in {"batch_size", "frames", "height", "seed", "steps", "width"}:
         property_schema = {"type": "integer"}
-    elif runtime_name in {"cfg", "denoise", "fps"}:
+    elif runtime_name in {"cfg", "denoise", "fps", "upscale_factor"}:
         property_schema = {"type": "number"}
     else:
         property_schema = {"type": "string"}
@@ -2055,7 +2366,47 @@ def _bind_runtime_parameter(
         if runtime_name == "seed" and "minimum" in property_schema:
             property_schema["minimum"] = min(property_schema["minimum"], -1)
 
+    if runtime_name == "frames" and input_name == "length":
+        minimum = property_schema.get("minimum", 1)
+        maximum = property_schema.get("maximum", 1024)
+        step = property_schema.get("multipleOf", 1)
+        values = (minimum, maximum, step)
+        if not all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and float(value).is_integer()
+            for value in values
+        ):
+            raise ValueError("ComfyUI video frame widgets need integer bounds and steps")
+        offset = int(minimum) % int(step)
+        if offset:
+            base = next(field for field in VIDEO_SETTINGS if field.key == "frames")
+            lower = max(int(minimum), int(base.minimum or 1))
+            upper = min(int(maximum), int(base.maximum or 1024))
+            first = lower + (offset - lower) % int(step)
+            choices = list(range(first, upper + 1, int(step)))
+            if not choices:
+                raise ValueError("ComfyUI video frame widget has no supported frame count")
+            property_schema.pop("multipleOf", None)
+            property_schema["x-lm-atelier-step"] = step
+            property_schema["minimum"] = choices[0]
+            property_schema["maximum"] = choices[-1]
+            property_schema["enum"] = choices
+
     previous = schema_properties.get(runtime_name, {})
+    if runtime_name == "frames" and input_name == "length" and previous.get("type") == "integer":
+        choices = sorted(_frame_widget_choices(previous) & _frame_widget_choices(property_schema))
+        if not choices:
+            raise ValueError("ComfyUI widgets have no common setting choice")
+        property_schema["enum"] = choices
+        property_schema["minimum"] = choices[0]
+        property_schema["maximum"] = choices[-1]
+        property_schema.pop("multipleOf", None)
+        if len(choices) > 1:
+            property_schema["x-lm-atelier-step"] = choices[1] - choices[0]
+        schema_properties[runtime_name] = property_schema
+        return
     for key, combine in (("minimum", max), ("maximum", min)):
         if key in previous:
             property_schema[key] = combine(previous[key], property_schema.get(key, previous[key]))
@@ -2078,6 +2429,20 @@ def _bind_runtime_parameter(
     schema_properties[runtime_name] = property_schema
 
 
+def _frame_widget_choices(prop: dict[str, Any]) -> set[int]:
+    """Enumerate the frame counts allowed by both widget and application bounds."""
+    base = next(field for field in VIDEO_SETTINGS if field.key == "frames")
+    lower = max(int(prop.get("minimum", 1)), int(base.minimum or 1))
+    upper = min(int(prop.get("maximum", 1024)), int(base.maximum or 1024))
+    step = prop.get("multipleOf")
+    return {
+        value
+        for value in range(lower, upper + 1)
+        if ("enum" not in prop or value in prop["enum"])
+        and (step is None or math.isclose(value % step, 0))
+    }
+
+
 def _resolve_widget_defaults(
     fields: list[SettingField],
     properties: dict[str, Any],
@@ -2092,7 +2457,14 @@ def _resolve_widget_defaults(
         # Prefer an authored value that survives the intersection. The stable
         # scalar ordering also settles graphs with several valid saved values.
         values = sorted(candidates[base.key], key=lambda value: (type(value).__name__, value))
-        values.extend(sorted(field.choices, key=lambda value: json.dumps(value, sort_keys=True)))
+        if base.key == "frames" and all(
+            isinstance(value, int) and not isinstance(value, bool) for value in field.choices
+        ):
+            values.extend(sorted(field.choices))
+        else:
+            values.extend(
+                sorted(field.choices, key=lambda value: json.dumps(value, sort_keys=True))
+            )
         values.append(base.default)
         if field.type in {"integer", "number"}:
             value = base.default

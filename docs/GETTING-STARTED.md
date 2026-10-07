@@ -108,10 +108,45 @@ them. See [Privacy and local data](PRIVACY.md).
 The Model library's **Check for updates** asks the provider - only when you
 press it, never in the background - whether any installed asset with an exact
 recorded version has something newer. The report keeps its three answers
-separate: updates available, up to date, and could not check. The available action depends on the asset type: supported LoRA updates open a
-review, while other model updates direct you to the catalog. Downloads use the
-normal installation checks; nothing updates itself or silently switches a
-profile to a newer model.
+separate: updates available, up to date, and could not check.
+
+Supported LoRA and checkpoint updates offer **Review update**. Checkpoint review
+uses the installed model's chat, image, or video role; if that role cannot be
+determined, the app asks you to check for updates again. Other asset types direct
+you to the catalog. Downloads use the normal installation checks; nothing
+updates itself or silently switches a profile to a newer model.
+
+## Describe when to use a LoRA
+
+New LoRA downloads can start with a use-case description drawn from the provider's
+tags, category and trained words. The Model library labels this text **Derived**;
+LoRA recommendation cards can show the same label before installation. If useful
+metadata is unavailable, the description starts blank. Existing descriptions,
+including ones you deliberately cleared, stay as you left them.
+
+Under **Model library > Installed workflow assets**, choose **Edit Auto rules** to
+review or change a LoRA's description, base model and strengths. Editing the
+description makes it your own and removes **Derived** after you save. Changing
+another setting preserves the description and its label. **Cancel** discards the
+unsaved changes.
+
+New CivitAI and Hugging Face model and LoRA installations can also retain a
+provider description. Hugging Face text comes from the inspected revision's model card.
+When one is available, **Suggest use case** asks your running local chat model for
+a short summary. Review the result, then choose **Save use case** to replace the
+current text. Generating a suggestion or choosing **Cancel** leaves the saved text
+alone. An unchanged suggestion keeps the **Derived** label; editing it makes the
+saved text manual. If the saved use case changes while you are reviewing a
+suggestion, refresh it before trying again.
+
+Automatic use starts off for new LoRAs. Enable **Use automatically** to let the
+app consider a LoRA whose description matches your request. It still needs to be
+enabled, verified and compatible with the selected workflow's base model.
+
+Use **Edit trigger words** separately for words the LoRA needs during generation.
+Words measured from its file are shown as a record; the words you enter are saved
+as yours. Both editors focus their text field when opened and return focus to
+their launch button after a successful save or cancellation.
 
 ## If a step will not complete
 
@@ -143,17 +178,157 @@ Images and video appear in the conversation, with queue progress while generatio
 runs. Output count and seed controls let you vary a request. Generation speed and
 supported sizes depend on the selected model, workflow, and hardware.
 
+A workflow that takes a size offers its shapes in the turn's **Shape** row, from
+square and portrait to landscape and wide, and shows the exact pixels before
+Send. A shape the workflow cannot make exactly is not offered, and **Settings**
+chooses which shapes appear and in what order. When a video starts from a
+picture, **Match source** makes it in that picture's own shape, as the picture is
+shown. A picture edited into a canvas of another shape can be kept whole with
+**Extend / preserve all**, which paints new canvas around it, or trimmed with
+**Crop / fill**, which keeps the centred part that has the canvas's shape. Each
+shows a preview before Send, and each is offered only where the chosen workflow
+can do it.
+
+### Read links and search the web
+
+Web access starts off. To make it available, set
+`LOCAL_LM_WEB_ACCESS_ENABLED=true` in the application's launch environment and
+restart it. Keeping this value false prevents both link reading and search;
+chat settings cannot override it.
+
+Search uses a separately configured [CRW service](https://docs.fastcrw.com/).
+Set `LOCAL_LM_CRW_ENDPOINT` to its HTTPS address, or to an HTTP address with a
+loopback IP such as `http://127.0.0.1:3000` for your own local service. LM Atelier
+does not install or start that service. **Settings > Web search** shows the
+configured address and connection setup. If the service needs a token, save it
+under **CRW access**; it uses the operating-system credential vault.
+`LOCAL_LM_CRW_TOKEN` is an optional environment override.
+
+Open **Web access** beneath a chat's title. **Read links I include in messages**
+and **Allow web searches** are separate permissions. A model that supports
+structured tools can propose a search when it would help answer the message.
+The chat shows the exact query and provider. Edit and **Save query** if needed,
+then choose **Search**, or **Continue without search**.
+
+**Allow searches without asking again** applies only to that chat. Each proposed
+query is still shown and waits five seconds before dispatch, with **Cancel
+search** available. Changing the provider or account requires fresh approval.
+Once a request has been sent, stopping the response can interrupt local work
+but cannot retract the query from the provider.
+
+Results supply titles, links and short excerpts for the answer; pages are not
+opened automatically. **Add source to message** puts a chosen address into your
+draft without sending it. Send that message with link reading enabled if you
+want the model to consider reading the page. An interrupted request is never
+resent automatically.
+
+### Watch accepted work
+
+Choose **View accepted work** in the Jobs panel to see active generation, transfers,
+and installs. Plans keep their jobs grouped. Use **Work category** to narrow the
+list and **Load more accepted work** to browse additional items. The count shows
+how many active items you have loaded out of the total.
+
+Items are ordered by acceptance time. Different resources can run at the same
+time. Plans show completed-step counts and running, queued, and paused job
+counts. Choose **Show steps** to inspect a plan's individual steps and unfinished
+prerequisites; **Load more steps** continues a long plan.
+Running steps show a reported percentage when available. **Current-stage progress**
+measures the active stage; **overall progress** measures the running job across
+stages. A step without a current percentage shows its status alone.
+Completed steps can also show a recorded media-output count. It includes recorded
+outputs whose media was later removed. Removing the response content also removes
+its recorded-output count.
+
+The view updates automatically and shows when it was last checked. Use
+**Refresh** for a fresh list. If an update fails, an error warns when
+previously loaded items are still shown. Step details have their own
+**Retry step details** action.
+
+When a generation plan offers **Hold**, its remaining work can safely wait without
+cancelling the plan or changing its accepted settings. **Release** makes that work
+eligible again. Completed results stay intact.
+
+New submissions are checked against a limit of 32 pending work items per chat.
+Queued, running and paused work all count, including held items. A request can
+contain several work items. When the limit is reached, wait for work to finish
+or cancel unwanted work before submitting more.
+
+Release starts a fresh waiting period for scheduling priority; it does not
+change when you submitted the work.
+
+Controls appear only when the plan supports the action. Work that has already
+started cannot be held. If the queue changes while you click, refresh and use the
+updated action. Holds survive an app restart.
+
+### Pause a work category
+
+In **View accepted work**, choose **Pause after current** under **Generation**,
+**Transfers**, or **Installations**. Current work in that category can finish,
+while new work waits. You can keep submitting work; its
+accepted settings stay intact. The status shows when current work has finished
+and the category is paused. Choose **Resume** to allow it to start work again.
+Each category's pause survives an app restart.
+
+Generation pause leaves transfers and installations available. Pausing transfers
+lets current downloads and their activation finish. Manually paused downloads
+stay paused when you resume the transfer category. Pausing installations lets
+current installations finish; downloads can still finish preparing their own
+models. A pause does not interrupt a running operation. Held plans still need
+**Release** after their category resumes.
+
+### Change dispatch order
+
+Choose **Change dispatch order** in **View accepted work**, then select an **Order
+category**. This view shows positions within groups that share a resource and
+priority. Older work keeps its scheduling priority as it waits, and different
+resources can run at the same time.
+
+The category must be idle before you can move work. Use **Back to accepted work**
+and **Pause after current** to keep it idle once current work finishes. A held
+item needs **Release** before it can move. Other unavailable items explain
+whether they are waiting for prerequisites, need different resources, or do not
+support ordering.
+
+Use **Move earlier** or **Move later** to change an item's position in its group.
+You can also use **Drag to move**, dropping on the top or bottom of another item
+in the same group to place it before or after that item. Use **Next order page**
+and **Previous order page** to browse a long list. Moves preserve the order of a
+plan's steps and never change its accepted settings or submission time.
+
+An **Order saved** message confirms a successful move. Saved order survives
+reloads and app restarts; changing it leaves a paused category paused. The
+accepted-work list continues to show acceptance order.
+
+If the queue changes while you move an item, review the refreshed order before
+trying again. If saving reports a connection error, use **Retry the same move**
+to resolve that attempt before making another move. **Refresh dispatch order**
+loads the current list.
+
 ### Browse workflows
 
 Open **Workflows** to browse families and their variants. Search names, descriptions,
-tags, or use cases; filter by operation, readiness, or source, and sort by name or
-readiness. A family groups related choices so their purpose and requirements can
+tags, use cases, or recorded dependency names; filter by operation, readiness,
+or source, and sort by name or readiness. A family groups related choices so their purpose and requirements can
 be compared together.
 
 Select a variant to inspect its revision and dependency details. Readiness labels
 explain whether it can run, needs setup, needs review, or is unavailable. Setting
 a default does not install missing dependencies or grant trust. The chat workflow
 selector also lists choices that need attention and explains why they cannot run.
+
+When a variant offers **Review downloads**, inspect its required files and total
+download size, then choose **Download reviewed files** to start. The app checks
+the current files and plans again before downloading. A dependency count is a
+summary of recorded requirements; use the readiness details to see what still
+needs attention.
+
+Open **Show revision history** to inspect saved versions and their dates. When
+viewing an older version, **Show changes** compares its saved graph, controls,
+and dependencies with the current revision. Large comparisons report when their
+display limit is reached. **Restore as new revision** is a separate action.
+Select the current revision to use **Validate**; its result applies to that
+revision.
 
 Names, tags, and use-case descriptions can be edited. Automatically derived
 use-case text is labeled, and your explicit text edits take precedence.
@@ -162,6 +337,10 @@ you want to find or restore one.
 
 See [Workflow packages](WORKFLOW-PACKAGES.md) before importing code or activating
 custom nodes.
+
+Use **Manage recipes** to save settings for a request type and choose workspace,
+project, or chat overrides. [Workflow recipes](WORKFLOW-RECIPES.md) explains how
+inheritance, Automatic, and individual request settings interact.
 
 ### Reuse a prompt
 

@@ -5,9 +5,16 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any, Final, Literal, cast
 
-from .saved_settings import MAX_SETTING_FIELDS
+from .auxiliary_assets import lora_setting_property
+from .saved_settings import MAX_SETTING_FIELDS, unusable_as_a_number
 from .schemas import EngineCapabilities, SettingField
+from .upscale_workflows import UPSCALE_SCHEMA_KIND, UPSCALE_SETTING_KEY
 from .video_length import video_duration_field, workflow_video_length
+from .workflow_graph_settings_v1 import (
+    GRAPH_SETTING_KEYS,
+    UNMAPPED_SETTING_REASON,
+    workflow_graph_settings,
+)
 
 MAX_SETTING_STRING_LENGTH = 65_536
 MAX_SETTING_ARRAY_ITEMS = 256
@@ -16,6 +23,7 @@ MAX_SETTING_NESTING_DEPTH = 8
 MAX_SETTING_VALUE_NODES = 4_096
 MAX_WORKFLOW_SCHEMA_PROPERTIES = 256
 MAX_WORKFLOW_SETTING_KEY_LENGTH = 200
+WORKFLOW_LORA_OVERRIDES_SETTING_KEY = "workflow_lora_overrides"
 
 CHAT_SETTINGS = [
     SettingField(
@@ -547,6 +555,7 @@ _RESERVED_SETTING_KEYS = {
     "run_id",
     "tools",
     "workflow",
+    WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
 }
 _NUMBERED_INPUT_IMAGE_KEY = re.compile(r"input_image_[0-9]+", re.IGNORECASE)
 
@@ -811,10 +820,28 @@ def _validate_setting_value(key: str, value: Any) -> None:
                     )
                 walk(nested_value, depth + 1)
             return
-        if candidate is not None and not isinstance(candidate, (bool, int)):
+        if isinstance(candidate, int) and not isinstance(candidate, bool):
+            if unusable_as_a_number(candidate):
+                raise ValueError(f"{key} numbers must be finite")
+            return
+        if candidate is not None and not isinstance(candidate, bool):
             raise ValueError(f"{key} contains a value that cannot be stored as JSON")
 
     walk(value, 0)
+
+
+def validate_workflow_input_schema(input_schema: Mapping[str, Any] | None) -> None:
+    """Refuse a stored settings schema this build could not read back.
+
+    `workflow_settings` asks this of every schema it reads, so a schema that
+    fails here is one no reader can use. It is asked on the way IN as well,
+    because a row that reaches the database unreadable makes every later reader
+    defend against it one at a time, and the person who could have fixed it is
+    long gone by then.
+    """
+    if input_schema is None:
+        return
+    _validate_setting_value("workflow input schema", dict(input_schema))
 
 
 #: Settings a graph can fix for itself, where offering the control is a promise.
@@ -835,6 +862,8 @@ DURATION_UNAVAILABLE_REASONS: Final = {
 def workflow_settings(
     fields: Iterable[SettingField],
     input_schema: Mapping[str, Any] | None,
+    *,
+    accepts_added_loras: bool = False,
 ) -> list[SettingField]:
     """Overlay a workflow's declared JSON-Schema controls on engine defaults.
 
@@ -842,6 +871,10 @@ def workflow_settings(
     declare only the controls they customize. A schema may also add a custom
     user control when it supplies a default, const, or enum. Properties without
     one of those UI hints are treated as runtime bindings such as input_image.
+
+    Generated graph mappings describe their editable numeric and choice inputs
+    completely. An undeclared control in that set remains unavailable, so a
+    saved preset cannot override a value supplied by the graph itself.
 
     The duration settings are the exception, and the asymmetry is deliberate. A
     workflow with no schema at all has told us nothing, so its fields are left
@@ -851,8 +884,23 @@ def workflow_settings(
     """
 
     base_fields = list(fields)
+
+    def offered(resolved: list[SettingField]) -> list[SettingField]:
+        """Add the LoRA setting when the workflow takes one and declares none.
+
+        The caller passes what the RUN decides, which is whether the revision
+        provides an insertion point, declared or read from its graph. Without
+        this the two disagree: a stack reaches the run through a prompt while
+        the panel, which sees only the schema, offers no way to choose one.
+        Declared wins, so a workflow that names its own cap or title keeps it.
+        """
+
+        if not accepts_added_loras or any(field.key == "loras" for field in resolved):
+            return resolved
+        return [*resolved, _workflow_setting("loras", lora_setting_property(), None)]
+
     if not input_schema:
-        return base_fields
+        return offered(base_fields)
     properties = input_schema.get("properties")
     if isinstance(properties, Mapping) and len(properties) > MAX_WORKFLOW_SCHEMA_PROPERTIES:
         raise ValueError(
@@ -861,7 +909,12 @@ def workflow_settings(
         )
     _validate_setting_value("workflow input schema", dict(input_schema))
     if not isinstance(properties, Mapping):
-        return base_fields
+        return offered(base_fields)
+
+    graph_settings = workflow_graph_settings(input_schema)
+    unbound = (
+        set(graph_settings.get("unbound_parameters", [])) if graph_settings is not None else set()
+    )
 
     video_length = workflow_video_length(input_schema)
 
@@ -888,6 +941,13 @@ def workflow_settings(
             video_length.fps_parameter,
         }:
             continue
+        if field.key in unbound:
+            resolved.append(
+                field.model_copy(
+                    update={"available": False, "unavailable_reason": UNMAPPED_SETTING_REASON}
+                )
+            )
+            continue
         property_schema = properties.get(field.key)
         if isinstance(property_schema, Mapping) and property_schema.get("readOnly") is True:
             continue
@@ -902,6 +962,15 @@ def workflow_settings(
                     }
                 )
             )
+        elif graph_settings is not None and field.key in GRAPH_SETTING_KEYS:
+            resolved.append(
+                field.model_copy(
+                    update={
+                        "available": False,
+                        "unavailable_reason": UNMAPPED_SETTING_REASON,
+                    }
+                )
+            )
         else:
             resolved.append(field)
 
@@ -912,6 +981,7 @@ def workflow_settings(
         if (
             not isinstance(key, str)
             or key in definitions
+            or key in unbound
             or (
                 video_length
                 and key
@@ -921,6 +991,11 @@ def workflow_settings(
                 }
             )
             or not isinstance(property_schema, Mapping)
+            or (
+                key == UPSCALE_SETTING_KEY
+                and property_schema.get("x-lm-atelier-kind") == UPSCALE_SCHEMA_KIND
+                and property_schema.get("readOnly") is True
+            )
             or not any(name in property_schema for name in ("default", "const", "enum"))
         ):
             continue
@@ -932,6 +1007,7 @@ def workflow_settings(
         _validate_setting_key(key, source="workflow setting")
         _reject_reserved_setting_key(key, source="workflow setting")
         resolved.append(_workflow_setting(key, property_schema, None))
+    resolved = offered(resolved)
     if len(resolved) > MAX_SETTING_FIELDS:
         raise ValueError(
             f"workflow settings must contain at most {MAX_SETTING_FIELDS} fields "
@@ -956,7 +1032,9 @@ def _workflow_setting(
     if declared_type not in supported_types:
         raise ValueError(f"workflow setting {key} must declare a supported type")
     if base and declared_type != base.type:
-        if base.type == "enum" and declared_type in {"boolean", "integer", "number", "string"}:
+        if base.type == "number" and declared_type == "integer":
+            pass
+        elif base.type == "enum" and declared_type in {"boolean", "integer", "number", "string"}:
             declared_type = "enum"
         else:
             raise ValueError(f"workflow setting {key} cannot change the engine setting type")
@@ -973,7 +1051,11 @@ def _workflow_setting(
         if broadened:
             raise ValueError(f"workflow setting {key} cannot broaden the engine choices")
 
-    if choices and declared_type in {"boolean", "integer", "number", "string"}:
+    if (
+        "const" not in schema
+        and choices
+        and declared_type in {"boolean", "integer", "number", "string"}
+    ):
         declared_type = "enum"
 
     if "const" in schema:
@@ -1014,6 +1096,26 @@ def _workflow_setting(
     ):
         raise ValueError(f"workflow setting {key} cannot weaken the engine multiple")
 
+    native_step = schema.get("x-lm-atelier-step")
+    declared_visibility = schema.get("x-lm-atelier-visibility")
+    visibility = (
+        cast(Literal["basic", "advanced", "expert"], declared_visibility)
+        if declared_visibility in ("basic", "advanced", "expert")
+        else base.visibility
+        if base
+        else "advanced"
+    )
+    step = (
+        native_step
+        if isinstance(native_step, int | float)
+        and not isinstance(native_step, bool)
+        and math.isfinite(native_step)
+        and native_step > 0
+        else base.step
+        if base
+        else None
+    )
+
     return SettingField(
         key=key,
         label=str(schema.get("title") or (base.label if base else key.replace("_", " ").title())),
@@ -1024,11 +1126,11 @@ def _workflow_setting(
         default=default,
         minimum=minimum,
         maximum=maximum,
-        step=schema.get("multipleOf", base.step if base else None),
+        step=schema.get("multipleOf", step),
         multiple_of=multiple_of,
         choices=choices,
         scope=base.scope if base else "workflow",
-        visibility=base.visibility if base else "advanced",
+        visibility=visibility,
         restart_required=base.restart_required if base else False,
         available=base.available if base else True,
         unavailable_reason=base.unavailable_reason if base else None,
@@ -1102,7 +1204,10 @@ def validate_settings(values: Mapping[str, Any], fields: Iterable[SettingField])
                 quotient = value / field.multiple_of
                 if not math.isclose(quotient, round(quotient), rel_tol=1e-9, abs_tol=1e-9):
                     raise ValueError(f"{key} must be a multiple of {field.multiple_of}")
-        if field.choices and value not in field.choices:
+        if field.choices and not any(
+            value == choice and isinstance(value, bool) == isinstance(choice, bool)
+            for choice in field.choices
+        ):
             raise ValueError(f"{key} must be one of {field.choices}")
         validated[key] = value
     return validated

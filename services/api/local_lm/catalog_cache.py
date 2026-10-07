@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import contextlib
+import errno
 import os
-import stat
-import tempfile
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -13,9 +14,13 @@ from .filesystem_links import (
     AnchoredDirectoryError,
     AnchoredEntry,
     AnchoredEntryKind,
+    create_publishable_entry,
     is_link_or_reparse,
     list_entries,
+    open_child_directory,
+    open_entry,
     remove_entry,
+    rename_entry,
 )
 
 #: A key is 64 lowercase hexadecimal characters and the payload is one of two
@@ -52,10 +57,9 @@ def is_cache_name(name: str) -> bool:
 def is_partial_name(name: str) -> bool:
     """True only for a leftover `_atomic_write` could actually have staged.
 
-    That method stages through `NamedTemporaryFile(prefix=f".{key}-",
-    suffix=".partial")`, so the emitted shape is a dot, the 64-character key, a
-    hyphen, the temporary's own name, and `.partial`. Parsing that grammar is
-    the point.
+    That method stages `.{key}-{token}.partial` in the held cache root: a dot,
+    the 64-character key, a hyphen, a token, and `.partial`. Parsing that
+    grammar is the point.
 
     Accepting anything that merely began with a dot and ended `.partial`
     deleted files this store could not have written - `.download.partial` among
@@ -103,20 +107,16 @@ class CatalogCacheStore:
         return self.root / f"{key}{suffix}"
 
     def read_text(self, path: Path, *, max_age_seconds: float | None = None) -> str | None:
-        if self._usable_entry(path, max_age_seconds=max_age_seconds) is None:
+        payload = self._read_cached(path, max_age_seconds=max_age_seconds)
+        if payload is None:
             return None
         try:
-            return path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
+            return payload.decode("utf-8")
+        except UnicodeError:
             return None
 
     def read_bytes(self, path: Path, *, max_age_seconds: float | None = None) -> bytes | None:
-        if self._usable_entry(path, max_age_seconds=max_age_seconds) is None:
-            return None
-        try:
-            return path.read_bytes()
-        except OSError:
-            return None
+        return self._read_cached(path, max_age_seconds=max_age_seconds)
 
     def write_text(self, path: Path, content: str) -> None:
         try:
@@ -246,51 +246,74 @@ class CatalogCacheStore:
                 refused.add(removable.path.name)
 
     def _atomic_write(self, path: Path, content: bytes) -> None:
+        """Write one cache file through the held root, or leave it untouched.
+
+        A path-based temporary follows a link planted at the cache directory
+        and publishes into whatever that link points at. Holding the root
+        refuses that link before any byte is written. Missing ancestors are
+        created through each held parent, so a source cache one level under
+        the shared directory still appears, and a link in that chain is
+        refused before the next directory is made. The staged name matches
+        `is_partial_name`, so a crash leftover is still the shape prune
+        deletes. A write that fails removes that staged file before it
+        returns. A root that cannot be held is the same outcome as a failed
+        write: the caller asked to store a cache entry, and nothing was stored.
+        """
+
         self._require_cache_path(path)
-        self.root.mkdir(parents=True, exist_ok=True)
-        temporary: Path | None = None
+        partial = f".{path.stem}-{os.urandom(8).hex()}.partial"
+        published = False
         try:
-            with tempfile.NamedTemporaryFile(
-                dir=self.root,
-                prefix=f".{path.stem}-",
-                suffix=".partial",
-                delete=False,
-            ) as handle:
-                temporary = Path(handle.name)
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-            temporary = None
-        finally:
-            if temporary is not None:
-                self._unlink(temporary)
+            with _held_cache_root(self.root) as anchor:
+                descriptor = create_publishable_entry(anchor, partial)
+                try:
+                    try:
+                        _write_all(descriptor, content)
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                    _publish_cache_name(anchor, partial, path.name)
+                    published = True
+                finally:
+                    if not published:
+                        with contextlib.suppress(AnchoredDirectoryError):
+                            remove_entry(anchor, partial)
+        except (AnchoredDirectoryError, OSError):
+            return
         self.prune(protected=path)
 
-    def _usable_entry(
-        self,
-        path: Path,
-        *,
-        max_age_seconds: float | None,
-    ) -> os.stat_result | None:
+    def _read_cached(self, path: Path, *, max_age_seconds: float | None) -> bytes | None:
+        """Read one cache file through the held root, or return nothing.
+
+        A path-based read follows a link planted at the cache directory and
+        returns the file that link points at. Holding the root refuses that
+        link before any byte is read. A link at the cache name is not an
+        entry. A root that cannot be held is the same outcome as a missing
+        file.
+        """
+
         self._require_cache_path(path)
         try:
-            if is_link_or_reparse(
-                path,
-                missing="assume_regular",
-                unreadable="assume_link",
-            ):
-                return None
-            metadata = path.stat()
-        except OSError:
+            with AnchoredDirectory(self.root) as anchor:
+                if is_link_or_reparse(
+                    path,
+                    missing="assume_regular",
+                    unreadable="assume_link",
+                ):
+                    return None
+                descriptor = open_entry(anchor, path.name)
+                if descriptor is None:
+                    return None
+                try:
+                    if max_age_seconds is not None:
+                        age = max(0.0, self._now() - os.fstat(descriptor).st_mtime)
+                        if age > max_age_seconds:
+                            return None
+                    return _read_all(descriptor)
+                finally:
+                    os.close(descriptor)
+        except (AnchoredDirectoryError, OSError):
             return None
-        if not stat.S_ISREG(metadata.st_mode):
-            return None
-        if max_age_seconds is not None:
-            age = max(0.0, self._now() - metadata.st_mtime)
-            if age > max_age_seconds:
-                return None
-        return metadata
 
     def _require_cache_path(self, path: Path) -> None:
         if path.parent != self.root or path.suffix not in {".json", ".bin"}:
@@ -316,16 +339,80 @@ class CatalogCacheStore:
             return False
         return True
 
-    @staticmethod
-    def _unlink(path: Path) -> bool:
-        """Remove a staged temporary by path, on the write path only.
 
-        The prune no longer uses this. `_atomic_write` created this file itself
-        moments earlier, holds no anchor, and is cleaning up its own failure.
-        """
+@contextlib.contextmanager
+def _held_cache_root(root: Path) -> Iterator[AnchoredDirectory]:
+    """Hold `root`, creating each missing ancestor through its held parent.
 
-        try:
-            path.unlink()
-        except OSError:
-            return False
-        return True
+    Opening the root with `create=True` makes only the final component, and
+    only when its parent already exists. A source cache lives at
+    `catalog-cache/<source>`, and that parent is not prepared in every
+    caller. Each missing name is created from the directory that holds it,
+    so a link anywhere in the chain refuses before the next directory exists.
+    """
+
+    parts = root.parts
+    held: list[AnchoredDirectory] = []
+    try:
+        base: AnchoredDirectory | None = None
+        start = len(parts)
+        for count in range(len(parts), 0, -1):
+            try:
+                base = AnchoredDirectory(Path(*parts[:count]))
+            except AnchoredDirectoryError:
+                continue
+            start = count
+            break
+        if base is None:
+            raise AnchoredDirectoryError
+        held.append(base)
+        current = base
+        for component in parts[start:]:
+            current = open_child_directory(current, component, create=True)
+            held.append(current)
+        yield current
+    finally:
+        for anchor in reversed(held):
+            anchor.close()
+
+
+def _publish_cache_name(anchor: AnchoredDirectory, partial: str, name: str) -> None:
+    """Move the staged file onto `name` inside the held cache root.
+
+    An ordinary file is replaced in one rename. A link refuses that rename on
+    some hosts; the link itself is then removed and the staged file takes the
+    name. Removing the link does not change the file the link pointed at.
+    """
+
+    try:
+        rename_entry(anchor, partial, name, replace=True)
+    except AnchoredDirectoryError as refusal:
+        if _held_kind(anchor, name) is not AnchoredEntryKind.LINK:
+            raise refusal
+        remove_entry(anchor, name)
+        rename_entry(anchor, partial, name, replace=False)
+
+
+def _held_kind(anchor: AnchoredDirectory, name: str) -> AnchoredEntryKind | None:
+    for entry in list_entries(anchor, include_metadata=False):
+        if entry.name == name:
+            return entry.kind
+    return None
+
+
+def _read_all(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _write_all(descriptor: int, content: bytes) -> None:
+    view = memoryview(content)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError(errno.EIO, "catalog cache write ended early")
+        view = view[written:]

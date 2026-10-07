@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import re
+from dataclasses import asdict
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
+from .catalog_hardware_alternatives import (
+    catalog_context_settings,
+    catalog_hardware_alternatives,
+    estimated_catalog_model_bytes,
+    estimated_catalog_ram,
+    with_catalog_context_estimate,
+)
 from .config import Settings
 from .gguf import (
     GGUFSelectionError,
@@ -11,12 +19,19 @@ from .gguf import (
     automatic_mmproj_selection,
     validate_gguf_selection,
 )
+from .hardware_fit import (
+    FitRequirements,
+    HardwareFit,
+    capacity_from_system_info,
+    recommend_hardware_fit,
+)
 from .schemas import (
     CatalogDetail,
     CatalogFileSource,
     CatalogPreflight,
     CatalogPreflightCheck,
     CatalogPreflightRequest,
+    HardwareFitAdviceOut,
     SystemInfo,
 )
 
@@ -192,6 +207,41 @@ def selected_catalog_file_metadata(
         )
         for filename in selected_filenames
     ]
+
+
+def with_catalog_file_hashes(
+    result: CatalogPreflight, files: list[dict[str, Any]]
+) -> CatalogPreflight:
+    """Keep download fields and checksum advice aligned with the planned file hashes."""
+    hashes = dict(result.expected_sha256)
+    for item in files:
+        path, digest = item.get("filename"), item.get("sha256")
+        if (
+            isinstance(path, str)
+            and path in result.selected_files
+            and isinstance(digest, str)
+            and _SHA256.fullmatch(digest)
+        ):
+            hashes[path] = digest.lower()
+    sources = {
+        path: source.model_copy(update={"sha256": hashes[path]}) if path in hashes else source
+        for path, source in result.file_sources.items()
+    }
+    complete = bool(result.selected_files) and all(path in hashes for path in result.selected_files)
+    checks = [
+        check.model_copy(
+            update={
+                "status": "pass",
+                "detail": "SHA-256 metadata is available for every selected file.",
+            }
+        )
+        if check.id == "checksum" and complete
+        else check
+        for check in result.checks
+    ]
+    return result.model_copy(
+        update={"expected_sha256": hashes, "file_sources": sources, "checks": checks}
+    )
 
 
 def exact_civitai_file_selection(
@@ -657,9 +707,16 @@ def assess_catalog_install(
         )
     )
 
-    known_sizes = [int(files[name].get("size") or 0) for name in selected if name in files]
-    download_bytes = sum(known_sizes)
-    unknown_sizes = [name for name in selected if name in files and not files[name].get("size")]
+    known_sizes = {
+        name: size
+        for name in selected
+        if name in files
+        and isinstance(size := files[name].get("size"), int)
+        and not isinstance(size, bool)
+        and size > 0
+    }
+    download_bytes = sum(known_sizes.values())
+    unknown_sizes = [name for name in selected if name in files and name not in known_sizes]
     if unknown_sizes:
         checks.append(
             _check(
@@ -688,49 +745,59 @@ def assess_catalog_install(
             )
         )
 
-    estimated_ram = int(download_bytes * 1.2) + 512 * 1024**2 if download_bytes else None
+    complete_sizes = bool(download_bytes) and not unknown_sizes
+    estimated_ram = estimated_catalog_ram(
+        download_bytes,
+        complete=complete_sizes,
+        chat_context=request.role == "chat"
+        and request.engine == "llama.cpp"
+        and request.auxiliary_kind is None,
+    )
     estimated_vram = (
         int(download_bytes * 1.25) + 1024**3
-        if download_bytes and (request.role != "chat" or request.engine == "vllm")
+        if complete_sizes and (request.role != "chat" or request.engine == "vllm")
         else None
     )
-    accelerators = [device for device in system.devices if device.kind != "cpu"]
-    available_accelerator = max(
-        (device.available_memory_bytes or 0 for device in accelerators), default=0
+    hardware_fit = assess_preflight_hardware_fit(
+        request,
+        system,
+        estimated_ram_bytes=estimated_ram,
+        estimated_vram_bytes=estimated_vram,
+        estimated_model_bytes=estimated_catalog_model_bytes(
+            download_bytes, complete=complete_sizes
+        ),
     )
-    if request.role == "chat" and request.engine != "vllm" and estimated_ram:
-        memory_status: Literal["pass", "warn", "block"] = (
-            "pass" if estimated_ram <= system.memory_total_bytes else "warn"
+    checks.append(_hardware_fit_check(hardware_fit))
+    pressure = [
+        reason.message
+        for reason in hardware_fit.reasons
+        if reason.code in {"system_memory_busy", "accelerator_memory_busy"}
+    ]
+    if pressure:
+        pressure.extend(
+            alternative.message
+            for alternative in hardware_fit.alternatives
+            if alternative.code == "free_current_memory"
         )
-        memory_detail = (
-            "Estimated loaded size fits total system memory."
-            if memory_status == "pass"
-            else (
-                "Estimated loaded size exceeds total system memory; "
-                "a smaller quantization is advised."
-            )
+        checks.append(
+            _check("memory-availability", "Memory available now", "warn", " ".join(pressure))
         )
-    elif estimated_vram and available_accelerator:
-        memory_status = "pass" if estimated_vram <= available_accelerator else "warn"
-        memory_detail = (
-            "Estimated loaded size fits currently available accelerator memory."
-            if memory_status == "pass"
-            else "Estimated loaded size exceeds currently available accelerator memory."
-        )
-    else:
-        memory_status = "warn"
-        memory_detail = "No accelerator memory was detected; accelerated generation may fail."
-    checks.append(_check("memory", "Memory estimate", memory_status, memory_detail))
 
+    if provider == "huggingface":
+        pinned_revision = re.fullmatch(r"[0-9a-f]{40}", resolved_revision) is not None
+    elif provider == "civitai":
+        pinned_revision = _CIVITAI_ID.fullmatch(resolved_revision) is not None
+    else:
+        pinned_revision = False
     checks.append(
         _check(
             "revision",
             "Pinned revision",
-            "pass" if resolved_revision != "main" else "warn",
+            "pass" if pinned_revision else "warn",
             (
                 f"Install is pinned to {resolved_revision}."
-                if resolved_revision != "main"
-                else "The catalog could not resolve main to an immutable commit."
+                if pinned_revision
+                else "The catalog did not return an exact version; this selection may change."
             ),
         )
     )
@@ -742,14 +809,75 @@ def assess_catalog_install(
         expected_sha256=expected_sha256,
         file_sources=file_sources,
         download_bytes=download_bytes,
+        download_size_complete=complete_sizes,
         available_disk_bytes=system.disk_free_bytes,
         estimated_ram_bytes=estimated_ram,
         estimated_vram_bytes=estimated_vram,
         can_install=not any(check.status == "block" for check in checks),
+        hardware_fit=HardwareFitAdviceOut.model_validate(asdict(hardware_fit)),
+        hardware_alternatives=catalog_hardware_alternatives(detail, request, system, selected),
         checks=checks,
         auxiliary_kind=request.auxiliary_kind,
         content_rating=detail.model.content_rating,
     )
+
+
+def assess_preflight_hardware_fit(
+    request: CatalogPreflightRequest,
+    system: SystemInfo,
+    *,
+    estimated_ram_bytes: int | None,
+    estimated_vram_bytes: int | None,
+    estimated_model_bytes: int | None,
+) -> HardwareFit:
+    """Assess calculated catalog fit without turning an estimate into a block."""
+
+    fit = recommend_hardware_fit(
+        capacity_from_system_info(system, runtime_backends=(request.engine,)),
+        FitRequirements(
+            estimated_system_memory_bytes=estimated_ram_bytes,
+            estimated_accelerator_memory_bytes=estimated_vram_bytes,
+            settings=(
+                catalog_context_settings(estimated_model_bytes, system.memory_total_bytes)
+                if request.role == "chat"
+                and request.engine == "llama.cpp"
+                and request.auxiliary_kind is None
+                else ()
+            ),
+        ),
+    )
+    if request.role == "chat" and request.engine == "llama.cpp" and request.auxiliary_kind is None:
+        return with_catalog_context_estimate(fit)
+    return fit
+
+
+def _hardware_fit_check(fit: HardwareFit) -> CatalogPreflightCheck:
+    status: Literal["pass", "warn", "block"]
+    if fit.status == "unsupported":
+        status = "block"
+    elif fit.status in {"recommended", "likely"}:
+        status = "pass"
+    else:
+        status = "warn"
+    headline = {
+        "recommended": "Recommended fit.",
+        "likely": "Likely fit.",
+        "tight": "Tight fit.",
+        "unsupported": "Unsupported by declared hardware requirements.",
+        "unknown": "Hardware fit is unknown.",
+    }[fit.status]
+    general_reasons = [
+        reason
+        for reason in fit.reasons
+        if reason.code not in {"system_memory_busy", "accelerator_memory_busy"}
+    ]
+    reason_text = " ".join(
+        reason.message for reason in general_reasons if reason.severity != "info"
+    )
+    if not reason_text:
+        reason_text = " ".join(reason.message for reason in general_reasons)
+    detail = f"{headline} {reason_text}".strip()
+    return _check("memory", "Hardware fit", status, detail)
 
 
 def _check(

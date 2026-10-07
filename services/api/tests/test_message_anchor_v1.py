@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from local_lm.message_anchor_v1 import (
@@ -36,11 +38,12 @@ def test_refuses_hostile_and_oversize() -> None:
         parse_message_anchor("msg=abc/def")
 
     class HostileStr(str):
-        def startswith(self, *args, **kwargs):
+        def startswith(self, *args: Any, **kwargs: Any) -> bool:
             raise RuntimeError("private attacker detail")
 
     with pytest.raises(AnchorError, match=INVALID_ANCHOR) as caught:
         parse_message_anchor(HostileStr("msg=abc123"))
     assert "private attacker detail" not in str(caught.value)
     with pytest.raises(TypeError):
-        MessageAnchorV1(message_id="abc123", changes_active_branch=True)
+        # A keyword the constructor does not take, passed on purpose.
+        cast(Any, MessageAnchorV1)(message_id="abc123", changes_active_branch=True)

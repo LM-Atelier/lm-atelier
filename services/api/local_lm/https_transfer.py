@@ -13,7 +13,18 @@ from urllib.parse import parse_qsl, urljoin, urlsplit
 
 import httpx
 
-from .filesystem_links import is_link_or_reparse
+from .filesystem_links import (
+    AnchoredDirectory,
+    AnchoredDirectoryError,
+    AnchoredEntryExists,
+    create_publishable_entry,
+    open_child_directory,
+    open_entry,
+    open_publishable_entry,
+    publish_opened_file,
+    remove_entry,
+    rename_entry,
+)
 
 _CHUNK_BYTES = 1024 * 1024
 _MAX_ALLOWED_HOSTS = 16
@@ -57,44 +68,13 @@ def download_https_artifact(
     transport: httpx.BaseTransport | None = None,
 ) -> str:
     request = _parse_request(payload)
-    destination, partial = _prepare_destination(request)
-    if _verified_file(destination, request):
-        return str(destination)
-    if destination.exists() or destination.is_symlink():
-        raise HttpsTransferError("destination_conflict")
-    if _verified_partial(partial, destination, request):
-        return str(destination)
-
-    starting_size = partial.stat().st_size if partial.is_file() else 0
-    if starting_size > request.expected_size:
-        partial.unlink()
-        starting_size = 0
-
-    timeout = httpx.Timeout(connect=20, read=60, write=20, pool=20)
-    try:
-        with (
-            _quiet_http_loggers(),
-            httpx.Client(
-                follow_redirects=False,
-                timeout=timeout,
-                transport=transport,
-                trust_env=False,
-            ) as client,
-        ):
-            downloaded = _stream_response(client, request, partial, starting_size)
-    except HttpsTransferError:
-        raise
-    except (httpx.HTTPError, OSError) as exc:
-        code = "network_error" if isinstance(exc, httpx.HTTPError) else "filesystem_error"
-        raise HttpsTransferError(code) from None
-
-    if downloaded != request.expected_size:
-        raise HttpsTransferError("truncated_body")
-    if _sha256_file(partial) != request.expected_sha256:
-        partial.unlink(missing_ok=True)
-        raise HttpsTransferError("digest_mismatch")
-    os.replace(partial, destination)
-    return str(destination)
+    with _hold_destination(request) as (parent, destination, partial):
+        try:
+            return _transfer_held(request, parent, destination.name, partial.name, transport)
+        except AnchoredEntryExists as exc:
+            raise HttpsTransferError("destination_conflict") from exc
+        except AnchoredDirectoryError as exc:
+            raise HttpsTransferError("unsafe_destination") from exc
 
 
 def _parse_request(payload: Mapping[str, Any]) -> HttpsArtifactRequest:
@@ -152,35 +132,265 @@ def _parse_request(payload: Mapping[str, Any]) -> HttpsArtifactRequest:
     )
 
 
-def _prepare_destination(request: HttpsArtifactRequest) -> tuple[Path, Path]:
-    root = request.local_dir
-    if not root.is_dir() or _is_link_or_reparse(root):
-        raise HttpsTransferError("unsafe_local_dir")
-    resolved_root = root.resolve(strict=True)
-    if _is_link_or_reparse(resolved_root):
-        raise HttpsTransferError("unsafe_local_dir")
-    parent = resolved_root
-    for part in request.filename.parts[:-1]:
-        parent /= part
-        if parent.exists() or parent.is_symlink():
-            if not parent.is_dir() or _is_link_or_reparse(parent):
-                raise HttpsTransferError("unsafe_destination")
+@contextmanager
+def _hold_destination(
+    request: HttpsArtifactRequest,
+) -> Iterator[tuple[AnchoredDirectory, Path, Path]]:
+    try:
+        root = AnchoredDirectory(request.local_dir)
+    except AnchoredDirectoryError as exc:
+        raise HttpsTransferError("unsafe_local_dir") from exc
+    held = [root]
+    try:
+        parent = root
+        for part in request.filename.parts[:-1]:
+            try:
+                child = open_child_directory(parent, part, create=True)
+            except AnchoredDirectoryError as exc:
+                raise HttpsTransferError("unsafe_destination") from exc
+            held.append(child)
+            parent = child
+        destination_name = request.filename.name
+        partial_name = f".{destination_name}.{request.expected_sha256[:12]}.https-partial"
+        for name in (destination_name, partial_name):
+            try:
+                descriptor = open_entry(parent, name)
+            except AnchoredDirectoryError as exc:
+                raise HttpsTransferError("unsafe_destination") from exc
+            if descriptor is not None:
+                os.close(descriptor)
+        yield parent, parent.path / destination_name, parent.path / partial_name
+    finally:
+        for directory in reversed(held):
+            directory.close()
+
+
+def _transfer_held(
+    request: HttpsArtifactRequest,
+    parent: AnchoredDirectory,
+    destination_name: str,
+    partial_name: str,
+    transport: httpx.BaseTransport | None,
+) -> str:
+    """Download into a descriptor opened in the held directory, then publish it.
+
+    The partial name is predictable, so a response can replace that name with
+    another file before a path open. The descriptor is opened first and is the
+    only object written. Publishing moves that same object.
+    """
+
+    destination = str(parent.path / destination_name)
+    existing = open_entry(parent, destination_name)
+    if existing is not None:
+        try:
+            if _descriptor_matches(existing, request):
+                return destination
+        finally:
+            os.close(existing)
+        raise HttpsTransferError("destination_conflict")
+
+    write_name, descriptor, starting_size, digest = _open_partial_descriptor(
+        parent, partial_name, destination_name, request
+    )
+    if descriptor is None:
+        return destination
+    # Name-based removal opens a second handle. Windows refuses that while the
+    # write handle is still open, and the refusal would hide the transfer's
+    # own error. Close first, then drop or keep the name.
+    failure: HttpsTransferError | None = None
+    try:
+        try:
+            downloaded, digest_hex = _stream_response(
+                request, descriptor, starting_size, digest, transport
+            )
+        except HttpsTransferError as exc:
+            failure = exc
+        except httpx.HTTPError:
+            failure = HttpsTransferError("network_error")
+        except OSError:
+            failure = HttpsTransferError("filesystem_error")
         else:
-            parent.mkdir()
-    destination = parent / request.filename.name
-    partial = parent / f".{request.filename.name}.{request.expected_sha256[:12]}.https-partial"
-    for path in (destination, partial):
-        if _is_link_or_reparse(path) or (path.exists() and not path.is_file()):
-            raise HttpsTransferError("unsafe_destination")
-    return destination, partial
+            # fstat and the final sync sit outside the stream's OSError handler.
+            # A failure there is still a filesystem error: fold the staging file
+            # back, or the next attempt finds the resume name already taken.
+            try:
+                if (
+                    os.fstat(descriptor).st_size != downloaded
+                    or downloaded != request.expected_size
+                ):
+                    failure = HttpsTransferError("truncated_body")
+                elif digest_hex != request.expected_sha256:
+                    failure = HttpsTransferError("digest_mismatch")
+                else:
+                    os.fsync(descriptor)
+            except OSError:
+                failure = HttpsTransferError("filesystem_error")
+            if failure is None:
+                publish_opened_file(
+                    parent,
+                    write_name,
+                    descriptor,
+                    into=parent,
+                    destination=destination_name,
+                )
+                if write_name != partial_name:
+                    remove_entry(parent, partial_name)
+                return destination
+    finally:
+        os.close(descriptor)
+    assert failure is not None
+    if failure.code in {"truncated_body", "network_error", "filesystem_error"}:
+        _preserve_truncated_partial(parent, write_name, partial_name)
+    else:
+        _discard_failed_partial(parent, write_name, failure.code)
+    raise failure
+
+
+def _open_partial_descriptor(
+    parent: AnchoredDirectory,
+    partial_name: str,
+    destination_name: str,
+    request: HttpsArtifactRequest,
+) -> tuple[str, int | None, int, Any]:
+    """Open the partial for writing, or publish it when it is already complete.
+
+    None for the descriptor means the verified partial was published and the
+    caller is done. An incomplete partial is copied into a new exclusive file
+    so the later write does not reopen the predictable name.
+    """
+
+    opened = open_publishable_entry(parent, partial_name)
+    if opened is None:
+        return partial_name, _create_partial(parent, partial_name), 0, hashlib.sha256()
+    try:
+        size = os.fstat(opened).st_size
+        if size == request.expected_size:
+            if _sha256_descriptor(opened) == request.expected_sha256:
+                publish_opened_file(
+                    parent,
+                    partial_name,
+                    opened,
+                    into=parent,
+                    destination=destination_name,
+                )
+                return partial_name, None, size, hashlib.sha256()
+            os.close(opened)
+            opened = None
+            remove_entry(parent, partial_name)
+            raise HttpsTransferError("digest_mismatch")
+        if size > request.expected_size:
+            os.close(opened)
+            opened = None
+            remove_entry(parent, partial_name)
+            return partial_name, _create_partial(parent, partial_name), 0, hashlib.sha256()
+        digest = hashlib.sha256()
+        os.lseek(opened, 0, os.SEEK_SET)
+        staging_name = f"{partial_name}.resume"
+        # A killed transfer can leave this name beside the partial. That open
+        # file cannot be appended to, and creating the name again would refuse,
+        # so the stale file goes before the new copy is created.
+        remove_entry(parent, staging_name)
+        descriptor = _create_partial(parent, staging_name)
+        try:
+            copied = _copy_descriptor(opened, descriptor, digest)
+        except OSError:
+            os.close(descriptor)
+            remove_entry(parent, staging_name)
+            raise
+        return staging_name, descriptor, copied, digest
+    finally:
+        if opened is not None:
+            os.close(opened)
+
+
+def _create_partial(parent: AnchoredDirectory, name: str) -> int:
+    try:
+        return create_publishable_entry(parent, name)
+    except AnchoredEntryExists as exc:
+        raise HttpsTransferError("unsafe_destination") from exc
+
+
+def _copy_descriptor(source: int, destination: int, digest: Any) -> int:
+    copied = 0
+    while True:
+        chunk = os.read(source, _CHUNK_BYTES)
+        if not chunk:
+            return copied
+        _write_all(destination, chunk)
+        digest.update(chunk)
+        copied += len(chunk)
+
+
+def _write_all(descriptor: int, chunk: bytes) -> None:
+    view = memoryview(chunk)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("incomplete write")
+        view = view[written:]
+
+
+def _sha256_descriptor(descriptor: int) -> str:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(descriptor, _CHUNK_BYTES)
+        if not chunk:
+            return digest.hexdigest()
+        digest.update(chunk)
+
+
+def _discard_failed_partial(parent: AnchoredDirectory, write_name: str, code: str) -> None:
+    """Drop a failed new file. Keep bytes that a later resume can continue."""
+
+    if code in {"truncated_body", "network_error", "filesystem_error"}:
+        return
+    remove_entry(parent, write_name)
+
+
+def _preserve_truncated_partial(
+    parent: AnchoredDirectory,
+    write_name: str,
+    partial_name: str,
+) -> None:
+    if write_name != partial_name:
+        rename_entry(parent, write_name, partial_name, replace=True)
+
+
+def _descriptor_matches(descriptor: int, request: HttpsArtifactRequest) -> bool:
+    return (
+        os.fstat(descriptor).st_size == request.expected_size
+        and _sha256_descriptor(descriptor) == request.expected_sha256
+    )
 
 
 def _stream_response(
+    request: HttpsArtifactRequest,
+    descriptor: int,
+    starting_size: int,
+    digest: Any,
+    transport: httpx.BaseTransport | None,
+) -> tuple[int, str]:
+    timeout = httpx.Timeout(connect=20, read=60, write=20, pool=20)
+    with (
+        _quiet_http_loggers(),
+        httpx.Client(
+            follow_redirects=False,
+            timeout=timeout,
+            transport=transport,
+            trust_env=False,
+        ) as client,
+    ):
+        return _stream_with_client(client, request, descriptor, starting_size, digest)
+
+
+def _stream_with_client(
     client: httpx.Client,
     request: HttpsArtifactRequest,
-    partial: Path,
+    descriptor: int,
     starting_size: int,
-) -> int:
+    digest: Any,
+) -> tuple[int, str]:
     current_url = request.url
     redirected = False
     for redirect_count in range(_MAX_REDIRECTS + 1):
@@ -200,21 +410,22 @@ def _stream_response(
                 _validate_url(current_url, request.allowed_hosts, initial=False)
                 redirected = True
                 continue
-            return _consume_response(response, partial, request, starting_size)
+            return _consume_response(response, descriptor, request, starting_size, digest)
     raise HttpsTransferError("too_many_redirects")
 
 
 def _consume_response(
     response: httpx.Response,
-    partial: Path,
+    descriptor: int,
     request: HttpsArtifactRequest,
     starting_size: int,
-) -> int:
+    digest: Any,
+) -> tuple[int, str]:
     if response.status_code == 416 and starting_size == request.expected_size:
         content_range = response.headers.get("content-range")
         if content_range and content_range != f"bytes */{request.expected_size}":
             raise HttpsTransferError("invalid_content_range")
-        return starting_size
+        return starting_size, digest.hexdigest()
     if response.status_code in {401, 403}:
         raise HttpsTransferError("unauthorized")
     if response.status_code == 429:
@@ -228,29 +439,27 @@ def _consume_response(
 
     if starting_size and response.status_code == 206:
         downloaded = starting_size
-        mode = "ab"
         expected_body = _validate_content_range(response, request, starting_size)
     elif response.status_code == 200:
+        os.ftruncate(descriptor, 0)
+        os.lseek(descriptor, 0, os.SEEK_SET)
         downloaded = 0
-        mode = "wb"
+        digest = hashlib.sha256()
         expected_body = request.expected_size
     else:
         raise HttpsTransferError("unexpected_partial_response")
     _validate_content_length(response, expected_body)
 
-    with partial.open(mode) as output:
-        for chunk in response.iter_raw(_CHUNK_BYTES):
-            if not chunk:
-                continue
-            downloaded += len(chunk)
-            if downloaded > request.expected_size:
-                output.close()
-                partial.unlink(missing_ok=True)
-                raise HttpsTransferError("oversized_body")
-            output.write(chunk)
-        output.flush()
-        os.fsync(output.fileno())
-    return downloaded
+    for chunk in response.iter_raw(_CHUNK_BYTES):
+        if not chunk:
+            continue
+        downloaded += len(chunk)
+        if downloaded > request.expected_size:
+            raise HttpsTransferError("oversized_body")
+        _write_all(descriptor, chunk)
+        digest.update(chunk)
+    os.fsync(descriptor)
+    return downloaded, digest.hexdigest()
 
 
 def _validate_content_range(
@@ -359,37 +568,6 @@ def _safe_relative_filename(value: str) -> bool:
     )
 
 
-def _verified_file(path: Path, request: HttpsArtifactRequest) -> bool:
-    return bool(
-        path.is_file()
-        and not _is_link_or_reparse(path)
-        and path.stat().st_size == request.expected_size
-        and _sha256_file(path) == request.expected_sha256
-    )
-
-
-def _verified_partial(
-    partial: Path,
-    destination: Path,
-    request: HttpsArtifactRequest,
-) -> bool:
-    if not partial.is_file() or partial.stat().st_size != request.expected_size:
-        return False
-    if _sha256_file(partial) != request.expected_sha256:
-        partial.unlink(missing_ok=True)
-        raise HttpsTransferError("digest_mismatch")
-    os.replace(partial, destination)
-    return True
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(_CHUNK_BYTES), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 @contextmanager
 def _quiet_http_loggers() -> Iterator[None]:
     loggers = tuple(logging.getLogger(name) for name in ("httpx", "httpcore"))
@@ -401,11 +579,3 @@ def _quiet_http_loggers() -> Iterator[None]:
     finally:
         for logger, previous in zip(loggers, disabled, strict=True):
             logger.disabled = previous
-
-
-def _is_link_or_reparse(path: Path) -> bool:
-    return is_link_or_reparse(
-        path,
-        missing="assume_regular",
-        unreadable="raise",
-    )

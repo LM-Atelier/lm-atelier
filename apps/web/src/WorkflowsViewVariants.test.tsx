@@ -1,12 +1,17 @@
+import { mockWorkflowFamilyPages } from "./workflowFamilyReadFixtures";
+import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { WorkflowsView } from "./WorkflowsView";
 import { api } from "./api";
 import type { Workflow, WorkflowFamily } from "./types";
+// Read from the source rather than written out again here. A second copy of
+// these sentences is the defect this file now guards against.
+import { REASON_TEXT } from "./readinessReason";
 
 vi.mock("./api", () => ({ api: {
-  workflows: vi.fn(), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
+  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilyOperations: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
   updateWorkflowFamily: vi.fn(), setWorkflowFamilyPreference: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
@@ -36,8 +41,9 @@ function wrap(element: React.ReactNode) {
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  mockWorkflowReadsFromFixture(() => api.workflows());
   vi.mocked(api.workflows).mockResolvedValue([workflow("a"), workflow("b")]);
-  vi.mocked(api.workflowFamilies).mockResolvedValue([family("a"), family("b")]);
+  mockWorkflowFamilyPages([family("a"), family("b")]);
 
   vi.mocked(api.updateWorkflowFamily).mockResolvedValue({ ...family("b"), archived: true, enabled: false });
 });
@@ -54,16 +60,17 @@ describe("workflow family variants", () => {
       { ...mixed.variants[0], id: "missing", name: "Missing revision", current_revision_id: null,
         current_revision_version: null, readiness: "setup_required", readiness_reason: "current_revision_missing" },
     );
-    vi.mocked(api.workflowFamilies).mockResolvedValue([mixed]);
+    mockWorkflowFamilyPages([mixed]);
     wrap(<WorkflowsView />);
     fireEvent.click(await screen.findByText("Workflow a"));
-    fireEvent.click(screen.getByRole("button", { name: "Show operation variants" }));
+    await screen.findByRole("button", { name: "New revision" });
+    fireEvent.click(await screen.findByRole("button", { name: "Show operation variants" }));
     const region = within(screen.getByRole("region", { name: "Operation variants" }));
     expect(region.getAllByRole("listitem")).toHaveLength(4);
     expect(region.getByText("Text to video")).toBeInTheDocument();
     expect(region.getByText("Current revision: v3")).toBeInTheDocument();
-    expect(region.getByText("This revision needs review before it can run.")).toBeInTheDocument();
-    expect(region.getByText("Its required dependencies are not activated for this revision.")).toBeInTheDocument();
+    expect(region.getByText(REASON_TEXT.revision_untrusted)).toBeInTheDocument();
+    expect(region.getByText(REASON_TEXT.activation_not_ready)).toBeInTheDocument();
     expect(region.getByText("Ready to run.")).toBeInTheDocument();
     expect(region.getByText("No current revision")).toBeInTheDocument();
     expect(region.queryByRole("button", { name: /install/i })).not.toBeInTheDocument();
@@ -73,10 +80,12 @@ describe("workflow family variants", () => {
   it("resets the disclosure when selecting another family", async () => {
     wrap(<WorkflowsView />);
     fireEvent.click(await screen.findByText("Workflow a"));
-    fireEvent.click(screen.getByRole("button", { name: "Show operation variants" }));
+    await screen.findByRole("button", { name: "New revision" });
+    fireEvent.click(await screen.findByRole("button", { name: "Show operation variants" }));
     fireEvent.click(screen.getByText("Workflow b"));
-    expect(screen.getByRole("button", { name: "Show operation variants" })).toHaveAttribute("aria-expanded", "false");
-    fireEvent.click(screen.getByRole("button", { name: "Show operation variants" }));
+    await screen.findByRole("button", { name: "New revision" });
+    expect(await screen.findByRole("button", { name: "Show operation variants" })).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(await screen.findByRole("button", { name: "Show operation variants" }));
     const region = within(screen.getByRole("region", { name: "Operation variants" }));
     expect(region.getByText("Workflow b")).toBeInTheDocument();
     expect(region.queryByText("Workflow a")).not.toBeInTheDocument();
@@ -87,13 +96,47 @@ describe("workflow family variants", () => {
   it("keeps an unknown readiness reason neutral", async () => {
     const blocked = family("a");
     blocked.variants[0] = { ...blocked.variants[0], readiness: "unavailable", readiness_reason: "future_server_reason" };
-    vi.mocked(api.workflowFamilies).mockResolvedValue([blocked]);
+    mockWorkflowFamilyPages([blocked]);
     wrap(<WorkflowsView />);
     fireEvent.click(await screen.findByText("Workflow a"));
-    fireEvent.click(screen.getByRole("button", { name: "Show operation variants" }));
+    await screen.findByRole("button", { name: "New revision" });
+    fireEvent.click(await screen.findByRole("button", { name: "Show operation variants" }));
     const region = within(screen.getByRole("region", { name: "Operation variants" }));
     expect(region.getByText("Unavailable")).toBeInTheDocument();
-    expect(region.getByText("No further readiness details are available.")).toBeInTheDocument();
+    // A reason this build has never heard of still says what the readiness
+    // means, rather than the non-answer this view used to give.
+    expect(region.getByText("Cannot run on this machine as configured.")).toBeInTheDocument();
     expect(region.queryByText("future_server_reason")).not.toBeInTheDocument();
+  });
+
+  it("says why in the same words as the rest of the app", async () => {
+    // This view carried its own list of refusal sentences, worded differently
+    // and two reasons short. A workflow refused for a reason added after that
+    // list was written - one that discards what you type, say - read a real
+    // sentence in the selectors and a non-answer here.
+    const every = family("a");
+    // The first variant stays as it is - it is what ties this family to the
+    // selected workflow - and one more is added for every reason the server
+    // can send.
+    every.variants.push(...Object.keys(REASON_TEXT).map((reason, index) => ({
+      ...every.variants[0], id: `refused-${index}`, name: `Refused ${index}`,
+      readiness: "unavailable" as const, readiness_reason: reason,
+    })));
+    mockWorkflowFamilyPages([every]);
+    wrap(<WorkflowsView />);
+    fireEvent.click(await screen.findByText("Workflow a"));
+    fireEvent.click(await screen.findByRole("button", { name: "Show operation variants" }));
+
+    const region = within(screen.getByRole("region", { name: "Operation variants" }));
+    while (region.getAllByRole("listitem").length < every.variants.length) {
+      const loaded = region.getAllByRole("listitem").length;
+      fireEvent.click(await region.findByRole("button", { name: "Load more Family a operation variants" }));
+      await waitFor(() => expect(region.getAllByRole("listitem").length).toBeGreaterThan(loaded));
+    }
+    expect(region.getAllByText(REASON_TEXT.revision_ignores_the_description).length).toBeGreaterThan(0);
+    for (const sentence of Object.values(REASON_TEXT)) {
+      expect(region.getAllByText(sentence).length).toBeGreaterThan(0);
+    }
+    expect(region.queryByText(/No further readiness details/)).not.toBeInTheDocument();
   });
 });

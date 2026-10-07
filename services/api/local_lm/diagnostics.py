@@ -14,9 +14,12 @@ from . import __version__
 from .artifacts import ArtifactStore
 from .config import Settings
 from .domain import ArtifactKind, utcnow
+from .filesystem_links import is_link_or_reparse
 from .hardware import collect_system_info
 from .models import Artifact, Chat, Job, ModelInstall, Project, Run, WorkflowDefinition
+from .power_inhibition import PowerInhibitor
 from .processes import ProcessSupervisor
+from .retention_policy import windows_for
 
 
 class DiagnosticBundleBuilder:
@@ -25,16 +28,24 @@ class DiagnosticBundleBuilder:
         settings: Settings,
         artifacts: ArtifactStore,
         processes: ProcessSupervisor,
+        power: PowerInhibitor | None = None,
     ) -> None:
         self.settings = settings
         self.artifacts = artifacts
         self.processes = processes
+        self.power = power
 
     def create(self, session: Session) -> Artifact:
         model_rows = session.execute(select(ModelInstall.role, ModelInstall.engine)).all()
         workflow_engines = Counter(session.scalars(select(WorkflowDefinition.operation)).all())
         job_statuses = Counter(session.scalars(select(Job.status)).all())
-        log_files = [path for path in self.settings.log_dir.iterdir() if path.is_file()]
+        # The windows retention actually uses, which Settings may have changed.
+        retention = windows_for(session, self.settings)
+        # is_file follows a link, so a name in the log directory would be
+        # measured as a local log when it points somewhere else. Skip it
+        # first. Listing the directory itself does the same when that
+        # directory is the link.
+        log_files = _measurable_log_files(self.settings.log_dir)
         payload = {
             "format": "lm-atelier-diagnostics",
             "version": 1,
@@ -51,8 +62,8 @@ class DiagnosticBundleBuilder:
                 "media_engine": self.settings.media_engine,
                 "auto_unload_chat_for_media": self.settings.auto_unload_chat_for_media,
                 "comfy_inactivity_seconds": self.settings.comfy_inactivity_seconds,
-                "artifact_retention_days": self.settings.artifact_retention_days,
-                "temporary_retention_hours": self.settings.temporary_retention_hours,
+                "artifact_retention_days": retention.media_days,
+                "temporary_retention_hours": retention.temporary_hours,
                 "backup_daily_count": self.settings.backup_daily_count,
                 "backup_weekly_count": self.settings.backup_weekly_count,
             },
@@ -96,6 +107,10 @@ class DiagnosticBundleBuilder:
                 }
                 for status in self.processes.statuses()
             ],
+            # Whether running work could keep the computer awake. A refusal is
+            # reported as a fact only: the platform's own words can name a
+            # system path, which this bundle promises to leave out.
+            "sleep": _sleep_summary(self.power),
             "logs": {
                 "file_count": len(log_files),
                 "total_bytes": sum(path.stat().st_size for path in log_files),
@@ -135,6 +150,38 @@ class DiagnosticBundleBuilder:
             )
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def _sleep_summary(power: PowerInhibitor | None) -> dict[str, object] | None:
+    if power is None:
+        return None
+    state = power.state()
+    return {
+        "supported": state.supported,
+        "backend": state.backend,
+        "enabled": state.enabled,
+        "active": state.active,
+        "holder_count": state.holder_count,
+        "kind_counts": state.kind_counts,
+        "refused": state.last_error is not None,
+    }
+
+
+def _measurable_log_files(log_dir: Path) -> list[Path]:
+    """Ordinary files in the log directory, or none when that directory is a link."""
+
+    if is_link_or_reparse(log_dir, missing="raise", unreadable="assume_link"):
+        return []
+    return [
+        path
+        for path in log_dir.iterdir()
+        if not is_link_or_reparse(
+            path,
+            missing="assume_link",
+            unreadable="assume_link",
+        )
+        and path.is_file()
+    ]
 
 
 _STAGE_SUMMARY_JOB_LIMIT = 200

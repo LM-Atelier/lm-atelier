@@ -17,6 +17,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import socket
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any
@@ -29,6 +30,9 @@ MAX_URL_CHARACTERS = 2_000
 MAX_CONTENT_BYTES = 512 * 1024
 MAX_TEXT_CHARACTERS = 20_000
 REQUEST_TIMEOUT_SECONDS = 15
+# For the whole read, every redirect included. The timeout above is per step
+# of a request, so a page that sends a little at a time would never meet it.
+PAGE_DEADLINE_SECONDS = 30
 
 # Nothing that could carry a session, a token, or an identity. A retrieval
 # the user asked for should look like a stranger asking, because that is
@@ -37,7 +41,12 @@ REQUEST_HEADERS = {
     "user-agent": "lm-atelier/1.0 (+local reader)",
     "accept": "text/html,text/plain;q=0.9",
     "accept-language": "en",
+    # A compressed body is decompressed as it is read, so one small chunk could
+    # become far more than a page is allowed to be.
+    "accept-encoding": "identity",
 }
+
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 _STRIPPED = {"script", "style", "noscript", "template", "svg", "iframe"}
 _WHITESPACE = re.compile(r"[ \t\r\f\v]+")
@@ -141,12 +150,17 @@ def validate_target(url: str, *, resolve: Any = socket.getaddrinfo) -> str:
     if not host:
         raise WebRetrievalError("web-url-invalid", "That address names no host.")
     for address in _addresses_for(host, resolve):
-        if not address.is_global or address.is_multicast:
+        if not public_address(address):
             raise WebRetrievalError(
                 "web-private-address-refused",
                 "That address points inside this machine or network.",
             )
     return url
+
+
+def public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Whether a page may be fetched from this address: a public one, not a group."""
+    return address.is_global and not address.is_multicast
 
 
 def _addresses_for(host: str, resolve: Any) -> list[Any]:
@@ -236,9 +250,48 @@ async def fetch_source(
     raise WebRetrievalError("web-too-many-redirects", "That address redirects too many times.")
 
 
+@dataclass(frozen=True)
+class BoundedResponse:
+    """A response read only as far as a page may be: what `fetch_source` asks of a request."""
+
+    status_code: int
+    headers: Mapping[str, str]
+    content: bytes
+
+
+def bounded_request(client: Any) -> Callable[[str], Awaitable[BoundedResponse]]:
+    """A request for `fetch_source` that never reads more of a body than a page may be.
+
+    A body is read as sent, to one byte past `MAX_CONTENT_BYTES`, which is
+    enough to know the page was cut, and the rest is left unread; a redirect's
+    body is not read at all. A body sent compressed is refused before any of
+    it is read: decompressing it could turn one small chunk into far more than
+    a page, and asking for an uncompressed page does not make a server send
+    one. `client` is an httpx async client.
+    """
+
+    async def request(url: str) -> BoundedResponse:
+        async with client.stream("GET", url) as response:
+            body = bytearray()
+            if response.status_code not in _REDIRECT_STATUSES:
+                encodings = response.headers.get_list("content-encoding", split_commas=True)
+                if any(value.strip().casefold() not in {"", "identity"} for value in encodings):
+                    raise WebRetrievalError(
+                        "web-encoding-refused", "That page was sent compressed, which is not read."
+                    )
+                async for chunk in response.aiter_raw():
+                    # Only what the page may still hold, however large a chunk arrives.
+                    body += chunk[: MAX_CONTENT_BYTES + 1 - len(body)]
+                    if len(body) > MAX_CONTENT_BYTES:
+                        break
+            return BoundedResponse(response.status_code, response.headers, bytes(body))
+
+    return request
+
+
 def _redirect_target(response: Any) -> str | None:
     status = int(getattr(response, "status_code", 0) or 0)
-    if status not in {301, 302, 303, 307, 308}:
+    if status not in _REDIRECT_STATUSES:
         return None
     location = _header(response, "location")
     if not location or not isinstance(location, str):

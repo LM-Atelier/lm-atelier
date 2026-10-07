@@ -4,10 +4,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MediaLibraryView } from "./MediaLibraryView";
 import { api } from "./api";
 import { parseArtifactLibraryPage, type ArtifactLibraryFilters } from "./artifactLibraryPage";
+import { CLOCK_KEY } from "./clockPreference";
+import { SENSITIVE_MEDIA_KEY } from "./sensitiveMedia";
 
-vi.mock("./api", () => ({
-  api: { artifactLibrary: vi.fn(), favoriteArtifact: vi.fn() },
-}));
+vi.mock("./api", async (original) => {
+  const actual = await original<typeof import("./api")>();
+  return { ApiError: actual.ApiError, api: { artifactLibrary: vi.fn(), favoriteArtifact: vi.fn(),
+    mediaOrganizationCatalog: vi.fn().mockResolvedValue({ items: [], next_cursor: null, revision: 1 }) } };
+});
 
 const digest = (character: string) => /^[a-f]$/.test(character)
   ? character.repeat(64)
@@ -192,4 +196,50 @@ describe("EntryV1 Media Library feed", () => {
     expect(screen.queryByText("Item a")).toBeNull();
     expect(screen.queryByText("Item b")).toBeNull();
   });
+});
+
+it("writes when an item was added on the chosen clock", async () => {
+  localStorage.setItem(CLOCK_KEY, "24");
+  try {
+    vi.mocked(api.artifactLibrary).mockResolvedValue(parsedPage([rawItem("b")]));
+    renderLibrary();
+
+    const added = await screen.findByText(/Added /);
+    expect(added.textContent).toMatch(/\d{1,2}:\d{2}/);
+    expect(added.textContent).not.toMatch(/\b(AM|PM)\b/i);
+  } finally {
+    localStorage.removeItem(CLOCK_KEY);
+  }
+});
+
+it("covers pictures and names items by place while covering is on", async () => {
+  localStorage.setItem(SENSITIVE_MEDIA_KEY, "hide");
+  try {
+    vi.mocked(api.artifactLibrary).mockResolvedValue(parsedPage([rawItem("b"), rawItem("a", { kind: "video" })]));
+    const onEdit = vi.fn();
+    renderLibrary(onEdit);
+
+    expect(await screen.findByText("Picture 1")).toBeVisible();
+    expect(screen.getByText("Video 2")).toBeVisible();
+    expect(screen.queryByText("Item b")).toBeNull();
+    expect(document.querySelector(".media-grid img, .media-grid video")).toBeNull();
+    expect(screen.getByRole("checkbox", { name: "Select Picture 1" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Edit Picture 1" }));
+    expect(onEdit).toHaveBeenCalledWith(`sha256:${digest("b")}`);
+    fireEvent.click(screen.getAllByRole("button", { name: "Show picture" })[0]);
+    expect(screen.getByRole("img", { name: "Picture 1" })).toBeVisible();
+  } finally {
+    localStorage.removeItem(SENSITIVE_MEDIA_KEY);
+  }
+});
+
+it("offers saving a frame and trimming on a video's card and on no picture's", async () => {
+  vi.mocked(api.artifactLibrary).mockResolvedValue(parsedPage([rawItem("b"), rawItem("a", { kind: "video" })]));
+  renderLibrary();
+
+  const video = (await screen.findByText("Item a")).closest("article");
+  const picture = screen.getByText("Item b").closest("article");
+  expect(video?.querySelector('[aria-label="Save a frame from this video"]')).not.toBeNull();
+  expect(video?.querySelector('[aria-label="Trim this video"]')).not.toBeNull();
+  expect(picture?.querySelector('[aria-label="Save a frame from this video"], [aria-label="Trim this video"]')).toBeNull();
 });

@@ -23,7 +23,7 @@ vi.mock("./api", async (importOriginal) => {
     promptTemplates: vi.fn(),
     promptTemplate: vi.fn(),
     createPromptTemplate: vi.fn(),
-    workflowFamilies: vi.fn(),
+    workflowReadyRevisions: vi.fn(),
     modelAssets: vi.fn(),
     },
   };
@@ -79,6 +79,7 @@ function renderDialog({
         onCreate={onCreate}
         onRetry={vi.fn()}
         onDiscard={vi.fn()}
+        onQueuePartial={vi.fn()}
       />
     </QueryClientProvider>,
   );
@@ -93,7 +94,7 @@ beforeEach(() => {
     offset: 0,
   });
   vi.mocked(api.promptTemplate).mockResolvedValue(detail);
-  vi.mocked(api.workflowFamilies).mockResolvedValue([]);
+  vi.mocked(api.workflowReadyRevisions).mockResolvedValue([]);
   vi.mocked(api.modelAssets).mockResolvedValue([]);
 });
 

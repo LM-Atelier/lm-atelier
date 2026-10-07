@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .domain import Operation
+from .matting_workflows import workflow_declares_matting
 from .models import (
     ModelInstall,
     ModelProfile,
@@ -20,11 +21,16 @@ from .models import (
     WorkflowProfileCompatibility,
     WorkflowRevision,
 )
+from .outpaint_workflows import workflow_declares_outpaint
+from .prompt_binding import ignores_the_description
+from .workflow_recovery_visibility import workflow_family_deleted
 from .workflow_revision_reviews import review_is_current
 
 WorkflowSelectorCapability = Literal["chat", "vision", "image", "video"]
 WorkflowSelectionMode = Literal["explicit", "default", "automatic"]
 LegacyRevisionResolver = Callable[[Session, ModelProfile, Operation], WorkflowRevision | None]
+RevisionPreference = Callable[[WorkflowRevision], bool]
+RevisionEligibility = Callable[[WorkflowRevision | None], str | None]
 
 _CAPABILITY_ROLE: dict[WorkflowSelectorCapability, str] = {
     "chat": "chat",
@@ -101,11 +107,13 @@ class WorkflowFamilySelectionError(ValueError):
         operation: Operation,
         reason: str,
         workflow_family_id: str | None = None,
+        candidate_reasons: tuple[str, ...] = (),
     ) -> None:
         self.capability = capability
         self.operation = operation
         self.reason = reason
         self.workflow_family_id = workflow_family_id
+        self.candidate_reasons = candidate_reasons
         target = f" {workflow_family_id}" if workflow_family_id else ""
         super().__init__(
             f"{capability} workflow family{target} cannot run {operation.value}: {reason}"
@@ -200,8 +208,25 @@ def resolve_workflow_family(
     engine: str | None = None,
     required_capabilities: Iterable[str] = (),
     legacy_revision_resolver: LegacyRevisionResolver | None = None,
+    preferred_revision: RevisionPreference | None = None,
+    revision_eligibility: RevisionEligibility | None = None,
+    skip_outpaint: bool = False,
 ) -> ResolvedWorkflowFamily:
-    """Resolve one broad selector to an exact operation variant without guessing."""
+    """Resolve one broad selector to an exact operation variant without guessing.
+
+    `preferred_revision` orders automatic candidates it accepts ahead of the
+    rest, before any other ranking. It never touches an explicit or default
+    choice, and it never makes an unready workflow eligible.
+
+    `revision_eligibility` can refuse a ready revision before variant ambiguity
+    and ranking. Explicit and default choices stay within their chosen family.
+    Graphless compatibility profiles are presented as None to this check.
+
+    `skip_outpaint` leaves a workflow that paints past the edge out of an
+    automatic choice, for a turn that names no margins: run without them it pads
+    by whatever its graph was saved with. Explicit and default choices are not
+    affected.
+    """
 
     if operation not in _CAPABILITY_OPERATIONS[capability]:
         raise _error(capability, operation, "selector_operation_mismatch", workflow_family_id)
@@ -224,6 +249,7 @@ def resolve_workflow_family(
             engine=engine,
             required_capabilities=required,
             legacy_revision_resolver=legacy_revision_resolver,
+            revision_eligibility=revision_eligibility,
         )
         return _resolved(candidate, mode)
 
@@ -260,10 +286,12 @@ def resolve_workflow_family(
             engine=engine,
             required_capabilities=required,
             legacy_revision_resolver=legacy_revision_resolver,
+            revision_eligibility=revision_eligibility,
         )
         return _resolved(candidate, mode)
 
     candidates: list[_Candidate] = []
+    candidate_reasons: list[str] = []
     for preference in preferences:
         family = session.get(WorkflowFamily, preference.workflow_family_id)
         if family is None:
@@ -271,25 +299,52 @@ def resolve_workflow_family(
         if not _automatic_family_eligible(session, family, preference):
             continue
         try:
-            candidates.append(
-                _candidate(
-                    session,
-                    family,
-                    preference,
-                    capability=capability,
-                    operation=operation,
-                    prompt=prompt,
-                    engine=engine,
-                    required_capabilities=required,
-                    legacy_revision_resolver=legacy_revision_resolver,
-                )
+            candidate = _candidate(
+                session,
+                family,
+                preference,
+                capability=capability,
+                operation=operation,
+                prompt=prompt,
+                engine=engine,
+                required_capabilities=required,
+                legacy_revision_resolver=legacy_revision_resolver,
+                revision_eligibility=revision_eligibility,
             )
-        except WorkflowFamilySelectionError:
+        except WorkflowFamilySelectionError as exc:
+            candidate_reasons.append(exc.reason)
             continue
+        # A workflow that only cuts a subject out is never chosen for a request:
+        # it answers the one tool that asks for a cutout, and picked for any other
+        # edit it would return a cutout instead of the edit.
+        if candidate.revision is not None and workflow_declares_matting(
+            candidate.revision.input_schema_json
+        ):
+            continue
+        # The same for one that paints past the edge, when the turn names no
+        # margins: it would return a larger picture, or with nothing to pad, the
+        # source unchanged.
+        if (
+            skip_outpaint
+            and candidate.revision is not None
+            and workflow_declares_outpaint(candidate.revision.input_schema_json)
+        ):
+            continue
+        candidates.append(candidate)
     if not candidates:
-        raise _error(capability, operation, "no_ready_workflow")
+        raise WorkflowFamilySelectionError(
+            capability=capability,
+            operation=operation,
+            reason="no_ready_workflow",
+            candidate_reasons=tuple(candidate_reasons),
+        )
     candidates.sort(
         key=lambda item: (
+            not (
+                preferred_revision is not None
+                and item.revision is not None
+                and preferred_revision(item.revision)
+            ),
             -item.score,
             not item.preference.is_default,
             item.preference.sort_order,
@@ -329,14 +384,33 @@ def _candidate(
     engine: str | None,
     required_capabilities: frozenset[str],
     legacy_revision_resolver: LegacyRevisionResolver | None,
+    revision_eligibility: RevisionEligibility | None,
 ) -> _Candidate:
-    if family.archived:
+    if workflow_family_deleted(session, family.id):
+        raise _error(capability, operation, "family_not_found", family.id)
+    family_state = session.execute(
+        select(WorkflowFamily.enabled, WorkflowFamily.archived).where(
+            WorkflowFamily.id == family.id
+        )
+    ).one_or_none()
+    if family_state is None:
+        raise _error(capability, operation, "family_not_found", family.id)
+    if family_state.archived:
         raise _error(capability, operation, "family_archived", family.id)
-    if not family.enabled:
+    if not family_state.enabled:
         raise _error(capability, operation, "family_disabled", family.id)
     if preference is None:
         raise _error(capability, operation, "selector_not_enabled", family.id)
-    if not preference.enabled:
+    preference_enabled = session.scalar(
+        select(WorkflowPreference.enabled).where(
+            WorkflowPreference.id == preference.id,
+            WorkflowPreference.workflow_family_id == family.id,
+            WorkflowPreference.selector_capability == capability,
+        )
+    )
+    if preference_enabled is None:
+        raise _error(capability, operation, "selector_not_enabled", family.id)
+    if not preference_enabled:
         raise _error(capability, operation, "selector_disabled", family.id)
 
     mapping = session.scalar(
@@ -374,6 +448,10 @@ def _candidate(
             required_capabilities=required_capabilities,
         )
         definition = session.get(WorkflowDefinition, revision.workflow_id) if revision else None
+        if revision_eligibility is not None:
+            reason = revision_eligibility(revision)
+            if reason is not None:
+                raise _error(capability, operation, reason, family.id)
         return _Candidate(
             family,
             preference,
@@ -417,6 +495,11 @@ def _candidate(
         except WorkflowFamilySelectionError as exc:
             failure_reasons.append(exc.reason)
             continue
+        if revision_eligibility is not None:
+            reason = revision_eligibility(revision)
+            if reason is not None:
+                failure_reasons.append(reason)
+                continue
         viable.append((definition, revision, activation))
     if not viable:
         reason = failure_reasons[0] if len(set(failure_reasons)) == 1 else "operation_unavailable"
@@ -485,12 +568,30 @@ def _validate_revision(
     if revision is None:
         return None
     definition = session.get(WorkflowDefinition, revision.workflow_id)
+    if definition is not None and workflow_family_deleted(session, definition.family_id):
+        raise _error(capability, operation, "revision_missing", workflow_family_id)
+    if definition is not None and definition.family_id is not None:
+        family_state = session.execute(
+            select(WorkflowFamily.enabled, WorkflowFamily.archived).where(
+                WorkflowFamily.id == definition.family_id
+            )
+        ).one_or_none()
+        if family_state is None:
+            raise _error(capability, operation, "family_not_found", definition.family_id)
+        if family_state.archived:
+            raise _error(capability, operation, "family_archived", definition.family_id)
+        if not family_state.enabled:
+            raise _error(capability, operation, "family_disabled", definition.family_id)
     if definition is None or definition.operation != operation.value:
         raise _error(capability, operation, "operation_mismatch", workflow_family_id)
     if engine is not None and revision.engine != engine:
         raise _error(capability, operation, "engine_mismatch", workflow_family_id)
     if operation != Operation.TEXT and engine != "mock" and not revision.api_graph_json:
         raise _error(capability, operation, "revision_not_executable", workflow_family_id)
+    if ignores_the_description(
+        revision.engine, operation.value, revision.api_graph_json, revision.input_schema_json
+    ):
+        raise _error(capability, operation, "revision_ignores_the_description", workflow_family_id)
     if not review_is_current(session, definition, revision):
         raise _error(capability, operation, "revision_untrusted", workflow_family_id)
     if not required_capabilities.issubset(set(revision.capabilities_json)):

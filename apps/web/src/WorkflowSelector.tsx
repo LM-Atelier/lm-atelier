@@ -1,10 +1,11 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useId } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
 import { readinessReason } from "./readinessReason";
-import { orderFamilies, servesCapability } from "./workflowFamilies";
+import { useWorkflowFamilyChoices } from "./useWorkflowFamilyChoices";
+import { useWorkflowSelectionSave } from "./useWorkflowSelectionSave";
+import { WorkflowFamilyBrowseControls } from "./WorkflowFamilyBrowseControls";
 import type {
-  ChatWorkflowSelectionInput,
-  ProjectWorkflowSelectionInput,
   WorkflowFamily,
   WorkflowSelection,
   WorkflowSelectorCapability,
@@ -32,11 +33,7 @@ export function WorkflowSelector({
   capability: WorkflowSelectorCapability;
   label: string;
 }) {
-  const client = useQueryClient();
-  const families = useQuery({
-    queryKey: ["workflow-families", capability],
-    queryFn: () => api.workflowFamilies(capability),
-  });
+  const selectorId = useId();
   const selections = useQuery({
     queryKey: [scope, scopeId, "workflow-selections"],
     queryFn: () =>
@@ -45,22 +42,15 @@ export function WorkflowSelector({
         : api.projectWorkflowSelections(scopeId),
   });
 
-  const choose = useMutation({
-    mutationFn: (selection: ChatWorkflowSelectionInput | ProjectWorkflowSelectionInput) =>
-      scope === "chat"
-        ? api.setChatWorkflowSelection(
-            scopeId,
-            capability,
-            selection as ChatWorkflowSelectionInput,
-          )
-        : api.setProjectWorkflowSelection(
-            scopeId,
-            capability,
-            selection as ProjectWorkflowSelectionInput,
-          ),
-    onSuccess: () =>
-      void client.invalidateQueries({ queryKey: [scope, scopeId, "workflow-selections"] }),
-  });
+  const current: WorkflowSelection | undefined = selections.data?.find(
+    (selection) => selection.selector_capability === capability,
+  );
+  const families = useWorkflowFamilyChoices(
+    capability, current?.mode === "family" ? current.workflow_family_id : null,
+  );
+  const ordered = families.families;
+
+  const choose = useWorkflowSelectionSave({ kind: scope, id: scopeId, capability });
 
   // Neither read having arrived is not the same as an answer. Undefined data
   // fell straight through the value chain below: a failed families read
@@ -73,9 +63,9 @@ export function WorkflowSelector({
   const readFailure = (families.error ?? selections.error) as Error | null;
   if (readFailure) {
     return (
-      <label className="workflow-selector">
-        <span>{label}</span>
-        <select disabled value="">
+      <div className="workflow-selector">
+        <label htmlFor={selectorId}>{label}</label>
+        <select id={selectorId} disabled value="">
           <option value="">Cannot read the current choice</option>
         </select>
         <small role="alert">
@@ -90,15 +80,19 @@ export function WorkflowSelector({
             Try again
           </button>
         </small>
-      </label>
+      </div>
     );
   }
 
-  const current: WorkflowSelection | undefined = selections.data?.find(
-    (selection) => selection.selector_capability === capability,
-  );
-  const available = (families.data ?? []).filter((family) => servesCapability(family, capability));
-  const ordered = orderFamilies(available, capability);
+  if (families.isLoading || selections.isLoading) {
+    return <div className="workflow-selector">
+      <label htmlFor={selectorId}>{label}</label>
+      <select id={selectorId} disabled value="">
+        <option value="">Loading current choice…</option>
+      </select>
+    </div>;
+  }
+
   const selectedFamilyMissing = current?.mode === "family"
     && Boolean(current.workflow_family_id)
     && !ordered.some((family) => family.id === current.workflow_family_id);
@@ -118,17 +112,18 @@ export function WorkflowSelector({
             : followMode;
 
   return (
-    <label className="workflow-selector">
-      <span>{label}</span>
+    <div className="workflow-selector">
+      <label htmlFor={selectorId}>{label}</label>
       <select
+        id={selectorId}
         value={value}
-        disabled={choose.isPending || families.isLoading || selections.isLoading}
+        disabled={choose.saving || families.isLoading || selections.isLoading}
         onChange={(event) => {
           const next = event.target.value;
           if (next === REVISION_VALUE || next === LEGACY_VALUE) return;
-          if (next === followMode) choose.mutate({ mode: followMode } as never);
-          else if (next === "automatic") choose.mutate({ mode: "automatic" });
-          else choose.mutate({ mode: "family", workflow_family_id: next });
+          if (next === followMode) choose.choose({ mode: followMode });
+          else if (next === "automatic") choose.choose({ mode: "automatic" });
+          else choose.choose({ mode: "family", workflow_family_id: next });
         }}
       >
         <option value={followMode}>
@@ -162,8 +157,9 @@ export function WorkflowSelector({
         </small>
       )}
       {choose.error && <small role="alert">{(choose.error as Error).message}</small>}
+      <WorkflowFamilyBrowseControls browse={families.browse} label={`${capability} workflows`} />
       <WorkflowSelectorReadiness families={ordered} chosen={current?.workflow_family_id ?? null} />
-    </label>
+    </div>
   );
 }
 
@@ -182,7 +178,8 @@ function WorkflowSelectorReadiness({
   const family = families.find((candidate) => candidate.id === chosen);
   if (!family) return null;
   const blocked = family.variants.filter((variant) => variant.readiness !== "ready");
-  if (blocked.length === 0 || blocked.length < family.variants.length) return null;
+  if ((family.ready_variant_count ?? family.variants.length - blocked.length) > 0
+    || blocked.length === 0) return null;
 
   return (
     <small role="status" className="workflow-selector-blocked">

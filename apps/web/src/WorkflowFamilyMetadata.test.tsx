@@ -90,7 +90,7 @@ describe("editing workflow family metadata", () => {
     renderFamily(family("a"));
     fireEvent.click(screen.getByRole("button", { name: "Edit family details" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Family name" }), { target: { value: "   " } });
-    expect(screen.getByRole("button", { name: "Save family details" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save family details" })).toHaveAttribute("aria-disabled", "true");
     fireEvent.click(screen.getByRole("button", { name: "Cancel family changes" }));
     expect(screen.queryByRole("textbox", { name: "Family name" })).not.toBeInTheDocument();
     expect(api.updateWorkflowFamily).not.toHaveBeenCalled();

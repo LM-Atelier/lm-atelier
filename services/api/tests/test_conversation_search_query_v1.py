@@ -9,6 +9,7 @@ back.
 from __future__ import annotations
 
 import dataclasses
+from typing import Any, cast
 
 import pytest
 
@@ -162,16 +163,16 @@ def test_the_aggregate_text_cap_refuses_a_corpus_under_the_row_cap() -> None:
 @pytest.mark.parametrize("candidates", [None, "rows", 5, {"m1": "body"}])
 def test_a_corpus_that_is_not_a_sequence_of_rows_is_refused(candidates: object) -> None:
     with pytest.raises(ConversationSearchError):
-        rank_candidate_bodies(candidates, "needle")
+        rank_candidate_bodies(cast(Any, candidates), "needle")
     with pytest.raises(ConversationSearchError):
-        rank_identity_bodies(candidates, "needle")
+        rank_identity_bodies(cast(Any, candidates), "needle")
 
 
 def test_rows_of_the_wrong_width_are_refused() -> None:
     with pytest.raises(ConversationSearchError):
-        rank_candidate_bodies([("m1", "body", "extra")], "body")
+        rank_candidate_bodies(cast(Any, [("m1", "body", "extra")]), "body")
     with pytest.raises(ConversationSearchError):
-        rank_identity_bodies([("m1", "body")], "body")
+        rank_identity_bodies(cast(Any, [("m1", "body")]), "body")
 
 
 def test_duplicate_message_ids_keep_their_own_chat_identity() -> None:

@@ -173,3 +173,93 @@ async def test_credential_api_separates_providers_without_echoing_secrets(
 
     invalid = await client.get("/api/credentials/unknown")
     assert invalid.status_code == 404
+
+
+def test_search_credentials_are_isolated_between_installation_namespaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = FakeKeyring()
+    monkeypatch.setattr(credentials_module, "keyring", vault)
+    first = CredentialStore(service="installation-alpha")
+    second = CredentialStore(service="installation-beta")
+    first.set_token("constructed-alpha-token", "crw")
+    second.set_token("constructed-beta-token", "crw")
+    assert first.token("crw") == "constructed-alpha-token"
+    assert second.token("crw") == "constructed-beta-token"
+    assert first.token("huggingface") is None and first.token("civitai") is None
+    first.delete_token("crw")
+    assert first.token("crw") is None
+    assert second.token("crw") == "constructed-beta-token"
+    assert ("installation-beta", "crw-token") in vault.values
+
+
+def test_search_environment_credentials_cannot_be_changed_through_the_vault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = FakeKeyring()
+    monkeypatch.setattr(credentials_module, "keyring", vault)
+    store = CredentialStore(environment_tokens={"crw": "constructed-environment-token"})
+    assert store.token("crw") == "constructed-environment-token"
+    with pytest.raises(ValueError, match="LOCAL_LM_CRW_TOKEN"):
+        store.set_token("constructed-replacement", "crw")
+    with pytest.raises(ValueError, match="LOCAL_LM_CRW_TOKEN"):
+        store.delete_token("crw")
+    assert not vault.values
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["x" * 4097, "two words", "two\nlines", "non-ascii-\u00e9"],
+    ids=["too-long", "space", "newline", "non-ascii"],
+)
+def test_invalid_search_token_is_refused_without_writing_the_vault(
+    monkeypatch: pytest.MonkeyPatch,
+    token: str,
+) -> None:
+    vault = FakeKeyring()
+    monkeypatch.setattr(credentials_module, "keyring", vault)
+    store = CredentialStore()
+    with pytest.raises(ValueError, match="search credential is invalid"):
+        store.set_token(token, "crw")
+    assert not vault.values
+
+
+async def test_search_credential_api_does_not_change_catalog_credentials_or_diagnostics(
+    client: AsyncClient,
+    app: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+    import zipfile
+
+    vault = FakeKeyring()
+    monkeypatch.setattr(credentials_module, "keyring", vault)
+    services = app.state.services
+    services.settings.hf_token = "constructed-hf-runtime"
+    services.settings.civitai_token = "constructed-civitai-runtime"
+    services.settings.web_access_enabled = False
+    saved = await client.put("/api/credentials/crw", json={"token": "constructed-api-search-token"})
+    assert saved.status_code == 200
+    assert services.settings.crw_token == "constructed-api-search-token"
+    assert services.settings.hf_token == "constructed-hf-runtime"
+    assert services.settings.civitai_token == "constructed-civitai-runtime"
+    assert services.settings.web_access_enabled is False
+    assert saved.json() == {
+        "provider": "crw",
+        "configured": True,
+        "source": "credential_vault",
+        "vault_available": True,
+    }
+    assert "constructed-api-search-token" not in saved.text
+    for provider in ("huggingface", "civitai"):
+        status = await client.get(f"/api/credentials/{provider}")
+        assert status.status_code == 200 and status.json()["configured"] is False
+    diagnostic = await client.post("/api/diagnostics")
+    assert diagnostic.status_code == 201
+    archive = await client.get(diagnostic.json()["url"])
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
+        for name in bundle.namelist():
+            assert b"constructed-api-search-token" not in bundle.read(name)
+    removed = await client.delete("/api/credentials/crw")
+    assert removed.status_code == 200 and removed.json()["configured"] is False
+    assert services.settings.crw_token is None

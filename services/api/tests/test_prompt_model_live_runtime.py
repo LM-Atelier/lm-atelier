@@ -28,6 +28,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _windows_creation_flags() -> int:
+    value = vars(subprocess)["CREATE_NO_WINDOW"]
+    assert isinstance(value, int)
+    return value
+
+
 async def test_local_model_fills_complete_mixed_scope_batches() -> None:
     receipt = json.loads(Path(os.environ["MODEL_SLOT_RUNTIME_RECEIPT"]).read_text(encoding="utf-8"))
     template = parse_prompt_template_contract(
@@ -81,7 +87,7 @@ async def test_local_model_fills_complete_mixed_scope_batches() -> None:
         },
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        creationflags=_windows_creation_flags() if os.name == "nt" else 0,
     )
     adapter = LlamaCppAdapter(f"http://127.0.0.1:{port}")
     try:

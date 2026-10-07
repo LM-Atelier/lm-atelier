@@ -1,7 +1,9 @@
+import { readyWorkflowPage } from "./readyWorkflowReadFixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, configure, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ApiError, api } from "./api";
+import { CLOCK_KEY } from "./clockPreference";
 import { PromptLibraryView } from "./PromptLibraryView";
 import type {
   ModelAssetInstall,
@@ -30,11 +32,25 @@ vi.mock("./api", async (importOriginal) => {
     promptBatch: vi.fn(),
     updatePromptBatchItem: vi.fn(),
     queuePromptBatch: vi.fn(),
-    workflowFamilies: vi.fn(),
+    workflowReadyRevisions: vi.fn(),
     modelAssets: vi.fn(),
     },
   };
 });
+
+// Every wait here is for a render that follows mocked queries, and the pool
+// editors draw thousands of LoRA options, so the time is CPU work rather than
+// anything the test is waiting on. Run about twenty times slower than a quiet
+// machine, as a busy shared runner can be, the first render misses the
+// one-second default wait, ordinary cases take up to 4.7 s against the
+// five-second default, and the sixty-four LoRA case runs past 15 s. A merge
+// queue run on Windows has since spent 80 s importing modules, and the first
+// template's detail had still not rendered five seconds after its list row
+// did. These limits leave room for that, stay inside each case's own limit,
+// and still fail a render that never arrives.
+configure({ asyncUtilTimeout: 15_000 });
+const CASE_TIMEOUT_MS = 20_000;
+const SIXTY_FOUR_LORA_TIMEOUT_MS = 60_000;
 
 const stamp = "2026-08-20T12:00:00Z";
 function readyVariant(name: string, revisionId: string) {
@@ -116,6 +132,7 @@ const installedLoras: ModelAssetInstall[] = installedLoraDigests.map((sha256, in
   updated_at: stamp,
   default_model_strength: 1,
   default_clip_strength: 1,
+  typed_trigger_words: [],
   manifest_json: { sha256 },
 }));
 const contract: PromptTemplateContract = {
@@ -174,7 +191,7 @@ beforeEach(() => {
     offset: 0,
   });
   vi.mocked(api.promptTemplate).mockResolvedValue(detail);
-  vi.mocked(api.workflowFamilies).mockResolvedValue(imageFamilies);
+  vi.mocked(api.workflowReadyRevisions).mockImplementation(async options => readyWorkflowPage(imageFamilies, options));
   vi.mocked(api.modelAssets).mockResolvedValue(installedLoras);
   vi.mocked(api.promptTemplateRevisions).mockResolvedValue([currentRevision, previousRevision]);
   vi.mocked(api.createPromptTemplate).mockResolvedValue(writeResult);
@@ -188,7 +205,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("Prompt Library", () => {
+describe("Prompt Library", { timeout: CASE_TIMEOUT_MS }, () => {
   it("starts each new template unnamed and requires an intentional name", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
@@ -411,6 +428,34 @@ describe("Prompt Library", () => {
     })));
   });
 
+  it("keeps a LoRA's last strength when its box is emptied, so the template is never saved without one", async () => {
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    beginNewTemplate();
+    fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "fixed" } });
+    await screen.findByRole("option", { name: "Portrait - Base - revision 1" });
+    fireEvent.change(screen.getByLabelText("Workflow"), { target: { value: "workflow-revision-1" } });
+    fireEvent.change(screen.getByLabelText("LoRA policy"), { target: { value: "fixed" } });
+    await screen.findByRole("option", { name: "Portrait LoRA 3 - Portrait styles" });
+    fireEvent.change(screen.getByLabelText("LoRA 1"), { target: { value: "c".repeat(64) } });
+    fireEvent.change(screen.getByLabelText("LoRA 1 model strength"), { target: { value: "0.8" } });
+    fireEvent.change(screen.getByLabelText("LoRA 1 CLIP strength"), { target: { value: "0.7" } });
+
+    fireEvent.change(screen.getByLabelText("LoRA 1 model strength"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("LoRA 1 CLIP strength"), { target: { value: "" } });
+    expect(screen.getByLabelText("LoRA 1 model strength")).toHaveValue(0.8);
+    expect(screen.getByLabelText("LoRA 1 CLIP strength")).toHaveValue(0.7);
+    fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
+
+    await waitFor(() => expect(api.createPromptTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      contract: expect.objectContaining({
+        resource_policy: expect.objectContaining({
+          lora_policy: { mode: "fixed", stack: [{ sha256: "c".repeat(64), model_strength: 0.8, clip_strength: 0.7 }] },
+        }),
+      }),
+    })));
+  });
+
   it("authors an exact workflow bundle pool with per-option LoRA policies", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
@@ -456,6 +501,7 @@ describe("Prompt Library", () => {
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
     await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
     fireEvent.change(screen.getByLabelText("Option 1 workflow revision"), { target: { value: "shared-revision" } });
+    await within(screen.getByLabelText("Option 2 workflow revision")).findByRole("option", { name: "Portrait · Shared (ready)" });
     fireEvent.change(screen.getByLabelText("Option 2 workflow revision"), { target: { value: "shared-revision" } });
     fireEvent.change(screen.getByLabelText("Option 2 LoRA policy"), { target: { value: "none" } });
     fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
@@ -481,6 +527,7 @@ describe("Prompt Library", () => {
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
     await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
     fireEvent.change(screen.getByLabelText("Option 1 workflow revision"), { target: { value: "same-revision" } });
+    await within(screen.getByLabelText("Option 2 workflow revision")).findByRole("option", { name: "Portrait · Same (ready)" });
     fireEvent.change(screen.getByLabelText("Option 2 workflow revision"), { target: { value: "same-revision" } });
     fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
 
@@ -584,9 +631,7 @@ describe("Prompt Library", () => {
   });
 
   it("omits a ready variant whose operation is not text to image", async () => {
-    // workflowFamilies("image") filters FAMILIES by selector preference, so a
-    // family can carry an image-to-image variant that is perfectly ready and
-    // still wrong for a prompt template.
+    // An image family can contain ready variants for different operations.
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
     beginNewTemplate();
@@ -602,7 +647,7 @@ describe("Prompt Library", () => {
 
   it("does not call a pinned revision stale when the readiness read failed", async () => {
     // An empty ready set means "we could not look", not "your workflow is gone".
-    vi.mocked(api.workflowFamilies).mockRejectedValue(new Error("offline"));
+    vi.mocked(api.workflowReadyRevisions).mockRejectedValue(new Error("offline"));
     vi.mocked(api.promptTemplate).mockResolvedValue({
       ...detail,
       current_revision: {
@@ -624,8 +669,8 @@ describe("Prompt Library", () => {
     await screen.findByRole("heading", { name: "Portrait variants" });
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
 
-    expect(await screen.findByText(/Could not read which image workflows are ready/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(await screen.findByText(/Selected workflows could not be checked/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry selected workflows" })).toBeInTheDocument();
     // The pinned values survive, and neither is described as stale.
     expect(screen.getByLabelText("Option 1 workflow revision")).toHaveValue("retired-revision");
     expect(screen.getByLabelText("Option 1 workflow revision")).toHaveTextContent("Previously selected workflow");
@@ -697,7 +742,8 @@ describe("Prompt Library", () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
+    const workflowChoice = await screen.findByLabelText("Option 1 workflow revision");
+    await within(workflowChoice).findByRole("option", { name: "Portrait · Base (ready)" });
     // Load the valid contract boundary in one render instead of paying for 64
     // sequential editor updates. Eight per stack keeps the aggregate cap
     // distinct from the independent sixteen-per-stack guard.
@@ -717,7 +763,7 @@ describe("Prompt Library", () => {
     fireEvent.change(ninth, { target: { value: "fixed" } });
     expect(ninth).toHaveValue("inherited_auto");
     expect(screen.getByText("9 options · 64 paired LoRAs of 64")).toBeInTheDocument();
-  }, 15_000);
+  }, SIXTY_FOUR_LORA_TIMEOUT_MS);
 
   it("keeps the pool between two and sixteen options and offers no nested LoRA pool", async () => {
     renderLibrary();
@@ -807,6 +853,19 @@ describe("Prompt Library", () => {
       currentRevision.id,
       expect.any(String),
     ));
+  });
+
+  it("writes when each revision was made on the chosen clock", async () => {
+    localStorage.setItem(CLOCK_KEY, "24");
+    try {
+      renderLibrary();
+      const revision = (await screen.findByText("Revision 1")).closest("span");
+      const made = revision?.querySelector("small")?.textContent ?? "";
+      expect(made).toMatch(/\d{1,2}:\d{2}/);
+      expect(made).not.toMatch(/\b(AM|PM)\b/i);
+    } finally {
+      localStorage.removeItem(CLOCK_KEY);
+    }
   });
 
   it("refuses a body/slot mismatch before any write", async () => {

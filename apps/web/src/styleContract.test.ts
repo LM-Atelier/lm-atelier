@@ -90,15 +90,98 @@ describe("style contract", () => {
     expect(css).toMatch(/\.studio-canvas-layers\s*>\s*canvas\s*\{[^}]*position:\s*absolute/);
   });
 
-  it("floats the light control over the workspace rather than inside a panel", () => {
+  it("keeps what floats over the studio picture in the canvas's own box", () => {
     const css = readFileSync(STYLESHEET, "utf8");
-    const rule = /\.theme-toggle\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
-    // The light is a property of the whole workspace, so hiding the sidebar
-    // must not take its control away with it.
-    expect(rule).toMatch(/position:\s*fixed/);
-    expect(rule).toMatch(/z-index:/);
-    const footer = readFileSync(join(SOURCE_DIR, "SidebarFooter.tsx"), "utf8");
-    expect(footer).not.toContain("ThemeToggle");
+    // The Extend frame covers the canvas with inset: 0, which measures from
+    // the nearest positioned ancestor, and places its edges by where the
+    // canvas shows the picture. With no positioned box around it, inset: 0
+    // once measured the whole main area, so the top handle sat above the page
+    // header and the right one over the tool panel, nowhere near the picture.
+    expect(css).toMatch(/\.studio-extend-handles\s*\{[^}]*position:\s*absolute/);
+    expect(css).toMatch(/\.studio-canvas\s*\{[^}]*position:\s*relative/);
+  });
+
+  it("lets the studio header's controls wrap rather than run off a narrow window", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    // In a narrow window the page header stacks, and the row of compare,
+    // favorite, export and close controls kept its full width, so the last
+    // of them sat past the edge of a phone screen with no way to scroll to it.
+    expect(css).toMatch(/\.studio-header-actions\s*\{[^}]*flex-wrap:\s*wrap/);
+  });
+
+  it("keeps every studio tool in view on a wide screen", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    // One column of more than twenty tools scrolled, and the last run of them
+    // sat below the fold with nothing to say it was there. Two columns fit
+    // them all, and a divider spans both so the runs still read as runs.
+    expect(css).toMatch(/\.studio-tool-rail\s*\{[^}]*grid-template-columns:\s*repeat\(2, auto\)/);
+    expect(css).toMatch(/\.studio-rail-divider\s*\{[^}]*grid-column:\s*1 \/ -1/);
+  });
+
+  it("keeps the light and the theme in Settings rather than floating over the work", () => {
+    // A control fixed over every screen sits on whatever is underneath it, and
+    // this one was changed rarely and in front of the work all day. It belongs
+    // to one Settings page, and no other component may render it as well.
+    const css = readFileSync(STYLESHEET, "utf8");
+    expect(css).not.toMatch(/\.theme-toggle\b/);
+    const elsewhere = readdirSync(SOURCE_DIR)
+      .filter((name) => name.endsWith(".tsx") && !name.endsWith(".test.tsx"))
+      .filter((name) => name !== "SettingsView.tsx" && name !== "AppearanceSettings.tsx")
+      .filter((name) => {
+        const source = readFileSync(join(SOURCE_DIR, name), "utf8");
+        return source.includes("<AppearanceSettings") || source.includes("ThemeToggle");
+      });
+    expect(elsewhere).toEqual([]);
+    const settings = readFileSync(join(SOURCE_DIR, "SettingsView.tsx"), "utf8");
+    expect(settings).toMatch(/on\("appearance"\) && <AppearanceSettings /);
+  });
+
+  it("gives the workspace the full height of the window", () => {
+    // The shell once reserved a band beneath every view so a button floating
+    // in the corner would not cover the composer. That button lives in the
+    // sidebar now, and a band kept for a control that is not there only takes
+    // room from the work.
+    const css = readFileSync(STYLESHEET, "utf8");
+    const shells = [...css.matchAll(/\.app-shell \{([^}]*)\}/g)].map((rule) => rule[1]);
+    expect(shells.some((rule) => /height: 100%/.test(rule))).toBe(true);
+    expect(shells.filter((rule) => /padding/.test(rule))).toEqual([]);
+  });
+
+  it("lets the conversation and its composer share one column whose width Appearance chooses", () => {
+    // Both measure the same column, so they widen together: a wider transcript
+    // over a composer still at the old width would misalign every message with
+    // the box that sends the next one.
+    const css = readFileSync(STYLESHEET, "utf8");
+    const column = /calc\(\(100% - var\(--chat-column, 860px\)\) \/ 2\)/;
+    expect(css).toMatch(new RegExp(`\\.messages \\{[^}]*${column.source}`));
+    expect(css).toMatch(new RegExp(`\\.composer-wrap \\{[^}]*${column.source}`));
+    expect(css).not.toMatch(/calc\(\(100% - 860px\) \/ 2\)/);
+    expect(css).toMatch(/html\[data-chat-width="wide"\] \{ --chat-column: \d+px; \}/);
+    expect(css).toMatch(/html\[data-chat-width="full"\] \{ --chat-column: 100%; \}/);
+  });
+
+  it("draws media previews at the size Appearance chooses, and at today's sizes otherwise", () => {
+    // Medium is the fallback in every rule, so nobody who never opens the
+    // setting sees a thumbnail move. Small and large set all four sizes
+    // together, so a Media Library card and an attached picture never disagree.
+    const css = readFileSync(STYLESHEET, "utf8");
+    const rule = (selector: string) => {
+      const at = css.indexOf(`\n${selector} {`);
+      return at < 0 ? "" : css.slice(at, css.indexOf("}", at));
+    };
+    // A minimum wider than the grid would push its only column past the edge
+    // of a phone, so the card never asks for more than the grid has.
+    expect(rule(".media-grid")).toContain("minmax(min(var(--thumbnail-card-min, 250px), 100%), 1fr)");
+    expect(rule(".gallery-card > img, .gallery-card > video")).toContain("height: var(--thumbnail-height, 210px)");
+    expect(rule(".attachment-card")).toContain("grid-template-columns: var(--attachment-thumbnail-width, 58px) minmax(0, 1fr) auto");
+    expect(rule(".attachment-preview")).toContain("width: var(--attachment-thumbnail-width, 58px); height: var(--attachment-thumbnail-height, 48px)");
+    for (const size of ["small", "large"]) {
+      const tokens = rule(`html[data-thumbnails="${size}"]`);
+      for (const token of ["--thumbnail-card-min", "--thumbnail-height", "--attachment-thumbnail-width", "--attachment-thumbnail-height"]) {
+        expect(tokens, `${size} sets ${token}`).toMatch(new RegExp(`${token}: \\d+px;`));
+      }
+    }
+    expect(css).not.toMatch(/html\[data-thumbnails="medium"\]/);
   });
 
   it("gives the studio both a mark and an export, not one word for two acts", () => {
@@ -113,7 +196,10 @@ describe("style contract", () => {
     expect(view).toContain("favoriteArtifact");
     expect(view).toMatch(/aria-pressed=\{isFavorite\}/);
     expect(view).not.toContain("Save to library");
-    expect(view).toMatch(/download/);
+    // Export is its own control beside the mark, and it is still a download.
+    expect(view).toContain("<StudioExportLink");
+    const exporter = readFileSync(join(SOURCE_DIR, "StudioExportLink.tsx"), "utf8");
+    expect(exporter).toMatch(/download/);
   });
 
   it("keeps the composer above the transcript it floats over", () => {
@@ -132,7 +218,14 @@ describe("style contract", () => {
     expect(composer).toBeGreaterThan(order(".media-frame > img:not(.media-backdrop)"));
     expect(composer).toBeGreaterThan(order(".block-copy"));
     expect(order(".jobs-panel")).toBeGreaterThan(composer);
-    expect(order(".theme-toggle")).toBeGreaterThan(composer);
+  });
+
+  it("keeps the jobs panel above the composer's top edge rather than over it", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    // Fixed at one height, it covered the text box at every width and, in a
+    // narrow window, the attach and send buttons while work ran.
+    const panel = /\.jobs-panel \{[^}]*\}/.exec(css)?.[0] ?? "";
+    expect(panel).toMatch(/bottom:\s*max\([^;]*var\(--composer-clearance/);
   });
 
   it("fills a letterboxed picture with itself rather than with a flat bar", () => {
@@ -149,8 +242,18 @@ describe("contrast and state", () => {
 
 
 
+  it("reduces motion through one rule that the computer and Appearance both reach", () => {
+    // The document is marked when either asks. A second, media-query copy of
+    // these declarations would be a place for the two to drift apart.
+    expect(css).not.toMatch(/@media \(prefers-reduced-motion/);
+    const rule = /html\[data-motion="reduced"\] \*, html\[data-motion="reduced"\] \*::before, html\[data-motion="reduced"\] \*::after \{([^}]*)\}/.exec(css)?.[1] ?? "";
+    expect(rule).toMatch(/scroll-behavior: auto !important/);
+    expect(rule).toMatch(/animation: none !important/);
+    expect(rule).toMatch(/transition: none !important/);
+  });
+
   it("does not leave an indeterminate bar parked at a false percentage", () => {
-    const reducedMotion = css.slice(css.indexOf("@media (prefers-reduced-motion"));
+    const reducedMotion = css.slice(css.indexOf('html[data-motion="reduced"]'));
     expect(reducedMotion).toMatch(/\.indeterminate\s*\{[^}]*width:\s*100%/);
   });
 
@@ -251,9 +354,11 @@ describe("typography", () => {
 });
 
 describe("scale and rhythm", () => {
+  // A size is its Standard value, whether written bare or multiplied by the
+  // text scale, so the scale checks keep reading the design's own steps.
   function stepsOf(property: string): number[] {
     const css = readFileSync(STYLESHEET, "utf8");
-    const found = [...css.matchAll(new RegExp(`\\b${property}:\\s*(\\d+)px;`, "g"))];
+    const found = [...css.matchAll(new RegExp(`\\b${property}:\\s*(?:calc\\()?(\\d+)px(?: \\* var\\(--(?:text|spacing)-scale, 1\\)\\))?;`, "g"))];
     return [...new Set(found.map((match) => Number(match[1])))].sort((a, b) => a - b);
   }
 
@@ -275,12 +380,31 @@ describe("scale and rhythm", () => {
     // nothing. Without this the Setup button grows to 46px while the Settings
     // button directly beneath it stays 42px.
     const rule = /\.setup-nav-state\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
-    expect(rule).toMatch(/line-height:\s*12px/);
+    // It grows with the text it belongs to, or larger text would overlap itself.
+    expect(rule).toMatch(/line-height:\s*calc\(12px \* var\(--text-scale, 1\)\)/);
   });
 
   it("leaves the density floor alone", () => {
     // Small labels remain legible without changing the larger type scale.
     expect(Math.min(...stepsOf("font-size"))).toBe(11);
+  });
+
+  it("enlarges all text from one scale, and leaves Standard exactly as it was", () => {
+    // A size that ignores the scale would stay small while everything around
+    // it grows, and a bare multiplier on Standard would move every size for
+    // somebody who never chose anything.
+    const css = readFileSync(STYLESHEET, "utf8");
+    const sizes = [...css.matchAll(/\bfont-size:\s*([^;}]+)/g)].map((match) => match[1].trim());
+    const unscaled = sizes.filter((value) => /\dpx/.test(value) && !value.endsWith("* var(--text-scale, 1))"));
+    expect(sizes.length).toBeGreaterThan(100);
+    expect(unscaled).toEqual([]);
+    const shorthands = [...css.matchAll(/\bfont:\s*([^;}]+)/g)].map((match) => match[1].trim());
+    expect(shorthands.filter((value) => /(^|[\s(])\d+px/.test(value) && !/calc\(\d+px \* var\(--text-scale, 1\)\)/.test(value))).toEqual([]);
+    // Text that names no size inherits the root, so the root moves by the same amount.
+    expect(css).toMatch(/html\[data-text-size="large"\] \{ --text-scale: 1\.125; font-size: 112\.5%; \}/);
+    expect(css).toMatch(/html\[data-text-size="larger"\] \{ --text-scale: 1\.25; font-size: 125%; \}/);
+    expect(css).not.toMatch(/html\[data-text-size="standard"\]/);
+    expect(css).not.toMatch(/--text-scale:\s*(0|1)\s*;/);
   });
 });
 
@@ -578,6 +702,35 @@ describe("the collapsed sidebar", () => {
     expect(shell).toMatch(/grid-template-columns:[^;]*var\(--sidebar-width[^;]*1fr/);
   });
 
+  it("keeps the work in its own column in a narrower window", () => {
+    // The shell lays three children side by side: the sidebar, its edge and
+    // the work. A rule for narrower windows, written before the edge existed,
+    // gave the grid two tracks, so the edge took the wide one and the work
+    // wrapped into a 220px column under the sidebar with the rest of the
+    // window left empty. Sizing the sidebar from its variable there as well
+    // keeps collapsing it working at that width.
+    const columns = [...css.matchAll(/\.app-shell \{([^}]*)\}/g)]
+      .map((rule) => /grid-template-columns:\s*([^;]+);/.exec(rule[1])?.[1].trim())
+      .filter((value): value is string => Boolean(value));
+    // A phone stacks them instead, in one column.
+    const beside = columns.filter((value) => value !== "1fr");
+    expect(beside.length).toBeGreaterThan(1);
+    for (const value of beside) {
+      expect(value).toMatch(/var\(--sidebar-width[^)]*\).*\sauto\s+1fr$/);
+    }
+  });
+
+  it("stacks the sidebar straight above the work on a phone", () => {
+    // In one column there is no edge to drag, and left in the grid it took
+    // the row meant to grow: a short page such as a new chat sat below a band
+    // of empty space as tall as most of the window.
+    const phone = [...css.matchAll(/@media \(max-width: 680px\) \{([\s\S]*?)\n\}/g)]
+      .map((block) => block[1])
+      .find((block) => block.includes(".app-shell {")) ?? "";
+    expect(phone).toMatch(/\.app-shell \{[^}]*grid-template-rows:\s*auto minmax\(0, 1fr\)/);
+    expect(phone).toMatch(/\.sidebar-resizer \{[^}]*display:\s*none/);
+  });
+
   it("leaves the edge reachable, since it is the only way back", () => {
     // With no separate reveal button, a collapsed sidebar can only be brought
     // back by its own edge - so that edge must still be there and hittable.
@@ -639,39 +792,62 @@ describe("one selector, one rule", () => {
   });
 });
 
-describe("the two things that float in the corner", () => {
+describe("the settings drawer holds what it shows", () => {
   const css = readFileSync(STYLESHEET, "utf8");
 
-  function fixedRule(selector: string): Record<string, string> {
-    const opening = `\n${selector} {`;
-    const start = css.indexOf(opening);
-    const body = start < 0 ? "" : css.slice(start + opening.length, css.indexOf("}", start));
-    return Object.fromEntries(
-      body
-        .split(";")
-        .filter((part) => part.includes(":"))
-        .map((part) => [
-          part.slice(0, part.indexOf(":")).trim(),
-          part.slice(part.indexOf(":") + 1).trim(),
-        ]),
-    );
+  function ruleBody(selector: string): string {
+    // Anchored to the start of a line, so asking for `.lora-stack` does not
+    // answer with the drawer's own `.settings-drawer .lora-stack` rule.
+    const at = css.indexOf(`\n${selector} {`);
+    if (at < 0) return "";
+    const open = css.indexOf("{", at);
+    const close = css.indexOf("}", open);
+    return close < 0 ? "" : css.slice(open + 1, close);
   }
 
-  it("keeps the jobs panel clear of the appearance control", () => {
-    // Both are fixed to the bottom right. The panel is 310px wide and was
-    // stacked above the pill, so while any job ran it covered the control
-    // completely: the work sat on the thing meant to sit above the work.
-    const panel = fixedRule(".jobs-panel");
-    const toggle = fixedRule(".theme-toggle");
+  function widthOf(selector: string, property: string): string {
+    for (const declaration of ruleBody(selector).split(";")) {
+      const [name, ...rest] = declaration.split(":");
+      if (name.trim() === property) return rest.join(":").trim();
+    }
+    return "";
+  }
 
-    const px = (value: string) => Number.parseInt(value, 10);
-    expect(panel.position).toBe("fixed");
-    expect(toggle.position).toBe("fixed");
+  function trackMinimums(template: string): number[] {
+    const minimums: number[] = [];
+    for (const track of template.matchAll(/minmax\(\s*([^,]+),/g)) {
+      minimums.push(Number.parseFloat(track[1]) || 0);
+    }
+    for (const track of template.matchAll(/(?:^|\s)(\d+(?:\.\d+)?)px/g)) {
+      minimums.push(Number.parseFloat(track[1]));
+    }
+    return minimums;
+  }
 
-    // The pill occupies roughly 40px above its own offset; the panel has to
-    // begin above that rather than share the space.
-    expect(px(panel.bottom)).toBeGreaterThan(px(toggle.bottom) + 40);
-    // And whatever else is on screen, the control stays reachable.
-    expect(px(toggle["z-index"])).toBeGreaterThan(px(panel["z-index"]));
+  it("asks the LoRA control for no more width than the drawer has", () => {
+    // The drawer is a fixed 380px and the LoRA control declares a 580px
+    // minimum, which is what lets it escape the 105px value column in a wide
+    // panel. Inside the drawer that minimum made the settings list 300px wider
+    // than the drawer: it scrolled sideways, and controls sat past the edge.
+    const drawer = Number.parseFloat(widthOf(".modal.settings-drawer", "width"));
+    const listPadding = 22 * 2;
+    const itemPadding = 10 * 2 + 2;
+    const room = drawer - listPadding - itemPadding;
+    expect(drawer).toBeGreaterThan(0);
+
+    const stackMinimum = widthOf(".settings-drawer .lora-stack", "min-width");
+    expect(stackMinimum).toBe("0");
+
+    const template = widthOf(".settings-drawer .lora-stack-item", "grid-template-columns");
+    const minimums = trackMinimums(template);
+    expect(minimums.length).toBeGreaterThan(0);
+    const demanded = minimums.reduce((total, track) => total + track, 0) + 6 * (minimums.length - 1);
+    expect(demanded).toBeLessThanOrEqual(room);
+  });
+
+  it("lets a long setting label wrap rather than widen its panel", () => {
+    // `1fr` is `minmax(auto, 1fr)`, so the label column could not shrink below
+    // its longest word and pushed the whole row wider than the panel holding it.
+    expect(widthOf(".setting-row", "grid-template-columns")).toMatch(/^minmax\(0,\s*1fr\)/);
   });
 });

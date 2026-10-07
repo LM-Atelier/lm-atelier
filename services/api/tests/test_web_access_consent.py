@@ -21,7 +21,11 @@ async def test_a_new_chat_cannot_reach_the_internet(client: AsyncClient) -> None
     created = await client.post("/api/chats", json={"title": "Fresh"})
 
     assert created.status_code in {200, 201}
-    assert created.json()["web_settings_json"] == {"allow_url_fetch": False}
+    assert created.json()["web_settings_json"] == {
+        "allow_url_fetch": False,
+        "allow_search": False,
+        "allow_search_without_asking": False,
+    }
 
 
 async def test_the_choice_is_per_chat_and_does_not_spread(client: AsyncClient) -> None:

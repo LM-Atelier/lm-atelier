@@ -109,6 +109,25 @@ async def test_runtime_probe_captures_canonical_installed_distributions() -> Non
     assert tuple(installed) == tuple(sorted(installed))
 
 
+@pytest.mark.parametrize("include_runtime", [False, True])
+async def test_runtime_probe_distinguishes_missing_and_empty_distribution_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, include_runtime: bool
+) -> None:
+    payload = json.loads(_target_payload())
+    if include_runtime:
+        payload["runtime_distributions"] = []
+    process = _FakeProcess(stdout=json.dumps(payload).encode())
+    await _use_process(monkeypatch, process)
+    executable = _executable(tmp_path)
+    if include_runtime:
+        _environment, _tags, distributions = await probe_comfy_registry_runtime_target(executable)
+        assert distributions == ()
+    else:
+        with pytest.raises(ComfyRegistryInterpreterError) as failure:
+            await probe_comfy_registry_runtime_target(executable)
+        assert failure.value.code == "interpreter_probe_invalid_output"
+
+
 async def test_probe_uses_isolated_credential_free_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -11,13 +11,14 @@ change.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from typing import Any
 
 import pytest
 import run_waits
-from run_waits import wait_for_terminal_status
+from run_waits import wait_for_terminal_status, wait_until
 
 
 async def test_it_returns_as_soon_as_the_status_is_terminal() -> None:
@@ -132,3 +133,95 @@ async def test_a_caller_can_widen_what_counts_as_an_ending(
         expected=None,
     )
     assert record["status"] == "interrupted"
+
+
+async def test_a_predicate_wait_returns_the_value_that_satisfied_it_at_once() -> None:
+    seen = 0
+
+    async def read() -> list[str]:
+        nonlocal seen
+        seen += 1
+        return ["running"] * (3 - seen) + ["complete"] * seen
+
+    value = await wait_until(read, lambda states: states == ["complete"] * 3, what="the plan")
+
+    assert value == ["complete"] * 3
+    assert seen == 3, "it kept polling after the state was reached"
+
+
+async def test_a_state_already_reached_is_returned_without_sleeping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slept: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+
+    async def read() -> str:
+        return "streamed"
+
+    assert await wait_until(read, bool, what="the text") == "streamed"
+    assert slept == []
+
+
+async def test_a_predicate_wait_polls_at_the_pace_it_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slept: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+    seen = 0
+
+    async def read() -> int:
+        nonlocal seen
+        seen += 1
+        return seen
+
+    await wait_until(read, lambda count: count == 3, what="the count", interval=0.01)
+    await wait_until(read, lambda count: count == 5, what="the count")
+
+    assert slept == [0.01, 0.01, run_waits.INTERVAL_SECONDS]
+
+
+async def test_a_predicate_timeout_reports_the_last_value_and_how_long_it_waited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(run_waits, "PATIENCE_SECONDS", 0.2)
+
+    async def read() -> list[str]:
+        return ["failed", "blocked"]
+
+    with pytest.raises(AssertionError) as caught:
+        await wait_until(read, lambda states: states == ["complete"], what="the steps of plan p1")
+
+    message = str(caught.value)
+    assert "the steps of plan p1" in message
+    assert "['failed', 'blocked']" in message, "the last value seen is the whole diagnosis"
+    reported = re.search(r"after (\d+\.\d+)s", message)
+    assert reported is not None, f"no elapsed time in the message: {message}"
+    assert float(reported.group(1)) >= run_waits.PATIENCE_SECONDS
+    assert "giving up at 0.2s" in message
+
+
+async def test_a_long_last_value_is_cut_short_in_the_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(run_waits, "PATIENCE_SECONDS", 0.05)
+
+    long_value = "x" * (run_waits.SEEN_CHARACTERS * 3)
+
+    async def read() -> str:
+        return long_value
+
+    with pytest.raises(AssertionError) as caught:
+        await wait_until(read, lambda _value: False, what="the listing")
+
+    message = str(caught.value)
+    shown = repr(long_value)
+    assert shown[: run_waits.SEEN_CHARACTERS] + "..." in message
+    assert shown[: run_waits.SEEN_CHARACTERS + 1] not in message

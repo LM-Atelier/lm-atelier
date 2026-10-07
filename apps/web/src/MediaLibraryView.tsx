@@ -1,16 +1,29 @@
 import { useState } from "react";
 import { useInfiniteQuery, useMutation } from "@tanstack/react-query";
-import { Image as ImageIcon, Pencil, RefreshCw, Search, Star } from "lucide-react";
+import { Image as ImageIcon, Pencil, RefreshCw, Search, Star, Trash2 } from "lucide-react";
 import { api } from "./api";
+import { ArtifactGenerationDetails } from "./ArtifactGenerationDetails";
 import {
   ARTIFACT_LIBRARY_PAGE_ERROR,
   flattenArtifactLibraryPages,
   type ArtifactLibraryFilters,
   type ArtifactLibraryKind,
 } from "./artifactLibraryPage";
+import { clockOptions, useClockChoice } from "./clockPreference";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { formatBytes } from "./format";
+import { MediaLibraryRecovery } from "./MediaLibraryRecovery";
+import { PictureFileSettings } from "./PictureFileSettings";
+import { useSensitiveMediaChoice } from "./sensitiveMedia";
+import { ShieldedMedia } from "./ShieldedMedia";
+import { useMediaLibraryRecovery } from "./useMediaLibraryRecovery";
+import { useMediaOrganization } from "./useMediaOrganization";
+import { VideoFrameButton } from "./VideoFrameButton";
+import { VideoTrimButton } from "./VideoTrimButton";
+import { MediaOrganizationControls } from "./MediaOrganizationControls";
+import { MediaOrganizationManager } from "./MediaOrganizationManager";
+import { MediaOrganizationReview } from "./MediaOrganizationReview";
 
 const PAGE_LIMIT = 20;
 const LIBRARY_UNAVAILABLE = "The Media Library could not be loaded safely. Refresh and try again.";
@@ -33,8 +46,10 @@ function boundedQuery(value: string): string | null {
 
 export function MediaLibraryView({
   onEditImage,
+  onOpenChat,
 }: {
   onEditImage?: (artifactId: string) => void;
+  onOpenChat?: (chatId: string) => void;
 }) {
   const [filters, setFilters] = useState<ArtifactLibraryFilters>({
     kind: "",
@@ -42,7 +57,22 @@ export function MediaLibraryView({
     favorite: false,
   });
   const [epoch, setEpoch] = useState(0);
+  const clock = useClockChoice();
+  // While pictures are covered, a file name could say as much as the picture,
+  // so items are named by their place in the grid instead.
+  const shielding = useSensitiveMediaChoice() !== "show";
   const [favoriteFailed, setFavoriteFailed] = useState(false);
+  const recovery = useMediaLibraryRecovery();
+  const organization = useMediaOrganization((command) => {
+    setFilters((current) => ({
+      ...current,
+      collection_id: command.action === "delete-album" && current.collection_id === command.target.id
+        ? undefined : current.collection_id,
+      tag_id: (command.action === "delete-tag" || command.action === "merge-tags") && current.tag_id === command.target.id
+        ? undefined : current.tag_id,
+    }));
+    setEpoch((current) => current + 1);
+  });
 
   const replaceFilters = (next: ArtifactLibraryFilters) => {
     setFavoriteFailed(false);
@@ -52,10 +82,12 @@ export function MediaLibraryView({
   const refresh = () => {
     setFavoriteFailed(false);
     setEpoch((current) => current + 1);
+    organization.refresh();
   };
 
   const feed = useInfiniteQuery({
-    queryKey: ["artifact-library-v1", filters.kind, filters.query, filters.favorite, PAGE_LIMIT, epoch],
+    queryKey: ["artifact-library-v1", filters.kind, filters.query, filters.favorite,
+      filters.collection_id, filters.tag_id, PAGE_LIMIT, epoch],
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }) =>
       api.artifactLibrary(filters, pageParam, PAGE_LIMIT, signal),
@@ -75,7 +107,7 @@ export function MediaLibraryView({
   let chainInvalid = false;
   if (feed.data) {
     try {
-      entries = flattenArtifactLibraryPages(feed.data.pages);
+      entries = flattenArtifactLibraryPages(feed.data.pages, Boolean(filters.collection_id));
     } catch (error) {
       if (!(error instanceof Error) || error.message !== ARTIFACT_LIBRARY_PAGE_ERROR) throw error;
       chainInvalid = true;
@@ -136,6 +168,7 @@ export function MediaLibraryView({
         </select>
       </div>
 
+      <MediaOrganizationControls filters={filters} onFilters={replaceFilters} organization={organization} />
       {unavailable && <ErrorCallout message={LIBRARY_UNAVAILABLE} />}
       {!unavailable && favoriteFailed && <ErrorCallout message="The favorite change could not be confirmed. The library was refreshed." />}
       {!unavailable && feed.isPending && (
@@ -144,21 +177,31 @@ export function MediaLibraryView({
       {!unavailable && !feed.isPending && entries.length > 0 && (
         <>
           <div className="media-grid">
-            {entries.map((entry) => {
+            {entries.map((entry, index) => {
               const source = `/api/artifacts/${encodeURIComponent(entry.artifact_id)}/content`;
-              const favoriteLabel = `${entry.favorite ? "Unfavorite" : "Favorite"} ${entry.display_name}`;
+              const name = shielding
+                ? `${entry.kind === "image" ? "Picture" : "Video"} ${index + 1}`
+                : entry.display_name;
+              const favoriteLabel = `${entry.favorite ? "Unfavorite" : "Favorite"} ${name}`;
               return (
                 <article className="gallery-card" key={entry.id}>
-                  {entry.kind === "image" ? (
-                    <img src={source} alt={entry.display_name} loading="lazy" />
-                  ) : (
-                    // Published videos have no caption track in EntryV1.
-                    // eslint-disable-next-line jsx-a11y-x/media-has-caption
-                    <video src={source} aria-label={entry.display_name} controls preload="metadata" />
-                  )}
+                  <label><input type="checkbox" aria-label={`Select ${name}`}
+                    checked={organization.selection.has(entry.id)}
+                    onChange={() => organization.choose(entry)} />Select</label>
+                  <ShieldedMedia kind={entry.kind === "image" ? "image" : "video"}>
+                    {entry.kind === "image" ? (
+                      <img src={source} alt={name} loading="lazy" />
+                    ) : (
+                      // Published videos have no caption track in EntryV1.
+                      // eslint-disable-next-line jsx-a11y-x/media-has-caption
+                      <video src={source} aria-label={name} controls preload="metadata" />
+                    )}
+                  </ShieldedMedia>
                   <div>
-                    <strong>{entry.display_name}</strong>
-                    <small>{formatBytes(entry.size_bytes)} · Added {new Date(Math.floor(entry.created_at_epoch_micros / 1000)).toLocaleString()}</small>
+                    <strong>{name}</strong>
+                    <small>{formatBytes(entry.size_bytes)} · Added {new Date(Math.floor(entry.created_at_epoch_micros / 1000)).toLocaleString(undefined, clockOptions(clock))}</small>
+                    <ArtifactGenerationDetails key={entry.artifact_id} artifactId={entry.artifact_id} />
+                    {entry.kind === "image" && <PictureFileSettings artifactId={entry.artifact_id} pictureName={name} onOpenChat={onOpenChat} />}
                     <span>
                       <button
                         className={`icon-button ${entry.favorite ? "favorite-active" : ""}`}
@@ -176,13 +219,20 @@ export function MediaLibraryView({
                       {entry.kind === "image" && onEditImage && (
                         <button
                           className="icon-button"
-                          aria-label={`Edit ${entry.display_name}`}
+                          aria-label={`Edit ${name}`}
                           title="Edit"
                           onClick={() => onEditImage(entry.artifact_id)}
                         >
                           <Pencil size={14} />
                         </button>
                       )}
+                      {entry.kind === "video" && <>
+                        <VideoFrameButton artifactId={entry.artifact_id} source={source} />
+                        <VideoTrimButton artifactId={entry.artifact_id} source={source} />
+                      </>}
+                      <button className="icon-button" aria-label={`Move ${name} to Recently Deleted`}
+                        title="Move to Recently Deleted" aria-disabled={recovery.busy}
+                        onClick={() => recovery.choose(entry)}><Trash2 size={14} /></button>
                     </span>
                   </div>
                 </article>
@@ -210,6 +260,9 @@ export function MediaLibraryView({
           body="Published images and videos appear here."
         />
       )}
+      <MediaLibraryRecovery recovery={recovery} />
+      {organization.manage && <MediaOrganizationManager organization={organization} />}
+      <MediaOrganizationReview organization={organization} />
     </div>
   );
 }

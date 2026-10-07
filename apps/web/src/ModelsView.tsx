@@ -1,0 +1,655 @@
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Folder,
+  HardDrive,
+  Search,
+} from "lucide-react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { AccessibleDialog } from "./AccessibleDialog";
+import { ErrorCallout } from "./ErrorCallout";
+import { FirstFailure } from "./FirstFailure";
+import { InstallConfirmDialog } from "./InstallConfirmDialog";
+import { InstructionEditCapability } from "./InstructionEditCapability";
+import { LoraTriggerWordsEditor } from "./LoraTriggerWordsEditor";
+import { measuredTriggerWords } from "./loraTriggerWords";
+import { useCatalogInstall } from "./useCatalogInstall";
+import { useCatalogInstallMatches } from "./useCatalogInstallMatches";
+import { ModelCard } from "./ModelCard";
+import { ModelUpdatesPanel } from "./ModelUpdatesPanel";
+import { ModelUpdateProfileOffers } from "./ModelUpdateProfileOffers";
+import { RecipeCard } from "./RecipeCard";
+import { VersionChooser } from "./VersionChooser";
+import { WorkflowConsumers } from "./WorkflowConsumers";
+import { UseCaseSuggestion } from "./UseCaseSuggestion";
+import { api } from "./api";
+import { catalogUnavailableMessage } from "./catalogSourceMessages";
+import { formatBytes } from "./format";
+import type {
+  CatalogModel,
+  EngineRole,
+  ModelAssetInstall,
+  ModelInstall,
+  ModelProfile,
+} from "./types";
+import { GenerationRecordCheck } from "./GenerationRecordCheck";
+import { useConfirm } from "./useConfirm";
+
+function InstalledModelRow({
+  model,
+  creating,
+  deleting,
+  savingProfileId,
+  defaulting,
+  onCreate,
+  onDelete,
+  onSaveUseCase,
+  onSetDefault,
+}: {
+  model: ModelInstall;
+  creating: boolean;
+  deleting: boolean;
+  savingProfileId?: string;
+  defaulting: boolean;
+  onCreate: () => void;
+  onDelete: () => void;
+  onSaveUseCase: (profileId: string, value: string) => Promise<boolean>;
+  onSetDefault: (profile?: ModelProfile) => void;
+}) {
+  const profileRead = useQuery({
+    queryKey: ["profiles", "installed-model", model.id, model.role, model.engine],
+    queryFn: () => api.profilesPage({ limit: 1, installIds: [model.id], role: model.role, engine: model.engine }),
+  });
+  const profile = profileRead.data?.[0];
+  const profileReady = profileRead.isSuccess && !profileRead.isError;
+  const saving = Boolean(profile && savingProfileId === profile.id);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(profile?.use_case ?? "");
+  const [submitting, setSubmitting] = useState(false);
+  const inFlight = useRef(false);
+  const editButton = useRef<HTMLButtonElement>(null);
+  const useCaseField = useRef<HTMLTextAreaElement>(null);
+  const editor = useRef<HTMLFormElement>(null);
+  const wasEditing = useRef(false);
+  const restoreFocus = useRef(false);
+  const busy = saving || submitting || !profileReady;
+  const unchanged = draft.trim() === (profile?.use_case ?? "").trim();
+  useEffect(() => {
+    if (editing) useCaseField.current?.focus();
+    else if (wasEditing.current && restoreFocus.current) editButton.current?.focus();
+    wasEditing.current = editing;
+  }, [editing]);
+  const startEditing = () => {
+    if (editing || busy) return;
+    setDraft(profile?.use_case ?? "");
+    setEditing(true);
+  };
+  const save = async () => {
+    if (busy || inFlight.current || unchanged || !profile) return;
+    inFlight.current = true;
+    setSubmitting(true);
+    try {
+      if (await onSaveUseCase(profile.id, draft.trim())) {
+        restoreFocus.current = editor.current?.contains(document.activeElement) ?? false;
+        setEditing(false);
+      }
+    } finally {
+      inFlight.current = false;
+      setSubmitting(false);
+    }
+  };
+  return (
+    <div className={editing ? "editing" : ""}>
+      <span className="badge">{model.role}</span>
+      <span className="model-install-copy">
+        <strong>{model.name}</strong>
+        <small>{model.readiness === "ready" ? "Runtime verified" : model.readiness === "unsupported" ? "Unsupported" : "Not runtime verified"}</small>
+        {model.role === "image" && <InstructionEditCapability manifest={model.manifest_json} />}
+        {model.role === "chat" && model.readiness === "ready" && profile?.input_modalities?.includes("text") && (
+          <small>{profile.input_modalities.includes("image") ? "Vision capable" : "Text only"}</small>
+        )}
+        {profile?.use_case && <small>{profile.use_case_derived ? "Derived · " : ""}{profile.use_case}</small>}
+      </span>
+      <span className="model-install-size">{formatBytes(model.size_bytes)}</span>
+      <span className="row-actions">
+        {!profileReady && (profileRead.isError
+          ? <button className="secondary compact-button" aria-label={`Retry profile for ${model.name}`} aria-disabled={profileRead.isFetching} onClick={() => { if (!profileRead.isFetching) void profileRead.refetch(); }}>Retry profile</button>
+          : <span role="status">Loading profile…</span>)}
+        {profileReady && <>
+        {profile?.is_default
+          ? <span className="badge tested">Default</span>
+          : <button className="secondary compact-button" aria-label={`Set ${model.name} as default ${model.role} model`} disabled={creating || defaulting} onClick={() => onSetDefault(profile)}>{defaulting ? "Setting..." : "Set default"}</button>}
+        {profile
+          ? <button ref={editButton} className="secondary compact-button" aria-label={`Edit use case for ${model.name}`} onClick={startEditing} aria-disabled={editing || busy}>Edit use case</button>
+          : <button className="secondary compact-button" aria-label={`Add ${model.name} to model selectors`} disabled={creating} onClick={onCreate}>Add to selectors</button>}
+        {profile && <UseCaseSuggestion kind="profile" id={profile.id} name={model.name} savedText={profile.use_case}
+          available={typeof model.manifest_json.provider_description === "string" && !!model.manifest_json.provider_description.trim()}
+            busy={editing || busy || deleting} />}
+        </>}
+        <button className="secondary compact-button danger" aria-label={`Delete ${model.name}`} disabled={deleting} onClick={onDelete}>Delete</button>
+      </span>
+      {editing && profile && (
+        <form ref={editor} className="model-use-case-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+          <textarea ref={useCaseField} aria-label={`Best uses for ${model.name}`} rows={2} value={draft} readOnly={busy} onChange={(event) => setDraft(event.target.value)} placeholder="Programming, illustration, cinematic video…" />
+          <button type="button" className="secondary compact-button" aria-disabled={busy} onClick={() => { if (!busy) { restoreFocus.current = true; setEditing(false); } }}>Cancel</button>
+          <button type="submit" className="primary compact-button" aria-disabled={busy || unchanged}>{busy ? "Saving…" : "Save"}</button>
+        </form>
+      )}
+    </div>
+  );
+}
+
+type ModelAssetUpdateValues = Parameters<typeof api.updateModelAsset>[1];
+
+/** The base models already recorded in the library, one spelling of each.
+ *
+ * Offered while typing so a base model is written the way the library
+ * already writes it. Spellings that differ only in case or punctuation name
+ * the same base model, so the first one met stands for the rest.
+ */
+function recordedBaseModels(assets: ModelAssetInstall[]): string[] {
+  const spellings = new Map<string, string>();
+  for (const asset of assets) {
+    const family = asset.family?.trim() ?? "";
+    const key = family.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+    if (key && !spellings.has(key)) spellings.set(key, family);
+  }
+  return [...spellings.values()].sort((a, b) => a.localeCompare(b));
+}
+
+function InstalledAssetRow({
+  asset,
+  baseModels,
+  saving,
+  deleting,
+  onUpdate,
+  onDelete,
+}: {
+  asset: ModelAssetInstall;
+  baseModels: string[];
+  saving: boolean;
+  deleting: boolean;
+  onUpdate: (values: ModelAssetUpdateValues) => Promise<boolean>;
+  onDelete: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [editingWords, setEditingWords] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const inFlight = useRef(false);
+  const busy = saving || submitting;
+  const rulesEditor = useRef<HTMLFormElement>(null);
+  const wordsEditor = useRef<HTMLFormElement>(null);
+  const restoreRulesFocus = useRef(false);
+  const restoreWordsFocus = useRef(false);
+  const closeRules = () => {
+    restoreRulesFocus.current = rulesEditor.current?.contains(document.activeElement) ?? false;
+    setEditing(false);
+  };
+  const closeWords = () => {
+    restoreWordsFocus.current = wordsEditor.current?.contains(document.activeElement) ?? false;
+    setEditingWords(false);
+  };
+  const update = async (values: ModelAssetUpdateValues) => {
+    if (busy || inFlight.current) return false;
+    inFlight.current = true;
+    setSubmitting(true);
+    try {
+      return await onUpdate(values);
+    } finally {
+      inFlight.current = false;
+      setSubmitting(false);
+    }
+  };
+  const editRulesButton = useRef<HTMLButtonElement>(null);
+  const editWordsButton = useRef<HTMLButtonElement>(null);
+  const useCaseField = useRef<HTMLTextAreaElement>(null);
+  const wasEditing = useRef(false);
+  const wasEditingWords = useRef(false);
+  useEffect(() => {
+    if (editing) useCaseField.current?.focus();
+    else if (wasEditing.current && restoreRulesFocus.current) editRulesButton.current?.focus();
+    wasEditing.current = editing;
+  }, [editing]);
+  useEffect(() => {
+    if (!editingWords && wasEditingWords.current && restoreWordsFocus.current) editWordsButton.current?.focus();
+    wasEditingWords.current = editingWords;
+  }, [editingWords]);
+  const measuredWords = measuredTriggerWords(asset);
+  const baseModelList = useId();
+  const [useCase, setUseCase] = useState(asset.use_case);
+  const [useCaseEdited, setUseCaseEdited] = useState(false);
+  const [baseModel, setBaseModel] = useState(asset.family ?? "");
+  const [autoApply, setAutoApply] = useState(asset.auto_apply);
+  const [modelStrength, setModelStrength] = useState(String(asset.default_model_strength));
+  const [clipStrength, setClipStrength] = useState(String(asset.default_clip_strength));
+  const beginEditing = () => {
+    if (editing || busy || inFlight.current) return;
+    setUseCase(asset.use_case);
+    setUseCaseEdited(false);
+    setBaseModel(asset.family ?? "");
+    setAutoApply(asset.auto_apply);
+    setModelStrength(String(asset.default_model_strength));
+    setClipStrength(String(asset.default_clip_strength));
+    setEditing(true);
+  };
+  const parsedModelStrength = Number(modelStrength);
+  const parsedClipStrength = Number(clipStrength);
+  const strengthsValid = Number.isFinite(parsedModelStrength)
+    && Math.abs(parsedModelStrength) <= 4
+    && Number.isFinite(parsedClipStrength)
+    && Math.abs(parsedClipStrength) <= 4;
+  const typedBaseModel = baseModel.trim();
+  const baseModelChanged = typedBaseModel !== (asset.family ?? "").trim();
+  // The server compares base models by their letters and digits, and refuses one with none.
+  const baseModelValid = !typedBaseModel || /[\p{L}\p{N}]/u.test(typedBaseModel);
+  const unchanged = !useCaseEdited
+    && useCase.trim() === asset.use_case
+    && !baseModelChanged
+    && autoApply === asset.auto_apply
+    && parsedModelStrength === asset.default_model_strength
+    && parsedClipStrength === asset.default_clip_strength;
+  const save = async () => {
+    if (busy || unchanged || !strengthsValid || !baseModelValid || (autoApply && !useCase.trim())) return;
+    const saved = await update({
+      ...(useCaseEdited ? { use_case: useCase.trim() } : {}),
+      // Sent only when edited, so the spelling a file declared stays until someone changes it.
+      ...(baseModelChanged ? { family: typedBaseModel } : {}),
+      auto_apply: autoApply,
+      default_model_strength: parsedModelStrength,
+      default_clip_strength: parsedClipStrength,
+    });
+    if (saved) closeRules();
+  };
+  return (
+    <div className={editing ? "editing" : ""}>
+      <span className="badge">{asset.kind.replace("_", " ")}</span>
+      <span className="model-install-copy">
+        <strong>{asset.name}</strong>
+        <small>{asset.active ? "Ready" : "Disabled"}{asset.family ? ` · ${asset.family}` : ""}</small>
+        {["checkpoint", "diffusion_model", "gguf_model", "lora"].includes(asset.kind) && <InstructionEditCapability manifest={asset.manifest_json} />}
+        {asset.kind === "lora" && (asset.auto_apply || asset.use_case_derived) && asset.use_case && (
+          <small>{asset.auto_apply ? "Auto · " : ""}{asset.use_case_derived ? "Derived · " : ""}{asset.use_case}</small>
+        )}
+        {/* A glance that may be cut short; the open editor shows the words in full instead. */}
+        {asset.kind === "lora" && !editingWords && (measuredWords.length > 0 || asset.typed_trigger_words.length > 0) && (
+          <small>
+            {[
+              measuredWords.length > 0 ? `From the file: ${measuredWords.join(", ")}` : "",
+              asset.typed_trigger_words.length > 0 ? `Yours: ${asset.typed_trigger_words.join(", ")}` : "",
+            ].filter(Boolean).join(" · ")}
+          </small>
+        )}
+      </span>
+      <span className="model-install-size">{formatBytes(asset.size_bytes)}</span>
+      <span className="row-actions">
+        <button
+          className="secondary compact-button"
+          disabled={!asset.verified_at || busy}
+          onClick={() => void update({ active: !asset.active })}
+        >
+          {asset.active ? "Disable" : "Enable"}
+        </button>
+        {asset.kind === "lora" && (
+          <button ref={editRulesButton} className="secondary compact-button" aria-disabled={editing || busy} onClick={beginEditing}>
+            Edit Auto rules
+          </button>
+        )}
+        {asset.kind === "lora" && <UseCaseSuggestion kind="lora" id={asset.id} name={asset.name} savedText={asset.use_case}
+          available={typeof asset.manifest_json.provider_description === "string" && !!asset.manifest_json.provider_description.trim()}
+          busy={editing || editingWords || busy || deleting} />}
+        {asset.kind === "lora" && (
+          <button ref={editWordsButton} className="secondary compact-button" aria-disabled={editingWords || busy} onClick={() => { if (!editingWords && !busy) setEditingWords(true); }}>
+            Edit trigger words
+          </button>
+        )}
+        <button className="secondary compact-button danger" disabled={deleting} onClick={onDelete}>Delete</button>
+      </span>
+      {editing && asset.kind === "lora" && (
+        <form ref={rulesEditor} className="model-use-case-editor lora-auto-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+          <label>
+            Use case
+            <textarea ref={useCaseField} aria-label={`Auto use case for ${asset.name}`} rows={2} readOnly={busy} value={useCase} onChange={(event) => { setUseCase(event.target.value); setUseCaseEdited(true); }} placeholder="Watercolor landscapes, product photography…" />
+            {asset.use_case_derived && !useCaseEdited && <small>Derived from provider metadata. You can edit it.</small>}
+          </label>
+          <label className="lora-base-model">
+            Base model
+            <input aria-label={`Base model for ${asset.name}`} type="text" list={baseModelList} maxLength={100} readOnly={busy} value={baseModel} onChange={(event) => setBaseModel(event.target.value)} placeholder="The model it was made for" />
+            <datalist id={baseModelList}>
+              {baseModels.map((name) => <option key={name} value={name} />)}
+            </datalist>
+          </label>
+          <label>
+            Model strength
+            <input aria-label={`Default model strength for ${asset.name}`} type="number" min="-4" max="4" step="0.05" readOnly={busy} value={modelStrength} onChange={(event) => setModelStrength(event.target.value)} />
+          </label>
+          <label>
+            CLIP strength
+            <input aria-label={`Default CLIP strength for ${asset.name}`} type="number" min="-4" max="4" step="0.05" readOnly={busy} value={clipStrength} onChange={(event) => setClipStrength(event.target.value)} />
+          </label>
+          <label className="lora-auto-toggle">
+            <input aria-label={`Use ${asset.name} automatically`} type="checkbox" aria-disabled={busy} checked={autoApply} onChange={(event) => { if (!busy) setAutoApply(event.target.checked); }} />
+            Use automatically
+          </label>
+          <span className="row-actions">
+            <button type="button" className="secondary compact-button" aria-disabled={busy} onClick={() => { if (!busy) closeRules(); }}>Cancel</button>
+            <button type="submit" className="primary compact-button" aria-disabled={busy || unchanged || !strengthsValid || !baseModelValid || (autoApply && !useCase.trim())}>{busy ? "Saving…" : "Save"}</button>
+          </span>
+          {!baseModelValid
+            ? <small>A base model needs at least one letter or digit.</small>
+            : autoApply && !typedBaseModel && <small>Without a base model, it is never chosen automatically.</small>}
+        </form>
+      )}
+      {editingWords && asset.kind === "lora" && (
+        <LoraTriggerWordsEditor
+          asset={asset}
+          formRef={wordsEditor}
+          saving={busy}
+          onCancel={closeWords}
+          onSave={(typedTriggerWords) => {
+            void update({ typed_trigger_words: typedTriggerWords }).then((saved) => {
+              if (saved) closeWords();
+            });
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+export function ModelsView({
+  initialRole,
+  onOpenChat,
+}: {
+  initialRole: EngineRole;
+  onOpenChat?: (chatId: string) => void;
+}) {
+  const [choosingVersions, setChoosingVersions] = useState<CatalogModel | null>(null);
+  const [confirmDialog, confirm] = useConfirm();
+  const client = useQueryClient();
+  const [query, setQuery] = useState("");
+  const [submitted, setSubmitted] = useState("");
+  const [catalogSource, setCatalogSource] = useState("huggingface");
+  const [role, setRole] = useState<string>(initialRole);
+  const [sort, setSort] = useState("trending");
+  const [compatibility, setCompatibility] = useState("");
+  const [quantization, setQuantization] = useState("");
+  const [maxSizeGb, setMaxSizeGb] = useState("");
+  const [updatedWithinDays, setUpdatedWithinDays] = useState("");
+  const [installedChatCapability, setInstalledChatCapability] = useState<"" | "text" | "vision">("");
+  const [installedSearch, setInstalledSearch] = useState("");
+  const [importOpen, setImportOpen] = useState(false);
+  const [importName, setImportName] = useState("");
+  const [importPath, setImportPath] = useState("");
+  const [importRole, setImportRole] = useState("chat");
+  const [importEngine, setImportEngine] = useState("llama.cpp");
+  const catalogFilters = {
+    compatibility,
+    quantization,
+    max_size_bytes: maxSizeGb ? String(Number(maxSizeGb) * 1024 ** 3) : "",
+    updated_within_days: updatedWithinDays,
+  };
+  const catalog = useInfiniteQuery({
+    queryKey: ["catalog", submitted, role, sort, catalogFilters, catalogSource],
+    queryFn: ({ pageParam }) =>
+      api.catalog(submitted, role, sort, pageParam, catalogFilters, catalogSource),
+    initialPageParam: null as string | null,
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
+  });
+  const rawCatalogItems = useMemo(() => catalog.data?.pages.flatMap((page) => page.items) ?? [], [catalog.data]);
+  const catalogItems = rawCatalogItems;
+  const catalogIsStale = catalog.data?.pages.some((page) => page.stale) ?? false;
+  const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
+  const installed = useInfiniteQuery({
+    queryKey: ["models", "installed", installedSearch, installedChatCapability],
+    queryFn: ({ pageParam }) => api.modelsPage({ limit: 50, offset: pageParam, search: installedSearch, chatCapability: installedChatCapability || undefined }),
+    initialPageParam: 0,
+    getNextPageParam: (page, pages) => page.length === 50 ? pages.length * 50 : undefined,
+  });
+  const installedModels = installed.data?.pages.flat() ?? [];
+  const catalogMatches = useCatalogInstallMatches(catalogItems, role);
+  const modelAssets = useQuery({ queryKey: ["model-assets"], queryFn: () => api.modelAssets() });
+  const baseModels = useMemo(() => recordedBaseModels(modelAssets.data ?? []), [modelAssets.data]);
+  const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 3_000 });
+  const storage = useQuery({ queryKey: ["model-storage"], queryFn: api.modelStorage });
+  const runtimes = useQuery({ queryKey: ["runtimes"], queryFn: api.runtimes });
+  const machine = useQuery({ queryKey: ["system"], queryFn: api.system });
+  const runtimeFor = (model: CatalogModel) => runtimes.data?.find(
+    (runtime) => runtime.engine === model.required_runtime,
+  );
+  const { pendingInstall, cancel: cancelInstall, prepare: download, confirm: confirmInstall, updateDownloads, dismissUpdate, selectAlternative } = useCatalogInstall();
+  const installRecipe = useMutation({
+    mutationFn: (recipeId: string) => api.installRecipe(recipeId),
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["jobs"] }),
+  });
+  const createProfile = useMutation({
+    mutationFn: (model: ModelInstall) => api.createProfile(model),
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["profiles"] }),
+  });
+  const updateUseCase = useMutation({
+    mutationFn: ({ profileId, useCase }: { profileId: string; useCase: string }) =>
+      api.updateProfile(profileId, { use_case: useCase }),
+    onSuccess: (updated) => {
+      client.setQueryData<ModelProfile[]>(["profiles"], (current) =>
+        current?.map((profile) => profile.id === updated.id ? updated : profile) ?? [updated],
+      );
+      void client.invalidateQueries({ queryKey: ["profiles"] });
+    },
+  });
+  const setDefaultModel = useMutation({
+    mutationFn: ({ model, profile }: { model: ModelInstall; profile?: ModelProfile }) =>
+      profile
+        ? api.updateProfile(profile.id, { is_default: true })
+        : api.createProfile(model, true),
+    onSuccess: (updated) => {
+      client.setQueryData<ModelProfile[]>(["profiles"], (current) => {
+        const siblings = (current ?? []).map((profile) => (
+          profile.role === updated.role
+            ? { ...profile, is_default: profile.id === updated.id }
+            : profile
+        ));
+        return siblings.some((profile) => profile.id === updated.id)
+          ? siblings
+          : [...siblings, updated];
+      });
+      void client.invalidateQueries({ queryKey: ["profiles"] });
+    },
+  });
+  const deleteModel = useMutation({
+    mutationFn: (modelId: string) => api.deleteModel(modelId, true),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["models"] });
+      void client.invalidateQueries({ queryKey: ["profiles"] });
+      void client.invalidateQueries({ queryKey: ["model-storage"] });
+    },
+  });
+  const updateModelAsset = useMutation({
+    mutationFn: ({ id, values }: { id: string; values: ModelAssetUpdateValues }) =>
+      api.updateModelAsset(id, values),
+    onSuccess: (updated) => {
+      client.setQueryData<ModelAssetInstall[]>(["model-assets"], (current) =>
+        current?.map((asset) => asset.id === updated.id ? updated : asset) ?? [updated],
+      );
+      void client.invalidateQueries({ queryKey: ["model-assets"] });
+    },
+  });
+  const deleteModelAsset = useMutation({
+    mutationFn: api.deleteModelAsset,
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["model-assets"] });
+      void client.invalidateQueries({ queryKey: ["model-storage"] });
+    },
+  });
+  const cleanupDownloads = useMutation({
+    mutationFn: api.cleanupDownloads,
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["model-storage"] }),
+  });
+  const importModel = useMutation({
+    mutationFn: () => api.importModel({ name: importName, local_path: importPath, role: importRole, engine: importEngine }),
+    onSuccess: () => {
+      setImportOpen(false);
+      setImportName("");
+      setImportPath("");
+      void client.invalidateQueries({ queryKey: ["models"] });
+      void client.invalidateQueries({ queryKey: ["model-storage"] });
+    },
+  });
+  const installedRemoteIds = new Set(modelAssets.data
+    ?.filter((asset) => asset.kind === "lora" && asset.active)
+    .map((asset) => asset.manifest_json.remote_id)
+    .filter((id): id is string => typeof id === "string") ?? []);
+  const activeDownloadIds = new Set(
+    jobs.data
+      ?.filter((job) =>
+        job.kind === "download"
+        && (
+          role === "lora"
+            ? job.payload_json.auxiliary_kind === "lora"
+            : job.payload_json.role === role && !job.payload_json.auxiliary_kind
+        )
+        && ["queued", "running", "paused"].includes(job.status)
+      )
+      .map((job) => job.payload_json.remote_id)
+      .filter((remoteId): remoteId is string => typeof remoteId === "string") ?? [],
+  );
+  const statusFor = (model: CatalogModel) => {
+    const match = role === "lora"
+      ? modelAssets.isError ? "unavailable" : !modelAssets.data ? "checking" : installedRemoteIds.has(model.remote_id) ? "installed" : "idle"
+      : catalogMatches.statusFor(model);
+    if (match === "installed") return match;
+    if (activeDownloadIds.has(model.remote_id)) return "downloading";
+    if (download.isPending && download.variables?.model.remote_id === model.remote_id && (download.variables?.model.workflow_template_id ?? null) === (model.workflow_template_id ?? null)) return "preparing";
+    return match;
+  };
+  return (
+    <div className="page-view">
+      <header className="page-header"><div><h1>Model library</h1></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? "…"} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" onClick={() => setImportOpen(true)}><Folder size={16} />Import local</button><GenerationRecordCheck onOpenChat={onOpenChat} />{Boolean(storage.data?.partial_download_count) && <button className="secondary compact-button" disabled={cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count} partial</button>}</div></header>
+      <ModelUpdatesPanel onInstall={(model, selectedRole, previousInstallId) => download.mutate({ model, selectedRole, previousInstallId })} />
+      <ModelUpdateProfileOffers downloads={updateDownloads} onDismiss={dismissUpdate} />
+      <section className="recipe-section">
+        <div className="section-heading"><div><h2>Reference recipes</h2></div></div>
+        {recipes.isLoading && <div className="loading-line" />}
+        <FirstFailure of={[recipes, installRecipe]} />
+        <div className="recipe-grid">{recipes.data?.map((recipe) => <RecipeCard key={recipe.id} recipe={recipe} pending={installRecipe.isPending && installRecipe.variables === recipe.id} onInstall={() => installRecipe.mutate(recipe.id)} />)}</div>
+      </section>
+      <div className="toolbar">
+        <form className="search-box" onSubmit={(event) => { event.preventDefault(); setSubmitted(query); }}><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" /></form>
+        <select aria-label="Model role" value={role} onChange={(event) => setRole(event.target.value)}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option><option value="lora">LoRA</option></select>
+        <select aria-label="Model source" value={catalogSource} onChange={(event) => setCatalogSource(event.target.value)}><option value="huggingface">Hugging Face</option><option value="civitai">CivitAI</option></select><select aria-label="Model order" value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
+      </div>
+      <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">Automatic test available</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Last updated filter" value={updatedWithinDays} onChange={(event) => setUpdatedWithinDays(event.target.value)}><option value="">Updated any time</option><option value="7">Updated this week</option><option value="30">Updated this month</option><option value="90">Updated in 3 months</option><option value="365">Updated this year</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
+      <section>
+        <div className="section-heading">
+          <h2>Installed models</h2>
+          <select
+            aria-label="Installed chat capability"
+            value={installedChatCapability}
+            onChange={(event) => setInstalledChatCapability(event.target.value as "" | "text" | "vision")}
+          >
+            <option value="">All capabilities</option>
+            <option value="text">Text only</option>
+            <option value="vision">Vision capable</option>
+          </select>
+        </div>
+        <label className="search-box"><Search size={18} /><input aria-label="Search installed models" maxLength={500} value={installedSearch} onChange={(event) => setInstalledSearch(event.target.value)} /></label>
+        {installed.isPending && <p role="status">Loading installed models…</p>}
+        <ErrorCallout message={installed.error?.message} action={<button className="secondary compact-button" aria-disabled={installed.isFetching} onClick={() => { if (!installed.isFetching) void (installed.isFetchNextPageError ? installed.fetchNextPage() : installed.refetch()); }}>Retry installed models</button>} />
+        {!installed.isPending && !installed.isError && installedModels.length === 0 && <p>No installed models match.</p>}
+        <div className="profile-table model-installs">{installedModels.map((model) => {
+        return <InstalledModelRow
+          key={model.id}
+          model={model}
+          creating={createProfile.isPending && createProfile.variables?.id === model.id}
+          deleting={deleteModel.isPending && deleteModel.variables === model.id}
+          savingProfileId={updateUseCase.isPending ? updateUseCase.variables?.profileId : undefined}
+          defaulting={setDefaultModel.isPending && setDefaultModel.variables?.model.id === model.id}
+          onCreate={() => createProfile.mutate(model)}
+          onDelete={() => void confirm({ title: `Delete ${model.name}?`, question: "This removes the model file and its saved settings from local storage. Downloading it again is the only way back.", detail: <WorkflowConsumers kind="model_install" resourceId={model.id} />, confirmLabel: "Delete model" }).then((ok) => ok && deleteModel.mutate(model.id))}
+          onSaveUseCase={async (profileId, value) => {
+            try {
+              await updateUseCase.mutateAsync({ profileId, useCase: value });
+              return true;
+            } catch {
+              return false;
+            }
+          }}
+          onSetDefault={(profile) => setDefaultModel.mutate({ model, profile })}
+        />;
+        })}</div>
+        {installed.hasNextPage && <div className="load-more"><button className="secondary" aria-disabled={installed.isFetching} onClick={() => { if (!installed.isFetching) void installed.fetchNextPage(); }}>{installed.isFetchingNextPage ? "Loading installed models…" : "More installed models"}</button></div>}
+      </section>
+      {(modelAssets.data?.length ?? 0) > 0 && <section>
+        <div className="section-heading"><h2>Installed workflow assets</h2></div>
+        <div className="profile-table model-installs">
+          {modelAssets.data?.map((asset) => (
+            <InstalledAssetRow
+              key={asset.id}
+              asset={asset}
+              baseModels={baseModels}
+              saving={updateModelAsset.isPending && updateModelAsset.variables?.id === asset.id}
+              deleting={deleteModelAsset.isPending && deleteModelAsset.variables === asset.id}
+              onUpdate={async (values) => {
+                try {
+                  await updateModelAsset.mutateAsync({ id: asset.id, values });
+                  return true;
+                } catch {
+                  return false;
+                }
+              }}
+              onDelete={() => void confirm({ title: `Delete ${asset.name}?`, question: "This removes the file from local storage.", detail: <WorkflowConsumers kind="model_asset" resourceId={asset.id} />, confirmLabel: "Delete" }).then((ok) => ok && deleteModelAsset.mutate(asset.id))}
+            />
+          ))}
+        </div>
+      </section>}
+      {pendingInstall && (
+        <InstallConfirmDialog
+          name={pendingInstall.model.name || pendingInstall.model.remote_id}
+          preflight={pendingInstall.preflight}
+          system={machine.data}
+          pending={confirmInstall.isPending}
+          onConfirm={() => confirmInstall.mutate(pendingInstall)}
+          onCancel={cancelInstall}
+          onSelectAlternative={(files) => selectAlternative.mutate({ pending: pendingInstall, files })}
+          selectingAlternative={selectAlternative.isPending}
+          alternativeError={selectAlternative.error?.message}
+        />
+      )}
+      <FirstFailure of={[createProfile, download, confirmInstall, deleteModel, cleanupDownloads, updateUseCase, setDefaultModel, updateModelAsset, deleteModelAsset]} />
+      {/* isFetching, not isLoading: the latter is only true the first
+          time, so changing a filter swapped the results with no sign
+          anything had happened - which reads as the page refreshing
+          itself for no reason. */}
+      {catalog.isFetching && !catalog.isFetchingNextPage && (
+        <div className="catalog-loading" role="status">
+          <div className="loading-line" />
+          <span>{catalogItems.length > 0 ? "Finding models…" : "Loading the catalogue…"}</span>
+        </div>
+      )}
+      <ErrorCallout message={catalog.error?.message} action={<button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button>} />
+      {catalogIsStale && !catalog.error && <div className="callout warning action-callout" role="status"><span>{catalogUnavailableMessage(catalogSource)}</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}
+      <ErrorCallout message={role === "lora" ? modelAssets.error?.message : catalogMatches.error?.message} action={<button className="secondary compact-button" onClick={() => { if (role === "lora") void modelAssets.refetch(); else catalogMatches.retry(); }}>Retry installation status</button>} />
+      <div className={`model-grid ${catalog.isFetching && !catalog.isFetchingNextPage ? "superseded" : ""}`}>{catalogItems.map((model) => <ModelCard key={`${model.remote_id}:${model.workflow_template_id ?? ""}`} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} onChooseVersion={model.provider === "civitai" && model.parent_model_id ? () => setChoosingVersions(model) : undefined} />)}</div>
+      {choosingVersions?.parent_model_id && (
+        <VersionChooser modelId={choosingVersions.parent_model_id} modelName={choosingVersions.parent_model_name ?? choosingVersions.name}
+          onClose={() => setChoosingVersions(null)}
+          onChoose={(versionId) => { setChoosingVersions(null); download.mutate({ model: { ...choosingVersions, remote_id: versionId }, selectedRole: role }); }} />
+      )}
+      {catalog.hasNextPage && <div className="load-more"><button className="secondary" disabled={catalog.isFetchingNextPage} onClick={() => void catalog.fetchNextPage()}>{catalog.isFetchingNextPage ? "Loading…" : "Load more models"}</button></div>}
+      {importOpen && (
+        <AccessibleDialog
+          title="Import a local model"
+          eyebrow="Advanced import"
+          closeLabel="Close local import"
+          onClose={() => setImportOpen(false)}
+        >
+          <p>Register a local file or folder. Pickle-compatible formats are blocked as unsafe, and imports require review before use.</p>
+          <label>Display name<input value={importName} onChange={(event) => setImportName(event.target.value)} /></label>
+          <label>Absolute local path<input value={importPath} onChange={(event) => setImportPath(event.target.value)} placeholder="/path/to/model.gguf" /></label>
+          <label>Role<select value={importRole} onChange={(event) => { const next = event.target.value; setImportRole(next); setImportEngine(next === "chat" ? "llama.cpp" : "comfyui"); }}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select></label>
+          <label>Runtime<select value={importEngine} onChange={(event) => setImportEngine(event.target.value)}><option value="llama.cpp">llama.cpp</option><option value="vllm">vLLM (ModelOpt/NVFP4)</option><option value="comfyui">ComfyUI</option></select></label>
+          {importModel.error && <ErrorCallout message={importModel.error.message} />}
+          <footer><button className="secondary" onClick={() => setImportOpen(false)}>Cancel</button><button className="primary" disabled={!importName.trim() || !importPath.trim() || importModel.isPending} onClick={() => importModel.mutate()}>{importModel.isPending ? "Importing…" : "Import model"}</button></footer>
+        </AccessibleDialog>
+      )}
+      {confirmDialog}
+    </div>
+  );
+}

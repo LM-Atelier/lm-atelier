@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
+from sqlalchemy.orm import Session
 
 from local_lm.adapters.base import ChatEvent, MediaEvent, estimate_chat_tokens
 from local_lm.comfy_registry_paths import registry_wheel_environment_root
 from local_lm.comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
+from local_lm.config import Settings
 from local_lm.domain import JobKind
 from local_lm.models import (
     Job,
@@ -31,8 +34,29 @@ from local_lm.workflow_activations import WorkflowActivationLaunchScope
 _TEST_CLAIM = JobClaim(token="attempt-token-a", attempt=1)
 
 
+def _collaborator_double(**members: object) -> Mock:
+    return Mock(spec_set=list(members), **members)
+
+
+def _session_double(factory: Callable[[], object]) -> MagicMock:
+    fixture = factory()
+    session = MagicMock(spec=Session, wraps=fixture)
+    enter = getattr(fixture, "__enter__", None)
+    if enter is not None:
+
+        def enter_session() -> MagicMock:
+            assert enter() is fixture
+            return session
+
+        session.__enter__.side_effect = enter_session
+        exit_session = getattr(fixture, "__exit__", None)
+        assert callable(exit_session)
+        session.__exit__.side_effect = exit_session
+    return session
+
+
 def test_contract_backed_queue_freezes_only_the_ready_active_activation() -> None:
-    revision = SimpleNamespace(id="wfrev-one", dependency_contract_sha256="a" * 64)
+    revision = WorkflowRevision(id="wfrev-one", dependency_contract_sha256="a" * 64)
     activation = SimpleNamespace(
         id="wfact-one",
         resolver_version="workflow-activation-v1",
@@ -45,7 +69,7 @@ def test_contract_backed_queue_freezes_only_the_ready_active_activation() -> Non
         def scalar(self, _query):  # type: ignore[no-untyped-def]
             return activation
 
-    assert _queued_workflow_activation(FakeSession(), revision) == {
+    assert _queued_workflow_activation(_session_double(FakeSession), revision) == {
         "id": "wfact-one",
         "resolver_version": "workflow-activation-v1",
         "dependency_contract_sha256": "a" * 64,
@@ -54,12 +78,12 @@ def test_contract_backed_queue_freezes_only_the_ready_active_activation() -> Non
     }
     activation.details_json = {}
     with pytest.raises(ValueError, match="dependencies are not ready"):
-        _queued_workflow_activation(FakeSession(), revision)
-    assert _queued_workflow_activation(FakeSession(), None) is None
+        _queued_workflow_activation(_session_double(FakeSession), revision)
+    assert _queued_workflow_activation(_session_double(FakeSession), None) is None
 
 
 def test_media_prompt_uses_the_frozen_combined_trigger_words() -> None:
-    run = SimpleNamespace(
+    run = Run(
         operation="text_to_image",
         standalone_prompt="A candid portrait",
         provenance_json={
@@ -76,7 +100,9 @@ def test_media_prompt_uses_the_frozen_combined_trigger_words() -> None:
     )
 
 
-def test_successful_media_evidence_requires_an_exact_official_contract(monkeypatch) -> None:
+def test_successful_media_evidence_requires_an_exact_official_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     template_sha256 = "b" * 64
     profile = SimpleNamespace(
         id="profile-image",
@@ -110,7 +136,7 @@ def test_successful_media_evidence_requires_an_exact_official_contract(monkeypat
             "template_sha256": template_sha256,
         },
     )
-    run = SimpleNamespace(
+    run = Run(
         id="run-image",
         provenance_json={},
         operation="image_to_image",
@@ -132,11 +158,11 @@ def test_successful_media_evidence_requires_an_exact_official_contract(monkeypat
     recorder = Mock(return_value=SimpleNamespace(evidence_key="evidence-key"))
     monkeypatch.setattr("local_lm.orchestrator.record_capability_evidence", recorder)
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace()),
+        engines=_collaborator_double(settings=SimpleNamespace()),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
-        processes=SimpleNamespace(runtimes=None),
+        processes=_collaborator_double(runtimes=None),
     )
     capabilities = EngineCapabilities(
         engine="comfyui",
@@ -153,7 +179,7 @@ def test_successful_media_evidence_requires_an_exact_official_contract(monkeypat
 
     assert (
         orchestrator._record_successful_media_evidence(
-            FakeSession(),
+            _session_double(FakeSession),
             run,
             capabilities,
             output_count=1,
@@ -175,7 +201,7 @@ def test_successful_media_evidence_requires_an_exact_official_contract(monkeypat
 
     assert (
         orchestrator._record_successful_media_evidence(
-            FakeSession(),
+            _session_double(FakeSession),
             run,
             capabilities.model_copy(update={"engine": "mock"}),
             output_count=1,
@@ -184,7 +210,7 @@ def test_successful_media_evidence_requires_an_exact_official_contract(monkeypat
     )
     assert (
         orchestrator._record_successful_media_evidence(
-            FakeSession(),
+            _session_double(FakeSession),
             run,
             capabilities.model_copy(update={"healthy": False}),
             output_count=1,
@@ -193,7 +219,7 @@ def test_successful_media_evidence_requires_an_exact_official_contract(monkeypat
     )
     assert (
         orchestrator._record_successful_media_evidence(
-            FakeSession(),
+            _session_double(FakeSession),
             run,
             capabilities,
             output_count=0,
@@ -212,7 +238,7 @@ async def test_context_folding_preserves_system_and_current_messages() -> None:
         {"role": "user", "content": "Current request must remain."},
     ]
     source_ids = [None, None, "old-user", "old-assistant", "current-user"]
-    engines = SimpleNamespace(
+    engines = _collaborator_double(
         chat=SimpleNamespace(
             count_tokens=AsyncMock(side_effect=lambda value: estimate_chat_tokens(value))
         ),
@@ -247,8 +273,24 @@ async def test_context_folding_preserves_system_and_current_messages() -> None:
 
 async def test_managed_chat_worker_is_aligned_to_the_run_profile() -> None:
     run = SimpleNamespace(id="run-1", profile_id="profile-selected", provenance_json={})
-    profile = SimpleNamespace(id="profile-selected", model_install_id="install-selected")
-    install = SimpleNamespace(id="install-selected")
+    profile = ModelProfile(
+        id="profile-selected",
+        model_install_id="install-selected",
+        name="Selected model",
+        role="chat",
+        engine="llama.cpp",
+        load_settings_json={},
+        request_settings_json={},
+    )
+    install = ModelInstall(
+        id="install-selected",
+        name="Selected model",
+        role="chat",
+        engine="llama.cpp",
+        local_path="selected-model.gguf",
+        manifest_json={},
+        active=True,
+    )
 
     class FakeSession:
         def __enter__(self):  # type: ignore[no-untyped-def]
@@ -276,24 +318,28 @@ async def test_managed_chat_worker_is_aligned_to_the_run_profile() -> None:
         profile_id="profile-previous",
     )
     aligned = previous.model_copy(update={"pid": 12, "profile_id": "profile-selected"})
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         settings=SimpleNamespace(llama_executable=Path("llama-server")),
         statuses=Mock(return_value=[previous]),
         load_chat=AsyncMock(return_value=aligned),
     )
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace(chat_engine="llama.cpp")),
+        engines=_collaborator_double(settings=SimpleNamespace(chat_engine="llama.cpp")),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
         processes=processes,
-        session_factory=FakeSession,
+        session_factory=lambda: _session_double(FakeSession),
     )
 
     result = await orchestrator._ensure_chat_worker("run-1")
 
     assert result == aligned
-    processes.load_chat.assert_awaited_once_with(profile, install)
+    processes.load_chat.assert_awaited_once()
+    supplied_profile, supplied_install = processes.load_chat.await_args_list[0].args
+    assert supplied_profile.id == profile.id
+    assert supplied_profile.model_install_id == install.id == supplied_install.id
+    assert len(processes.load_chat.await_args_list[0].kwargs["launch_scope_sha256"]) == 64
 
 
 async def test_engine_cancel_runs_after_the_database_session_closes() -> None:
@@ -324,7 +370,7 @@ async def test_engine_cancel_runs_after_the_database_session_closes() -> None:
         assert run_id == "run-cancel"
         assert session_closed is True
 
-    engines = SimpleNamespace(
+    engines = _collaborator_double(
         settings=SimpleNamespace(),
         chat=SimpleNamespace(cancel=cancel),
         media=SimpleNamespace(cancel=AsyncMock()),
@@ -332,15 +378,15 @@ async def test_engine_cancel_runs_after_the_database_session_closes() -> None:
     orchestrator = ConversationOrchestrator(
         engines=engines,
         artifacts=Mock(),
-        events=SimpleNamespace(publish=AsyncMock()),
-        scheduler=SimpleNamespace(publish_job=AsyncMock()),
+        events=_collaborator_double(publish=AsyncMock()),
+        scheduler=_collaborator_double(publish_job=AsyncMock()),
         processes=Mock(),
-        session_factory=FakeSession,
+        session_factory=lambda: _session_double(FakeSession),
     )
     orchestrator._mark_cancelled = Mock()  # type: ignore[method-assign]
 
     assert await orchestrator.cancel("job-cancel") is True
-    orchestrator._mark_cancelled.assert_called_once()  # type: ignore[attr-defined]
+    orchestrator._mark_cancelled.assert_called_once()
 
 
 async def test_chat_worker_resume_runs_after_the_database_session_closes() -> None:
@@ -371,12 +417,12 @@ async def test_chat_worker_resume_runs_after_the_database_session_closes() -> No
         assert selected_install is install
 
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace()),
+        engines=_collaborator_double(settings=SimpleNamespace()),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
-        processes=SimpleNamespace(load_chat=load_chat),
-        session_factory=FakeSession,
+        processes=_collaborator_double(load_chat=load_chat),
+        session_factory=lambda: _session_double(FakeSession),
     )
 
     await orchestrator._resume_chat_worker("profile-resume")
@@ -399,13 +445,13 @@ async def test_media_handoff_recycles_managed_comfy_before_chat_resume() -> None
     async def start_media() -> None:
         order.append("start media")
 
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         statuses=Mock(return_value=[media]),
         stop=stop,
         start_media=start_media,
     )
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
@@ -448,21 +494,21 @@ async def test_media_handoff_preloads_the_next_queued_text_profile() -> None:
                 return next_run
             return None
 
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         statuses=Mock(return_value=[media]),
         stop=AsyncMock(),
         start_media=AsyncMock(),
     )
-    scheduler = SimpleNamespace(
+    scheduler = _collaborator_double(
         peek_next_eligible_job=Mock(return_value=("job-next", "run-next")),
     )
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
         artifacts=Mock(),
         events=Mock(),
         scheduler=scheduler,
         processes=processes,
-        session_factory=FakeSession,
+        session_factory=lambda: _session_double(FakeSession),
     )
     resume = AsyncMock()
     orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
@@ -494,13 +540,13 @@ async def test_cancelled_chat_release_restores_planner_readiness() -> None:
     async def cancelled_stop(_name: str) -> None:
         raise asyncio.CancelledError
 
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         settings=SimpleNamespace(auto_unload_chat_for_media=True),
         statuses=Mock(return_value=[chat]),
         stop=cancelled_stop,
     )
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace()),
+        engines=_collaborator_double(settings=SimpleNamespace()),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
@@ -532,13 +578,13 @@ async def test_a_refused_chat_release_restores_planner_readiness() -> None:
         profile_id="profile-chat",
     )
     stop = AsyncMock()
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         settings=SimpleNamespace(auto_unload_chat_for_media=True),
         statuses=Mock(return_value=[chat]),
         stop=stop,
     )
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace()),
+        engines=_collaborator_double(settings=SimpleNamespace()),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
@@ -579,11 +625,11 @@ async def test_media_worker_startup_forwards_truthful_phases() -> None:
             await phase_callback(phase)
 
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace()),
+        engines=_collaborator_double(settings=SimpleNamespace()),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
-        processes=SimpleNamespace(
+        processes=_collaborator_double(
             statuses=Mock(return_value=[media]),
             start_media=start_media,
         ),
@@ -627,11 +673,11 @@ async def test_ready_media_worker_still_receives_an_exact_activation_scope() -> 
     )
     start_media = AsyncMock()
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace()),
+        engines=_collaborator_double(settings=SimpleNamespace()),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
-        processes=SimpleNamespace(
+        processes=_collaborator_double(
             statuses=Mock(return_value=[media]),
             start_media=start_media,
         ),
@@ -661,8 +707,9 @@ def test_media_execution_revalidates_the_exact_queued_activation(
         dependency_contract_sha256="a" * 64,
         binding_sha256="b" * 64,
     )
-    run = SimpleNamespace(
+    run = Run(
         workflow_revision_id="wfrev-one",
+        settings_json={},
         provenance_json={"workflow": {"activation": snapshot}},
     )
     scope = WorkflowActivationLaunchScope(
@@ -697,14 +744,14 @@ def test_media_execution_revalidates_the_exact_queued_activation(
         registry_dir=tmp_path / "registry",
     )
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=settings),
+        engines=_collaborator_double(settings=settings),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
-        processes=SimpleNamespace(runtimes=None),
+        processes=_collaborator_double(runtimes=None),
     )
 
-    assert orchestrator._media_activation_scope(FakeSession(), run) is scope
+    assert orchestrator._media_activation_scope(_session_double(FakeSession), run) is scope
     assert revalidate.call_args.kwargs == {
         "runtime_materializer": None,
         "custom_node_root": settings.custom_node_dir,
@@ -713,7 +760,7 @@ def test_media_execution_revalidates_the_exact_queued_activation(
 
     run.provenance_json["workflow"]["activation"]["launch_sha256"] = "d" * 64
     with pytest.raises(RuntimeError, match="launch identity changed"):
-        orchestrator._media_activation_scope(FakeSession(), run)
+        orchestrator._media_activation_scope(_session_double(FakeSession), run)
 
 
 async def test_scoped_media_handoff_does_not_restart_a_broad_worker() -> None:
@@ -724,14 +771,14 @@ async def test_scoped_media_handoff_does_not_restart_a_broad_worker() -> None:
         running=True,
         pid=22,
     )
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         statuses=Mock(return_value=[media]),
         launch_scope_sha256=Mock(return_value="a" * 64),
         stop=AsyncMock(),
         start_media=AsyncMock(),
     )
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
@@ -758,7 +805,7 @@ async def test_media_execution_awaits_inflight_handoff_restart() -> None:
         restart_entered.set()
         await restart_release.wait()
 
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         statuses=Mock(
             return_value=[
                 WorkerStatus(
@@ -773,7 +820,7 @@ async def test_media_execution_awaits_inflight_handoff_restart() -> None:
         start_media=start_media,
     )
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace()),
+        engines=_collaborator_double(settings=SimpleNamespace()),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
@@ -819,7 +866,7 @@ def _plan_prewarm_orchestrator(  # type: ignore[no-untyped-def]
         def scalar(self, _query):  # type: ignore[no-untyped-def]
             return next_step
 
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         statuses=Mock(
             return_value=[
                 WorkerStatus(
@@ -833,18 +880,18 @@ def _plan_prewarm_orchestrator(  # type: ignore[no-untyped-def]
         start_media=start_media or AsyncMock(),
     )
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
         processes=processes,
-        session_factory=FakeSession,
+        session_factory=lambda: _session_double(FakeSession),
     )
     return orchestrator, processes, FakeSession
 
 
-def _ordered_text_run():  # type: ignore[no-untyped-def]
-    return SimpleNamespace(
+def _ordered_text_run() -> Run:
+    return Run(
         operation="text",
         work_plan_id="plan-1",
         work_step_id="step-current",
@@ -1063,18 +1110,20 @@ async def test_a_handoff_that_loads_another_profile_still_owes_the_displaced_one
     # Unmanaged media, so nothing is holding the device and the handoff takes
     # the direct restore path rather than the recycle.
     media = WorkerStatus(name="media", state="ready", managed=False, running=True, pid=22)
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         statuses=Mock(return_value=[media]),
         stop=AsyncMock(),
         start_media=AsyncMock(),
     )
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
         artifacts=Mock(),
         events=Mock(),
-        scheduler=SimpleNamespace(peek_next_eligible_job=Mock(return_value=("job-verify", None))),
+        scheduler=_collaborator_double(
+            peek_next_eligible_job=Mock(return_value=("job-verify", None))
+        ),
         processes=processes,
-        session_factory=FakeSession,
+        session_factory=lambda: _session_double(FakeSession),
     )
     resumed: list[str] = []
 
@@ -1114,18 +1163,18 @@ async def test_a_handoff_that_restores_the_displaced_profile_clears_the_debt() -
             return None
 
     media = WorkerStatus(name="media", state="ready", managed=False, running=True, pid=22)
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         statuses=Mock(return_value=[media]),
         stop=AsyncMock(),
         start_media=AsyncMock(),
     )
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
         artifacts=Mock(),
         events=Mock(),
-        scheduler=SimpleNamespace(peek_next_eligible_job=Mock(return_value=None)),
+        scheduler=_collaborator_double(peek_next_eligible_job=Mock(return_value=None)),
         processes=processes,
-        session_factory=FakeSession,
+        session_factory=lambda: _session_double(FakeSession),
     )
     resumed: list[str] = []
 
@@ -1152,13 +1201,13 @@ async def test_external_media_handoff_only_resumes_chat() -> None:
         running=True,
         pid=22,
     )
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         statuses=Mock(return_value=[media]),
         stop=AsyncMock(),
         start_media=AsyncMock(),
     )
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
@@ -1183,7 +1232,7 @@ async def test_chat_planner_falls_back_during_media_handoff() -> None:
         pid=12,
         profile_id="profile-selected",
     )
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         settings=SimpleNamespace(
             llama_executable=Path("llama-server"),
             worker_startup_seconds=60,
@@ -1191,7 +1240,7 @@ async def test_chat_planner_falls_back_during_media_handoff() -> None:
         statuses=Mock(return_value=[ready]),
     )
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace(chat_engine="llama.cpp")),
+        engines=_collaborator_double(settings=SimpleNamespace(chat_engine="llama.cpp")),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
@@ -1246,13 +1295,13 @@ async def test_vision_bridge_restores_the_text_profile_after_completion_or_cance
         yield ChatEvent(type="delta", text="A green apple.")
         yield ChatEvent(type="complete", data={"finish_reason": "stop"})
 
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         settings=SimpleNamespace(),
         runtimes=None,
         load_chat=AsyncMock(),
         stop=AsyncMock(),
     )
-    engines = SimpleNamespace(
+    engines = _collaborator_double(
         settings=SimpleNamespace(vision_bridge_max_tokens=128),
         chat_capabilities=AsyncMock(
             return_value=SimpleNamespace(input_modalities=["text", "image"])
@@ -1291,14 +1340,14 @@ async def test_vision_bridge_restores_the_text_profile_after_completion_or_cance
         with pytest.raises(asyncio.CancelledError):
             await orchestrator._bridge_visual_context(
                 _TEST_CLAIM,
-                FakeSession(),  # type: ignore[arg-type]
+                _session_double(FakeSession),
                 run,  # type: ignore[arg-type]
                 [SimpleNamespace(id="sha256:image")],  # type: ignore[list-item]
             )
     else:
         observation, metadata = await orchestrator._bridge_visual_context(
             _TEST_CLAIM,
-            FakeSession(),  # type: ignore[arg-type]
+            _session_double(FakeSession),
             run,  # type: ignore[arg-type]
             [SimpleNamespace(id="sha256:image")],  # type: ignore[list-item]
         )
@@ -1366,13 +1415,13 @@ async def test_vision_bridge_stops_and_moves_no_worker_once_reclaimed() -> None:
         resumed_after_reclaim["value"] = True
         yield ChatEvent(type="complete", data={"finish_reason": "stop"})
 
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         settings=SimpleNamespace(),
         runtimes=None,
         load_chat=AsyncMock(),
         stop=AsyncMock(),
     )
-    engines = SimpleNamespace(
+    engines = _collaborator_double(
         settings=SimpleNamespace(vision_bridge_max_tokens=128),
         chat_capabilities=AsyncMock(
             return_value=SimpleNamespace(input_modalities=["text", "image"])
@@ -1390,8 +1439,8 @@ async def test_vision_bridge_stops_and_moves_no_worker_once_reclaimed() -> None:
     # The real predicates, answered from one flag: the fence probes ownership,
     # the phase refuses to speak for a row that is not this execution's, and the
     # teardown reads the attempt again before it moves anything.
-    orchestrator._claim_still_owns = lambda _job_id, _claim: owned["value"]  # type: ignore[method-assign]
-    orchestrator._attempt_current = lambda _job_id, _claim: owned["value"]  # type: ignore[method-assign]
+    orchestrator._claim_still_owns = lambda job_id, claim: owned["value"]  # type: ignore[method-assign]
+    orchestrator._attempt_current = lambda job_id, claim: owned["value"]  # type: ignore[method-assign]
 
     async def phase(_job_id, _run_id, label, _claim):  # type: ignore[no-untyped-def]
         consumed.append(label)
@@ -1416,7 +1465,7 @@ async def test_vision_bridge_stops_and_moves_no_worker_once_reclaimed() -> None:
     with pytest.raises(ClaimLost, match="mid-vision-bridge"):
         await orchestrator._bridge_visual_context(
             _TEST_CLAIM,
-            FakeSession(),  # type: ignore[arg-type]
+            _session_double(FakeSession),
             run,  # type: ignore[arg-type]
             [SimpleNamespace(id="sha256:image")],  # type: ignore[list-item]
         )
@@ -1503,7 +1552,7 @@ def test_chat_progress_is_removed_without_discarding_text() -> None:
     assert message.parts == [text]
 
 
-async def test_chat_phase_advances_when_the_first_token_arrives() -> None:
+async def test_chat_phase_advances_when_the_first_token_arrives(settings: Settings) -> None:
     """The phase used to say "waiting" for the whole generation.
 
     It was set once before the stream and never updated, so a long answer that
@@ -1512,6 +1561,9 @@ async def test_chat_phase_advances_when_the_first_token_arrives() -> None:
     something is.
     """
     from local_lm.adapters.base import ChatEvent
+
+    settings.web_access_enabled = False
+    settings.crw_endpoint = None
 
     async def stream(_request):  # type: ignore[no-untyped-def]
         yield ChatEvent(type="delta", text="Hello", data={})
@@ -1538,9 +1590,9 @@ async def test_chat_phase_advances_when_the_first_token_arrives() -> None:
             return None
 
         def execute(self, _statement):  # type: ignore[no-untyped-def]
-            # The ownership probe and the claim-bound writes are conditional
-            # UPDATEs; one owned row answers them.
-            return SimpleNamespace(rowcount=1)
+            # There is no pending search proposal. Ownership probes and
+            # claim-bound writes each affect the one owned row.
+            return SimpleNamespace(rowcount=1, one_or_none=lambda: None)
 
         def in_transaction(self) -> bool:
             # The owned commit asserts ownership inside the transaction it
@@ -1554,11 +1606,11 @@ async def test_chat_phase_advances_when_the_first_token_arrives() -> None:
             return False
 
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(chat=SimpleNamespace(stream=stream), settings=SimpleNamespace()),
+        engines=_collaborator_double(chat=SimpleNamespace(stream=stream), settings=settings),
         artifacts=Mock(),
-        events=SimpleNamespace(publish=AsyncMock()),
+        events=_collaborator_double(publish=AsyncMock()),
         scheduler=Mock(),
-        processes=SimpleNamespace(runtimes=None),
+        processes=_collaborator_double(runtimes=None),
     )
     phases = AsyncMock()
     orchestrator._set_chat_phase = phases  # type: ignore[method-assign]
@@ -1574,7 +1626,7 @@ async def test_chat_phase_advances_when_the_first_token_arrives() -> None:
 
     with pytest.raises(RuntimeError):
         await orchestrator._execute_chat(
-            "job-phase", "run-phase", SimpleNamespace(token="claim-test", attempt=1)
+            "job-phase", "run-phase", JobClaim(token="claim-test", attempt=1)
         )
 
     labels = [call.args[2] for call in phases.await_args_list]
@@ -1609,18 +1661,18 @@ def _queued_media_orchestrator(
                 return next_run
             return None
 
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         statuses=Mock(return_value=[media]),
         stop=AsyncMock(),
         start_media=AsyncMock(),
     )
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
         artifacts=Mock(),
         events=Mock(),
-        scheduler=SimpleNamespace(peek_next_eligible_job=Mock(side_effect=list(peeks))),
+        scheduler=_collaborator_double(peek_next_eligible_job=Mock(side_effect=list(peeks))),
         processes=processes,
-        session_factory=FakeSession,
+        session_factory=lambda: _session_double(FakeSession),
     )
     return orchestrator, processes
 
@@ -1808,10 +1860,10 @@ async def test_a_failure_choosing_the_target_still_leaves_the_profile_owed() -> 
         SimpleNamespace(operation="text", profile_id=None),
     )
 
-    def unreadable_session() -> object:
+    def unreadable_session() -> Session:
         raise RuntimeError("the database would not answer during the handoff")
 
-    orchestrator.session_factory = unreadable_session  # type: ignore[method-assign]
+    orchestrator.session_factory = unreadable_session
     resume = AsyncMock()
     orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
 
@@ -1951,13 +2003,13 @@ async def test_shutdown_does_not_restore_chat_from_active_bridge(
         await asyncio.Event().wait()
         yield ChatEvent(type="complete", data={"finish_reason": "stop"})
 
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         settings=SimpleNamespace(),
         runtimes=None,
         load_chat=AsyncMock(),
         stop=AsyncMock(),
     )
-    engines = SimpleNamespace(
+    engines = _collaborator_double(
         settings=SimpleNamespace(vision_bridge_max_tokens=128),
         chat_capabilities=AsyncMock(
             return_value=SimpleNamespace(input_modalities=["text", "image"])
@@ -1990,14 +2042,15 @@ async def test_shutdown_does_not_restore_chat_from_active_bridge(
         )
     )
 
-    task = asyncio.create_task(
-        orchestrator._bridge_visual_context(
+    async def bridge() -> None:
+        await orchestrator._bridge_visual_context(
             _TEST_CLAIM,
-            FakeSession(),  # type: ignore[arg-type]
+            _session_double(FakeSession),
             run,  # type: ignore[arg-type]
             [SimpleNamespace(id="sha256:image")],  # type: ignore[list-item]
         )
-    )
+
+    task = asyncio.create_task(bridge())
     orchestrator._tasks["job-vision"] = task
     await entered.wait()
     assert [call.args[0].id for call in processes.load_chat.await_args_list] == ["profile-vision"]
@@ -2069,13 +2122,13 @@ async def test_a_replaced_bridge_leaves_the_chat_worker_where_it_is(
         yield ChatEvent(type="delta", text="a lamp")
         yield ChatEvent(type="complete", data={"finish_reason": "stop"})
 
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         settings=SimpleNamespace(),
         runtimes=None,
         load_chat=AsyncMock(),
         stop=AsyncMock(),
     )
-    engines = SimpleNamespace(
+    engines = _collaborator_double(
         settings=SimpleNamespace(vision_bridge_max_tokens=128),
         chat_capabilities=AsyncMock(
             return_value=SimpleNamespace(input_modalities=["text", "image"])
@@ -2116,7 +2169,7 @@ async def test_a_replaced_bridge_leaves_the_chat_worker_where_it_is(
 
     await orchestrator._bridge_visual_context(
         _TEST_CLAIM,
-        FakeSession(),  # type: ignore[arg-type]
+        _session_double(FakeSession),
         run,  # type: ignore[arg-type]
         [SimpleNamespace(id="sha256:image")],  # type: ignore[list-item]
     )
@@ -2127,7 +2180,9 @@ async def test_a_replaced_bridge_leaves_the_chat_worker_where_it_is(
 
 
 @pytest.mark.parametrize("managed_media", [False, True])
-async def test_later_media_preserves_the_chat_profile_owed_before_verification(managed_media):
+async def test_later_media_preserves_the_chat_profile_owed_before_verification(
+    managed_media: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
     displaced = "profile-chat"
     vision = "profile-vision"
     verification = SimpleNamespace(
@@ -2135,41 +2190,41 @@ async def test_later_media_preserves_the_chat_profile_owed_before_verification(m
     )
 
     class FakeSession:
-        def __enter__(self):
+        def __enter__(self) -> FakeSession:
             return self
 
-        def __exit__(self, *_args):
+        def __exit__(self, *_args: object) -> None:
             return None
 
-        def get(self, model, identity):
+        def get(self, model: object, identity: object) -> SimpleNamespace | None:
             return verification if model is Job and identity == "job-verify" else None
 
     media = WorkerStatus(name="media", state="ready", managed=managed_media, running=True, pid=22)
     chat = WorkerStatus(
         name="chat", state="ready", managed=True, running=True, pid=23, profile_id=vision
     )
-    processes = SimpleNamespace(
+    processes = _collaborator_double(
         settings=SimpleNamespace(auto_unload_chat_for_media=True),
         statuses=Mock(return_value=[media, chat]),
         stop=AsyncMock(),
         start_media=AsyncMock(),
     )
-    scheduler = SimpleNamespace(peek_next_eligible_job=Mock(return_value=("job-verify", None)))
+    scheduler = _collaborator_double(peek_next_eligible_job=Mock(return_value=("job-verify", None)))
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
         artifacts=Mock(),
         events=Mock(),
         scheduler=scheduler,
         processes=processes,
-        session_factory=FakeSession,
+        session_factory=lambda: _session_double(FakeSession),
     )
-    resumed = []
+    resumed: list[str] = []
 
-    async def resume(profile_id):
+    async def resume(profile_id: str) -> None:
         resumed.append(profile_id)
 
-    orchestrator._resume_chat_worker = resume
-    orchestrator._schedule_media_restart = Mock()
+    monkeypatch.setattr(orchestrator, "_resume_chat_worker", resume)
+    monkeypatch.setattr(orchestrator, "_schedule_media_restart", Mock())
     await orchestrator._complete_media_handoff(displaced)
     assert resumed == [vision]
     # The verification used the preloaded vision profile. A following image now

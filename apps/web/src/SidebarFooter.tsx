@@ -1,4 +1,5 @@
 import { Settings, Sparkles } from "lucide-react";
+import { AcceptedWorkEntry } from "./AcceptedWorkEntry";
 import type { SetupReadinessReport } from "./types";
 import type { View } from "./rooms";
 
@@ -7,10 +8,11 @@ const SETUP_LABEL: Record<string, string> = {
   in_progress: "Working",
 };
 
-/** What the workspace is set to, rather than what is in it.
+/** What the workspace is doing and set to, rather than what is in it.
  *
- * Appearance, whether the sidebar is there at all, setup, and settings. The
- * tree above answers "what am I working on"; this answers "how".
+ * Accepted work, appearance, whether the sidebar is there at all, setup, and
+ * settings. The tree above answers "what am I working on"; this answers
+ * "what is running, and how".
  */
 export function SidebarFooter({
   setupState,
@@ -27,6 +29,7 @@ export function SidebarFooter({
 }) {
   return (
     <div className="sidebar-footer">
+      <AcceptedWorkEntry />
       <button onClick={() => { onSetup(); onNavigate(); }}>
         <Sparkles />Setup
         {setupState && (

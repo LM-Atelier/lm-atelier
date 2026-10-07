@@ -1,17 +1,20 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api, ApiError } from "./api";
-import { readPriorTurnEditDraft } from "./priorTurnEditDraft";
+import { initializePriorTurnEditDraft, readPriorTurnEditDraft, writePriorTurnEditDraft } from "./priorTurnEditDraft";
+import { presetPages } from "./test/modelLibraryPageFixtures";
 import { PriorTurnEditor } from "./PriorTurnEditor";
-import type { ChatDetail, EngineCapabilities, GenerationPreset, PriorTurnEditSource, SettingField } from "./types";
+import { familyFixturePage } from "./workflowFamilyReadFixtures";
+import type { ChatDetail, EngineCapabilities, GenerationPreset, PriorTurnEditSource, SettingField, WorkflowFamily } from "./types";
 
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
-  return { ...actual, api: { ...actual.api,
-    workflowFamilies: vi.fn(), chatWorkflowSelections: vi.fn(), projectWorkflowSelections: vi.fn(),
+  return { ...actual, api: { ...actual.api, profilesPage: vi.fn().mockResolvedValue([]),
+    presetsPage: vi.fn(), workflowRevisionChoices: vi.fn(), workflowRevisionSchema: vi.fn(), workflowFamilies: vi.fn(), chatWorkflowSelections: vi.fn(), projectWorkflowSelections: vi.fn(),
     classifyDraft: vi.fn(), references: vi.fn(), modelAssets: vi.fn(),
     getPriorTurnEditSource: vi.fn(), queueEditedMessage: vi.fn(), updateChat: vi.fn(),
+    workflowRevisionSourceFit: vi.fn(), previewWorkflowRevisionSourceFit: vi.fn(), previewPriorTurnSourceFit: vi.fn(),
   } };
 });
 const stamp = "2026-09-07T12:00:00Z";
@@ -42,8 +45,14 @@ const presets: GenerationPreset[] = [{ id: "preset-scene", name: "Scene today", 
 const onAccepted = vi.fn();
 const clients: QueryClient[] = [];
 beforeEach(() => {
+  vi.mocked(api.profilesPage).mockResolvedValue([]);
+  vi.mocked(api.presetsPage).mockImplementation((options) => presetPages({ presets: async () => presets }, options));
+  vi.mocked(api.workflowRevisionChoices).mockResolvedValue([]);
   localStorage.clear();
   vi.mocked(api.workflowFamilies).mockResolvedValue([]);
+  vi.mocked(api.workflowRevisionSourceFit).mockResolvedValue({
+    available: false, reason: "source_fit_workflow_unsupported", modes: [], request_authorized: false,
+  });
   vi.mocked(api.chatWorkflowSelections).mockResolvedValue([]);
   vi.mocked(api.projectWorkflowSelections).mockResolvedValue([]);
   vi.mocked(api.modelAssets).mockResolvedValue([]);
@@ -55,14 +64,15 @@ async function mount() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   clients.push(client);
   const mounted = render(<QueryClientProvider client={client}>
-    <PriorTurnEditor chat={chat} messageId={source.source_user_message_id} engines={[engine]} profiles={[]}
-      workflows={[]} presets={presets} maxMediaOutputsPerPlan={4} onAccepted={onAccepted} onClose={vi.fn()} />
+    <PriorTurnEditor chat={chat} messageId={source.source_user_message_id} engines={[engine]}
+      maxMediaOutputsPerPlan={4} onAccepted={onAccepted} onClose={vi.fn()} />
   </QueryClientProvider>);
   await screen.findByRole("textbox", { name: "Message" });
   fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
   return mounted;
 }
 async function submit() {
+  await waitFor(() => expect(screen.queryByText("Loading selected preset…")).not.toBeInTheDocument());
   fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
   fireEvent.click(screen.getByRole("button", { name: "Queue edited version" }));
   await waitFor(() => expect(api.queueEditedMessage).toHaveBeenCalledTimes(1));
@@ -112,6 +122,7 @@ it("shows a role preset on each step without restoring omitted original settings
   try {
     await mount();
     fireEvent.change(screen.getByLabelText("Settings for this version"), { target: { value: "role:image" } });
+    await screen.findByRole("option", { name: "Scene today" });
     fireEvent.change(screen.getByRole("combobox", { name: "Preset for this version" }), { target: { value: "preset-scene" } });
     fireEvent.change(screen.getByLabelText("Settings for this version"), { target: { value: "step:second" } });
     expect(screen.getByRole("spinbutton", { name: "steps" })).toHaveValue(15);
@@ -146,6 +157,7 @@ it("lets the current LoRA selection be explicitly chosen even when its values ma
 });
 it("can reselect the same preset identity with its current values", async () => {
   await mount();
+  await screen.findByRole("option", { name: "Scene today" });
   fireEvent.change(screen.getByRole("combobox", { name: "Preset for this version" }), { target: { value: "preset-scene" } });
   expect(screen.getByRole("spinbutton", { name: "steps" })).toHaveValue(99);
   expect(await submit()).toMatchObject({ preset_id: "preset-scene", settings: { width: 1024, steps: 99 } });
@@ -159,6 +171,7 @@ it("restores original settings and preset inheritance after local edits", async 
   await mount();
   fireEvent.change(screen.getByRole("spinbutton", { name: "width" }), { target: { value: "768" } });
   fireEvent.blur(screen.getByRole("spinbutton", { name: "width" }));
+  await screen.findByRole("option", { name: "Scene today" });
   fireEvent.change(screen.getByRole("combobox", { name: "Preset for this version" }), { target: { value: "preset-scene" } });
   fireEvent.click(screen.getByRole("button", { name: "Restore original settings" }));
   expect(screen.getByRole("spinbutton", { name: "width" })).toHaveValue(640);
@@ -258,4 +271,241 @@ it("does not ask again or make a third submission when the confirmed retry is re
   expect(api.queueEditedMessage).toHaveBeenCalledTimes(2);
   expect(screen.queryByRole("button", { name: "Start video" })).not.toBeInTheDocument();
   expect(onAccepted).not.toHaveBeenCalled();
+});
+
+it.each(["text_to_image", "image_to_image"])(
+  "loads the chosen historical %s schema and preserves the original snapshot",
+  async (operation) => {
+    vi.mocked(api.getPriorTurnEditSource).mockResolvedValue({ ...structuredClone(source),
+      workflow_schema: { properties: { width: { type: "integer", title: "Original width" } } },
+    });
+    vi.mocked(api.workflowRevisionChoices).mockResolvedValue([1, 2].map((version) => ({
+      revision_id: "history-r" + version, workflow_id: "history", workflow_name: "Example history",
+      operation, version,
+    })));
+    vi.mocked(api.workflowRevisionSchema).mockResolvedValue({
+      revision_id: "history-r1", workflow_id: "history", operation,
+      input_schema_json: { properties: { width: { type: "integer", title: "Historical width" } } },
+    });
+    await mount();
+    expect(screen.getByRole("spinbutton", { name: "Original width" })).toHaveValue(640);
+    expect(api.workflowRevisionSchema).not.toHaveBeenCalled();
+    await screen.findByRole("option", { name: "Example history · version 1" });
+    expect(screen.getByRole("option", { name: "Example history · version 2" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Workflow for this version"), { target: { value: "revision:history-r1" } });
+    await screen.findByRole("spinbutton", { name: "Historical width" });
+    expect(api.workflowRevisionSchema).toHaveBeenCalledTimes(1);
+    expect(api.workflowRevisionSchema).toHaveBeenCalledWith("history-r1", expect.any(AbortSignal));
+    fireEvent.change(screen.getByLabelText("Workflow for this version"), { target: { value: "inherit" } });
+    expect(screen.getByRole("spinbutton", { name: "Original width" })).toHaveValue(640);
+    expect(api.workflowRevisionSchema).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each(["loading", "failed", "missing"])("keeps the pinned revision visible when choices are %s", async (state) => {
+  const choice = { kind: "explicit" as const, value: { selector_capability: "image" as const,
+    mode: "revision" as const, workflow_revision_id: "history-r1" } };
+  writePriorTurnEditDraft({ ...initializePriorTurnEditDraft(structuredClone(source)), workflowChoice: choice });
+  let finish!: (choices: Awaited<ReturnType<typeof api.workflowRevisionChoices>>) => void;
+  if (state === "loading") vi.mocked(api.workflowRevisionChoices).mockReturnValue(
+    new Promise(resolve => { finish = resolve; }));
+  else if (state === "failed") vi.mocked(api.workflowRevisionChoices).mockRejectedValue(new Error("neutral choices unavailable"));
+  vi.mocked(api.workflowRevisionSchema).mockResolvedValue({
+    revision_id: "history-r1", workflow_id: "history", operation: "text_to_image", input_schema_json: {},
+  });
+  await mount();
+  if (state === "failed") await screen.findByText("Workflow choices or settings could not be loaded.");
+  const select = screen.getByLabelText<HTMLSelectElement>("Workflow for this version");
+  expect(select).toHaveValue("revision:history-r1");
+  await waitFor(() => expect(select.selectedOptions[0].textContent).toBe(state === "loading"
+    ? "Selected workflow (loading details…)" : "Selected workflow (details unavailable)"));
+  expect(readPriorTurnEditDraft(chat.id, source.source_user_message_id)?.workflowChoice).toEqual(choice);
+  if (state !== "missing") {
+    const choices = [{ revision_id: "history-r1", workflow_id: "history",
+      workflow_name: "Example history", operation: "text_to_image", version: 1 }];
+    if (state === "loading") await act(async () => finish(choices));
+    else {
+      vi.mocked(api.workflowRevisionChoices).mockResolvedValue(choices);
+      fireEvent.click(screen.getByRole("button", { name: "Retry workflow reads" }));
+    }
+    await screen.findByRole("option", { name: "Example history · version 1" });
+    expect(select).toHaveValue("revision:history-r1");
+    expect(select.selectedOptions[0].textContent?.trim()).toBe("Example history · version 1");
+  }
+  expect((await submit()).workflow_selection).toEqual(choice.value);
+});
+
+it.each([
+  ["image", "image"], ["auto", "image"], ["auto", "chat"],
+] as const)("previews the inherited image canvas in %s while viewing %s settings", async (mode, viewedRole) => {
+  vi.mocked(api.getPriorTurnEditSource).mockResolvedValue({
+    ...structuredClone(source), original_mode: mode, operation: "image_to_image",
+    source_fit: { mode: "extend", width: 1200, height: 900 },
+    input_artifact_ids: ["canvas-source"],
+    input_artifacts: [{ id: "canvas-source", sha256: "b".repeat(64), kind: "input", media_type: "image/png",
+      size_bytes: 10, original_name: "landscape.png", metadata_json: {}, created_at: stamp }],
+    workflow_revision_id: "canvas-revision",
+    workflow_selection: { selector_capability: "image", mode: "revision", workflow_revision_id: "canvas-revision",
+      workflow_family_id: null, legacy_profile_id: null },
+  });
+  vi.mocked(api.workflowRevisionSourceFit).mockResolvedValue({
+    available: true, reason: null, modes: ["extend"], request_authorized: false,
+  });
+  vi.mocked(api.previewPriorTurnSourceFit).mockResolvedValue({
+    version: 1, mode: "extend", workflow_revision_id: "canvas-revision", workflow_artifact_sha256: "c".repeat(64),
+    source_artifact_id: "canvas-source", source: { width: 400, height: 300 },
+    canvas: { width: 1200, height: 900 }, margins: { left: 400, top: 300, right: 400, bottom: 300 },
+    source_rectangle: { x: 400, y: 300, width: 400, height: 300 }, request_authorized: false,
+  });
+  await mount();
+  if (viewedRole !== "image") fireEvent.change(screen.getByLabelText("Settings for this version"), { target: { value: "role:" + viewedRole } });
+  fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+  expect(screen.getByLabelText("Generation mode")).toHaveValue(mode);
+  await screen.findByRole("button", { name: "Extend / preserve all" });
+  fireEvent.click(screen.getByRole("button", { name: "Preview canvas" }));
+  await screen.findByRole("img", { name: /Extension preview/ });
+  const chooseWorkflow = (choice: string) => {
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    if (viewedRole !== "image") fireEvent.change(screen.getByLabelText("Settings for this version"), { target: { value: "role:image" } });
+    fireEvent.change(screen.getByLabelText("Workflow for this version"), { target: { value: choice } });
+    if (viewedRole !== "image") fireEvent.change(screen.getByLabelText("Settings for this version"), { target: { value: "role:" + viewedRole } });
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+  };
+  for (const choice of ["current", "automatic"]) {
+    chooseWorkflow(choice);
+    expect(screen.queryByRole("img", { name: /Extension preview/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preview canvas" })).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Queue edited version" }));
+    expect(api.queueEditedMessage).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Message")).toHaveValue(source.text);
+  }
+  chooseWorkflow("inherit");
+  fireEvent.click(screen.getByRole("button", { name: "Preview canvas" }));
+  await screen.findByRole("img", { name: /Extension preview/ });
+  fireEvent.click(screen.getByRole("button", { name: "Queue edited version" }));
+  await waitFor(() => expect(api.queueEditedMessage).toHaveBeenCalledTimes(1));
+  await screen.findByText("Queue full");
+  expect(vi.mocked(api.queueEditedMessage).mock.calls[0][1]).toMatchObject({
+    mode, input_artifact_ids: ["canvas-source"],
+    source_fit: { mode: "extend", width: 1200, height: 900 },
+  });
+  expect(vi.mocked(api.queueEditedMessage).mock.calls[0][1]).not.toHaveProperty("workflow_selection");
+  expect(vi.mocked(api.queueEditedMessage).mock.calls[0][1]).not.toHaveProperty("workflow_revision_id");
+  // The preview is the edit itself: the same message, mode and canvas the queued version carries.
+  expect(api.previewPriorTurnSourceFit).toHaveBeenLastCalledWith(
+    source.source_user_message_id,
+    expect.objectContaining({ mode, source_fit: { mode: "extend", width: 1200, height: 900 } }),
+    expect.any(AbortSignal),
+  );
+  expect(api.previewWorkflowRevisionSourceFit).not.toHaveBeenCalled();
+});
+
+it("pages historical workflow choices without dropping the selected revision", async () => {
+  const rows = Array.from({ length: 51 }, (_, index) => ({ revision_id: "history-r" + index,
+    workflow_id: "history-" + index, workflow_name: "History " + String(index).padStart(2, "0"),
+    operation: "text_to_image", version: 1 }));
+  vi.mocked(api.workflowRevisionChoices).mockImplementation(async (_signal?: AbortSignal, options?: {
+    revisionIds?: string[]; offset?: number; limit?: number; search?: string;
+  }) => {
+    if (options?.revisionIds) return rows.filter(row => options.revisionIds?.includes(row.revision_id));
+    const matching = rows.filter(row => row.workflow_name.includes(options?.search ?? ""));
+    return matching.slice(options?.offset ?? 0, (options?.offset ?? 0) + (options?.limit ?? rows.length));
+  });
+  writePriorTurnEditDraft({ ...initializePriorTurnEditDraft(structuredClone(source)), workflowChoice: {
+    kind: "explicit", value: { selector_capability: "image", mode: "revision", workflow_revision_id: "history-r50" },
+  } });
+  vi.mocked(api.workflowRevisionSchema).mockResolvedValue({ revision_id: "history-r50", workflow_id: "history-50",
+    operation: "text_to_image", input_schema_json: {} });
+  await mount();
+  await screen.findByRole("option", { name: "History 50 · version 1" });
+  expect(api.workflowRevisionChoices).toHaveBeenCalledWith(expect.any(AbortSignal), expect.objectContaining({ limit: 50, role: "image" }));
+  const select = screen.getByLabelText("Workflow for this version");
+  expect(select).toHaveValue("revision:history-r50");
+  fireEvent.click(screen.getByRole("button", { name: "Load more workflow revisions" }));
+  await waitFor(() => expect(api.workflowRevisionChoices).toHaveBeenCalledWith(expect.any(AbortSignal), expect.objectContaining({ offset: 50 })));
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search workflow revisions" }), { target: { value: "History 00" } });
+  await waitFor(() => expect(api.workflowRevisionChoices).toHaveBeenCalledWith(expect.any(AbortSignal), expect.objectContaining({ search: "History 00", offset: 0 })));
+  expect(select).toHaveValue("revision:history-r50");
+  expect(screen.getByRole("option", { name: "History 50 · version 1" })).toBeInTheDocument();
+});
+
+function pagedFamily(id: string, count = 1, isDefault = false): WorkflowFamily {
+  return { id, name: id, description: "", use_case: "", tags: [], enabled: true, archived: false,
+    compatibility: false, created_at: stamp, updated_at: stamp,
+    preferences: [{ selector_capability: "image", enabled: true, is_default: isDefault, sort_order: 0 }],
+    variants: Array.from({ length: count }, (_, index) => ({ id: `${id}-${index}`, name: `Variant ${index}`,
+      variant_key: String(index), operation: "text_to_image", current_revision_id: `${id}-revision-${index}`,
+      current_revision_version: 1, engine: "mock", capabilities: ["image"], trusted: true,
+      readiness: "ready", readiness_reason: null })) };
+}
+function familyPages(selected = pagedFamily("Chosen elsewhere")) {
+  const rows = [...Array.from({ length: 50 }, (_, index) => pagedFamily(`Browse ${String(index).padStart(2, "0")}`)), selected];
+  vi.mocked(api.workflowFamilies).mockImplementation(async (_capability, archived, _dependencies, options) =>
+    familyFixturePage(rows, archived, options ?? { limit: 50 }));
+  vi.mocked(api.workflowRevisionSchema).mockImplementation(async id => ({
+    revision_id: id, workflow_id: "workflow", operation: "text_to_image",
+    input_schema_json: { properties: { steps: { type: "integer", title: "Chosen steps", default: 12 } } },
+  }));
+  return selected;
+}
+function pinFamily(id: string) {
+  const draft = initializePriorTurnEditDraft(structuredClone(source));
+  draft.workflowChoice = { kind: "explicit", value: { selector_capability: "image", mode: "family", workflow_family_id: id } };
+  writePriorTurnEditDraft(draft);
+}
+it("retains an off-page prior-turn family through searching and loading more families", async () => {
+  const chosen = familyPages();
+  pinFamily(chosen.id);
+  await mount();
+  expect(await screen.findByRole("option", { name: chosen.name })).toBeInTheDocument();
+  const picker = screen.getByLabelText("Workflow for this version");
+  expect(picker).toHaveValue("family:" + chosen.id);
+  fireEvent.click(screen.getByRole("button", { name: "Load more workflow families" }));
+  await waitFor(() => expect(api.workflowFamilies).toHaveBeenCalledWith(undefined, false, false,
+    expect.objectContaining({ offset: 50, limit: 50 }), expect.any(AbortSignal)));
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search workflow families" }), { target: { value: "Browse 49" } });
+  await screen.findByRole("option", { name: "Browse 49" });
+  expect(picker).toHaveValue("family:" + chosen.id);
+  expect(await screen.findByRole("spinbutton", { name: "Chosen steps" })).toBeInTheDocument();
+  expect(readPriorTurnEditDraft(chat.id, source.source_user_message_id)?.workflowChoice).toEqual({ kind: "explicit",
+    value: { selector_capability: "image", mode: "family", workflow_family_id: chosen.id } });
+});
+it("resolves a prior-turn default beyond the browsing page", async () => {
+  familyPages(pagedFamily("Workspace default", 1, true));
+  const draft = initializePriorTurnEditDraft(structuredClone(source));
+  draft.workflowChoice = { kind: "explicit", value: { selector_capability: "image", mode: "default" } };
+  writePriorTurnEditDraft(draft);
+  await mount();
+  expect(await screen.findByRole("spinbutton", { name: "Chosen steps" })).toBeInTheDocument();
+  expect(api.workflowFamilies).toHaveBeenCalledWith("image", false, false, expect.objectContaining({
+    defaultsOnly: true, readiness: "ready", operation: "text_to_image", limit: 1, variantLimit: 2,
+  }), expect.any(AbortSignal));
+});
+it("does not resolve an ambiguous prior-turn family from its first visible variant", async () => {
+  const chosen = familyPages(pagedFamily("Ambiguous family", 3));
+  pinFamily(chosen.id);
+  await mount();
+  await screen.findByRole("option", { name: chosen.name });
+  await waitFor(() => expect(api.workflowFamilies).toHaveBeenCalledWith("image", false, false,
+    expect.objectContaining({ familyIds: [chosen.id], readiness: "ready", variantLimit: 2 }), expect.any(AbortSignal)));
+  expect(api.workflowRevisionSchema).not.toHaveBeenCalled();
+  expect(screen.getByLabelText("Workflow for this version")).toHaveValue("family:" + chosen.id);
+});
+it("keeps a prior-turn family when its exact read fails and retries without replacing it", async () => {
+  const chosen = familyPages();
+  const normal = vi.mocked(api.workflowFamilies).getMockImplementation()!;
+  let failed = true;
+  vi.mocked(api.workflowFamilies).mockImplementation(async (capability, archived, dependencies, options, signal) => {
+    if (options?.familyIds && failed) throw new Error("Exact family unavailable");
+    return normal(capability, archived, dependencies, options, signal);
+  });
+  pinFamily(chosen.id);
+  await mount();
+  await screen.findByRole("button", { name: "Retry selected family" });
+  expect(screen.getByLabelText("Workflow for this version")).toHaveValue("family:" + chosen.id);
+  expect(screen.queryByRole("option", { name: "Selected family (currently unavailable)" })).not.toBeInTheDocument();
+  failed = false;
+  fireEvent.click(screen.getByRole("button", { name: "Retry selected family" }));
+  await screen.findByRole("option", { name: chosen.name });
+  expect(readPriorTurnEditDraft(chat.id, source.source_user_message_id)?.workflowChoice).toMatchObject({ value: { workflow_family_id: chosen.id } });
 });

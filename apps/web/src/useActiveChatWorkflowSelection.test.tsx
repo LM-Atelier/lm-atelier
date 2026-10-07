@@ -86,7 +86,9 @@ describe("useActiveChatWorkflowSelection", () => {
     );
 
     await waitFor(() => expect(result.current.kind).toBe("ready"));
-    expect(api.workflowFamilies).toHaveBeenCalledWith(capability);
+    expect(api.workflowFamilies).toHaveBeenCalledWith(capability, false, false,
+      expect.objectContaining({ limit: 50, variantLimit: 1, variantCapability: capability }),
+      expect.any(AbortSignal));
     expect(api.workflowFamilies).not.toHaveBeenCalledWith("vision");
     expect(result.current.capability).toBe(capability);
   });

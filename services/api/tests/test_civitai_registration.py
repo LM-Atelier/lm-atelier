@@ -378,6 +378,7 @@ async def test_a_civitai_preflight_composes_into_the_download_manager(
     assert revision == "201"
     assert extra == {
         "source_version_id": "201",
+        "instruction_edit_capability": "unknown",
         "tags": ["portrait"],
         "category": ["LORA"],
         "trained_words": ["portrait-style"],

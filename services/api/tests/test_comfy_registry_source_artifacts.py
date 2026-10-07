@@ -7,6 +7,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import pytest
 from sqlalchemy import Select, create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from local_lm import comfy_registry_source_artifacts as source_artifacts
@@ -23,7 +24,7 @@ from local_lm.comfy_registry_source_artifacts import (
 from local_lm.config import Settings
 from local_lm.db import Base
 from local_lm.domain import ArtifactKind
-from local_lm.models import Artifact, ComfyRegistrySourceArtifactReview
+from local_lm.models import Artifact, Chat, ComfyRegistrySourceArtifactReview
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 ALT_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
@@ -208,6 +209,31 @@ def test_exact_retry_is_idempotent_and_does_not_rewrite_review_time(
     assert second.id == first.id
     assert second.reviewed_at == reviewed_at
     assert session.query(ComfyRegistrySourceArtifactReview).count() == 1
+
+
+def test_unrelated_pending_write_keeps_its_original_database_error(
+    source_review_context: tuple[Session, ArtifactStore],
+) -> None:
+    session, store = source_review_context
+    artifact = _artifact(session, store)
+    session.commit()
+    artifact_id = artifact.id
+    session.add(Chat(id="chat_pending", routing_mode="invalid"))
+
+    with session.no_autoflush, pytest.raises(IntegrityError) as caught:
+        record_local_source_artifact_review(
+            session, store, declaration=DECLARATION, artifact_id=artifact_id
+        )
+
+    assert "ck_chat_routing_mode" in str(caught.value.orig)
+    session.rollback()
+    assert session.get(Chat, "chat_pending") is None
+    assert session.query(ComfyRegistrySourceArtifactReview).count() == 0
+    review = record_local_source_artifact_review(
+        session, store, declaration=DECLARATION, artifact_id=artifact_id
+    )
+    session.commit()
+    assert session.get(ComfyRegistrySourceArtifactReview, review.id) is review
 
 
 def test_same_artifact_under_a_different_declaration_is_a_coded_conflict(

@@ -6,7 +6,7 @@ import { useStudioSession } from "./useStudioSession";
 import { api } from "./api";
 
 vi.mock("./api", () => ({
-  api: { openStudioSession: vi.fn(), studioSession: vi.fn(), sendTurn: vi.fn() },
+  api: { openStudioSession: vi.fn(), studioSession: vi.fn(), sendTurn: vi.fn(), upload: vi.fn() },
 }));
 
 function chain(chatId: string, artifactId: string) {
@@ -79,6 +79,33 @@ describe("a studio session belongs to one picture", () => {
 
     await waitFor(() => expect(result.current.error).toBeTruthy());
     expect(api.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("sends a tool's second picture after the source, as an input", async () => {
+    vi.mocked(api.openStudioSession).mockResolvedValue(chain("chat-a", "edit-of-a") as never);
+    vi.mocked(api.studioSession).mockResolvedValue(chain("chat-a", "edit-of-a") as never);
+    vi.mocked(api.upload).mockResolvedValue({ id: "sha256:light-map" } as never);
+    vi.mocked(api.sendTurn).mockResolvedValue({} as never);
+
+    const { result } = renderHook(() => useStudioSession("art-a", null), { wrapper });
+    await waitFor(() => expect(result.current.sessionId).toBe("chat-a"));
+    const map = new Blob(["map"], { type: "image/png" });
+    result.current.apply(
+      "Relight",
+      "art-a",
+      undefined,
+      { relight: { direction: "left" } },
+      "wfrev_light",
+      undefined,
+      map,
+    );
+
+    await waitFor(() => expect(api.sendTurn).toHaveBeenCalled());
+    const [sessionId, text, mode, inputs, settings] = vi.mocked(api.sendTurn).mock.calls[0];
+    expect([sessionId, text, mode]).toEqual(["chat-a", "Relight", "image"]);
+    expect(inputs).toEqual(["art-a", "sha256:light-map"]);
+    expect(settings).toEqual({ relight: { direction: "left" } });
+    expect(vi.mocked(api.sendTurn).mock.calls[0][7]).toBe("wfrev_light");
   });
 
   it("ignores a stored session that was opened for another picture", async () => {

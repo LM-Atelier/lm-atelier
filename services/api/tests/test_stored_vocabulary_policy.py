@@ -91,6 +91,10 @@ CONSTRAINED_COLUMNS: frozenset[tuple[str, str]] = frozenset(
         ("media_collections", "kind"),
         ("media_collections", "name"),
         ("media_collections", "version"),
+        ("media_organization_catalog_revisions", "kind"),
+        ("media_organization_catalog_revisions", "revision"),
+        ("media_organization_creations", "kind"),
+        ("media_organization_creations", "operation_key"),
         ("media_tags", "color"),
         ("media_tags", "label"),
         ("media_tags", "slug"),
@@ -131,6 +135,7 @@ CONSTRAINED_COLUMNS: frozenset[tuple[str, str]] = frozenset(
         ("prompt_template_revisions", "contract_sha256"),
         ("prompt_template_revisions", "schema_version"),
         ("prompt_template_revisions", "version"),
+        ("queue_order_entries", "position"),
         ("reference_asset_review_events", "artifact_sha256"),
         ("reference_asset_review_events", "decision_sha256"),
         ("reference_asset_review_events", "expected_version"),
@@ -165,9 +170,11 @@ CONSTRAINED_COLUMNS: frozenset[tuple[str, str]] = frozenset(
         ("workflow_install_offers", "dependency_contract_sha256"),
         ("workflow_install_offers", "offer_sha256"),
         ("workflow_install_offers", "plan_count"),
+        ("workflow_install_offers", "source_plan_id"),
         ("workflow_install_offers", "status"),
         ("workflow_install_offers", "total_bytes"),
         ("workflow_install_offers", "workflow_artifact_sha256"),
+        ("workflow_package_install_plans", "plan_sha256"),
         ("workflow_preferences", "enabled"),
         ("workflow_preferences", "is_default"),
         ("workflow_preferences", "selector_capability"),
@@ -178,13 +185,15 @@ CONSTRAINED_COLUMNS: frozenset[tuple[str, str]] = frozenset(
         ("workflow_trust_attestations", "node_inventory_sha256"),
         ("workflow_trust_attestations", "runtime_contract_sha256"),
         ("workflow_trust_attestations", "whitelist_sha256"),
+        ("workflow_use_case_presets", "enabled"),
+        ("workflow_use_case_presets", "is_default"),
     }
 )
 
 #: The number of ``CheckConstraint`` objects in the schema. Pinned alongside the
 #: columns so that a constraint naming no column at all, or one constraint
 #: replaced by two over the same columns, still fails.
-CHECK_CONSTRAINT_COUNT = 103
+CHECK_CONSTRAINT_COUNT = 110
 
 
 def _mapped_tables() -> dict[str, Table]:

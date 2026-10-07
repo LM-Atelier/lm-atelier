@@ -21,7 +21,8 @@ from pathlib import Path
 
 import pytest
 
-WORDING = Path(__file__).resolve().parents[3] / "apps" / "web" / "src" / "readinessReason.ts"
+WEB = Path(__file__).resolve().parents[3] / "apps" / "web" / "src"
+WORDING = WEB / "readinessReason.ts"
 API = Path(__file__).resolve().parents[1] / "local_lm" / "api.py"
 
 
@@ -85,4 +86,30 @@ def test_the_browser_invents_no_reason(browser_reasons: set[str]) -> None:
     invented = browser_reasons - _server_reasons() - ALLOWED_AHEAD
     assert not invented, (
         f"the workflow selectors carry wording for {sorted(invented)}, which the server never sends"
+    )
+
+
+def test_only_one_module_words_the_reasons(browser_reasons: set[str]) -> None:
+    """A second list of sentences is how the first one goes stale.
+
+    The Workflows view kept its own copy, worded differently and two reasons
+    short, so a workflow refused for a reason added after that copy was written
+    read a real sentence in the selectors and "No further readiness details are
+    available" there. Nothing caught it, because this file only ever read the
+    one module. It reads all of them now.
+    """
+
+    if not WEB.is_dir():
+        pytest.skip("the browser sources are not present in this checkout")
+    slugs = _server_reasons() | browser_reasons
+    naming = re.compile(rf"^\s*({'|'.join(sorted(slugs))})\s*:\s*[\"`']", re.M)
+    elsewhere = {
+        path.name: sorted({m.group(1) for m in naming.finditer(path.read_text(encoding="utf-8"))})
+        for path in sorted(WEB.rglob("*.ts*"))
+        if path != WORDING
+    }
+    carrying = {name: found for name, found in elsewhere.items() if found}
+    assert not carrying, (
+        f"{sorted(carrying)} map a readiness reason to wording of their own; the "
+        "sentences belong in readinessReason.ts so every view says the same thing"
     )

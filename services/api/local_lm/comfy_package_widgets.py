@@ -40,6 +40,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+POWER_LORA_LOADER_CONTRACT = "rgthree-power-lora-loader-v1"
+
 POWER_LORA_LOADER = "Power Lora Loader (rgthree)"
 VIDEO_COMBINE = "VHS_VideoCombine"
 
@@ -181,11 +183,25 @@ def package_widget_inputs(
     as it did before any layout was known.
     """
 
+    if package_widget_contract(node_type, claim) != POWER_LORA_LOADER_CONTRACT:
+        return None
+    return _power_lora_loader_inputs(values)
+
+
+def package_widget_contract(node_type: str, claim: PackageClaim | None) -> str | None:
+    """Return the exact audited contract that authorizes a package layout.
+
+    A compiled API prompt no longer carries the UI node properties that named
+    the package and revision. Callers which retain that evidence can ask this
+    function whether it authorizes the same transcription used by the compiler,
+    without copying the private audited-revision set into another subsystem.
+    """
+
     if node_type != POWER_LORA_LOADER or not _names(claim, _RGTHREE, node_type):
         return None
     assert claim is not None
     _require_audited(node_type, claim, _RGTHREE_AUDITED)
-    return _power_lora_loader_inputs(values)
+    return POWER_LORA_LOADER_CONTRACT
 
 
 def package_named_widget_inputs(

@@ -35,9 +35,31 @@ function strengthChange(before: unknown, after: unknown): string {
 /**
  * Skips that are not worth a line. `not_image_edit` and `disabled` are the
  * ordinary state of almost every message, and `eligible` means the check was
- * about to run rather than that it stopped.
+ * about to run rather than that it stopped. `new_canvas` is an extension, which
+ * is not an edit of its source's pixels for the review to judge.
  */
-const SILENT_SKIPS = new Set(["not_image_edit", "disabled", "eligible", "cancelled"]);
+const SILENT_SKIPS = new Set(["not_image_edit", "disabled", "eligible", "cancelled", "new_canvas"]);
+
+/**
+ * Skips where the review ran and reached no verdict, which is a different thing
+ * from never having started. A review that reads both pictures, reads both
+ * lists and then refuses to certify has done its work and learned something;
+ * telling the person it did not run describes the wrong event, and since a
+ * reading that would otherwise pass an edit now ends here, this is the common
+ * ending of a good edit rather than a rare one.
+ */
+const REACHED_NO_VERDICT = new Set([
+  "change_unaccounted",
+  "inventory_unavailable",
+  "assessment_unavailable",
+  "invalid_assessment",
+]);
+
+/** Whether the comparison measured a change, whatever the review concluded from it. */
+function measuredAChange(review: Record<string, unknown>): boolean {
+  const difference = record(review.difference);
+  return difference?.comparable === true && difference.changed === true;
+}
 
 export function editReviewSummary(
   provenance: Record<string, unknown> | undefined,
@@ -55,9 +77,13 @@ export function editReviewSummary(
 
   if (review.status === "skipped") {
     const reason = review.reason;
-    return typeof reason === "string" && SILENT_SKIPS.has(reason)
-      ? null
-      : "Edit review did not run";
+    if (typeof reason === "string" && SILENT_SKIPS.has(reason)) return null;
+    if (typeof reason === "string" && REACHED_NO_VERDICT.has(reason)) {
+      return measuredAChange(review)
+        ? "Edit review could not tell · the picture did change"
+        : "Edit review could not tell";
+    }
+    return "Edit review did not run";
   }
   if (review.status !== "complete") return null;
 
@@ -78,10 +104,21 @@ export function editReviewSummary(
       return "Edit review suggested another attempt · it has not started yet";
   }
 
+  // The pixels outrank the model: a result that measurably did not change
+  // where the edit was asked is reported as such, whatever the model said.
+  if (review.reason === "no_measurable_change") {
+    return "Edit review measured no change where you asked for one";
+  }
+
   const assessment = record(review.assessment);
   if (!assessment) return null;
   if (assessment.requested_change_visible === false) {
-    return "Edit review did not find the change you asked for";
+    // Say so when the two signals disagree. The comparison is measured from the
+    // pixels and the verdict is a model's reading of them, so a flat "not found"
+    // over a picture that visibly changed is the one claim worth qualifying.
+    return measuredAChange(review)
+      ? "Edit review did not find the change you asked for · the picture did change"
+      : "Edit review did not find the change you asked for";
   }
   if (assessment.unrelated_content_preserved === false) {
     return "Edit review found changes beyond the one you asked for";

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from sqlalchemy import select
@@ -84,6 +85,32 @@ def _recorded_compiler_versions(
     return versions
 
 
+def _files_still_as_measured(install: ModelInstall) -> bool:
+    """Whether every file measured at activation still looks the way it did.
+
+    Only an install whose identity was measured here carries these signatures,
+    and the comparison costs one stat each. It can refuse evidence and can never
+    grant it: a file that matches its size and time is not thereby proved, it is
+    merely not yet known to have changed.
+    """
+
+    recorded = install.manifest_json.get("file_signatures")
+    if not isinstance(recorded, dict) or not recorded:
+        return True
+    root = Path(install.local_path)
+    for name, signature in recorded.items():
+        if not isinstance(name, str) or not isinstance(signature, list) or len(signature) != 2:
+            return False
+        path = root / name if root.is_dir() else root
+        try:
+            status = path.stat()
+        except OSError:
+            return False
+        if [status.st_size, status.st_mtime_ns] != list(signature):
+            return False
+    return True
+
+
 def current_capability_evidence(
     session: Session,
     install: ModelInstall,
@@ -97,6 +124,10 @@ def current_capability_evidence(
         for path, digest in (install.manifest_json.get("expected_sha256") or {}).items()
         if isinstance(path, str) and isinstance(digest, str)
     }
+    if not _files_still_as_measured(install):
+        # The files this install's evidence was gathered against have moved on,
+        # so nothing probed before describes what is on disk now.
+        return None
     accepted_workflows = _accepted_workflow_contracts(session, install)
     runtime_name = (
         cast(Literal["llama.cpp", "vllm", "comfyui"], install.engine)

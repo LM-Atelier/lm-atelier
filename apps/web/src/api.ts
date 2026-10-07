@@ -1,11 +1,36 @@
+import type { QueueLane, QueueOrderCommand, QueueOrderPage, QueueOrderResult } from "./queueOrderTypes";
+import { recoveryApi } from "./recoveryApi";
+import { workspaceLockApi } from "./workspaceLockApi";
+import {
+  isWorkspaceLockBlocking,
+  noteSessionLock,
+  noteWorkspaceLockChanged,
+  noteWorkspaceLocked,
+  workspaceLockEpoch,
+} from "./workspaceLockState";
+import type { GenerationExperiment, GenerationExperimentBlindEvaluationCreate, GenerationExperimentBlindView, GenerationExperimentCreate, GenerationExperimentEvaluationCreate, GenerationExperimentPreflight, GenerationExperimentRecipeDraft, GenerationExperimentRequest, GenerationExperimentStart } from "./generationExperimentTypes";
+import { workflowFamilyQuery, workflowReadQuery, type WorkflowFamilyReadOptions, type WorkflowReadPageOptions } from "./workflowReadQuery";
+import type { WorkflowRecipeTarget, WorkflowUseCase, WorkflowUseCaseChoice, WorkflowUseCaseDefault, WorkflowUseCasePreset, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
+import type { EnlargementPreview } from "./studioEnlargement";
+import type { EditRecipeDraft, OutputRecipeDraft } from "./recipeDraftTypes";
+import type { BackupRestoreState } from "./backupRestoreTypes";
+import type { EncryptedBackupCheck } from "./backupArchiveTypes";
+import { buildTurnRequest, SOURCE_FIT_BINDING_ERROR, type TurnRequestPayload } from "./turnRequest";
+import { defaultOutputShapes } from "./outputShapePreferences";
+export { buildTurnRequest } from "./turnRequest";
+import type { SourceFitCapability, SourceFitIntent, SourceFitPreviewResult, SourceFitSelection } from "./sourceFit";
 import type { TurnReference } from "./mentionDraft";
 import type { ComposerPromptSource } from "./composerPromptSource";
+import type { InstallQueueAction, InstallQueuePolicy } from "./installationQueueTypes";
 import {
   parseArtifactLibraryPage,
   type ArtifactLibraryFilters,
 } from "./artifactLibraryPage";
 import type {
+  WebSearch,
+  WebSearchConfiguration,
   StudioCapabilityReport,
+  StudioLocalEditRequest,
   ApplicationInfo,
   AppEvent,
   Artifact,
@@ -14,6 +39,13 @@ import type {
   ArtifactLibraryItem,
   ArtifactStorageInfo,
   BackupInfo,
+  RetentionPolicy,
+  ThirdPartyNotices,
+  LoraSuggestions,
+  WorkflowLoraControls,
+  EmptyChatDeletion,
+  EmptyChatPage,
+  EmptyChatPreview,
   ReferenceAsset,
   ReferenceAssetAttached,
   ReferenceAssetReview,
@@ -24,14 +56,22 @@ import type {
   CatalogModel,
   CatalogPage,
   CatalogDetail,
+  CatalogInstallMatches,
   CatalogPreflight,
   CatalogVersions,
   Chat,
+  ChatSearchPage,
+  ChatTranscriptContext,
+  ChatEditLineagePage,
+  ChatSummary,
+  ChatComposerDraft,
+  ChatComposerDraftInput,
   ChatItemRemovalExecution,
   ChatItemRemovalImpact,
   ContentRating,
   ExchangeDeletion,
   ChatDetail,
+  ChatMessageWindow,
   DraftClassification,
   PriorTurnEditBinding,
   CustomNodeInstall,
@@ -41,13 +81,31 @@ import type {
   GenerationPreset,
   GenerationPresetBundle,
   Job,
+  JobActivity,
+  QueueActivityItem,
+  QueueControlCommand,
+  GenerationQueueAction,
+  GenerationQueuePolicy,
+  TransferQueueAction,
+  TransferQueuePolicy,
+  UtilityQueueAction,
+  UtilityQueuePolicy,
+  VideoProbe,
+  VideoTrimPreview,
+  VideoTrimRequest,
+  QueueControlResult,
+  QueueActivityPage,
+  QueuePlanSteps,
   Message,
   ModelAssetInstall,
   ModelInstall,
   ModelStorageInfo,
   ModelUpdate,
   ModelProfile,
+  UseCaseSuggestionOut,
+  ModelProfileModelUpdate,
   ModelProfileBundle,
+  OutputRatioPresetId,
   PlatformMatrixEntry,
   PromptHelperDetail,
   PromptBatchCreateInput,
@@ -69,16 +127,27 @@ import type {
   SystemInfo,
   ToolCapabilityProbe,
   TurnAccepted,
+  Run,
   PriorTurnEditRequest,
   PriorTurnEditAccepted,
   PriorTurnEditSource,
   EditTemplate,
   Workflow,
+  WorkflowOutputGeometryCapability,
+  WorkflowOutputGeometryResolution,
   WorkflowBundle,
+  WorkflowCatalogGraph,
   WorkflowAssetReview,
   WorkflowPackageAnalysis,
+  WorkflowRevisionChoice,
+  WorkflowReadyRevision,
+  WorkflowRevisionSchema,
+  WorkflowSummary,
   WorkflowRevision,
   WorkflowRevisionReview,
+  WorkflowActivation,
+  WorkflowActivationPreparation,
+  WorkflowActivationRequest,
   WorkflowEditorDraft,
   WorkflowEditorReturn,
   WorkflowEditorSession,
@@ -86,6 +155,7 @@ import type {
   WorkerLogTail,
   WorkerResetResult,
   WorkerSettings,
+  KeepAwakeStatus,
   WorkerStatus,
   EditedBranchPage,
   EditedBranchActivation,
@@ -93,6 +163,7 @@ import type {
   WorkStep,
   WorkflowDependencyResourceKind,
   WorkflowFamily,
+  WorkflowInstallProgress,
   WorkflowFamilyPreference,
   WorkflowFamilyPreferenceUpdate,
   WorkflowFamilyRemovalImpact,
@@ -186,6 +257,8 @@ export class ApiError extends Error {
     public readonly detail: unknown,
     message: string,
     public readonly code?: string,
+    /** The whole error body, for routes whose refusal carries more than a message. */
+    public readonly payload?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "ApiError";
@@ -205,10 +278,13 @@ async function ensureSession(): Promise<void> {
         csrf_token: string;
         event_epoch?: string;
         event_sequence?: number;
+        workspace_locked?: boolean;
+        lock_epoch?: string | null;
       };
       csrfToken = payload.csrf_token;
       eventEpoch = payload.event_epoch ?? "";
       eventSequence = Math.max(0, payload.event_sequence ?? 0);
+      noteSessionLock(payload);
     })();
   }
   try {
@@ -240,17 +316,24 @@ async function isCsrfFailure(response: Response): Promise<boolean> {
   }
 }
 
-async function request<T>(
+/** Send one request and return its successful response, or throw its refusal. */
+async function send(
   path: string,
   init: RequestInit = {},
   retrySession = true,
-): Promise<T> {
+): Promise<Response> {
   if (path !== "/api/session") await ensureSession();
   const headers = new Headers(init.headers);
-  if (init.body && !(init.body instanceof FormData)) headers.set("content-type", "application/json");
+  if (init.body && !(init.body instanceof FormData) && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
   if (init.method && !["GET", "HEAD"].includes(init.method.toUpperCase())) {
     headers.set("x-local-lm-csrf", csrfToken);
   }
+  // Ties the request to the lock this page last saw, so a page that slept
+  // through a lock is refused rather than served as if nothing happened.
+  const lockEpoch = path === "/api/session" ? null : workspaceLockEpoch();
+  if (lockEpoch) headers.set("x-local-lm-lock-epoch", lockEpoch);
   const response = await fetch(path, { ...init, headers, credentials: "same-origin" });
   if (path !== "/api/session" && retrySession) {
     // A stale session answers 401, but a stale CSRF token answers 403, and only
@@ -263,15 +346,17 @@ async function request<T>(
     if (staleSession) {
       resetSession();
       await ensureSession();
-      return request<T>(path, init, false);
+      return send(path, init, false);
     }
   }
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     let detail: unknown;
     let code: string | undefined;
+    let body: Record<string, unknown> | undefined;
     try {
       const payload = (await response.json()) as { detail?: unknown; code?: unknown };
+      if (payload && typeof payload === "object" && !Array.isArray(payload)) body = payload as Record<string, unknown>;
       detail = payload.detail;
       if (typeof payload.code === "string") code = payload.code;
       if (typeof detail === "string") message = detail;
@@ -279,10 +364,31 @@ async function request<T>(
     } catch {
       // Preserve the HTTP status text.
     }
-    throw new ApiError(response.status, detail, message, code);
+    if (response.status === 423) {
+      if (code === "workspace-lock-changed") noteWorkspaceLockChanged();
+      else noteWorkspaceLocked();
+    }
+    throw new ApiError(response.status, detail, message, code, body);
   }
+  return response;
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await send(path, init);
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
+}
+
+/** A response's exact bytes, for a body whose digest covers them as sent. */
+async function requestBytes(path: string, init: RequestInit = {}): Promise<ArrayBuffer> {
+  return (await send(path, init)).arrayBuffer();
+}
+
+// A header carries only Latin-1, so a passphrase goes as base64 of its UTF-8 bytes.
+function base64Text(text: string): string {
+  let binary = "";
+  for (const byte of new TextEncoder().encode(text)) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
 
 type WorkflowRevisionInput = Pick<
@@ -296,23 +402,90 @@ type WorkflowCreateInput = WorkflowRevisionInput & Pick<
 >;
 
 export const api = {
+  ...recoveryApi(request),
+  ...workspaceLockApi(request),
+  searchConfiguration: () => request<WebSearchConfiguration>("/api/web-search/configuration"),
+  decideSearch: (jobId: string, revision: number, action: "approve" | "decline" | "cancel") =>
+    request<WebSearch>("/api/jobs/" + encodeURIComponent(jobId) + "/search/decision",
+      { method: "POST", body: JSON.stringify({ revision, action }) }),
+  editSearch: (jobId: string, revision: number, query: string) =>
+    request<WebSearch>("/api/jobs/" + encodeURIComponent(jobId) + "/search",
+      { method: "PUT", body: JSON.stringify({ revision, query }) }),
   initialize: ensureSession,
   setupReadiness: () => request<SetupReadinessReport>("/api/setup/readiness"),
   verifySetupRole: (role: SetupVerification["role"]) =>
     request<SetupVerification>(`/api/setup/verify/${role}`, { method: "POST" }),
-  projects: (includeArchived = false, query = "") =>
-    request<Project[]>(`/api/projects?${new URLSearchParams({ include_archived: String(includeArchived), query })}`),
+  projects: (includeArchived = false, query = "", options: { limit?: number; offset?: number; projectIds?: string[]; literalSearch?: boolean; signal?: AbortSignal } = {}) => {
+    const parameters = new URLSearchParams({ include_archived: String(includeArchived), query });
+    if (options.limit !== undefined) parameters.set("limit", String(options.limit));
+    if (options.offset !== undefined) parameters.set("offset", String(options.offset));
+    for (const id of options.projectIds ?? []) parameters.append("project_id", id);
+    if (options.literalSearch) parameters.set("literal_search", "true");
+    return request<Project[]>(`/api/projects?${parameters}`, options.signal ? { signal: options.signal } : undefined);
+  },
+  project: (id: string, signal?: AbortSignal) => request<Project>(`/api/projects/${encodeURIComponent(id)}`, signal ? { signal } : undefined),
   createProject: (name: string) =>
     request<Project>("/api/projects", { method: "POST", body: JSON.stringify({ name }) }),
   updateProject: (id: string, values: Partial<Project>) =>
     request<Project>(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify(values) }),
   deleteProject: (id: string) => request<void>(`/api/projects/${id}`, { method: "DELETE" }),
-  chats: (projectId?: string | null, includeArchived = false, query = "") => {
+  chats: (projectId?: string | null, includeArchived = false, query = "", options: { limit?: number; offset?: number; searchProjects?: boolean; signal?: AbortSignal } = {}) => {
     const parameters = new URLSearchParams({ include_archived: String(includeArchived), query });
     if (projectId) parameters.set("project_id", projectId);
-    return request<Chat[]>(`/api/chats?${parameters}`);
+    if (options.limit !== undefined) parameters.set("limit", String(options.limit));
+    if (options.offset !== undefined) parameters.set("offset", String(options.offset));
+    if (options.searchProjects) parameters.set("search_projects", "true");
+    return request<Chat[]>(`/api/chats?${parameters}`, options.signal ? { signal: options.signal } : undefined);
+  },
+  chatSummaries: (projectId?: string | null, includeArchived = false, query = "", options: { limit?: number; offset?: number; searchProjects?: boolean; signal?: AbortSignal } = {}) => {
+    const parameters = new URLSearchParams({ include_archived: String(includeArchived), query });
+    if (projectId) parameters.set("project_id", projectId);
+    if (options.limit !== undefined) parameters.set("limit", String(options.limit));
+    if (options.offset !== undefined) parameters.set("offset", String(options.offset));
+    if (options.searchProjects) parameters.set("search_projects", "true");
+    return request<ChatSummary[]>(`/api/chats/summaries?${parameters}`, options.signal ? { signal: options.signal } : undefined);
   },
   chat: (id: string) => request<ChatDetail>(`/api/chats/${id}`),
+  chatMetadata: (id: string, signal?: AbortSignal) =>
+    request<Chat>(`/api/chats/${encodeURIComponent(id)}/metadata`, signal ? { signal } : undefined),
+  chatEditLineage: (id: string, resultId: string, options: {
+    before?: string; limit?: number; signal?: AbortSignal;
+  } = {}) => {
+    const parameters = new URLSearchParams({ limit: String(options.limit ?? 40) });
+    if (options.before) parameters.set("before", options.before);
+    return request<ChatEditLineagePage>(`/api/chats/${encodeURIComponent(id)}/messages/${encodeURIComponent(resultId)}/lineage?${parameters}`,
+      options.signal ? { signal: options.signal } : undefined);
+  },
+  chatContext: (id: string, headId: string | null, signal?: AbortSignal) => {
+    const parameters = new URLSearchParams();
+    if (headId !== null) parameters.set("head_id", headId);
+    return request<ChatTranscriptContext>(`/api/chats/${encodeURIComponent(id)}/context?${parameters}`,
+      signal ? { signal } : undefined);
+  },
+  chatSearches: (id: string, options: {
+    headId?: string | null; oldestMessageId?: string; before?: string;
+    pendingOnly?: boolean; limit?: number; signal?: AbortSignal;
+  } = {}) => {
+    const parameters = new URLSearchParams({ limit: String(options.limit ?? 40) });
+    if (options.headId) parameters.set("head_id", options.headId);
+    if (options.oldestMessageId !== undefined) parameters.set("oldest_message_id", options.oldestMessageId);
+    if (options.before !== undefined) parameters.set("before", options.before);
+    if (options.pendingOnly) parameters.set("pending_only", "true");
+    return request<ChatSearchPage>(`/api/chats/${encodeURIComponent(id)}/searches?${parameters}`,
+      options.signal ? { signal: options.signal } : undefined);
+  },
+  chatMessages: (id: string, options: {
+    headId?: string | null; before?: string; after?: string; around?: string;
+    limit?: number; signal?: AbortSignal;
+  } = {}) => {
+    const parameters = new URLSearchParams({ limit: String(options.limit ?? 40) });
+    if (options.headId) parameters.set("head_id", options.headId);
+    for (const anchor of ["before", "after", "around"] as const) {
+      if (options[anchor] !== undefined) parameters.set(anchor, options[anchor]);
+    }
+    return request<ChatMessageWindow>(`/api/chats/${encodeURIComponent(id)}/messages?${parameters}`,
+      options.signal ? { signal: options.signal } : undefined);
+  },
   classifyDraft: (chatId: string, text: string, mode: RoutingMode, editSource?: PriorTurnEditBinding) =>
     request<DraftClassification>(`/api/chats/${chatId}/classify-draft`, {
       method: "POST",
@@ -325,6 +498,15 @@ export const api = {
     }),
   updateChat: (id: string, values: Partial<Chat>) =>
     request<Chat>(`/api/chats/${id}`, { method: "PATCH", body: JSON.stringify(values) }),
+  /** The chat's unsent draft as the workspace keeps it; revision 0 when it has none. */
+  composerDraft: (chatId: string) =>
+    request<ChatComposerDraft>(`/api/chats/${encodeURIComponent(chatId)}/composer-draft`),
+  /** Replace the chat's stored draft, refused if another save came first. */
+  saveComposerDraft: (chatId: string, expectedRevision: number, draft: ChatComposerDraftInput) =>
+    request<ChatComposerDraft>(`/api/chats/${encodeURIComponent(chatId)}/composer-draft`, {
+      method: "PUT",
+      body: JSON.stringify({ expected_revision: expectedRevision, draft }),
+    }),
   deleteChat: (id: string, deleteGeneratedMedia = false) => {
     const parameters = new URLSearchParams({
       delete_generated_media: String(deleteGeneratedMedia),
@@ -340,6 +522,148 @@ export const api = {
     }),
   studioSession: (sessionId: string) =>
     request<ChatDetail>(`/api/studio/sessions/${encodeURIComponent(sessionId)}`),
+  /** One run, with what it resolved and recorded: how a Studio result's edit is made again. */
+  run: (runId: string) => request<Run>(`/api/runs/${encodeURIComponent(runId)}`),
+  /** Which of a record's requirements this installation holds; nothing is installed or kept. */
+  /** The words an edit was asked with, to keep it as an Image Studio recipe; nothing is saved. */
+  editRecipeDraft: (runId: string, signal?: AbortSignal) =>
+    request<EditRecipeDraft>(`/api/runs/${encodeURIComponent(runId)}/edit-recipe-draft`, { signal }),
+  /** A recipe drafted from one finished generation's settings; nothing is saved until the person saves it. */
+  outputRecipeDraft: (runId: string, signal?: AbortSignal) =>
+    request<OutputRecipeDraft>(`/api/runs/${encodeURIComponent(runId)}/recipe-draft`, { signal }),
+  /** Whether a run generated again from a record came out as the record's output did. */
+  replayResult: (runId: string, signal?: AbortSignal) =>
+    request<unknown>(`/api/runs/${encodeURIComponent(runId)}/replay-result`, { signal }),
+  /** Whether a record could be generated again exactly here; nothing is started or kept. */
+  planGenerationReplay: (content: ArrayBuffer) =>
+    request<unknown>("/api/output-recipes/replay-plan", {
+      method: "POST",
+      body: content,
+      headers: { "content-type": "application/octet-stream" },
+    }),
+  /** Generate a record again exactly, as the first turn of a chat with nothing in it. */
+  replayGenerationRecord: (chatId: string, content: ArrayBuffer) =>
+    request<unknown>(`/api/chats/${encodeURIComponent(chatId)}/replays`, {
+      method: "POST",
+      body: content,
+      headers: { "content-type": "application/octet-stream" },
+    }),
+  /** A new version of a record, with the chosen workflow, model and LoRAs in place of what does not match. */
+  adaptGenerationRecord: (
+    chatId: string,
+    content: ArrayBuffer,
+    choices: { workflowRevisionId?: string; profileId?: string; loras?: string[]; inputs?: string[] },
+  ) => {
+    const query = new URLSearchParams();
+    if (choices.workflowRevisionId) query.append("workflow_revision_id", choices.workflowRevisionId);
+    if (choices.profileId) query.append("profile_id", choices.profileId);
+    for (const lora of choices.loras ?? []) query.append("lora", lora);
+    for (const input of choices.inputs ?? []) query.append("input", input);
+    const text = query.toString();
+    const suffix = text ? `?${text}` : "";
+    return request<unknown>(`/api/chats/${encodeURIComponent(chatId)}/adaptations${suffix}`, {
+      method: "POST",
+      body: content,
+      headers: { "content-type": "application/octet-stream" },
+    });
+  },
+  checkGenerationRecord: (content: ArrayBuffer) =>
+    // A file's own bytes, not JSON: a bundle with its picture can be far larger
+    // than a JSON body may be, and the route bounds what it reads itself.
+    request<unknown>("/api/output-recipes/check", {
+      method: "POST",
+      body: content,
+      headers: { "content-type": "application/octet-stream" },
+    }),
+  /** One output's portable generation record, as the exact bytes its digest covers. */
+  generationRecord: (
+    runId: string,
+    artifactId: string,
+    includePrompt: boolean,
+    signal?: AbortSignal,
+  ) =>
+    requestBytes(
+      `/api/runs/${encodeURIComponent(runId)}/outputs/${encodeURIComponent(artifactId)}/recipe?prompts=${includePrompt ? "include" : "omit"}`,
+      { signal },
+    ),
+  /** A picture's record, byte for byte as shown and named by its digest, zipped with a clean copy and, when asked, copies of its inputs. */
+  generationRecordBundle: (
+    runId: string,
+    artifactId: string,
+    includePrompt: boolean,
+    digest: string,
+    includeInputs: boolean,
+    signal?: AbortSignal,
+  ) =>
+    requestBytes(
+      `/api/runs/${encodeURIComponent(runId)}/outputs/${encodeURIComponent(artifactId)}/recipe-bundle?prompts=${includePrompt ? "include" : "omit"}&digest=${encodeURIComponent(digest)}&inputs=${includeInputs ? "include" : "omit"}`,
+      { signal },
+    ),
+  /** The record on screen, named by its digest, encrypted under a passphrase sent in the body. */
+  encryptedGenerationRecord: (
+    runId: string,
+    artifactId: string,
+    includePrompt: boolean,
+    digest: string,
+    passphrase: string,
+    signal?: AbortSignal,
+  ) =>
+    requestBytes(
+      `/api/runs/${encodeURIComponent(runId)}/outputs/${encodeURIComponent(artifactId)}/recipe/encrypted`,
+      { method: "POST", body: JSON.stringify({ passphrase, prompts: includePrompt ? "include" : "omit", digest }), signal },
+    ),
+  /** The same bundle as generationRecordBundle, encrypted under a passphrase sent in the body. */
+  encryptedGenerationRecordBundle: (
+    runId: string,
+    artifactId: string,
+    includePrompt: boolean,
+    digest: string,
+    includeInputs: boolean,
+    passphrase: string,
+    signal?: AbortSignal,
+  ) =>
+    requestBytes(
+      `/api/runs/${encodeURIComponent(runId)}/outputs/${encodeURIComponent(artifactId)}/recipe-bundle/encrypted`,
+      {
+        method: "POST",
+        body: JSON.stringify({ passphrase, prompts: includePrompt ? "include" : "omit", digest, inputs: includeInputs ? "include" : "omit" }),
+        signal,
+      },
+    ),
+  /** An encrypted record or bundle opened with its passphrase, which travels in a header, never the address. */
+  openEncryptedGenerationRecord: (content: ArrayBuffer, passphrase: string) =>
+    requestBytes("/api/output-recipes/open", {
+      method: "POST",
+      body: content,
+      headers: { "content-type": "application/octet-stream", "x-archive-passphrase": base64Text(passphrase) },
+    }),
+  preflightGenerationExperiment: (payload: GenerationExperimentRequest) =>
+    request<GenerationExperimentPreflight>("/api/generation-experiments/preflight", { method: "POST", body: JSON.stringify(payload) }),
+  createGenerationExperiment: (payload: GenerationExperimentCreate) =>
+    request<GenerationExperiment>("/api/generation-experiments", { method: "POST", body: JSON.stringify(payload) }),
+  generationExperiment: (experimentId: string, signal?: AbortSignal) =>
+    request<GenerationExperiment>(`/api/generation-experiments/${encodeURIComponent(experimentId)}`, { signal }),
+  startGenerationExperiment: (experimentId: string, payload: GenerationExperimentStart) =>
+    request<GenerationExperiment>(`/api/generation-experiments/${encodeURIComponent(experimentId)}/start`, { method: "POST", body: JSON.stringify(payload) }),
+  /** Keep which picture is preferred, or a tie, or neither suiting; the answer carries the latest. */
+  evaluateGenerationExperiment: (experimentId: string, payload: GenerationExperimentEvaluationCreate) =>
+    request<GenerationExperiment>(`/api/generation-experiments/${encodeURIComponent(experimentId)}/evaluations`, { method: "POST", body: JSON.stringify(payload) }),
+  /** Begin a viewing of a blind comparison, with its own random order of the pictures. */
+  openBlindView: (experimentId: string) =>
+    request<GenerationExperimentBlindView>(`/api/generation-experiments/${encodeURIComponent(experimentId)}/blind-views`, { method: "POST" }),
+  blindView: (experimentId: string, viewId: string, signal?: AbortSignal) =>
+    request<GenerationExperimentBlindView>(`/api/generation-experiments/${encodeURIComponent(experimentId)}/blind-views/${encodeURIComponent(viewId)}`, { signal }),
+  /** Keep the preference said in a viewing; the answer carries the reveal. */
+  sayBlindPreference: (experimentId: string, viewId: string, payload: GenerationExperimentBlindEvaluationCreate) =>
+    request<GenerationExperimentBlindView>(`/api/generation-experiments/${encodeURIComponent(experimentId)}/blind-views/${encodeURIComponent(viewId)}/evaluations`, { method: "POST", body: JSON.stringify(payload) }),
+  /** A recipe to review from one choice of a comparison; nothing is saved. */
+  generationExperimentRecipeDraft: (experimentId: string, ordinal: number, signal?: AbortSignal) =>
+    request<GenerationExperimentRecipeDraft>(`/api/generation-experiments/${encodeURIComponent(experimentId)}/arms/${ordinal}/recipe-draft`, { signal }),
+  studioLocalEdit: (sessionId: string, edit: StudioLocalEditRequest) =>
+    request<ChatDetail>(`/api/studio/sessions/${encodeURIComponent(sessionId)}/local-edits`, {
+      method: "POST",
+      body: JSON.stringify(edit),
+    }),
   createPromptHelper: (sourceChatId: string, draftPrompt: string) =>
     request<PromptHelperDetail>("/api/prompt-helpers", {
       method: "POST",
@@ -430,6 +754,13 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   studioCapabilities: () => request<StudioCapabilityReport>("/api/studio/capabilities"),
+  /** Which workflow an enlargement of this turn's picture would run, and what it lets the person choose. */
+  previewEnlargement: (chatId: string, payload: TurnRequestPayload, signal?: AbortSignal) =>
+    request<EnlargementPreview>(`/api/chats/${encodeURIComponent(chatId)}/upscale/preview`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+      signal,
+    }),
   sendTurn: async (
     chatId: string,
     text: string,
@@ -446,28 +777,22 @@ export const api = {
     outputCount?: number,
     promptSource?: ComposerPromptSource,
     confirmTurn?: TurnConfirmationHandler,
+    sourceFit?: SourceFitSelection,
+    upscale?: boolean,
   ) => {
-    // The count belongs to the mode the person explicitly chose. Auto may
-    // later confirm a media route, but that must not resurrect a hidden media
-    // control from an earlier mode.
-    const requestedOutputCount = mode === "image" || mode === "video"
-      ? outputCount
-      : undefined;
-    const submit = (selectedMode: RoutingMode, confirmed = false) => request<TurnAccepted>(`/api/chats/${chatId}/${endpoint}`, {
-      method: "POST",
-      body: JSON.stringify({
-        text,
-        mode: selectedMode,
-        input_artifact_ids: inputArtifactIds,
-        references,
-        settings,
-        workflow_revision_id: workflowRevisionId,
-        output_count: requestedOutputCount,
-        confirm_media: confirmed,
-        idempotency_key: idempotencyKey,
-        prompt_source: promptSource,
-      }),
+    const payload = buildTurnRequest({
+      text, mode, inputArtifactIds, settings, idempotencyKey, workflowRevisionId,
+      references, outputCount, promptSource, sourceFit,
+      defaultOutputShapes: defaultOutputShapes(),
+      upscale,
     });
+    const submit = (selectedMode: RoutingMode, confirmed = false) => {
+      if (payload.source_fit && selectedMode !== "image" && selectedMode !== "auto") throw new Error(SOURCE_FIT_BINDING_ERROR);
+      return request<TurnAccepted>(`/api/chats/${chatId}/${endpoint}`, {
+        method: "POST",
+        body: JSON.stringify({ ...payload, mode: selectedMode, confirm_media: confirmed }),
+      });
+    };
     try {
       return await submit(mode);
     } catch (error) {
@@ -487,6 +812,7 @@ export const api = {
     outputCount?: number,
     promptSource?: ComposerPromptSource,
     confirmTurn?: TurnConfirmationHandler,
+    sourceFit?: SourceFitSelection,
   ) => api.sendTurn(
     chatId,
     text,
@@ -500,6 +826,7 @@ export const api = {
     outputCount,
     promptSource,
     confirmTurn,
+    sourceFit,
   ),
   regenerateMessage: (messageId: string, settings: Record<string, unknown>, idempotencyKey?: string) =>
     request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {
@@ -560,6 +887,83 @@ export const api = {
   cancelChat: (chatId: string) =>
     request<Job>(`/api/chats/${chatId}/cancel`, { method: "POST" }),
   jobs: () => request<Job[]>("/api/jobs"),
+  queuePlanSteps: (planId: string, offset: number, signal?: AbortSignal) =>
+    request<QueuePlanSteps>("/api/queue/plans/" + encodeURIComponent(planId)
+      + "/steps?limit=50&offset=" + String(offset), { signal }).then((value) => {
+      if (value.plan_id !== planId) throw new Error("The submitted work steps could not be read.");
+      return value;
+    }),
+  installQueuePolicy: (signal?: AbortSignal) =>
+    request<InstallQueuePolicy>("/api/queue/lanes/install", { signal }),
+  installQueueControl: (action: InstallQueueAction, command: QueueControlCommand) =>
+    request<InstallQueuePolicy>("/api/queue/lanes/install/"
+      + (action === "pause_after_current" ? "pause-after-current" : "resume"),
+    { method: "POST", body: JSON.stringify(command) }),
+  videoProbe: (artifactId: string, signal?: AbortSignal) =>
+    request<VideoProbe>(`/api/artifacts/${encodeURIComponent(artifactId)}/video-probe`, { signal }),
+  saveVideoFrame: (artifactId: string, requestedSeconds: number) =>
+    request<Job>(`/api/artifacts/${encodeURIComponent(artifactId)}/video-frames`, {
+      method: "POST", body: JSON.stringify({ requested_seconds: requestedSeconds }),
+    }),
+  videoTrimPreview: (
+    artifactId: string,
+    startSeconds: number,
+    endSeconds: number,
+    keepAudio: boolean,
+    signal?: AbortSignal,
+  ) => {
+    const query = new URLSearchParams({
+      start_seconds: String(startSeconds),
+      end_seconds: String(endSeconds),
+      keep_audio: String(keepAudio),
+    });
+    return request<VideoTrimPreview>(
+      `/api/artifacts/${encodeURIComponent(artifactId)}/video-trim-preview?${query}`, { signal },
+    );
+  },
+  trimVideo: (artifactId: string, body: VideoTrimRequest) =>
+    request<Job>(`/api/artifacts/${encodeURIComponent(artifactId)}/video-trims`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
+  videoUtilityJob: (jobId: string, signal?: AbortSignal) =>
+    request<Job>(`/api/video-utilities/jobs/${encodeURIComponent(jobId)}`, { signal }),
+  utilityQueuePolicy: (signal?: AbortSignal) =>
+    request<UtilityQueuePolicy>("/api/queue/lanes/utility", { signal }),
+  utilityQueueControl: (action: UtilityQueueAction, command: QueueControlCommand) =>
+    request<UtilityQueuePolicy>("/api/queue/lanes/utility/"
+      + (action === "pause_after_current" ? "pause-after-current" : "resume"),
+    { method: "POST", body: JSON.stringify(command) }),
+  transferQueuePolicy: (signal?: AbortSignal) =>
+    request<TransferQueuePolicy>("/api/queue/lanes/transfer", { signal }),
+  transferQueueControl: (action: TransferQueueAction, command: QueueControlCommand) =>
+    request<TransferQueuePolicy>("/api/queue/lanes/transfer/"
+      + (action === "pause_after_current" ? "pause-after-current" : "resume"),
+    { method: "POST", body: JSON.stringify(command) }),
+  generationQueuePolicy: (signal?: AbortSignal) =>
+    request<GenerationQueuePolicy>("/api/queue/lanes/generation", { signal }),
+  generationQueueControl: (action: GenerationQueueAction, command: QueueControlCommand) =>
+    request<GenerationQueuePolicy>("/api/queue/lanes/generation/"
+      + (action === "pause_after_current" ? "pause-after-current" : "resume"),
+    { method: "POST", body: JSON.stringify(command) }),
+  queueControl: (planId: string, action: "hold" | "release", command: QueueControlCommand) =>
+    request<QueueControlResult>("/api/queue/items/" + encodeURIComponent(planId) + "/" + action,
+      { method: "POST", body: JSON.stringify(command) }),
+  queueOrder: (lane: QueueLane, options: { cursor?: string | null; limit: number }, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ limit: String(options.limit) });
+    if (options.cursor) params.set("cursor", options.cursor);
+    return request<QueueOrderPage>("/api/queue/lanes/" + lane + "/order?" + params.toString(), { signal });
+  },
+  reorderQueue: (lane: QueueLane, command: QueueOrderCommand) =>
+    request<QueueOrderResult>("/api/queue/lanes/" + lane + "/reorder",
+      { method: "POST", body: JSON.stringify(command) }),
+  queueActivity: (options: { lane?: QueueActivityItem["lane"]; cursor?: string | null; limit: number }, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ limit: String(options.limit) });
+    if (options.lane) params.set("lane", options.lane);
+    if (options.cursor) params.set("cursor", options.cursor);
+    return request<QueueActivityPage>("/api/queue/activity?" + params.toString(), { signal });
+  },
+  jobActivity: (activeLimit: number) =>
+    request<JobActivity>(`/api/jobs/activity?active_limit=${activeLimit}`),
   workPlans: (chatId?: string) =>
     request<WorkPlan[]>(
       `/api/work-plans${chatId ? `?chat_id=${encodeURIComponent(chatId)}` : ""}`,
@@ -600,6 +1004,7 @@ export const api = {
     request<ToolCapabilityProbe>("/api/engines/chat/tool-probe", { method: "POST" }),
   system: () => request<SystemInfo>("/api/system"),
   about: () => request<ApplicationInfo>("/api/about"),
+  thirdPartyNotices: () => request<ThirdPartyNotices>("/api/about/third-party-notices"),
   platforms: () => request<PlatformMatrixEntry[]>("/api/platforms"),
   createDiagnostics: () => request<{ url: string }>("/api/diagnostics", { method: "POST" }),
   credentialStatus: (provider: CredentialProvider) =>
@@ -614,6 +1019,29 @@ export const api = {
       method: "DELETE",
     }),
   models: () => request<ModelInstall[]>("/api/models"),
+  modelsPage: (options: {
+    limit: number; offset?: number; search?: string; role?: "chat" | "image" | "video";
+    chatCapability?: "text" | "vision"; modelIds?: string[];
+  }) => {
+    const parameters = new URLSearchParams({ limit: String(options.limit), offset: String(options.offset ?? 0) });
+    if (options.search) parameters.set("search", options.search);
+    if (options.role) parameters.set("role", options.role);
+    if (options.chatCapability) parameters.set("chat_capability", options.chatCapability);
+    for (const id of options.modelIds ?? []) parameters.append("model_id", id);
+    return request<ModelInstall[]>(`/api/models?${parameters}`);
+  },
+  catalogInstallMatches: (options: {
+    role: "chat" | "image" | "video"; remoteIds: string[]; workflowTemplateIds: string[];
+  }) => {
+    const parameters = new URLSearchParams({ role: options.role });
+    for (const id of options.remoteIds) parameters.append("remote_id", id);
+    for (const id of options.workflowTemplateIds) parameters.append("workflow_template_id", id);
+    return request<CatalogInstallMatches>(`/api/models/catalog-matches?${parameters}`);
+  },
+  modelInstall: async (installId: string) => {
+    const installs = await request<ModelInstall[]>("/api/models?install_id=" + encodeURIComponent(installId));
+    return installs.find((install) => install.id === installId) ?? null;
+  },
   modelStorage: () => request<ModelStorageInfo>("/api/models/storage"),
   modelUpdates: () => request<ModelUpdate[]>("/api/models/updates"),
   catalogItemDetail: (source: string, itemId: string, role: string | null) => {
@@ -631,6 +1059,20 @@ export const api = {
       method: "POST",
     }),
   profiles: () => request<ModelProfile[]>("/api/profiles"),
+  profilesPage: (options: {
+    limit: number; offset?: number; search?: string; role?: string; engine?: string;
+    inputModality?: "text" | "image"; installIds?: string[]; profileIds?: string[]; defaultsOnly?: boolean;
+  }) => {
+    const parameters = new URLSearchParams({ limit: String(options.limit), offset: String(options.offset ?? 0) });
+    if (options.search) parameters.set("search", options.search);
+    if (options.role) parameters.set("role", options.role);
+    if (options.inputModality) parameters.set("input_modality", options.inputModality);
+    if (options.engine) parameters.set("engine", options.engine);
+    if (options.defaultsOnly !== undefined) parameters.set("defaults_only", String(options.defaultsOnly));
+    for (const id of options.installIds ?? []) parameters.append("install_id", id);
+    for (const id of options.profileIds ?? []) parameters.append("profile_id", id);
+    return request<ModelProfile[]>(`/api/profiles?${parameters}`);
+  },
   createProfile: (model: ModelInstall, isDefault = false) =>
     request<ModelProfile>("/api/profiles", {
       method: "POST",
@@ -644,11 +1086,18 @@ export const api = {
         is_default: isDefault,
       }),
     }),
+  downloadJob: (id: string) => request<Job>(`/api/downloads/${encodeURIComponent(id)}`),
+  updateProfileModel: (id: string, values: ModelProfileModelUpdate) =>
+    request<ModelProfile>(`/api/profiles/${encodeURIComponent(id)}/model-update`, {
+      method: "POST", body: JSON.stringify(values),
+    }),
   updateProfile: (
     id: string,
     values: {
       name?: string;
       use_case?: string;
+      use_case_derived?: boolean;
+      expected_use_case?: string;
       load_settings?: Record<string, unknown>;
       request_settings?: Record<string, unknown>;
       is_default?: boolean;
@@ -659,6 +1108,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ name }),
     }),
+  suggestProfileUseCase: (id: string, expectedUseCase: string, signal?: AbortSignal) =>
+    request<UseCaseSuggestionOut>(`/api/profiles/${encodeURIComponent(id)}/use-case-suggestion`, {
+      method: "POST", body: JSON.stringify({ expected_use_case: expectedUseCase }), signal,
+    }),
+  suggestLoraUseCase: (id: string, expectedUseCase: string, signal?: AbortSignal) =>
+    request<UseCaseSuggestionOut>(`/api/model-assets/${encodeURIComponent(id)}/use-case-suggestion`, {
+      method: "POST", body: JSON.stringify({ expected_use_case: expectedUseCase }), signal,
+    }),
   resetProfile: (id: string) =>
     request<ModelProfile>(`/api/profiles/${id}/reset`, { method: "POST" }),
   deleteProfile: (id: string) => request<void>(`/api/profiles/${id}`, { method: "DELETE" }),
@@ -666,6 +1123,16 @@ export const api = {
   importProfile: (bundle: ModelProfileBundle) =>
     request<ModelProfile>("/api/profiles/import", { method: "POST", body: JSON.stringify(bundle) }),
   presets: () => request<GenerationPreset[]>("/api/presets"),
+  presetsPage: (options: {
+    limit: number; offset?: number; search?: string; role?: string; presetIds?: string[]; defaultsOnly?: boolean;
+  }) => {
+    const parameters = new URLSearchParams({ limit: String(options.limit), offset: String(options.offset ?? 0) });
+    if (options.search) parameters.set("search", options.search);
+    if (options.role) parameters.set("role", options.role);
+    if (options.defaultsOnly !== undefined) parameters.set("defaults_only", String(options.defaultsOnly));
+    for (const id of options.presetIds ?? []) parameters.append("preset_id", id);
+    return request<GenerationPreset[]>(`/api/presets?${parameters}`);
+  },
   createPreset: (role: GenerationPreset["role"], name: string) =>
     request<GenerationPreset>("/api/presets", {
       method: "POST",
@@ -690,6 +1157,9 @@ export const api = {
   workerSettings: () => request<WorkerSettings>("/api/workers/settings"),
   updateWorkerSettings: (values: WorkerSettings) =>
     request<WorkerSettings>("/api/workers/settings", { method: "PUT", body: JSON.stringify(values) }),
+  keepAwake: () => request<KeepAwakeStatus>("/api/settings/keep-awake"),
+  updateKeepAwake: (values: { enabled: boolean }) =>
+    request<KeepAwakeStatus>("/api/settings/keep-awake", { method: "PUT", body: JSON.stringify(values) }),
   runtimes: () => request<RuntimeStatus[]>("/api/runtimes"),
   installRuntime: (engine: RuntimeStatus["engine"]) =>
     request<RuntimeStatus>(`/api/runtimes/${engine}/install`, { method: "POST" }),
@@ -705,7 +1175,49 @@ export const api = {
   workerLogTail: (name: "chat" | "media") =>
     request<WorkerLogTail>(`/api/workers/${name}/log-tail`),
   workerLogLocation: () => request<WorkerLogLocation>("/api/workers/log-location"),
+  // Empty-chat cleanup. The list and the check only read; the delete spends a
+  // check and is refused whole if anything it bound has changed.
+  emptyChats: (options: {
+    include_archived?: boolean;
+    include_configured?: boolean;
+    cursor?: string;
+  } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined) query.set(key, String(value));
+    }
+    const suffix = query.toString();
+    return request<EmptyChatPage>(`/api/maintenance/empty-chats${suffix ? `?${suffix}` : ""}`);
+  },
+  previewEmptyChats: (body: {
+    chat_ids: string[];
+    min_age_hours?: number;
+    include_archived: boolean;
+    include_configured: boolean;
+  }) =>
+    request<EmptyChatPreview>("/api/maintenance/empty-chats/preview", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deleteEmptyChats: (body: {
+    operation_id: string;
+    preview_id: string;
+    digest: string;
+    acknowledged_count: number;
+    acknowledged_configured: boolean;
+    chat_ids: string[];
+    min_age_hours?: number;
+    include_archived: boolean;
+    include_configured: boolean;
+  }) =>
+    request<EmptyChatDeletion>("/api/maintenance/empty-chats/execute", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   backups: () => request<BackupInfo[]>("/api/backups"),
+  backupRestoreState: () => request<BackupRestoreState>("/api/backups/restore-state"),
+  dismissFailedRestore: () => request<void>("/api/backups/restore-state/dismiss", { method: "POST" }),
+  cancelRestore: () => request<void>("/api/backups/restore-state/cancel", { method: "POST" }),
   createBackup: (includeMedia = false) =>
     request<BackupInfo>(`/api/backups?${new URLSearchParams({ include_media: String(includeMedia) })}`, { method: "POST" }),
   verifyBackup: (name: string) =>
@@ -714,12 +1226,36 @@ export const api = {
     request<BackupInfo>(`/api/backups/${encodeURIComponent(name)}/restore`, { method: "POST" }),
   deleteBackup: (name: string) =>
     request<void>(`/api/backups/${encodeURIComponent(name)}`, { method: "DELETE" }),
-  exportProject: (projectId: string, includeMedia = true) =>
-    request<{ url: string }>(`/api/projects/${projectId}/export?${new URLSearchParams({ include_media: String(includeMedia) })}`, { method: "POST" }),
-  importProject: async (file: File) => {
+  createEncryptedBackup: (includeMedia: boolean, passphrase: string) =>
+    request<{ url: string }>("/api/backups/encrypted", {
+      method: "POST",
+      // In the body, never the address, so the passphrase stays out of logs and history.
+      body: JSON.stringify({ passphrase, include_media: includeMedia }),
+    }),
+  checkEncryptedBackup: (file: File, passphrase: string) =>
+    request<EncryptedBackupCheck>("/api/backups/encrypted/check", {
+      method: "POST",
+      // The file is the body, sent from disk rather than read into memory first.
+      headers: { "content-type": "application/octet-stream", "x-archive-passphrase": base64Text(passphrase) },
+      body: file,
+    }),
+  restoreEncryptedBackup: (file: File, passphrase: string) =>
+    request<EncryptedBackupCheck>("/api/backups/encrypted/restore", {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream", "x-archive-passphrase": base64Text(passphrase) },
+      body: file,
+    }),
+  exportProject: (projectId: string, includeMedia = true, passphrase?: string) =>
+    request<{ url: string }>(
+      `/api/projects/${projectId}/export?${new URLSearchParams({ include_media: String(includeMedia) })}`,
+      // In the body, never the address, so the passphrase stays out of logs and history.
+      passphrase === undefined ? { method: "POST" } : { method: "POST", body: JSON.stringify({ passphrase }) },
+    ),
+  importProject: async (file: File, passphrase?: string) => {
     await ensureSession();
     const form = new FormData();
     form.append("archive", file);
+    if (passphrase !== undefined) form.append("passphrase", passphrase);
     return request<Project>("/api/projects/import", {
       method: "POST",
       headers: { "x-local-lm-csrf": csrfToken },
@@ -821,16 +1357,80 @@ export const api = {
     });
     if (filters.kind) parameters.set("kind", filters.kind);
     if (filters.favorite) parameters.set("favorite", "true");
+    if (filters.collection_id) parameters.set("collection_id", filters.collection_id);
+    if (filters.tag_id) parameters.set("tag_id", filters.tag_id);
     if (cursor !== null) parameters.set("cursor", cursor);
     const payload = await request<unknown>(`/api/artifact-library?${parameters}`, { signal });
-    const page = parseArtifactLibraryPage(payload, limit);
+    const page = parseArtifactLibraryPage(payload, limit, Boolean(filters.collection_id));
     if (cursor !== null && page.next_cursor === cursor) {
       throw new Error("The Media Library response was invalid.");
     }
     return page;
   },
+  mediaCollections: () => request<unknown>("/api/media-collections"),
+  mediaTags: () => request<unknown>("/api/media-tags"),
+  mediaOrganizationCatalog: (kind: "albums" | "tags", query: string, cursor: string | null, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ query, limit: "50" });
+    if (cursor) params.set("cursor", cursor);
+    return request<unknown>(`/api/media-organization/catalog/${kind}?${params}`, { signal });
+  },
+  createMediaCollection: (name: string, description: string, operationKey?: string) =>
+    request<unknown>("/api/media-collections", { method: "POST", body: JSON.stringify({ name, description, ...(operationKey ? { operation_key: operationKey } : {}) }) }),
+  createMediaTag: (label: string, color: string | null, operationKey?: string) =>
+    request<unknown>("/api/media-tags", { method: "POST", body: JSON.stringify({ label, color, ...(operationKey ? { operation_key: operationKey } : {}) }) }),
+  previewMediaOrganization: (command: import("./mediaOrganization").OrganizationCommand) =>
+    request<unknown>("/api/media-organization/impacts", { method: "POST", body: JSON.stringify(command) }),
+  applyMediaOrganization: (id: string, operationKey: string) =>
+    request<unknown>(`/api/media-organization/impacts/${encodeURIComponent(id)}/apply`, {
+      method: "POST", body: JSON.stringify({ operation_key: operationKey }),
+    }),
+  generationRetryPolicy: () =>
+    request<import("./generationRetryTypes").GenerationRetryPolicy>("/api/settings/generation-retries"),
+  updateGenerationRetryPolicy: (maxRetries: number, expectedRevision: number) =>
+    request<import("./generationRetryTypes").GenerationRetryPolicy>("/api/settings/generation-retries", {
+      method: "PUT",
+      body: JSON.stringify({ max_retries: maxRetries, expected_revision: expectedRevision }),
+    }),
   artifact: (artifactId: string) =>
     request<Artifact>(`/api/artifacts/${encodeURIComponent(artifactId)}`),
+  /** The ComfyUI workflow a stored picture's own file carries, for the workflow review; imports nothing. */
+  pictureWorkflow: (artifactId: string) =>
+    request<unknown>(`/api/artifacts/${encodeURIComponent(artifactId)}/embedded-workflow`),
+  /** What a stored picture's own file says about how it was made; read by pictureSettings.ts. */
+  pictureSettings: (artifactId: string, signal?: AbortSignal) =>
+    request<unknown>(`/api/artifacts/${encodeURIComponent(artifactId)}/generation-settings`, { signal }),
+  /** What a remix of a stored picture would run with a workflow and model chosen here; writes nothing. */
+  remixPreview: (
+    artifactId: string,
+    choice: {
+      workflow_revision_id: string;
+      profile_id: string;
+      apply: string[];
+      role: "words" | "edit";
+    },
+    signal?: AbortSignal,
+  ) =>
+    request<unknown>(`/api/artifacts/${encodeURIComponent(artifactId)}/remix-preview`, {
+      method: "POST",
+      body: JSON.stringify(choice),
+      signal,
+    }),
+  /** Make one picture in a new chat from a previewed remix, refused unless it is still what was shown. */
+  remixPicture: (
+    chatId: string,
+    remix: {
+      artifact_id: string;
+      workflow_revision_id: string;
+      profile_id: string;
+      apply: string[];
+      role: "words" | "edit";
+      review_digest: string;
+    },
+  ) =>
+    request<unknown>(`/api/chats/${encodeURIComponent(chatId)}/remixes`, {
+      method: "POST",
+      body: JSON.stringify(remix),
+    }),
   favoriteArtifact: (artifactId: string, favorite: boolean) =>
     request<Artifact>(`/api/artifacts/${encodeURIComponent(artifactId)}`, {
       method: "PATCH",
@@ -842,10 +1442,48 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ dry_run: dryRun }),
     }),
+  retentionPolicy: () => request<RetentionPolicy>("/api/artifacts/retention"),
+  chooseRetention: (expectedRevision: number, mediaDays: number, temporaryHours: number) =>
+    request<RetentionPolicy>("/api/artifacts/retention", {
+      method: "PUT",
+      body: JSON.stringify({
+        expected_revision: expectedRevision,
+        media_days: mediaDays,
+        temporary_hours: temporaryHours,
+      }),
+    }),
+  previewRetention: (mediaDays: number, temporaryHours: number) =>
+    request<ArtifactCleanupResult>("/api/artifacts/retention/preview", {
+      method: "POST",
+      body: JSON.stringify({ media_days: mediaDays, temporary_hours: temporaryHours }),
+    }),
   deleteArtifact: (artifactId: string) =>
     request<ArtifactDeleteResult>(`/api/artifacts/${encodeURIComponent(artifactId)}`, {
       method: "DELETE",
     }),
+  /** Workflows on a remote source.
+   *
+   * Its own method rather than an option on `catalog`, because the two ask
+   * different questions: the model search carries role, quantization and
+   * parameter filters that a workflow cannot answer, and folding them together
+   * would make every caller carry parameters that mean nothing for half of
+   * them. The server draws the same line.
+   */
+  workflowCatalog: (
+    query: string,
+    sort: string,
+    cursor?: string | null,
+    source = "civitai",
+  ) => {
+    const parameters = new URLSearchParams({ query, sort, source });
+    if (cursor) parameters.set("cursor", cursor);
+    return request<CatalogPage>(`/api/workflow-catalog?${parameters.toString()}`);
+  },
+  /** One discovered workflow's graph, for the same review an imported file gets. */
+  workflowCatalogGraph: (versionId: string, source = "civitai") =>
+    request<WorkflowCatalogGraph>(
+      `/api/workflow-catalog/versions/${encodeURIComponent(versionId)}/graph?${new URLSearchParams({ source })}`,
+    ),
   catalog: (
     query: string,
     role: string,
@@ -947,7 +1585,12 @@ export const api = {
     values: Partial<Pick<
       ModelAssetInstall,
       "active" | "use_case" | "auto_apply" | "default_model_strength" | "default_clip_strength"
-    >>,
+      | "typed_trigger_words" | "use_case_derived"
+    >> & {
+      /** The base model the asset is for; an empty string clears it. */
+      family?: string;
+      expected_use_case?: string;
+    },
   ) =>
     request<ModelAssetInstall>(`/api/model-assets/${id}`, {
       method: "PATCH",
@@ -961,8 +1604,88 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   workflows: () => request<Workflow[]>("/api/workflows"),
-  workflowFamily: (familyId: string) =>
-    request<WorkflowFamily>(`/api/workflow-families/${encodeURIComponent(familyId)}`),
+  workflowRevisionOutputGeometry: (revisionId: string) =>
+    request<WorkflowOutputGeometryCapability>(
+      `/api/workflow-revisions/${encodeURIComponent(revisionId)}/output-geometry`,
+    ),
+  // Read-only: resolving a shape writes nothing, queues nothing and grants no
+  // authority to generate. It exists so the browser can show the exact pixels a
+  // choice means instead of working them out itself.
+  resolveWorkflowRevisionOutputGeometry: (
+    revisionId: string,
+    geometry: { mode: "image" | "video"; size_mode: "preset"; preset_id: OutputRatioPresetId },
+  ) =>
+    request<WorkflowOutputGeometryResolution>(
+      `/api/workflow-revisions/${encodeURIComponent(revisionId)}/output-geometry/resolve`,
+      { method: "POST", body: JSON.stringify(geometry) },
+    ),
+  // Read-only as well: the size the revision makes in the exact shape of one
+  // picture, as the picture is shown. A shape it cannot make exactly is refused.
+  matchWorkflowRevisionOutputGeometryToSource: (revisionId: string, sourceArtifactId: string) =>
+    request<WorkflowOutputGeometryResolution>(
+      `/api/workflow-revisions/${encodeURIComponent(revisionId)}/output-geometry/match-source`,
+      { method: "POST", body: JSON.stringify({ source_artifact_id: sourceArtifactId }) },
+    ),
+  workflowSummaries: (options: WorkflowReadPageOptions = {}, signal?: AbortSignal) =>
+    request<WorkflowSummary[]>("/api/workflow-summaries" + workflowReadQuery(options), { signal }),
+  workflow: (id: string, signal?: AbortSignal) =>
+    request<Workflow>("/api/workflows/" + encodeURIComponent(id), { signal }).then((value) => {
+      if (value.id !== id) throw new Error("The selected workflow could not be read.");
+      return value;
+    }),
+  workflowReadyRevisions: (options: WorkflowReadPageOptions = {}, signal?: AbortSignal) =>
+    request<WorkflowReadyRevision[]>("/api/workflow-ready-revisions" + workflowReadQuery(options), { signal }),
+  workflowRevisionChoices: (signal?: AbortSignal, options: WorkflowReadPageOptions = {}) =>
+    request<WorkflowRevisionChoice[]>("/api/workflow-revision-choices" + workflowReadQuery(options), { signal }),
+  /** The LoRAs a workflow revision applies, read-only. */
+  workflowLoraControls: (revisionId: string, signal?: AbortSignal) =>
+    request<WorkflowLoraControls>(
+      "/api/workflow-revisions/" + encodeURIComponent(revisionId) + "/lora-controls", { signal },
+    ),
+  workflowLoraSuggestions: (revisionId: string, signal?: AbortSignal) =>
+    request<LoraSuggestions>(
+      "/api/workflow-revisions/" + encodeURIComponent(revisionId) + "/lora-suggestions", { signal },
+    ),
+  workflowRevisionSchema: (revisionId: string, signal?: AbortSignal) =>
+    request<WorkflowRevisionSchema>(
+      "/api/workflow-revisions/" + encodeURIComponent(revisionId) + "/settings-schema", { signal },
+    ).then((value) => {
+      if (value.revision_id !== revisionId) throw new Error("The selected workflow settings could not be read.");
+      return value;
+    }),
+  previewTurnSourceFit: (chatId: string, payload: TurnRequestPayload, signal?: AbortSignal) =>
+    request<SourceFitPreviewResult>(
+      "/api/chats/" + encodeURIComponent(chatId) + "/source-fit/preview",
+      { method: "POST", body: JSON.stringify(payload), signal },
+    ),
+  previewPriorTurnSourceFit: (messageId: string, payload: PriorTurnEditRequest, signal?: AbortSignal) =>
+    request<SourceFitPreviewResult>(
+      "/api/messages/" + encodeURIComponent(messageId) + "/edits/source-fit/preview",
+      { method: "POST", body: JSON.stringify(payload), signal },
+    ),
+  workflowRevisionSourceFit: (revisionId: string, signal?: AbortSignal) =>
+    request<SourceFitCapability>(
+      "/api/workflow-revisions/" + encodeURIComponent(revisionId) + "/source-fit",
+      { signal },
+    ),
+  previewWorkflowRevisionSourceFit: (
+    revisionId: string,
+    sourceArtifactId: string,
+    sourceFit: SourceFitIntent,
+    signal?: AbortSignal,
+  ) =>
+    request<SourceFitPreviewResult>(
+      "/api/workflow-revisions/" + encodeURIComponent(revisionId) + "/source-fit/preview",
+      {
+        method: "POST",
+        body: JSON.stringify({ source_artifact_id: sourceArtifactId, source_fit: sourceFit }),
+        signal,
+      },
+    ),
+  workflowFamily: (familyId: string, options: WorkflowFamilyReadOptions = {}, signal?: AbortSignal) => {
+    const query = workflowFamilyQuery(options).toString();
+    return request<WorkflowFamily>(`/api/workflow-families/${encodeURIComponent(familyId)}${query ? `?${query}` : ""}`, { signal });
+  },
   updateWorkflowFamily: (familyId: string, changes: WorkflowFamilyUpdate) =>
     request<WorkflowFamily>(`/api/workflow-families/${encodeURIComponent(familyId)}`, {
       method: "PATCH",
@@ -985,13 +1708,35 @@ export const api = {
     request<WorkflowResourceConsumers>(
       `/api/workflow-dependencies/${kind}/${encodeURIComponent(resourceId)}/consumers`,
     ),
-  workflowFamilies: (capability?: WorkflowSelectorCapability, includeArchived = false) => {
-    const parameters = new URLSearchParams();
+  workflowFamilies: (capability?: WorkflowSelectorCapability, includeArchived = false, includeDependencies = false, options: WorkflowFamilyReadOptions = {}, signal?: AbortSignal) => {
+    const parameters = workflowFamilyQuery(options);
     if (capability) parameters.set("selector_capability", capability);
     if (includeArchived) parameters.set("include_archived", "true");
+    if (includeDependencies) parameters.set("include_dependencies", "true");
     const query = parameters.toString();
-    return request<WorkflowFamily[]>(`/api/workflow-families${query ? `?${query}` : ""}`);
+    return request<WorkflowFamily[]>(`/api/workflow-families${query ? `?${query}` : ""}`, { signal });
   },
+  workflowFamilyOperations: (includeArchived = false, signal?: AbortSignal) =>
+    request<string[]>(`/api/workflow-family-operations${includeArchived ? "?include_archived=true" : ""}`, { signal }),
+  workflowUseCasePresets: (useCase?: WorkflowUseCase, offset = 0, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: "200", offset: String(offset) });
+    if (useCase) query.set("use_case", useCase);
+    return request<WorkflowUseCasePreset[]>(`/api/workflow-use-case-presets?${query}`, { signal });
+  },
+  createWorkflowUseCasePreset: (payload: WorkflowUseCasePresetCreate) =>
+    request<WorkflowUseCasePreset>("/api/workflow-use-case-presets", { method: "POST", body: JSON.stringify(payload) }),
+  replaceWorkflowUseCasePreset: (id: string, payload: WorkflowUseCasePresetCreate) =>
+    request<WorkflowUseCasePreset>(`/api/workflow-use-case-presets/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(payload) }),
+  deleteWorkflowUseCasePreset: (id: string) =>
+    request<void>(`/api/workflow-use-case-presets/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  workflowUseCaseDefault: (useCase: WorkflowUseCase, signal?: AbortSignal) =>
+    request<WorkflowUseCaseDefault>(`/api/workflow-use-case-defaults/${useCase}`, { signal }),
+  setWorkflowUseCaseDefault: (useCase: WorkflowUseCase, payload: WorkflowUseCaseDefault) =>
+    request<WorkflowUseCaseDefault>(`/api/workflow-use-case-defaults/${useCase}`, { method: "PUT", body: JSON.stringify(payload) }),
+  workflowUseCaseChoice: (scope: WorkflowRecipeTarget, useCase: WorkflowUseCase, signal?: AbortSignal) =>
+    request<WorkflowUseCaseChoice>(`/api/${scope.kind === "chat" ? "chats" : "projects"}/${encodeURIComponent(scope.id)}/workflow-use-case-presets/${useCase}`, { signal }),
+  setWorkflowUseCaseChoice: (scope: WorkflowRecipeTarget, useCase: WorkflowUseCase, payload: WorkflowUseCaseChoice) =>
+    request<WorkflowUseCaseChoice>(`/api/${scope.kind === "chat" ? "chats" : "projects"}/${encodeURIComponent(scope.id)}/workflow-use-case-presets/${useCase}`, { method: "PUT", body: JSON.stringify(payload) }),
   chatWorkflowSelections: (chatId: string) =>
     request<WorkflowSelection[]>(
       `/api/chats/${encodeURIComponent(chatId)}/workflow-selections`,
@@ -1026,6 +1771,10 @@ export const api = {
     request<WorkflowRevision>(`/api/workflows/${id}/revisions`, { method: "POST", body: JSON.stringify(payload) }),
   restoreWorkflowRevision: (id: string, revisionId: string) =>
     request<WorkflowRevision>(`/api/workflows/${id}/revisions/${revisionId}/restore`, { method: "POST" }),
+  prepareWorkflowActivation: (id: string, revisionId: string, signal?: AbortSignal) =>
+    request<WorkflowActivationPreparation>(`/api/workflows/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/activation/prepare`, { signal }),
+  activateWorkflowRevision: (id: string, revisionId: string, payload: WorkflowActivationRequest, signal?: AbortSignal) =>
+    request<WorkflowActivation>(`/api/workflows/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/activation`, { method: "POST", body: JSON.stringify(payload), signal }),
   previewWorkflowRevisionReview: (id: string, revisionId: string) =>
     request<WorkflowRevisionReview>(`/api/workflows/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/review`),
   decideWorkflowRevisionReview: (id: string, revisionId: string, payload: { action: "approve" | "revoke"; subject_sha256: string }) =>
@@ -1065,7 +1814,14 @@ export const api = {
   importWorkflow: (bundle: WorkflowBundle) =>
     request<Workflow>("/api/workflows/import", { method: "POST", body: JSON.stringify(bundle) }),
   editTemplates: () => request<EditTemplate[]>("/api/edit-templates"),
-  createEditTemplate: (payload: { name: string; description?: string; instruction: string; settings_json?: Record<string, unknown> }) =>
+  createEditTemplate: (payload: {
+    name: string;
+    description?: string;
+    instruction: string;
+    settings_json?: Record<string, unknown>;
+    /** Read the recipe from what this run did, rather than from the words and settings given here. */
+    from_run_id?: string;
+  }) =>
     request<EditTemplate>("/api/edit-templates", { method: "POST", body: JSON.stringify(payload) }),
   deleteEditTemplate: (id: string) =>
     request<void>(`/api/edit-templates/${id}`, { method: "DELETE" }),
@@ -1135,6 +1891,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ui_graph: uiGraph, selections }),
     }),
+  workflowInstallProgress: (offerId: string, signal?: AbortSignal) =>
+    request<WorkflowInstallProgress>(`/api/workflow-install-offers/${encodeURIComponent(offerId)}/progress`, { signal }),
+  installWorkflowOffer: (offerId: string) =>
+    request<Job[]>(`/api/workflow-install-offers/${encodeURIComponent(offerId)}/install`, { method: "POST" }),
   installWorkflowAssets: (
     uiGraph: Record<string, unknown>,
     selections: Array<{
@@ -1157,6 +1917,7 @@ export const api = {
     name: string;
     operation: string;
     description?: string;
+    dependencies?: Record<string, unknown>;
     draft_workflow_id?: string;
     draft_revision_id?: string;
   }) =>
@@ -1238,6 +1999,9 @@ export async function connectEvents(
     try {
       await ensureSession();
       if (closed) return;
+      // A locked workspace refuses the socket. Asking again every second would
+      // only repeat that; the page reconnects from scratch once it is unlocked.
+      if (isWorkspaceLockBlocking()) return;
       if (!sequenceInitialized) {
         lastSequence = eventSequence;
         connectedEpoch = eventEpoch;
@@ -1249,7 +2013,11 @@ export async function connectEvents(
         lastSequence = 0;
       }
       const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-      socket = new WebSocket(`${scheme}//${window.location.host}/api/events?after=${lastSequence}`);
+      // The lock epoch rides along like every request's, so a page that slept
+      // through a lock cannot reattach to the stream after it.
+      const lockEpoch = workspaceLockEpoch();
+      const epochQuery = lockEpoch ? `&lock_epoch=${encodeURIComponent(lockEpoch)}` : "";
+      socket = new WebSocket(`${scheme}//${window.location.host}/api/events?after=${lastSequence}${epochQuery}`);
       socket.onopen = () => {
         onStatus(true);
         if (hasOpened) onReconnect?.();
@@ -1267,9 +2035,14 @@ export async function connectEvents(
         eventSequence = lastSequence;
         onEvent(event);
       };
-      socket.onclose = () => {
+      socket.onclose = (event: CloseEvent) => {
         onStatus(false);
         if (closed) return;
+        // The server closes live sockets with this code when the workspace locks.
+        if (event?.code === 4423) {
+          noteWorkspaceLocked();
+          return;
+        }
         resetSession();
         scheduleRetry();
       };

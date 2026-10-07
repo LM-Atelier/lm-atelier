@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 from run_waits import wait_for_terminal_status
@@ -66,17 +67,18 @@ async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignor
         assert response.status_code == 200
         return cast(dict[str, Any], response.json())
 
-    return cast(dict, await wait_for_terminal_status(read, what=f"helper run {run_id}"))
+    return cast(dict[str, Any], await wait_for_terminal_status(read, what=f"helper run {run_id}"))
 
 
-async def create_helper(client: AsyncClient, draft: str = "A blue ceramic cup") -> dict:  # type: ignore[type-arg]
+async def create_helper(client: AsyncClient, draft: str = "A blue ceramic cup") -> dict[str, Any]:
     source = (await client.post("/api/chats", json={"title": "Source chat"})).json()
     response = await client.post(
         "/api/prompt-helpers",
         json={"source_chat_id": source["id"], "draft_prompt": draft},
     )
     assert response.status_code == 201
-    return response.json()
+    helper: dict[str, Any] = response.json()
+    return helper
 
 
 async def test_prompt_helper_lifecycle_is_hidden_and_bounded(client: AsyncClient) -> None:
@@ -119,8 +121,8 @@ async def test_prompt_helper_lifecycle_is_hidden_and_bounded(client: AsyncClient
 async def test_prompt_helper_uses_isolated_system_context_and_normal_chat_queue(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source = (await client.post("/api/chats", json={"title": "Source chat"})).json()
     source_turn = await client.post(
         f"/api/chats/{source['id']}/turns",

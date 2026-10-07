@@ -359,3 +359,169 @@ it("refuses confirmation when storage fails without changing the pending request
   expect(() => confirmPriorTurnEditSubmission(first.draft, "video", storage)).toThrow("Check browser storage");
   expect(first.draft.pending?.request).toEqual(first.request);
 });
+
+it("restores the accepted source canvas with its source and exact workflow", () => {
+  const original = { ...source(), source_fit: { mode: "extend" as const, width: 1200, height: 900 } };
+  const draft = initializePriorTurnEditDraft(original);
+  expect(draft.editor.sourceFit).toEqual({
+    sourceArtifactId: "image-one", workflowRevisionId: "revision-one",
+    request: { mode: "extend", width: 1200, height: 900 },
+  });
+  const request = buildPriorTurnEditRequest(draft);
+  expect(request).toMatchObject({
+    source_fit: { mode: "extend", width: 1200, height: 900 },
+    input_artifact_ids: ["image-one"],
+  });
+  expect(request).not.toHaveProperty("workflow_selection");
+  expect(request).not.toHaveProperty("workflow_revision_id");
+  expect(request.settings).not.toHaveProperty("width");
+  expect(request.settings).not.toHaveProperty("height");
+  expect(request.references).toBeUndefined();
+});
+
+it("restores an accepted crop as a crop, through storage", () => {
+  const original = { ...source(), source_fit: { mode: "crop" as const, width: 900, height: 1200 } };
+  const storage = memoryStorage();
+  const first = preparePriorTurnEditSubmission(initializePriorTurnEditDraft(original), undefined, storage);
+  const restored = readPriorTurnEditDraft("chat-one", "source-user", storage)!;
+
+  expect(restored.editor.sourceFit?.request).toEqual({ mode: "crop", width: 900, height: 1200 });
+  expect(first.request.source_fit).toEqual({ mode: "crop", width: 900, height: 1200 });
+});
+
+it.each([true, false])("records deliberate source-canvas removal with configurations=%s", (configurations) => {
+  const draft = initializePriorTurnEditDraft(source());
+  if (!configurations) delete draft.configurations;
+  draft.editor.sourceFit = null;
+  expect(buildPriorTurnEditRequest(draft)).toHaveProperty("source_fit", null);
+});
+
+it("retains a canvas retry through storage and gives a changed canvas a new key", () => {
+  const original = { ...source(), source_fit: { mode: "extend" as const, width: 1200, height: 900 } };
+  const storage = memoryStorage();
+  const first = preparePriorTurnEditSubmission(initializePriorTurnEditDraft(original), undefined, storage);
+  const restored = readPriorTurnEditDraft("chat-one", "source-user", storage)!;
+  expect(restored.editor.sourceFit).toBeDefined();
+  const retry = preparePriorTurnEditSubmission(restored, undefined, storage);
+  expect(retry.request).toEqual(first.request);
+  restored.editor.sourceFit!.request.width = 1400;
+  const changed = preparePriorTurnEditSubmission(restored, undefined, storage);
+  expect(changed.request.idempotency_key).not.toBe(first.request.idempotency_key);
+  expect(changed.request.source_fit).toEqual({ mode: "extend", width: 1400, height: 900 });
+});
+
+it("refuses a saved canvas after its primary source is replaced", () => {
+  const original = { ...source(), source_fit: { mode: "extend" as const, width: 1200, height: 900 } };
+  const draft = initializePriorTurnEditDraft(original);
+  draft.editor.attachmentIntent = "replace";
+  draft.editor.attachments = [{ id: "image-two", kind: "image", origin: "uploaded" }];
+  expect(() => buildPriorTurnEditRequest(draft))
+    .toThrow("The source or workflow changed. Preview the canvas again before sending.");
+});
+
+it("retains and reports malformed saved source-canvas state", () => {
+  const storage = memoryStorage();
+  const draft = initializePriorTurnEditDraft(source());
+  const broken = { ...draft, editor: { ...draft.editor, sourceFit: {
+    sourceArtifactId: "image-one", workflowRevisionId: "revision-one",
+    request: { mode: "extend", width: -1, height: 900 },
+  } } };
+  storage.setItem("lm-atelier:prior-turn-edit:v1:chat-one:source-user", JSON.stringify(broken));
+  expect(() => readPriorTurnEditDraft("chat-one", "source-user", storage)).toThrow("Could not restore the edited version");
+  expect(storage.removeItem).not.toHaveBeenCalled();
+});
+
+it("keeps Auto routing with an accepted image canvas in the saved request", () => {
+  const original = { ...source(), original_mode: "auto" as const,
+    source_fit: { mode: "extend" as const, width: 1200, height: 900 } };
+  const request = buildPriorTurnEditRequest(initializePriorTurnEditDraft(original));
+  expect(request).toMatchObject({ mode: "auto", input_artifact_ids: ["image-one"],
+    source_fit: { mode: "extend", width: 1200, height: 900 } });
+});
+
+it.each(["inherit", "replace", "confirmed"] as const)("builds the %s context preview without saving or changing the draft", (choice) => {
+  const storage = memoryStorage();
+  let draft = initializePriorTurnEditDraft(source());
+  draft.editor.sourceFit = {
+    sourceArtifactId: "image-one", workflowRevisionId: "revision-one",
+    request: { mode: "extend", width: 1200, height: 900 },
+  };
+  draft.editor.templateSettings = { name: "Neutral template", settings: { steps: 7 } };
+  draft.settings.steps = 3;
+  draft.explicitSettingsKeys = ["steps"];
+  if (choice === "replace") {
+    draft.presetChoice = { kind: "explicit", value: null };
+    draft.profileChoice = { kind: "explicit", value: "replacement-profile" };
+  }
+  if (choice === "confirmed") {
+    draft.editor.mode = "auto";
+    draft = preparePriorTurnEditSubmission(draft, undefined, storage).draft;
+    draft = confirmPriorTurnEditSubmission(draft, "image", storage).draft;
+  }
+  const before = JSON.stringify(draft);
+  const localWrite = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+    throw new Error("Preview must not persist a draft");
+  });
+  const uuid = vi.spyOn(crypto, "randomUUID");
+  let preview;
+  try {
+    preview = draftApi.buildPriorTurnEditPreviewRequest(draft);
+    expect(JSON.stringify(draft)).toBe(before);
+    expect(localWrite).not.toHaveBeenCalled();
+    expect(uuid).not.toHaveBeenCalled();
+  } finally { localWrite.mockRestore(); uuid.mockRestore(); }
+  const accepted = preparePriorTurnEditSubmission(draft, undefined, storage).request;
+  expect(preview).toEqual(accepted);
+  expect(preview).toMatchObject({
+    source_run_id: "source-run", source_snapshot_sha256: "a".repeat(64),
+    source_fit: { mode: "extend", width: 1200, height: 900 }, input_artifact_ids: ["image-one"],
+  });
+  expect(preview?.workflow_revision_id).toBeUndefined();
+  if (choice !== "confirmed") expect(preview?.settings).toEqual({ steps: 7 });
+  if (choice === "replace") expect(preview).toMatchObject({ preset_id: null, profile_id: "replacement-profile" });
+  if (choice === "confirmed") expect(preview).toMatchObject({ mode: "image", confirm_media: true });
+});
+
+
+it("previews submitted editor settings without saving and preserves template precedence", () => {
+  const storage = memoryStorage();
+  const draft = initializePriorTurnEditDraft(source());
+  draft.settings = { steps: 3 };
+  draft.explicitSettingsKeys = ["steps"];
+  draft.editor.templateSettings = { name: "Neutral template", settings: { steps: 7 } };
+  const submission = {
+    requestId: draft.editor.requestId, text: "Extend the landscape", mode: "image" as const,
+    inputArtifactIds: ["image-one"], references: undefined, outputCount: 2,
+    settings: { steps: 7, width: 1200, height: 900 }, presetId: null, settingsRole: "image" as const,
+    sourceFit: { sourceArtifactId: "image-one", workflowRevisionId: "revision-one",
+      request: { mode: "extend" as const, width: 1200, height: 900 } },
+  };
+  const before = JSON.stringify({ draft, submission });
+  const preview = draftApi.buildPriorTurnEditPreviewRequest(draft, submission);
+  expect(JSON.stringify({ draft, submission })).toBe(before);
+  expect(preview).toMatchObject({ text: "Extend the landscape", output_count: 2, settings: { steps: 7 } });
+  expect(preview.settings).toEqual({ steps: 7 });
+  expect(preview).toEqual(preparePriorTurnEditSubmission(draft, submission, storage).request);
+});
+
+it("previews changed context without saving or reusing the previous confirmed payload", () => {
+  const storage = memoryStorage();
+  let draft = initializePriorTurnEditDraft(source());
+  draft = preparePriorTurnEditSubmission(draft, undefined, storage).draft;
+  draft = confirmPriorTurnEditSubmission(draft, "image", storage).draft;
+  const oldKey = draft.pending!.request.idempotency_key;
+  draft.settings.steps = 9;
+  const before = JSON.stringify(draft);
+  const uuid = vi.spyOn(crypto, "randomUUID");
+  let preview;
+  try {
+    preview = draftApi.buildPriorTurnEditPreviewRequest(draft);
+    expect(uuid).not.toHaveBeenCalled();
+  } finally { uuid.mockRestore(); }
+  expect(JSON.stringify(draft)).toBe(before);
+  expect(preview.settings).toEqual({ steps: 9 });
+  expect(preview.confirm_media).toBeUndefined();
+  const submitted = preparePriorTurnEditSubmission(draft, undefined, storage).request;
+  expect(submitted.idempotency_key).not.toBe(oldKey);
+  expect({ ...preview, idempotency_key: submitted.idempotency_key }).toEqual(submitted);
+});

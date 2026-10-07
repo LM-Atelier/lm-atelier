@@ -15,7 +15,16 @@ the Git object it came from.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import closing
 from pathlib import Path, PurePosixPath
+
+from .filesystem_links import (
+    AnchoredDirectory,
+    AnchoredDirectoryError,
+    AnchoredEntryKind,
+    is_link_or_reparse,
+    walk_entries,
+)
 
 MAX_REQUIREMENTS_BYTES = 64 * 1024
 MAX_REQUIREMENTS_LINES = 512
@@ -67,17 +76,53 @@ def staged_requirements_manifests(root: Path) -> tuple[str, ...]:
     the same question is asked of the copy on disk and answered the same way -
     the selector below still decides which of them describes the package.
 
-    Bounded: a staged tree that is somehow enormous stops the scan rather than
-    walking it forever, and the caller sees no manifest instead of hanging.
+    Only the package's own files count. The tree is walked through held
+    directories and a link is never entered, so a folder linked into the
+    package cannot lend it a requirements file, and a link or an entry of
+    unknown kind is never reported as one. A tree that cannot be walked that
+    way - the package folder is itself a link, or the tree changes while it is
+    read - refuses, because a package that declares nothing and a package that
+    could not be read are different answers.
+
+    Bounded: an enormous staged tree stops the scan at its bound. The caller
+    sees only what was found before the stop. The walk is breadth first, so
+    what falls inside
+    the bound is the shallowest part of the tree, where the package's own file
+    is; a large folder cannot use up the bound before the root is read. A
+    single folder holding more entries than the scan reads refuses instead,
+    since it is listed whole.
     """
     if not root.is_dir():
         return ()
     found: list[str] = []
-    for seen, path in enumerate(root.rglob("*"), start=1):
-        if seen > MAX_STAGED_MANIFEST_SCAN:
-            break
-        if path.is_file() and path.name.casefold() == REQUIREMENTS_NAME:
-            found.append(path.relative_to(root).as_posix())
+    try:
+        with (
+            AnchoredDirectory(root) as anchor,
+            closing(
+                walk_entries(
+                    anchor,
+                    # The scan stops itself on the entry past its bound, so the
+                    # walk's total never refuses first. A folder is listed
+                    # whole, so one folder may hold as much as the scan reads.
+                    limit=MAX_STAGED_MANIFEST_SCAN + 1,
+                    level_limit=MAX_STAGED_MANIFEST_SCAN + 1,
+                    breadth_first=True,
+                    include_metadata=False,
+                )
+            ) as walked,
+        ):
+            for seen, item in enumerate(walked, start=1):
+                if seen > MAX_STAGED_MANIFEST_SCAN:
+                    break
+                if (
+                    item.entry.kind is AnchoredEntryKind.FILE
+                    and item.entry.name.casefold() == REQUIREMENTS_NAME
+                ):
+                    found.append("/".join(item.parts))
+    except AnchoredDirectoryError as exc:
+        raise StagedRequirementsError(
+            "unreadable_requirements", "The staged package could not be read safely"
+        ) from exc
     return tuple(sorted(found))
 
 
@@ -118,21 +163,37 @@ def read_staged_requirements(root: Path, manifest: str) -> tuple[str, ...]:
     return tuple(lines)
 
 
+def _is_link(path: Path) -> bool:
+    return is_link_or_reparse(path, missing="assume_link", unreadable="assume_link")
+
+
 def _inside(root: Path, manifest: str) -> Path:
     """Resolve a staged path, refusing anything that leaves the staged tree.
 
-    Staging validated these entries already. This checks again because the
-    path is being used to read from disk, and a check that costs nothing is
-    worth repeating at the boundary that acts on it.
+    A filesystem link is not read, and its target is left unchanged. Staging
+    validated these entries already. This checks again because the path is
+    being used to read from disk, and a check that costs nothing is worth
+    repeating at the boundary that acts on it.
     """
     relative = PurePosixPath(manifest)
     if relative.is_absolute() or any(part in {"..", ""} for part in relative.parts):
         raise StagedRequirementsError(
             "invalid_requirements_path", "The staged requirements path is not inside the package"
         )
+    cursor = root
+    if _is_link(cursor):
+        raise StagedRequirementsError(
+            "unreadable_requirements", "The staged requirements file could not be read"
+        )
+    for part in relative.parts:
+        cursor = cursor / part
+        if _is_link(cursor):
+            raise StagedRequirementsError(
+                "unreadable_requirements", "The staged requirements file could not be read"
+            )
     try:
         staged_root = root.resolve(strict=True)
-        target = root.joinpath(*relative.parts).resolve(strict=True)
+        target = cursor.resolve(strict=True)
     except OSError as exc:
         raise StagedRequirementsError(
             "unreadable_requirements", "The staged requirements file could not be read"

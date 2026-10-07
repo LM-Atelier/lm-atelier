@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 from local_lm.media_organization_schema import (
-    CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL,
+    CREATE_MEDIA_ORGANIZATION_V1_TRIGGER_SQL,
     DROP_MEDIA_ORGANIZATION_TRIGGER_SQL,
 )
 
@@ -111,7 +111,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["entry_id"], ["artifact_library_entries.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("tag_id", "entry_id"),
     )
-    for statement in CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL:
+    for statement in CREATE_MEDIA_ORGANIZATION_V1_TRIGGER_SQL:
         op.execute(statement)
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from local_lm.conversation_search_mutation_v1 import (
@@ -132,7 +134,7 @@ def test_public_constructor_cannot_mint_write_authority() -> None:
     with pytest.raises(SearchMutationError, match=INVALID_MUTATION):
         ConversationSearchMutationV1()
     with pytest.raises(TypeError):
-        ConversationSearchMutationV1(
+        cast(Any, ConversationSearchMutationV1)(
             sequence=1,
             message_id="m1",
             chat_id="c1",

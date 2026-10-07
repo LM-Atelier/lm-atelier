@@ -14,33 +14,39 @@ import asyncio
 import hashlib
 import logging
 import os
+import sqlite3
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from httpx2 import ASGITransport, AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from local_lm import artifacts as artifacts_module
 from local_lm import main as main_module
-from local_lm.artifacts import ArtifactStore
+from local_lm.artifact_library import begin_artifact_write_fence
+from local_lm.artifacts import ArtifactStore, RetentionCleanupSummary
 from local_lm.config import Settings
 from local_lm.db import Base, SessionLocal
 from local_lm.domain import ArtifactKind
+from local_lm.filesystem_links import list_entries
 from local_lm.main import create_app
 from local_lm.models import Artifact
 
 
 @pytest.fixture
-def sweepable(tmp_path: Path) -> tuple[ArtifactStore, Session]:
+def sweepable(tmp_path: Path) -> Iterator[tuple[ArtifactStore, Session]]:
     settings = Settings(data_dir=tmp_path / "data")
     settings.prepare()
     engine = create_engine(f"sqlite:///{settings.data_dir / 'retention.sqlite3'}")
@@ -177,6 +183,10 @@ async def test_the_app_serves_while_the_sweep_commits_one_batch_at_a_time(
     monkeypatch.setattr(main_module, "RETENTION_BATCH_PAUSE_SECONDS", 0.0)
 
     stages: list[str] = []
+    # Count-bound commits must not gain extra passes when the runner is slow.
+    clock = SimpleNamespace(monotonic=lambda: 0.0, perf_counter=time.perf_counter)
+    monkeypatch.setattr(main_module, "time", clock)
+    monkeypatch.setattr(artifacts_module, "time", clock)
     real_stage = main_module._startup_stage
 
     def recording_stage(name: str, **kwargs: Any) -> Any:
@@ -193,7 +203,7 @@ async def test_the_app_serves_while_the_sweep_commits_one_batch_at_a_time(
         with SessionLocal() as other:
             visible_before.append(_count(other))
         if len(visible_before) == 1:
-            assert release.wait(timeout=10), "the first batch was never released"
+            assert release.wait(timeout=PATIENCE_SECONDS), "the first batch was never released"
         return real_cleanup(self, session, **kwargs)
 
     monkeypatch.setattr(ArtifactStore, "cleanup_retention", spying_cleanup)
@@ -351,8 +361,8 @@ async def test_a_budget_smaller_than_the_fixed_work_still_makes_progress(
 ) -> None:
     """A zero budget cannot delete anything; the sweep must not spin on it.
 
-    After one batch that removes nothing within its budget, the sweep switches
-    to one deletion per batch and still drains the store.
+    After one batch that removes nothing within its budget, the sweep drops the
+    clock and still drains the store.
     """
 
     caplog.set_level(logging.INFO)
@@ -369,7 +379,7 @@ async def test_a_budget_smaller_than_the_fixed_work_still_makes_progress(
         await asyncio.wait_for(app.state.retention_sweep, timeout=30)
     with SessionLocal() as check:
         assert _count(check) == 0
-    assert "continuing one deletion per batch" in caplog.text
+    assert "continuing without the clock" in caplog.text
     assert "sweep complete" in caplog.text
 
 
@@ -594,6 +604,10 @@ async def test_orphan_batches_commit_one_at_a_time_through_the_lifespan(
     orphans = [_aged_orphan(store, index) for index in range(5)]
     monkeypatch.setattr(main_module, "RETENTION_BATCH_DELETIONS", 2)
     monkeypatch.setattr(main_module, "RETENTION_BATCH_PAUSE_SECONDS", 0.0)
+    # Count-bound batches must not expire because the test runner is slow.
+    clock = SimpleNamespace(monotonic=lambda: 0.0, perf_counter=time.perf_counter)
+    monkeypatch.setattr(main_module, "time", clock)
+    monkeypatch.setattr(artifacts_module, "time", clock)
 
     left_before: list[int] = []
     real_walk = ArtifactStore._cleanup_orphan_files
@@ -645,7 +659,88 @@ async def test_a_slow_snapshot_keeps_the_default_batch_and_deletion_budget(
 
     assert removed == [25, 0]
     assert snapshots == 2
-    assert "continuing one deletion per batch" not in caplog.text
+    assert "continuing without the clock" not in caplog.text
+
+
+async def test_slow_staging_recovery_keeps_the_deletion_budget(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = ArtifactStore(settings)
+    with SessionLocal() as session:
+        for index in range(25):
+            _aged_temporary(store, session, index)
+        session.commit()
+    clock = 0.0
+    delays = 0
+    removed: list[int] = []
+    real_listing = list_entries
+    real_cleanup = ArtifactStore.cleanup_retention
+
+    def slow_listing(*args: Any, **kwargs: Any) -> Any:
+        nonlocal clock, delays
+        first = True
+        for entry in real_listing(*args, **kwargs):
+            if first:
+                clock += 10.0
+                delays += 1
+                first = False
+            yield entry
+
+    def counted_cleanup(self: ArtifactStore, session: Session, **kwargs: Any) -> Any:
+        result = real_cleanup(self, session, **kwargs)
+        removed.append(result.removed_count)
+        return result
+
+    monkeypatch.setattr(main_module, "time", SimpleNamespace(monotonic=lambda: clock))
+    monkeypatch.setattr(artifacts_module, "list_entries", slow_listing)
+    monkeypatch.setattr(ArtifactStore, "cleanup_retention", counted_cleanup)
+    caplog.set_level(logging.INFO)
+
+    await main_module.sweep_artifact_retention(store, settings, pause_seconds=0)
+
+    assert delays >= 2
+    assert removed == [25, 0]
+    assert "continuing without the clock" not in caplog.text
+
+
+async def test_cancelling_during_staging_recovery_still_reaches_its_stop(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ArtifactStore(settings)
+    entered = threading.Event()
+    release = threading.Event()
+    stopped = threading.Event()
+    real_recovery = ArtifactStore._recover_staged_deletions
+
+    def paused_recovery(self: ArtifactStore, session: Session, **kwargs: Any) -> None:
+        should_stop = kwargs["should_stop"]
+        assert not should_stop()
+        entered.set()
+        assert release.wait(timeout=PATIENCE_SECONDS), (
+            "the constructed staging recovery was not released"
+        )
+        assert should_stop()
+        stopped.set()
+        real_recovery(self, session, **kwargs)
+
+    monkeypatch.setattr(ArtifactStore, "_recover_staged_deletions", paused_recovery)
+    operation = asyncio.create_task(
+        main_module.sweep_artifact_retention(store, settings, pause_seconds=0)
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 5), "staging recovery never started"
+        operation.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+    finally:
+        release.set()
+        if not operation.done():
+            operation.cancel()
+        with suppress(asyncio.CancelledError):
+            await operation
+    assert stopped.is_set()
 
 
 async def test_retention_progress_counts_rows_and_excludes_writer_wait(
@@ -658,13 +753,15 @@ async def test_retention_progress_counts_rows_and_excludes_writer_wait(
         favorite.favorite = True
         session.commit()
     clock = 0.0
-    real_fence = artifacts_module.begin_artifact_write_fence
+    real_fence = begin_artifact_write_fence
+    assert vars(artifacts_module)["begin_artifact_write_fence"] is real_fence
     real_references = ArtifactStore.referenced_artifact_ids
     real_commit = Session.commit
 
     def waiting_fence(session: Session) -> None:
         nonlocal clock
         driver = session.connection().connection.driver_connection
+        assert isinstance(driver, sqlite3.Connection)
         if not driver.in_transaction:
             clock += 7.0
         real_fence(session)
@@ -691,8 +788,8 @@ async def test_retention_progress_counts_rows_and_excludes_writer_wait(
     assert "Artifact retention sweep started" in messages
     committed = [message for message in messages if "retention batch committed:" in message]
     assert len(committed) == 2
-    assert "2 row(s) examined, 1 item(s) removed" in committed[0]
-    assert "1 row(s) examined, 0 item(s) removed" in committed[1]
+    assert "2 row(s) examined, 1 artifact row(s), 0 unindexed file(s) removed" in committed[0]
+    assert "1 row(s) examined, 0 artifact row(s), 0 unindexed file(s) removed" in committed[1]
     assert all("elapsed 12.000s; writer reservation 5.000s" in message for message in committed)
     assert "3 row examination(s); elapsed 24.000s" in messages[-1]
     with SessionLocal() as session:
@@ -725,7 +822,7 @@ async def test_retention_progress_reports_a_statement_while_sqlite_is_still_insi
     def pause_inside_sqlite() -> int:
         in_sql.set()
         try:
-            reported.wait(timeout=3)
+            reported.wait(timeout=PATIENCE_SECONDS)
         finally:
             in_sql.clear()
         return 1
@@ -735,6 +832,7 @@ async def test_retention_progress_reports_a_statement_while_sqlite_is_still_insi
             return
         attempted.set()
         driver = session.connection().connection.driver_connection
+        assert isinstance(driver, sqlite3.Connection)
         driver.create_function("retention_progress_pause", 0, pause_inside_sqlite)
         session.execute(text("SELECT retention_progress_pause()"))
 
@@ -815,7 +913,7 @@ async def test_retention_progress_includes_the_batch_committed_during_cancellati
     def paused_delete(self: ArtifactStore, session: Session, *args: Any, **kwargs: Any) -> Any:
         result = real_delete(self, session, *args, **kwargs)
         deleted.set()
-        assert release.wait(timeout=5), "the constructed deletion was not released"
+        assert release.wait(timeout=PATIENCE_SECONDS), "the constructed deletion was not released"
         return result
 
     monkeypatch.setattr(ArtifactStore, "_delete_artifact", paused_delete)
@@ -840,6 +938,180 @@ async def test_retention_progress_includes_the_batch_committed_during_cancellati
     with SessionLocal() as session:
         assert _count(session) == 1
     assert "retention batch committed:" in caplog.text
-    assert "1 item(s) removed" in caplog.text
-    assert "sweep stopped after 1 batch(es), 1 removed" in caplog.text
+    assert "1 artifact row(s), 0 unindexed file(s) removed" in caplog.text
+    assert (
+        "sweep stopped after 1 batch(es), 1 artifact row(s), 0 unindexed file(s) removed"
+        in caplog.text
+    )
     assert "sweep complete:" not in caplog.text
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize(("row_count", "orphan_count"), [(1, 0), (0, 2), (1, 2)])
+def test_retention_separates_missing_file_rows_from_unindexed_files(
+    sweepable: tuple[ArtifactStore, Session],
+    dry_run: bool,
+    row_count: int,
+    orphan_count: int,
+) -> None:
+    store, session = sweepable
+    row_ids = []
+    for index in range(row_count):
+        artifact = _aged_temporary(store, session, index)
+        store.resolve(artifact).unlink()
+        row_ids.append(artifact.id)
+    orphans = [_aged_orphan(store, index) for index in range(orphan_count)]
+    session.commit()
+
+    summary = store.cleanup_retention(
+        session, retention_days=30, temporary_hours=24, dry_run=dry_run
+    )
+    session.commit()
+
+    assert summary.removed_count == row_count + orphan_count
+    assert summary.removed_row_count == row_count
+    assert summary.removed_orphan_file_count == orphan_count
+    assert _count(session) == (row_count if dry_run else 0)
+    assert all(path.exists() is dry_run for path in orphans)
+    assert all((session.get(Artifact, row_id) is not None) is dry_run for row_id in row_ids)
+
+
+async def test_retention_logs_distinct_row_and_file_totals_across_batches(
+    settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = ArtifactStore(settings)
+    with SessionLocal() as session:
+        artifact = _aged_temporary(store, session, 0)
+        store.resolve(artifact).unlink()
+        session.commit()
+    orphans = [_aged_orphan(store, index) for index in range(2)]
+    caplog.set_level(logging.INFO)
+
+    await main_module.sweep_artifact_retention(
+        store, settings, batch_deletions=1, pause_seconds=0, batch_seconds=0
+    )
+
+    messages = [record.getMessage() for record in caplog.records]
+    committed = [message for message in messages if "retention batch committed:" in message]
+    assert any("1 artifact row(s), 0 unindexed file(s) removed" in m for m in committed)
+    assert sum("0 artifact row(s), 1 unindexed file(s) removed" in m for m in committed) == 2
+    continuing = [message for message in messages if "more remain" in message]
+    assert continuing
+    assert all("artifact row(s)" in m and "unindexed file(s)" in m for m in continuing)
+    assert "1 artifact row(s), 2 unindexed file(s) removed" in messages[-1]
+    assert "sweep complete:" in messages[-1]
+    assert not any(path.exists() for path in orphans)
+    with SessionLocal() as session:
+        assert _count(session) == 0
+
+
+async def test_retention_cancellation_reports_committed_unindexed_files(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = ArtifactStore(settings)
+    orphans = [_aged_orphan(store, index) for index in range(2)]
+    completed = threading.Event()
+    release = threading.Event()
+    real_cleanup = ArtifactStore.cleanup_retention
+
+    def paused_cleanup(self: ArtifactStore, session: Session, **kwargs: Any) -> Any:
+        result = real_cleanup(self, session, **kwargs)
+        completed.set()
+        assert release.wait(timeout=PATIENCE_SECONDS), "the completed batch was not released"
+        return result
+
+    monkeypatch.setattr(ArtifactStore, "cleanup_retention", paused_cleanup)
+    caplog.set_level(logging.INFO)
+    operation = asyncio.create_task(
+        main_module.sweep_artifact_retention(
+            store, settings, batch_deletions=1, pause_seconds=0, batch_seconds=60
+        )
+    )
+    try:
+        assert await asyncio.to_thread(completed.wait, 5), "the first batch never completed"
+        operation.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+    finally:
+        release.set()
+        if not operation.done():
+            operation.cancel()
+        with suppress(asyncio.CancelledError):
+            await operation
+
+    assert sum(path.exists() for path in orphans) == 1
+    assert (
+        "sweep stopped after 1 batch(es), 0 artifact row(s), 1 unindexed file(s) removed"
+        in caplog.text
+    )
+    assert "sweep complete:" not in caplog.text
+
+
+async def test_a_batch_that_removed_nothing_continues_in_bulk_not_one_at_a_time(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The batches after one that removed nothing must not pay a snapshot each.
+
+    A batch removes nothing when its row pass finds nothing to remove and the
+    walk of stored files after it spends the whole budget without removing one.
+    Dropping the clock for the batches after that is right, because a budget one
+    batch could not spend the next cannot spend either. Dropping to a single
+    deletion as well is not: every row then pays for another complete reference
+    snapshot, which is what held the writer for minutes on a store with a real
+    backlog behind it.
+
+    The store here keeps everything it holds, so the row pass has nothing to
+    remove and the file walk runs into the budget.
+    """
+
+    caplog.set_level(logging.INFO)
+    store = ArtifactStore(settings)
+    with SessionLocal() as session:
+        for index in range(30):
+            store.ingest_bytes(
+                session,
+                f"kept {index}".encode(),
+                kind=ArtifactKind.IMAGE,
+                media_type="image/png",
+            )
+        session.commit()
+
+    real_cleanup = ArtifactStore.cleanup_retention
+    requested: list[int | None] = []
+    summaries: list[RetentionCleanupSummary] = []
+
+    def recording_cleanup(self: ArtifactStore, session: Session, **kwargs: Any) -> Any:
+        requested.append(kwargs["max_deletions"])
+        summary = real_cleanup(self, session, **kwargs)
+        summaries.append(summary)
+        return summary
+
+    # Half a second a reading, so the first batch's walk of the stored files
+    # outlasts its two-second budget after a handful of them rather than at
+    # once. The batches after it run without a clock and never read it.
+    readings = count()
+    monkeypatch.setattr(
+        main_module, "time", SimpleNamespace(monotonic=lambda: next(readings) * 0.5)
+    )
+    monkeypatch.setattr(ArtifactStore, "cleanup_retention", recording_cleanup)
+
+    await main_module.sweep_artifact_retention(store, settings, pause_seconds=0)
+
+    # The first batch really did remove nothing and really was truncated: that
+    # is the state this whole branch exists for, reached through the sweep
+    # rather than asserted of it.
+    assert summaries[0].removed_count == 0 and summaries[0].truncated is True
+    # Nothing here changes the batch sizes, so the sweep used the defined ones.
+    assert requested[0] == artifacts_module.RETENTION_BATCH_DELETIONS
+    # The behaviour first: the batch after it may delete in bulk. The ceiling
+    # second, so a failure says which of the two is wrong.
+    assert requested[1] is not None and requested[1] > 1
+    assert requested[1] == min(
+        artifacts_module.RETENTION_BATCH_DELETIONS,
+        artifacts_module.RETENTION_UNTIMED_BATCH_DELETIONS,
+    )
+    assert "continuing without the clock" in caplog.text
+    with SessionLocal() as check:
+        assert _count(check) == 30

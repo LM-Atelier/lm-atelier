@@ -1,5 +1,10 @@
 import { useState, type ReactNode } from "react";
+import { OutputRatioControl } from "./OutputRatioControl";
+import type { ShapeAlternatives } from "./shapeAlternatives";
 import { SettingControl } from "./SettingControl";
+import { NativeWorkflowFixedSettings } from "./NativeWorkflowFixedSettings";
+import { nativeWorkflowSettingParameters } from "./nativeWorkflowSettings";
+import { storedSettingDetail } from "./settingDetail";
 import {
   IMAGE_EDIT_STRENGTH_MODE_KEY,
   calibratedImageEditStrength,
@@ -17,6 +22,9 @@ import {
   type Visibility,
 } from "./settings";
 import type { EngineCapabilities, EngineRole, GenerationPreset, SettingField } from "./types";
+import { LoraSuggestions } from "./LoraSuggestions";
+import { LorasSection } from "./WorkflowLoraRows";
+import { useWorkflowLoraControls } from "./useWorkflowLoraControls";
 
 /** The generation settings panel and the strength control it owns.
  *
@@ -129,6 +137,7 @@ export function GenerationSettingsPanel({
   presetId,
   onPreset,
   workflowSchema,
+  workflowRevisionId = null,
   inheritedValues = {},
   inheritedPresetId = null,
   profileValues = {},
@@ -138,6 +147,10 @@ export function GenerationSettingsPanel({
   resetLabel,
   onReset,
   editSettings,
+  presetControl,
+  settingsUnavailable,
+  shapeAlternatives,
+  shapeSource,
 }: {
   role: EngineRole;
   engines: EngineCapabilities[];
@@ -147,6 +160,7 @@ export function GenerationSettingsPanel({
   presetId: string | null;
   onPreset: (presetId: string | null) => void;
   workflowSchema?: Record<string, unknown>;
+  workflowRevisionId?: string | null;
   inheritedValues?: Record<string, unknown>;
   inheritedPresetId?: string | null;
   profileValues?: Record<string, unknown>;
@@ -156,17 +170,29 @@ export function GenerationSettingsPanel({
   resetLabel: string;
   onReset: () => void;
   editSettings?: { presetControl: ReactNode };
+  presetControl?: ReactNode;
+  settingsUnavailable?: ReactNode;
+  /** Other workflows for this turn, offered when the chosen one sets its own size. */
+  shapeAlternatives?: ShapeAlternatives;
+  /** A picture the output can take the shape of, such as a video's start frame. */
+  shapeSource?: string | null;
 }) {
-  const [visibility, setVisibility] = useState<Visibility>("basic");
+  const [visibility, setVisibility] = useState<Visibility>(storedSettingDetail);
   const engine = engines.find((item) => item.roles.includes(role));
   const rolePresets = presets.filter((preset) => preset.role === role);
   const defaultPreset = !editSettings ? rolePresets.find((preset) => preset.is_default) : undefined;
   const inheritedPreset = !editSettings ? rolePresets.find((preset) => preset.id === inheritedPresetId) : undefined;
   const selectedPreset = !editSettings ? rolePresets.find((preset) => preset.id === presetId) : undefined;
   const inheritedName = inheritedPreset?.name ?? defaultPreset?.name;
+  // The schema alone cannot say whether this revision takes added LoRAs: it
+  // can provide the insertion point the run reads and declare no setting for
+  // it. The controls projection carries what the run decides, and the query is
+  // the one the LoRAs section below already makes, so this costs no request.
+  const { controls: loraControls } = useWorkflowLoraControls(workflowRevisionId ?? null);
   const allFields = resolveWorkflowSettings(
     resolveCapabilitySettings(engine, role),
     workflowSchema,
+    loraControls?.accepts_added_loras ?? false,
   );
   const editCalibration = workflowImageEditCalibration(workflowSchema);
   const strengthParameter = editCalibration?.parameter ?? "denoise";
@@ -184,6 +210,16 @@ export function GenerationSettingsPanel({
   // among steps and guidance. They get their own section so choosing one is a
   // deliberate act rather than scrolling past it.
   const loraField = visibleFields.find((field) => field.key === "loras");
+  // The ratio control reads these two through the same hierarchy every other
+  // control uses, so what it shows is the size the run will actually use rather
+  // than whatever was typed into a box that the workflow has since stopped
+  // accepting. It is not filtered to the visible ones: a workflow can put width
+  // and height behind the advanced level, and the shape of the output is not an
+  // advanced concern.
+  const widthField = allFields.find((field) => field.key === "width" && field.available);
+  const heightField = allFields.find((field) => field.key === "height" && field.available);
+  const nativeRatios = nativeWorkflowSettingParameters(workflowSchema, "aspect_ratio");
+  const hasNativeRatio = allFields.some((field) => field.available && nativeRatios.includes(field.key));
   const fields = visibleFields.filter((field) => field.key !== "loras");
   // The server resolves this same hierarchy and drops, per layer, any value the
   // field cannot accept - the workflow changed, and a saved sampler or a saved
@@ -231,7 +267,7 @@ export function GenerationSettingsPanel({
         ))}
       </div>
       <div className="settings-list">
-        {editSettings?.presetControl ?? <label className="setting-row">
+        {editSettings?.presetControl ?? presetControl ?? <label className="setting-row">
           <span><strong>Preset</strong></span>
           <select
             aria-label={presetLabel}
@@ -244,6 +280,8 @@ export function GenerationSettingsPanel({
             ))}
           </select>
         </label>}
+        {settingsUnavailable}
+        {!settingsUnavailable && <>
         {imageEdit && strengthField && (
           <ImageEditStrengthControl
             manualLabel={editSettings ? "Set for this version" : "Set for this chat"}
@@ -265,6 +303,22 @@ export function GenerationSettingsPanel({
             onValues={onValues}
           />
         )}
+        {/* Mounted only when a turn actually pins a revision. The control asks
+            the server about one exact revision, so without an id there is
+            nothing to ask about - and rendering it anyway would put a data
+            fetch inside every panel that has no workflow at all. */}
+        {workflowRevisionId && !hasNativeRatio && <OutputRatioControl
+          revisionId={workflowRevisionId}
+          width={widthField ? effectiveValue(widthField) : undefined}
+          height={heightField ? effectiveValue(heightField) : undefined}
+          sizeIsTheWorkflowsOwn={!widthField && !heightField}
+          onDimensions={({ width, height }) => onValues(
+            { ...values, width, height }, ["width", "height"],
+          )}
+          alternatives={shapeAlternatives}
+          source={shapeSource}
+        />}
+        <NativeWorkflowFixedSettings schema={workflowSchema} />
         {fields.map((field) => (
           <SettingControl
             key={`${field.scope}:${field.key}`}
@@ -274,11 +328,26 @@ export function GenerationSettingsPanel({
           />
         ))}
         {!engine && <p className="muted">No {role} engine is configured.</p>}
+        </>}
       </div>
-      {loraField && (
-        <section className="settings-section" aria-label="LoRAs">
-          <h4>LoRAs</h4>
-          <div className="settings-list">
+      {!settingsUnavailable && <LorasSection
+        revisionId={workflowRevisionId}
+        editing={{
+          layers: [
+            profileValues,
+            defaultPreset?.settings_json,
+            inheritedPreset?.settings_json,
+            inheritedValues,
+            selectedPreset?.settings_json,
+            values,
+          ],
+          values,
+          onValues,
+          clearLabel: editSettings ? "Clear LoRA changes for this workflow" : "Clear chat overrides for current workflow",
+        }}
+      >
+        {loraField && (
+          <>
             <SettingControl
               field={loraField}
               value={effectiveValue(loraField)}
@@ -287,9 +356,10 @@ export function GenerationSettingsPanel({
             {editSettings && <button type="button" className="secondary" onClick={() => onValues(
               { ...values, loras: effectiveValue(loraField) }, ["loras"],
             )}>Use current LoRA selection</button>}
-          </div>
-        </section>
-      )}
+            {workflowRevisionId && <LoraSuggestions revisionId={workflowRevisionId} />}
+          </>
+        )}
+      </LorasSection>}
       <div className="generation-settings-actions">
         <button className="secondary" type="button" onClick={onReset}>{resetLabel}</button>
       </div>

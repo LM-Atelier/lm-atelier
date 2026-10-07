@@ -95,6 +95,11 @@
           "directory": "ComfyUI_windows_portable/ComfyUI",
           "dependency_inventory_count": 89,
           "dependency_inventory_sha256": "f12087e3dfc278fc1f6521b6c61f8df03bdc9b0322df9c6464fb78a6dd08b69c",
+          "workflow_node_inventory": {
+            "file": "runtime-reviews/comfyui-v0.28.0-nodes.json",
+            "sha256": "39b1bd21166cebc68352cd6abe61609e6e306d5e01b07c7d684238f7ea9995d3",
+            "asset_key": "windows-x86_64-nvidia-cu13"
+          },
           "dependency_review": {
             "file": "runtime-reviews/comfyui-v0.28.0.json",
             "sha256": "138a1432a49fafe465ea74c1b38c8211dc3b0e0a9fc1ae1d237067e3c92861a5",

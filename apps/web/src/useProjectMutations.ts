@@ -1,6 +1,7 @@
 import { useMutation, type QueryClient } from "@tanstack/react-query";
 import { api } from "./api";
-import type { Chat, Project } from "./types";
+import { useProjectDeletion } from "./useProjectDeletion";
+import type { Project } from "./types";
 
 /** The four project mutations, exactly as the workspace root wires them. */
 export function useProjectMutations({
@@ -8,21 +9,18 @@ export function useProjectMutations({
   onImportedChat,
 }: {
   client: QueryClient;
-  onImportedChat: (chatId: string) => void;
+  onImportedChat?: (chatId: string) => void;
 }) {
   const updateProject = useMutation({
     mutationFn: ({ id, values }: { id: string; values: Partial<Project> }) => api.updateProject(id, values),
     onSuccess: () => void client.invalidateQueries({ queryKey: ["projects"] }),
   });
-  const deleteProject = useMutation({
-    mutationFn: api.deleteProject,
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ["projects"] });
-      void client.invalidateQueries({ queryKey: ["chats"] });
-    },
-  });
+  const deleteProject = useProjectDeletion(client);
   const exportProject = useMutation({
-    mutationFn: ({ id, includeMedia = true }: { id: string; includeMedia?: boolean }) => api.exportProject(id, includeMedia),
+    // Not kept once finished, so a passphrase it was given does not linger.
+    gcTime: 0,
+    mutationFn: ({ id, includeMedia = true, passphrase }: { id: string; includeMedia?: boolean; passphrase?: string }) =>
+      passphrase === undefined ? api.exportProject(id, includeMedia) : api.exportProject(id, includeMedia, passphrase),
     onSuccess: (artifact) => {
       const link = document.createElement("a");
       link.href = artifact.url;
@@ -31,15 +29,16 @@ export function useProjectMutations({
     },
   });
   const importProject = useMutation({
-    mutationFn: api.importProject,
-    onSuccess: (project) => {
+    gcTime: 0,
+    // A file alone is a plain archive; an encrypted one comes with its passphrase.
+    mutationFn: (archive: File | { file: File; passphrase: string }) =>
+      archive instanceof File ? api.importProject(archive) : api.importProject(archive.file, archive.passphrase),
+    onSuccess: async (project) => {
       void client.invalidateQueries({ queryKey: ["projects"] });
-      // Awaited, not timed: a slower refetch used to leave the import on nothing.
-      void client.invalidateQueries({ queryKey: ["chats"] }).then(() => {
-        const importedChat = client.getQueryData<Chat[]>(["chats"])?.find((item) => item.project_id === project.id);
-        if (!importedChat) return;
-        onImportedChat(importedChat.id);
-      });
+      await client.invalidateQueries({ queryKey: ["chats"] });
+      if (!onImportedChat) return;
+      const [importedChat] = await api.chatSummaries(project.id, true, "", { limit: 1, offset: 0 });
+      if (importedChat) onImportedChat(importedChat.id);
     },
   });
   return { updateProject, deleteProject, exportProject, importProject };

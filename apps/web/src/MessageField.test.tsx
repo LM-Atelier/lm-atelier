@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MessageField } from "./MessageField";
+import { SEND_KEY_KEY } from "./sendKey";
 
 function Harness({ onSubmit = vi.fn(), onPasteFiles }: { onSubmit?: () => void; onPasteFiles?: (files: File[]) => void }) {
   const field = useRef<HTMLTextAreaElement | null>(null);
@@ -41,6 +42,39 @@ describe("MessageField", () => {
     const field = screen.getByLabelText("Message");
 
     fireEvent.keyDown(field, { key: "Enter", shiftKey: true });
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves Enter for a new line and sends on Ctrl+Enter or Cmd+Enter once that is chosen", () => {
+    localStorage.setItem(SEND_KEY_KEY, "mod-enter");
+    try {
+      const onSubmit = vi.fn();
+      render(<Harness onSubmit={onSubmit} />);
+      const field = screen.getByLabelText("Message");
+
+      // Not prevented, so the browser inserts the new line as it would anywhere.
+      expect(fireEvent.keyDown(field, { key: "Enter" })).toBe(true);
+      fireEvent.keyDown(field, { key: "Enter", shiftKey: true, ctrlKey: true });
+      expect(onSubmit).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(field, { key: "Enter", ctrlKey: true });
+      fireEvent.keyDown(field, { key: "Enter", metaKey: true });
+      expect(onSubmit).toHaveBeenCalledTimes(2);
+    } finally {
+      localStorage.removeItem(SEND_KEY_KEY);
+    }
+  });
+
+  it("does not send the Enter that confirms composed text", () => {
+    const onSubmit = vi.fn();
+    render(<Harness onSubmit={onSubmit} />);
+    const field = screen.getByLabelText("Message");
+
+    fireEvent.keyDown(field, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(field, { key: "Enter", keyCode: 229 });
     expect(onSubmit).not.toHaveBeenCalled();
 
     fireEvent.keyDown(field, { key: "Enter" });

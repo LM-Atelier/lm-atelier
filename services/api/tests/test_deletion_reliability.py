@@ -8,13 +8,19 @@ and honesty about the already-deleted.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
+from fastapi import FastAPI
 from httpx2 import AsyncClient
+
+from local_lm.artifacts import ArtifactStore
 
 pytestmark = pytest.mark.asyncio
 
 
-def _seed_shared_generated_image(chat_ids: list[str]) -> str:
+def _seed_shared_generated_image(chat_ids: list[str], store: ArtifactStore | None = None) -> str:
+    from local_lm.artifact_library import ensure_library_entry
     from local_lm.db import SessionLocal
     from local_lm.domain import ArtifactKind, MessageRole, MessageStatus, PartType
     from local_lm.models import Artifact, Chat, Message, MessagePart
@@ -28,7 +34,16 @@ def _seed_shared_generated_image(chat_ids: list[str]) -> str:
             size_bytes=8,
             relative_path=f"{'d' * 2}/{'d' * 2}/{'d' * 64}",
         )
-        session.add(artifact)
+        if store is None:
+            session.add(artifact)
+        else:
+            artifact = store.ingest_bytes(
+                session,
+                b"constructed shared garden picture",
+                kind=ArtifactKind.IMAGE,
+                media_type="image/png",
+            )
+            assert ensure_library_entry(session, artifact) is not None
         for index, chat_id in enumerate(chat_ids):
             chat = session.get(Chat, chat_id)
             assert chat is not None
@@ -53,12 +68,13 @@ def _seed_shared_generated_image(chat_ids: list[str]) -> str:
 
 
 async def test_a_deleted_chat_leaves_the_list_and_stays_deleted(client: AsyncClient) -> None:
+    from recovery_requests import permanently_delete_chat
+
     created = await client.post("/api/chats", json={"title": "Doomed", "project_id": None})
     chat_id = created.json()["id"]
     assert any(chat["id"] == chat_id for chat in (await client.get("/api/chats")).json())
 
-    deleted = await client.delete(f"/api/chats/{chat_id}")
-    assert deleted.status_code == 204
+    await permanently_delete_chat(client, chat_id)
     assert all(chat["id"] != chat_id for chat in (await client.get("/api/chats")).json())
 
     # Deleting again is an honest 404, never a success that did nothing.
@@ -68,27 +84,69 @@ async def test_a_deleted_chat_leaves_the_list_and_stays_deleted(client: AsyncCli
 
 async def test_chat_media_deletion_spares_artifacts_other_chats_show(
     client: AsyncClient,
+    app: FastAPI,
 ) -> None:
+    from recovery_requests import permanently_delete_chat
+
     first = (await client.post("/api/chats", json={"title": "A", "project_id": None})).json()["id"]
     second = (await client.post("/api/chats", json={"title": "B", "project_id": None})).json()["id"]
-    artifact_id = _seed_shared_generated_image([first, second])
+    store = app.state.services.artifacts
+    artifact_id = _seed_shared_generated_image([first, second], store)
+
+    from sqlalchemy import select
 
     from local_lm.db import SessionLocal
-    from local_lm.models import Artifact
+    from local_lm.models import Artifact, ArtifactLibraryEntry
 
-    deleted = await client.delete(f"/api/chats/{first}", params={"delete_generated_media": "true"})
-    assert deleted.status_code == 204
+    with SessionLocal() as session:
+        artifact = session.get(Artifact, artifact_id)
+        assert artifact is not None
+        path = store.resolve(artifact)
+        original = path.read_bytes()
+    await permanently_delete_chat(client, first, delete_generated_media=True)
     with SessionLocal() as session:
         assert session.get(Artifact, artifact_id) is not None, (
             "an artifact another chat still shows must survive that chat's media deletion"
         )
 
-    deleted = await client.delete(f"/api/chats/{second}", params={"delete_generated_media": "true"})
-    assert deleted.status_code == 204
-    with SessionLocal() as session:
-        assert session.get(Artifact, artifact_id) is None, (
-            "the last reference leaving takes the artifact with it"
+        assert (
+            session.scalar(
+                select(ArtifactLibraryEntry.id).where(
+                    ArtifactLibraryEntry.artifact_id == artifact_id
+                )
+            )
+            is not None
         )
+    assert path.read_bytes() == original
+    await permanently_delete_chat(client, second, delete_generated_media=True)
+    with SessionLocal() as session:
+        assert session.get(Artifact, artifact_id) is not None
+        assert (
+            session.scalar(
+                select(ArtifactLibraryEntry.id).where(
+                    ArtifactLibraryEntry.artifact_id == artifact_id
+                )
+            )
+            is None
+        )
+        later = datetime.now(UTC) + timedelta(days=120)
+        marked = store.cleanup_retention(
+            session, retention_days=1, temporary_hours=1, dry_run=False, now=later
+        )
+        session.commit()
+        assert marked.removed_count == 0 and marked.marked_count == 1
+        assert path.read_bytes() == original
+        removed = store.cleanup_retention(
+            session,
+            retention_days=1,
+            temporary_hours=1,
+            dry_run=False,
+            now=later + timedelta(days=1, microseconds=1),
+        )
+        session.commit()
+        assert removed.removed_count == 1 and removed.reclaimed_bytes == len(original)
+        assert session.get(Artifact, artifact_id) is None
+    assert not path.exists()
 
 
 async def test_exchange_refusals_are_typed_and_actionable(client: AsyncClient) -> None:
@@ -159,8 +217,10 @@ async def test_double_deleting_an_artifact_answers_honestly(client: AsyncClient)
 
 
 async def test_small_resource_deletes_reconcile_and_stay_deleted(client: AsyncClient) -> None:
+    from recovery_requests import permanently_delete_project
+
     project = (await client.post("/api/projects", json={"name": "Doomed project"})).json()
-    assert (await client.delete(f"/api/projects/{project['id']}")).status_code == 204
+    await permanently_delete_project(client, project["id"])
     assert (await client.delete(f"/api/projects/{project['id']}")).status_code == 404
 
     template = (

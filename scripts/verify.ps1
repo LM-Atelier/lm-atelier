@@ -116,25 +116,53 @@ try {
     # lines above: two of them decide whether verification happens at all, and
     # until they were added the tools that judge the gate were the only Python
     # in the repository the gate never judged.
-    Invoke-Checked "Strict mypy" $Mypy @(
-        "--config-file", "services/api/pyproject.toml", "services/api/local_lm", "scripts"
-    )
-    Invoke-Checked "Strict mypy (Linux platform)" $Mypy @(
-        "--platform", "linux",
-        "--config-file", "services/api/pyproject.toml", "services/api/local_lm", "scripts"
-    )
+    $PreviousMypyPath = $env:MYPYPATH
+    try {
+        $env:MYPYPATH = @(
+            (Join-Path $RepositoryRoot "services/api"),
+            (Join-Path $RepositoryRoot "services/api/tests")
+        ) -join [System.IO.Path]::PathSeparator
+        Invoke-Checked "Strict mypy" $Mypy @(
+            "--explicit-package-bases",
+            "--config-file", "services/api/pyproject.toml",
+            "services/api/local_lm", "services/api/tests", "scripts"
+        )
+        Invoke-Checked "Strict mypy (Linux platform)" $Mypy @(
+            "--platform", "linux", "--explicit-package-bases",
+            "--config-file", "services/api/pyproject.toml",
+            "services/api/local_lm", "services/api/tests", "scripts"
+        )
+    }
+    finally {
+        $env:MYPYPATH = $PreviousMypyPath
+    }
     Invoke-Checked "Bandit high-severity scan" $Bandit @(
         "-q", "-lll", "-r", "services/api/local_lm"
     )
     Invoke-Checked "Version metadata" $Python @("scripts/sync-version.py")
     $PytestTemp = New-HeldPytestScratch `
         -RepositoryRoot $RepositoryRoot -Lease $MachineLease
+    # Away from the checkout unless the caller said otherwise, because the
+    # suite opens a data directory and the default is relative, so it would
+    # land in the tree. Beside the pytest scratch rather than inside it:
+    # pytest empties its own basetemp as it starts, and by then the
+    # application has taken ownership of the data directory, so one inside
+    # the other cannot both survive. The parent is the held directory the
+    # lease already pins, so this stays inside that containment.
+    if (-not $env:LOCAL_LM_DATA_DIR) {
+        $env:LOCAL_LM_DATA_DIR = Join-Path (Split-Path -Parent $PytestTemp) "data"
+    }
     Invoke-Checked "API tests" $Pytest @(
         "services/api/tests",
         "-q",
+        "--durations=20",
         "--basetemp=$PytestTemp",
         "-p",
-        "no:cacheprovider"
+        "no:cacheprovider",
+        "-n",
+        "auto",
+        "--dist",
+        "loadfile"
     )
     Invoke-Checked "Web lint" $Npm @("run", "lint")
     Invoke-Checked "Web typecheck" $Npm @("run", "typecheck")

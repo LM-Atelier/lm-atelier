@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator, Set
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,7 @@ from local_lm.models import (
 
 
 @pytest.fixture
-def sweepable(tmp_path: Path) -> tuple[ArtifactStore, Session]:
+def sweepable(tmp_path: Path) -> Iterator[tuple[ArtifactStore, Session]]:
     settings = Settings(data_dir=tmp_path / "data")
     settings.prepare()
     engine = create_engine(f"sqlite:///{settings.data_dir / 'retention.sqlite3'}")
@@ -75,7 +76,7 @@ def test_the_sweep_walks_the_reference_graph_once_not_once_per_deletion(
     calls = 0
     real = artifact_library.referenced_artifact_ids
 
-    def counted(*args: Any, **kwargs: Any) -> set[str]:
+    def counted(*args: Any, **kwargs: Any) -> Set[str]:
         nonlocal calls
         calls += 1
         return real(*args, **kwargs)
@@ -157,7 +158,7 @@ def test_a_poster_bearing_artifact_does_not_buy_a_second_graph_walk(
     calls = 0
     real = artifact_library.referenced_artifact_ids
 
-    def counted(*args: Any, **kwargs: Any) -> set[str]:
+    def counted(*args: Any, **kwargs: Any) -> Set[str]:
         nonlocal calls
         calls += 1
         return real(*args, **kwargs)
@@ -271,9 +272,9 @@ def test_one_key_tuple_describes_the_artifact_metadata_edge(
     """
 
     keys = artifact_library_schema.ARTIFACT_METADATA_REFERENCE_KEYS
-    assert artifact_library.ARTIFACT_METADATA_REFERENCE_KEYS is keys
-    assert artifacts_module.ARTIFACT_METADATA_REFERENCE_KEYS is keys
-    assert exports.ARTIFACT_METADATA_REFERENCE_KEYS is keys
+    assert vars(artifact_library)["ARTIFACT_METADATA_REFERENCE_KEYS"] is keys
+    assert vars(artifacts_module)["ARTIFACT_METADATA_REFERENCE_KEYS"] is keys
+    assert vars(exports)["ARTIFACT_METADATA_REFERENCE_KEYS"] is keys
     for key in keys:
         assert f"'$.{key}'" in artifact_library_schema._reference_values("artifacts", "OLD")
 

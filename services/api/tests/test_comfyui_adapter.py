@@ -5,12 +5,13 @@ import json
 import os
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from run_waits import PATIENCE_SECONDS
 from websockets.exceptions import WebSocketException
 
 from local_lm.adapters.base import GeneratedAsset, MediaEvent, MediaRequest
@@ -386,7 +387,7 @@ async def test_workflow_probe_requires_a_generated_asset(
     adapter = ComfyUIAdapter("http://comfy.test")
     request = media_request(operation="text_to_image")
 
-    async def successful_probe(_request: MediaRequest):  # type: ignore[no-untyped-def]
+    async def successful_probe(_request: MediaRequest) -> AsyncIterator[MediaEvent]:
         yield MediaEvent(
             type="complete",
             assets=[
@@ -399,7 +400,7 @@ async def test_workflow_probe_requires_a_generated_asset(
             ],
         )
 
-    async def empty_probe(_request: MediaRequest):  # type: ignore[no-untyped-def]
+    async def empty_probe(_request: MediaRequest) -> AsyncIterator[MediaEvent]:
         yield MediaEvent(type="complete")
 
     try:
@@ -424,7 +425,7 @@ async def test_workflow_probe_interrupts_a_backend_that_exceeds_its_deadline(
         interrupted = True
         return httpx.Response(200, json={})
 
-    async def stalled_probe(_request: MediaRequest):  # type: ignore[no-untyped-def]
+    async def stalled_probe(_request: MediaRequest) -> AsyncIterator[MediaEvent]:
         yield MediaEvent(type="queued")
         await asyncio.Event().wait()
 
@@ -545,9 +546,9 @@ async def test_cancel_wakes_a_blocked_comfyui_websocket(
     request = media_request(operation="text_to_image")
     collecting = asyncio.create_task(_collect_media_events(adapter, request))
     try:
-        await asyncio.wait_for(receiving.wait(), timeout=0.5)
+        await asyncio.wait_for(receiving.wait(), timeout=PATIENCE_SECONDS)
         await adapter.cancel(request.run_id)
-        events = await asyncio.wait_for(collecting, timeout=0.5)
+        events = await asyncio.wait_for(collecting, timeout=PATIENCE_SECONDS)
     finally:
         if not collecting.done():
             collecting.cancel()
@@ -581,7 +582,15 @@ class _BlockingSocket:
         raise AssertionError("unreachable")
 
 
-def _adapter_on(monkeypatch: pytest.MonkeyPatch, handler: Any) -> ComfyUIAdapter:
+def _adapter_on(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Callable[[httpx.Request], Awaitable[httpx.Response]],
+) -> ComfyUIAdapter:
+    async def legacy_backend(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/api/jobs/"):
+            return httpx.Response(404)
+        return await handler(request)
+
     monkeypatch.setattr(
         "local_lm.adapters.comfyui.websockets.connect",
         lambda *_args, **_kwargs: _BlockingSocket(),
@@ -589,7 +598,7 @@ def _adapter_on(monkeypatch: pytest.MonkeyPatch, handler: Any) -> ComfyUIAdapter
     adapter = ComfyUIAdapter("http://comfy.test", inactivity_seconds=60)
     adapter._client = httpx.AsyncClient(
         base_url="http://comfy.test",
-        transport=httpx.MockTransport(handler),
+        transport=httpx.MockTransport(legacy_backend),
     )
     return adapter
 
@@ -597,7 +606,7 @@ def _adapter_on(monkeypatch: pytest.MonkeyPatch, handler: Any) -> ComfyUIAdapter
 async def _drive_to_queued(producer: Any) -> list[str]:
     seen: list[str] = []
     while True:
-        event = await asyncio.wait_for(anext(producer), timeout=1)
+        event = await asyncio.wait_for(anext(producer), timeout=PATIENCE_SECONDS)
         seen.append(event.type)
         if event.type == "queued":
             return seen
@@ -923,9 +932,9 @@ async def test_a_cancelled_run_is_interrupted_once_and_not_again_on_the_way_out(
     request = media_request(operation="text_to_image")
     collecting = asyncio.create_task(_collect_media_events(adapter, request))
     try:
-        await asyncio.wait_for(receiving.wait(), timeout=0.5)
+        await asyncio.wait_for(receiving.wait(), timeout=PATIENCE_SECONDS)
         await adapter.cancel(request.run_id)
-        events = await asyncio.wait_for(collecting, timeout=0.5)
+        events = await asyncio.wait_for(collecting, timeout=PATIENCE_SECONDS)
     finally:
         if not collecting.done():
             collecting.cancel()
@@ -1268,6 +1277,287 @@ async def test_managed_outputs_are_removed_when_collection_fails(tmp_path: Path)
     assert not second.exists()
 
 
+async def test_a_run_whose_history_is_written_after_its_success_report_is_collected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ComfyUI reports success before it stores the run's history.
+
+    With large models the gap is long enough that the first read finds no
+    record, and a finished run used to fail as having produced nothing.
+    """
+
+    prompt_id = "prompt-late-history"
+    history_reads: list[int] = []
+
+    class Socket:
+        def __init__(self) -> None:
+            self.messages = iter(
+                [
+                    json.dumps({"type": "execution_start", "data": {"prompt_id": prompt_id}}),
+                    json.dumps({"type": "execution_success", "data": {"prompt_id": prompt_id}}),
+                ]
+            )
+
+        async def __aenter__(self) -> Socket:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def __aiter__(self) -> Socket:
+            return self
+
+        async def __anext__(self) -> str:
+            try:
+                return next(self.messages)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    def connect(*_args: Any, **_kwargs: Any) -> Socket:
+        return Socket()
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json={"prompt_id": prompt_id, "node_errors": {}})
+        if request.url.path == f"/history/{prompt_id}":
+            history_reads.append(len(history_reads))
+            if len(history_reads) < 3:
+                return httpx.Response(200, json={})
+            return httpx.Response(
+                200,
+                json={
+                    prompt_id: {
+                        "outputs": {
+                            "save": {
+                                "images": [
+                                    {"filename": "late.png", "subfolder": "", "type": "output"}
+                                ]
+                            }
+                        }
+                    }
+                },
+            )
+        if request.url.path == "/view":
+            return httpx.Response(
+                200, content=b"\x89PNG\r\n\x1a\n", headers={"content-type": "image/png"}
+            )
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    monkeypatch.setattr("local_lm.adapters.comfyui.websockets.connect", connect)
+    monkeypatch.setattr("local_lm.adapters.comfyui._HISTORY_POLL_SECONDS", 0)
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        generated = [
+            event async for event in adapter.generate(media_request(operation="text_to_image"))
+        ]
+    finally:
+        await adapter.close()
+
+    assert generated[-1].type == "complete"
+    assert [asset.name for asset in generated[-1].assets] == ["late.png"]
+    assert len(history_reads) == 3
+
+
+async def test_a_prompt_that_never_reaches_the_history_still_fails_once_the_wait_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_id = "prompt-never-recorded"
+    history_reads = 0
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        nonlocal history_reads
+        if request.url.path == f"/history/{prompt_id}":
+            history_reads += 1
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    monkeypatch.setattr("local_lm.adapters.comfyui._HISTORY_SETTLE_SECONDS", 0.05)
+    monkeypatch.setattr("local_lm.adapters.comfyui._HISTORY_POLL_SECONDS", 0.01)
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="without collectible image or video outputs"):
+            await adapter._collect_outputs(prompt_id, "text_to_image")
+    finally:
+        await adapter.close()
+
+    assert history_reads > 1
+
+
+async def test_a_recorded_prompt_with_no_outputs_fails_without_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a missing record is waited for; an empty one is the backend's answer."""
+
+    prompt_id = "prompt-recorded-empty"
+    history_reads = 0
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        nonlocal history_reads
+        if request.url.path == f"/history/{prompt_id}":
+            history_reads += 1
+            return httpx.Response(200, json={prompt_id: {"outputs": {}}})
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    # Were an empty record waited for, this would read it about twenty times.
+    monkeypatch.setattr("local_lm.adapters.comfyui._HISTORY_SETTLE_SECONDS", 0.2)
+    monkeypatch.setattr("local_lm.adapters.comfyui._HISTORY_POLL_SECONDS", 0.01)
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="without collectible image or video outputs"):
+            await adapter._collect_outputs(prompt_id, "text_to_image")
+    finally:
+        await adapter.close()
+
+    assert history_reads == 1
+
+
+def _finished_socket(prompt_id: str) -> Any:
+    """A progress socket that reports the run started and then succeeded."""
+
+    class Socket:
+        def __init__(self) -> None:
+            self.messages = iter(
+                [
+                    json.dumps({"type": "execution_start", "data": {"prompt_id": prompt_id}}),
+                    json.dumps({"type": "execution_success", "data": {"prompt_id": prompt_id}}),
+                ]
+            )
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def __aiter__(self) -> Any:
+            return self
+
+        async def __anext__(self) -> str:
+            try:
+                return next(self.messages)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    return Socket()
+
+
+async def test_a_stop_while_the_run_record_is_awaited_ends_the_run_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop during the wait for the run's record is not held for the whole wait."""
+
+    prompt_id = "prompt-stopped-while-settling"
+    request = media_request(operation="text_to_image")
+    history_reads = 0
+    adapter = ComfyUIAdapter("http://comfy.test")
+
+    async def comfy(http_request: httpx.Request) -> httpx.Response:
+        nonlocal history_reads
+        if http_request.url.path == "/prompt":
+            return httpx.Response(200, json={"prompt_id": prompt_id, "node_errors": {}})
+        if http_request.url.path == f"/history/{prompt_id}":
+            history_reads += 1
+            if history_reads == 1:
+                await adapter.cancel(request.run_id)
+            return httpx.Response(200, json={})
+        if http_request.url.path == "/interrupt":
+            return httpx.Response(200)
+        raise AssertionError(
+            f"unexpected ComfyUI request: {http_request.method} {http_request.url}"
+        )
+
+    monkeypatch.setattr(
+        "local_lm.adapters.comfyui.websockets.connect",
+        lambda *_args, **_kwargs: _finished_socket(prompt_id),
+    )
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        generated = [event async for event in adapter.generate(request)]
+    finally:
+        await adapter.close()
+
+    assert generated[-1].type == "cancelled"
+    assert all(event.type != "complete" for event in generated)
+    # The record was still missing and the wait ended at the stop, not at its bound.
+    # The teardown's own look for the run's files is the one other read.
+    assert history_reads <= 2
+
+
+async def test_a_stop_while_the_output_is_downloaded_ends_the_run_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop that arrives once the result is being fetched still wins over it."""
+
+    prompt_id = "prompt-stopped-while-downloading"
+    request = media_request(operation="text_to_image")
+    adapter = ComfyUIAdapter("http://comfy.test")
+
+    async def comfy(http_request: httpx.Request) -> httpx.Response:
+        if http_request.url.path == "/prompt":
+            return httpx.Response(200, json={"prompt_id": prompt_id, "node_errors": {}})
+        if http_request.url.path == f"/history/{prompt_id}":
+            return httpx.Response(
+                200,
+                json={
+                    prompt_id: {
+                        "outputs": {
+                            "save": {
+                                "images": [
+                                    {"filename": "stopped.png", "subfolder": "", "type": "output"}
+                                ]
+                            }
+                        }
+                    }
+                },
+            )
+        if http_request.url.path == "/view":
+            await adapter.cancel(request.run_id)
+            return httpx.Response(
+                200, content=b"\x89PNG\r\n\x1a\n", headers={"content-type": "image/png"}
+            )
+        if http_request.url.path == "/interrupt":
+            return httpx.Response(200)
+        raise AssertionError(
+            f"unexpected ComfyUI request: {http_request.method} {http_request.url}"
+        )
+
+    monkeypatch.setattr(
+        "local_lm.adapters.comfyui.websockets.connect",
+        lambda *_args, **_kwargs: _finished_socket(prompt_id),
+    )
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        generated = [event async for event in adapter.generate(request)]
+    finally:
+        await adapter.close()
+
+    assert generated[-1].type == "cancelled"
+    assert all(event.type != "complete" for event in generated)
+
+
 async def test_output_collection_enforces_total_byte_limit_and_removes_source(
     tmp_path: Path,
 ) -> None:
@@ -1515,7 +1805,7 @@ def _lost_reply_backend(*, mine_is_running: bool, during_lookup: Any = None) -> 
                 await during_lookup()
             mine_id = state["client_id"]
             assert mine_id is not None
-            rows = {"queue_running": [], "queue_pending": []}
+            rows: dict[str, list[Any]] = {"queue_running": [], "queue_pending": []}
             if state["running"] is not None:
                 rows["queue_running"].append(
                     _queue_entry(

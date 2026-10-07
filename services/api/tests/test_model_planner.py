@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import struct
 from dataclasses import replace
+from typing import cast
 
 import pytest
 
 from local_lm.db import SessionLocal
+from local_lm.install_plan_types import InstallPlanFailureCode
 from local_lm.model_manifests import (
     MAX_METADATA_BYTES,
     InspectedComponent,
@@ -483,6 +485,46 @@ def test_workflow_owned_encoder_stays_one_inert_exact_component() -> None:
     }
 
 
+def test_background_removal_reference_refines_filename_only_safe_weights() -> None:
+    inspection = ModelManifestInspection(
+        architecture=None,
+        family=None,
+        components=(
+            InspectedComponent(
+                path="birefnet.safetensors",
+                kind="checkpoint",
+                target_folder="checkpoints",
+            ),
+        ),
+        metadata_files=(),
+    )
+
+    plan = resolve_install_plan(
+        remote_id="synthetic/background-removal",
+        revision="2" * 40,
+        role="image",
+        engine="comfyui",
+        selected_files=[
+            {
+                "filename": "birefnet.safetensors",
+                "size": 2_048,
+                "sha256": "3" * 64,
+            }
+        ],
+        inspection=inspection,
+        workflow_reference_kind="background_removal",
+    )
+
+    assert plan.compatibility == "supported"
+    assert [(item.kind, item.target_folder) for item in plan.artifacts] == [
+        ("background_removal", "background_removal")
+    ]
+    assert plan.runtime_contract["workflow_asset_kind"] == "background_removal"
+    assert plan.runtime_contract["comfy_paths"] == {"background_removal": "."}
+    assert plan.activation_probe["kind"] == "workflow_asset"
+    assert plan.activation_probe["required"] is False
+
+
 def test_workflow_owned_lora_does_not_become_a_standalone_auxiliary() -> None:
     inspection = ModelManifestInspection(
         architecture=None,
@@ -807,7 +849,12 @@ async def test_a_stored_plan_stops_quoting_a_reason_that_no_longer_applies(clien
     first = replace(
         resolved, failure_code="preflight_blocked", failure_reason="Choose one or the other."
     )
-    second = replace(resolved, failure_code="disk_full", failure_reason="Not enough room for this.")
+    # Preserve a historical code outside the current vocabulary in this stored-row fixture.
+    second = replace(
+        resolved,
+        failure_code=cast(InstallPlanFailureCode, "disk_full"),
+        failure_reason="Not enough room for this.",
+    )
     assert first.plan_hash == second.plan_hash
 
     with SessionLocal() as session:
@@ -852,7 +899,12 @@ async def test_a_plan_being_downloaded_is_not_rewritten_underneath_the_transfer(
 
     with SessionLocal() as session:
         again = persist_install_plan(
-            session, replace(resolved, failure_code="late", failure_reason="arrived mid-transfer")
+            session,
+            replace(
+                resolved,
+                failure_code=cast(InstallPlanFailureCode, "late"),
+                failure_reason="arrived mid-transfer",
+            ),
         )
         session.commit()
 

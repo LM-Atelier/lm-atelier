@@ -1,7 +1,8 @@
 import { act, renderHook } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AppEvent } from "./types";
+import type { AppEvent, Job, JobActivity } from "./types";
+import { connectEvents } from "./api";
 
 const handlers: Array<(event: AppEvent) => void> = [];
 
@@ -151,5 +152,260 @@ describe("useLiveEvents attempt fence", () => {
     ]);
     expect(text.m1).toBe("ab");
     expect(text.m2).toBe("xy");
+  });
+});
+
+
+describe("useLiveEvents activity projection", () => {
+  const clients: QueryClient[] = [];
+  afterEach(() => {
+    clients.splice(0).forEach((client) => client.clear());
+    vi.useRealTimers();
+  });
+  async function openActivity(activity: JobActivity, limit = 100) {
+    handlers.length = 0;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    clients.push(client);
+    const key = ["jobs", "activity", limit];
+    client.setQueryData(key, activity);
+    const setText = vi.fn();
+    const hook = renderHook(() => useLiveEvents(client, setText));
+    await act(async () => { await Promise.resolve(); });
+    return { client, key, setText, hook, invalidate: vi.spyOn(client, "invalidateQueries") };
+  }
+  function activityJob(attempt = 1): Job {
+    return progress("job-1", attempt).payload.job as Job;
+  }
+  it("updates visible progress in every activity window without changing the total", async () => {
+    const job = activityJob();
+    const current = { active: [job], active_count: 501, recent_issues: [] };
+    const { client, key, invalidate } = await openActivity(current);
+    const expanded = ["jobs", "activity", 200];
+    client.setQueryData(expanded, current);
+    const event = progress(job.id, 1);
+    event.payload.job = { ...job, phase: "Downloading model", progress: 0.5 };
+    act(() => handlers[0]!(event));
+    for (const queryKey of [key, expanded]) {
+      expect(client.getQueryData<JobActivity>(queryKey)).toEqual({
+        ...current, active: [event.payload.job],
+      });
+    }
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+  it("coalesces membership changes into an authoritative count refresh", async () => {
+    vi.useFakeTimers();
+    const job = activityJob();
+    const current = { active: [job], active_count: 501, recent_issues: [] };
+    const { client, key, invalidate } = await openActivity(current);
+    const event = progress(job.id, 1);
+    event.payload.job = { ...job, status: "complete", progress: 1 };
+    act(() => { handlers[0]!(event); handlers[0]!(event); });
+    expect(client.getQueryData(key)).toEqual(current);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith({ queryKey: ["jobs", "activity"] });
+  });
+  it("refreshes when a new active job arrives in a complete visible list", async () => {
+    vi.useFakeTimers();
+    const { invalidate } = await openActivity({ active: [], active_count: 0, recent_issues: [] });
+    act(() => handlers[0]!(progress("new-job", 1)));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith({ queryKey: ["jobs", "activity"] });
+  });
+  it("keeps hidden active progress and verification jobs from causing refresh fanout", async () => {
+    vi.useFakeTimers();
+    const { invalidate } = await openActivity({ active: [activityJob()], active_count: 501, recent_issues: [] });
+    const verification = progress("verification", 1);
+    verification.payload.job = { ...activityJob(), id: "verification", kind: "edit_verify", status: "complete" };
+    act(() => { handlers[0]!(progress("hidden-active", 1)); handlers[0]!(verification); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+  it("seeds the attempt fence from activity rows after reconnecting", async () => {
+    const { setText } = await openActivity({ active: [activityJob(2)], active_count: 1, recent_issues: [] });
+    act(() => handlers[0]!(delta("message", "Earlier attempt", 1)));
+    expect(setText).not.toHaveBeenCalled();
+  });
+  it("does not replace activity with an older attempt or older stored snapshot", async () => {
+    const job = { ...activityJob(2), updated_at: "2026-09-02T00:00:02Z" };
+    const current = { active: [job], active_count: 1, recent_issues: [] };
+    const { client, key } = await openActivity(current);
+    act(() => {
+      handlers[0]!(progress(job.id, 1));
+      handlers[0]!(progress(job.id, 2));
+    });
+    expect(client.getQueryData(key)).toEqual(current);
+  });
+});
+
+describe("useLiveEvents accepted queue reconciliation", () => {
+  const clients: QueryClient[] = [];
+  afterEach(() => {
+    clients.splice(0).forEach((client) => client.clear());
+    vi.useRealTimers();
+  });
+  async function openQueue() {
+    vi.useFakeTimers(); handlers.length = 0;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    clients.push(client);
+    const key = ["jobs", "queue", "all"];
+    const data = { pages: [{ items: [], total: 0 }], pageParams: [null] };
+    client.setQueryData(key, data);
+    const hook = renderHook(() => useLiveEvents(client, vi.fn()));
+    await act(async () => { await Promise.resolve(); });
+    return { client, key, data, hook, invalidate: vi.spyOn(client, "invalidateQueries") };
+  }
+  it("coalesces visible progress bursts into one queue read without copying job payloads", async () => {
+    const { client, key, data, invalidate } = await openQueue();
+    act(() => { for (let i = 0; i < 20; i++) handlers[0]!(progress("job-" + i, 1)); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_999); });
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(client.getQueryData(key)).toEqual(data);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith({ queryKey: ["jobs", "queue"] });
+  });
+  it("omits verification events and clears a pending queue refresh on unmount", async () => {
+    const { hook, invalidate } = await openQueue();
+    const hidden = progress("check", 1);
+    hidden.payload.job = { ...(hidden.payload.job as Job), kind: "edit_verify" };
+    act(() => handlers[0]!(hidden));
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(invalidate).not.toHaveBeenCalled();
+    act(() => handlers[0]!(progress("visible", 1)));
+    hook.unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+  it("reconciles a committed queue control change received from another client", async () => {
+    const { client, key, data, invalidate } = await openQueue();
+    act(() => handlers[0]!({ sequence: 2, type: "queue.control", entity_id: "plan-a",
+      payload: {}, created_at: "2026-09-02T00:00:00Z" }));
+    expect(client.getQueryData(key)).toEqual(data);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith({ queryKey: ["jobs", "queue"] });
+  });
+  it("reconciles queue pages after a replay gap", async () => {
+    const { client, key } = await openQueue();
+    act(() => handlers[0]!({ sequence: 2, type: "events.replay_gap", entity_id: "",
+      payload: {}, created_at: "2026-09-02T00:00:00Z" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(client.getQueryState(key)?.isInvalidated).toBe(true);
+  });
+});
+
+describe("useLiveEvents expanded queue step reconciliation", () => {
+  afterEach(() => { vi.useRealTimers(); });
+  it("refreshes expanded steps on visible job progress even without an item-list cache", async () => {
+    vi.useFakeTimers(); handlers.length = 0;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const key = ["jobs", "queue-steps", "plan"];
+    client.setQueryData(key, { pages: [{ items: [], total: 0 }], pageParams: [0] });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const hook = renderHook(() => useLiveEvents(client, vi.fn()));
+    await act(async () => { await Promise.resolve(); });
+    act(() => { handlers[0]!(progress("one", 1)); handlers[0]!(progress("two", 1)); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith({ queryKey: ["jobs", "queue-steps"] });
+    hook.unmount(); client.clear();
+  });
+});
+
+describe("web search state refresh", () => {
+  it("refreshes visible consent and paused work from a content-free event", async () => {
+    handlers.length = 0;
+    const client = new QueryClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const hook = renderHook(() => useLiveEvents(client, vi.fn()));
+    await act(async () => { await Promise.resolve(); });
+    act(() => handlers[0]!({
+      sequence: 1, type: "web.search.changed", entity_id: "chat-one",
+      payload: {}, created_at: "2026-09-11T00:00:00Z",
+    }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["chat"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["jobs"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["work-plans"] });
+    hook.unmount();
+    client.clear();
+  });
+
+  it("refreshes provider configuration after a replay gap", async () => {
+    vi.useFakeTimers();
+    handlers.length = 0;
+    const client = new QueryClient();
+    const key = ["web-search", "configuration"];
+    client.setQueryData(key, { configured: false });
+    const hook = renderHook(() => useLiveEvents(client, vi.fn()));
+    try {
+      await act(async () => { await Promise.resolve(); });
+      act(() => handlers[0]!({
+        sequence: 1, type: "events.replay_gap", entity_id: null,
+        payload: {}, created_at: "2026-09-11T00:00:00Z",
+      }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(client.getQueryState(key)?.isInvalidated).toBe(true);
+    } finally {
+      hook.unmount();
+      client.clear();
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("workflow installation refresh", () => {
+  it.each(["workflow.install.completed", "workflow.install.attention", "download.paused", "download.cancelled", "download.completed"])(
+    "refreshes installation history and readiness after %s", async (type) => {
+      handlers.length = 0;
+      const client = new QueryClient();
+      const keys = [["workflow-install-progress", "offer"], ["workflow-families", "library"],
+        ["workflow-family", "family"], ["workflows", "detail", "workflow"], ["studio-capabilities"]];
+      keys.forEach(key => client.setQueryData(key, {}));
+      const hook = renderHook(() => useLiveEvents(client, vi.fn()));
+      try {
+        await act(async () => { await Promise.resolve(); });
+        act(() => handlers[0]!({ sequence: 1, type, entity_id: "offer", payload: {}, created_at: "2026-09-13T00:00:00Z" }));
+        keys.forEach(key => expect(client.getQueryState(key)?.isInvalidated).toBe(true));
+      } finally { hook.unmount(); client.clear(); }
+    },
+  );
+  it("refreshes installation and capability snapshots after a replay gap", async () => {
+    vi.useFakeTimers(); handlers.length = 0;
+    const client = new QueryClient();
+    const keys = [["workflow-install-progress", "offer"], ["workflow-families"], ["workflow-family"], ["studio-capabilities"]];
+    keys.forEach(key => client.setQueryData(key, {}));
+    const hook = renderHook(() => useLiveEvents(client, vi.fn()));
+    try {
+      await act(async () => { await Promise.resolve(); });
+      act(() => handlers[0]!({ sequence: 1, type: "events.replay_gap", entity_id: null, payload: {}, created_at: "2026-09-13T00:00:00Z" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      keys.forEach(key => expect(client.getQueryState(key)?.isInvalidated).toBe(true));
+    } finally { hook.unmount(); client.clear(); vi.useRealTimers(); }
+  });
+});
+
+describe("closing a connection that finishes opening late", () => {
+  it("closes the connection when it opens after the page that asked for it has gone", async () => {
+    // Connecting waits for the session first. A page taken down in that time,
+    // as locking the workspace does, used to leave the socket and its retry
+    // loop running with nothing left to close them.
+    let finish: (cleanup: () => void) => void = () => undefined;
+    vi.mocked(connectEvents).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const client = new QueryClient();
+    const hook = renderHook(() => useLiveEvents(client, vi.fn()));
+    hook.unmount();
+    const close = vi.fn();
+    await act(async () => { finish(close); await Promise.resolve(); });
+    expect(close).toHaveBeenCalledTimes(1);
+    client.clear();
+  });
+
+  it("closes a connection that opened in time when the page goes", async () => {
+    const close = vi.fn();
+    vi.mocked(connectEvents).mockImplementationOnce(async () => close);
+    const client = new QueryClient();
+    const hook = renderHook(() => useLiveEvents(client, vi.fn()));
+    await act(async () => { await Promise.resolve(); });
+    expect(close).not.toHaveBeenCalled();
+    hook.unmount();
+    expect(close).toHaveBeenCalledTimes(1);
+    client.clear();
   });
 });

@@ -1,17 +1,21 @@
 import { useState, type ReactNode } from "react";
+import { SENSITIVE_MEDIA_KEY } from "./sensitiveMedia";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api";
 import type { ComposerDraft } from "./composerPromptSource";
 import { TurnEditor, type TurnEditorProps, type TurnEditorState, type TurnEditorSubmission } from "./TurnEditor";
-import type { Artifact, ChatDetail, EngineCapabilities, GenerationPreset } from "./types";
+import type { Artifact, ChatDetail, EngineCapabilities, EngineRole, GenerationPreset } from "./types";
 
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
-  return { ...actual, api: { ...actual.api,
+  return { ...actual, api: { ...actual.api, profilesPage: vi.fn().mockResolvedValue([]),
+    presetsPage: vi.fn(async (options) => (await import("./test/modelLibraryPageFixtures")).presetPages({ presets: async () => presets }, options)),
     workflowFamilies: vi.fn(), chatWorkflowSelections: vi.fn(), projectWorkflowSelections: vi.fn(),
     classifyDraft: vi.fn(), references: vi.fn(), upload: vi.fn(), setChatWorkflowSelection: vi.fn(),
+    workflowRevisionSourceFit: vi.fn(), previewWorkflowRevisionSourceFit: vi.fn(), previewTurnSourceFit: vi.fn(),
+    previewPriorTurnSourceFit: vi.fn(),
   } };
 });
 
@@ -51,6 +55,9 @@ function editorState(initial: Partial<TurnEditorState> = {}): TurnEditorState {
 }
 
 type HarnessProps = {
+  revisionId?: string;
+  settingsRole?: EngineRole;
+  normalWorkflow?: boolean;
   initial?: Partial<TurnEditorState>;
   initialText?: string;
   onAccept?: (submission: TurnEditorSubmission) => Promise<unknown>;
@@ -60,9 +67,10 @@ type HarnessProps = {
   remountable?: boolean;
   controlled?: boolean;
   classificationSource?: TurnEditorProps["classificationSource"];
+  sourceFitPreviewContext?: TurnEditorProps["sourceFitPreviewContext"];
 };
 function Harness({ initial, initialText = "Paint a green landscape", onAccept, onSend = ignore,
-  onStopAndSend = ignore, stoppable = false, remountable = false, controlled = true, classificationSource }: HarnessProps) {
+  onStopAndSend = ignore, stoppable = false, remountable = false, controlled = true, classificationSource, revisionId, settingsRole = "image", normalWorkflow = false, sourceFitPreviewContext }: HarnessProps) {
   const [draft, setDraft] = useState<ComposerDraft>({ text: initialText, promptSource: null });
   const [state, setState] = useState(() => editorState(initial));
   const [settings, setSettings] = useState<Record<string, unknown>>({ width: 640 });
@@ -70,13 +78,16 @@ function Harness({ initial, initialText = "Paint a green landscape", onAccept, o
   const [visible, setVisible] = useState(true);
   return <>
     {remountable && <button onClick={() => setVisible((current) => !current)}>Toggle editor</button>}
-    {visible && <TurnEditor chat={chat} engines={[engine]} profiles={[]} workflows={[]} presets={presets}
-      stoppable={stoppable} settings={settings} onSettings={setSettings} settingsRole="image" onSettingsRole={ignore}
+    {visible && <TurnEditor chat={chat} engines={[engine]}
+      stoppable={stoppable} settings={settings} onSettings={setSettings} settingsRole={settingsRole} onSettingsRole={ignore}
       presetId={presetId} onPreset={setPresetId} onMode={ignore} onSend={onSend} onStop={ignore} onStopAndSend={onStopAndSend}
+      sourceFitPreviewContext={sourceFitPreviewContext}
       maxMediaOutputsPerPlan={4} draft={draft} onDraftChange={setDraft}
       {...(controlled ? { editorState: state, onEditorStateChange: setState } : { initialState: editorState(initial) })}
       classificationSource={classificationSource} contextMessages={[]} contextVisualArtifacts={classificationSource ? [artifact("prior-image")] : []}
-      workflowControl={<span>Draft workflow</span>} workflowSchemaOverride={null} onAccept={onAccept}
+      workflowSelection={revisionId ? { selector_capability: "image", mode: "revision",
+        workflow_revision_id: revisionId, workflow_family_id: null, legacy_profile_id: null } : undefined}
+      workflowControl={normalWorkflow ? undefined : <span>Draft workflow</span>} workflowSchemaOverride={null} onAccept={onAccept}
       submitLabel={onAccept ? "Queue edited version" : "Send"} />}
   </>;
 }
@@ -88,7 +99,11 @@ function mount(element: ReactNode) {
 }
 
 beforeEach(() => {
+  vi.mocked(api.profilesPage).mockResolvedValue([]);
   vi.mocked(api.workflowFamilies).mockResolvedValue([]);
+  vi.mocked(api.workflowRevisionSourceFit).mockResolvedValue({
+    available: false, reason: "source_fit_workflow_unsupported", modes: [], request_authorized: false,
+  });
   vi.mocked(api.chatWorkflowSelections).mockResolvedValue([]);
   vi.mocked(api.projectWorkflowSelections).mockResolvedValue([]);
   vi.mocked(api.upload).mockImplementation(async (file) => artifact(file.name, file.type));
@@ -233,7 +248,8 @@ describe("TurnEditor", () => {
     mount(<Harness onAccept={accept} />);
     fireEvent.change(screen.getByLabelText("Number of outputs"), { target: { value: "4" } });
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Width" }), { target: { value: "1024" } });
+    fireEvent.change(await screen.findByRole("spinbutton", { name: "Width" }), { target: { value: "1024" } });
+    await screen.findByRole("option", { name: "Landscape" });
     fireEvent.change(screen.getByLabelText("image preset"), { target: { value: "preset-one" } });
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
     fireEvent.click(screen.getByRole("button", { name: "Queue edited version" }));
@@ -250,4 +266,194 @@ it("classifies inherited source media using the edited source identity", async (
     chat.id, "Paint a green landscape", "image", binding,
   ));
   expect(await screen.findByRole("button", { name: "Open editing studio" })).toBeEnabled();
+});
+
+describe("source canvas in the composer", () => {
+  function preview(sourceId = "source-image", revisionId = "revision-canvas") {
+    return {
+      version: 1 as const, mode: "extend" as const,
+      workflow_revision_id: revisionId, workflow_artifact_sha256: "a".repeat(64),
+      source_artifact_id: sourceId,
+      source: { width: 400, height: 300 }, canvas: { width: 1200, height: 900 },
+      margins: { left: 400, top: 300, right: 400, bottom: 300 },
+      source_rectangle: { x: 400, y: 300, width: 400, height: 300 },
+      request_authorized: false as const,
+    };
+  }
+
+  async function chooseCanvas() {
+    fireEvent.click(await screen.findByRole("button", { name: "Extend / preserve all" }));
+    fireEvent.change(screen.getByLabelText("Canvas width"), { target: { value: "1200" } });
+    fireEvent.change(screen.getByLabelText("Canvas height"), { target: { value: "900" } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview canvas" }));
+  }
+
+  beforeEach(() => {
+    vi.mocked(api.workflowRevisionSourceFit).mockResolvedValue({
+      available: true, reason: null, modes: ["extend"], request_authorized: false,
+    });
+    vi.mocked(api.previewWorkflowRevisionSourceFit).mockResolvedValue(preview());
+    vi.mocked(api.previewTurnSourceFit).mockResolvedValue(preview());
+  });
+
+  it.each([false, true])("previews the complete source then dispatches the exact canvas with stop=%s", async (stop) => {
+    const send = vi.fn();
+    mount(<Harness revisionId="revision-canvas" stoppable={stop} onSend={send} onStopAndSend={send}
+      initial={{ attachments: [{ id: "source-image", kind: "image", origin: "uploaded" }] }} />);
+    await chooseCanvas();
+    expect(await screen.findByRole("img", { name: /Extension preview/ })).toBeInTheDocument();
+    expect(screen.getByText("Source: 400 × 300 · Output: 1200 × 900")).toBeInTheDocument();
+    // The preview is fitted within the send itself: the same text, mode, inputs and settings.
+    expect(api.previewTurnSourceFit).toHaveBeenLastCalledWith(chat.id, expect.objectContaining({
+      text: "Paint a green landscape", mode: "image", input_artifact_ids: ["source-image"], settings: {}, references: [],
+      source_fit: { mode: "extend", width: 1200, height: 900 },
+    }), expect.any(AbortSignal));
+    expect(api.previewWorkflowRevisionSourceFit).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: stop ? "Stop current response and send" : "Send" }));
+    expect(send).toHaveBeenCalledWith("Paint a green landscape", "image", ["source-image"], {}, [], undefined, undefined, {
+      sourceArtifactId: "source-image", workflowRevisionId: "revision-canvas",
+      request: { mode: "extend", width: 1200, height: 900 },
+    });
+    expect(screen.getByLabelText("Message")).toHaveValue("");
+    expect(screen.queryByLabelText("Canvas width")).not.toBeInTheDocument();
+  });
+
+  it("loads the image workflow for an Auto canvas while text settings are visible", async () => {
+    vi.mocked(api.chatWorkflowSelections).mockResolvedValue([{
+      selector_capability: "image", mode: "revision", workflow_revision_id: "revision-canvas",
+      workflow_family_id: null, legacy_profile_id: null,
+    }]);
+    const send = vi.fn();
+    mount(<Harness normalWorkflow settingsRole="chat" onSend={send} initial={{
+      mode: "auto", attachments: [{ id: "source-image", kind: "image", origin: "uploaded" }],
+    }} />);
+    await chooseCanvas();
+    await screen.findByRole("img", { name: /Extension preview/ });
+    expect(api.chatWorkflowSelections).toHaveBeenCalledWith(chat.id);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(send).toHaveBeenCalledWith("Paint a green landscape", "auto", ["source-image"], {}, [], undefined, undefined, {
+      sourceArtifactId: "source-image", workflowRevisionId: "revision-canvas",
+      request: { mode: "extend", width: 1200, height: 900 },
+    });
+  });
+
+  it("keeps the draft when Send is pressed before the requested preview returns", async () => {
+    let complete!: (value: ReturnType<typeof preview>) => void;
+    vi.mocked(api.previewTurnSourceFit).mockReturnValue(new Promise((resolve) => { complete = resolve; }));
+    const send = vi.fn();
+    mount(<Harness revisionId="revision-canvas" onSend={send}
+      initial={{ attachments: [{ id: "source-image", kind: "image", origin: "uploaded" }] }} />);
+    await chooseCanvas();
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(send).not.toHaveBeenCalled();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Preview the selected source canvas before sending.");
+    expect(screen.getByLabelText("Message")).toHaveValue("Paint a green landscape");
+    await act(async () => { complete(preview()); });
+    await screen.findByRole("img", { name: /Extension preview/ });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not treat a response for another source as the requested preview", async () => {
+    vi.mocked(api.previewTurnSourceFit).mockResolvedValue(preview("another-image"));
+    const send = vi.fn();
+    mount(<Harness revisionId="revision-canvas" onSend={send}
+      initial={{ attachments: [{ id: "source-image", kind: "image", origin: "uploaded" }] }} />);
+    await chooseCanvas();
+    await waitFor(() => expect(api.previewTurnSourceFit).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(send).not.toHaveBeenCalled();
+    expect(screen.queryByRole("img", { name: /Extension preview/ })).not.toBeInTheDocument();
+  });
+
+  it("sends the workflow the server previewed the canvas with", async () => {
+    vi.mocked(api.previewTurnSourceFit).mockResolvedValue(preview("source-image", "revision-resolved"));
+    const send = vi.fn();
+    mount(<Harness revisionId="revision-canvas" onSend={send}
+      initial={{ attachments: [{ id: "source-image", kind: "image", origin: "uploaded" }] }} />);
+    await chooseCanvas();
+    await screen.findByRole("img", { name: /Extension preview/ });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(send.mock.calls[0][2]).toEqual(["source-image"]);
+    expect(send.mock.calls[0][7]).toMatchObject({ sourceArtifactId: "source-image", workflowRevisionId: "revision-resolved" });
+  });
+
+  it("leaves the workflow's answer to the server and sends no canvas it would not draw", async () => {
+    vi.mocked(api.previewTurnSourceFit).mockRejectedValue(new Error("source_fit_workflow_unsupported"));
+    const send = vi.fn();
+    mount(<Harness revisionId="revision-canvas" onSend={send}
+      initial={{ attachments: [{ id: "source-image", kind: "image", origin: "uploaded" }] }} />);
+    await chooseCanvas();
+    expect(await screen.findByText("This source and workflow cannot use that canvas. Change the dimensions or choose another workflow."))
+      .toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(send).not.toHaveBeenCalled();
+    expect(api.workflowRevisionSourceFit).not.toHaveBeenCalled();
+  });
+
+  it("carries an exact preview into a prior-turn submission and retains it after rejection", async () => {
+    const accept = vi.fn<(submission: TurnEditorSubmission) => Promise<unknown>>().mockRejectedValue(new Error("Queue full"));
+    mount(<Harness revisionId="revision-canvas" onAccept={accept} initial={{
+      attachmentIntent: "inherit", attachments: [{ id: "source-image", kind: "image", origin: "uploaded" }],
+    }} />);
+    await chooseCanvas();
+    await screen.findByRole("img", { name: /Extension preview/ });
+    fireEvent.click(screen.getByRole("button", { name: "Queue edited version" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Queue full");
+    expect(accept.mock.calls[0][0]).toMatchObject({
+      inputArtifactIds: ["source-image"], settings: {},
+      sourceFit: { sourceArtifactId: "source-image", workflowRevisionId: "revision-canvas",
+        request: { mode: "extend", width: 1200, height: 900 } },
+    });
+    expect(screen.getByLabelText("Canvas width")).toHaveValue(1200);
+  });
+  it("puts the picture the server fitted the canvas to first among an edit's inputs", async () => {
+    vi.mocked(api.previewPriorTurnSourceFit).mockResolvedValue(preview("resolved-image"));
+    const accept = vi.fn<(submission: TurnEditorSubmission) => Promise<unknown>>().mockResolvedValue(undefined);
+    mount(<Harness revisionId="revision-canvas" onAccept={accept}
+      sourceFitPreviewContext={{ kind: "prior-edit", id: "message-edited", request: { text: "Paint a green landscape", idempotency_key: "edit" } }}
+      initial={{ sourceFit: { sourceArtifactId: "", workflowRevisionId: "", request: { mode: "extend", width: 1200, height: 900 } } }} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Preview canvas" }));
+    const shown = await screen.findByRole("img", { name: /Extension preview/ });
+    // The preview draws the picture the server fitted, not whatever the composer holds.
+    expect(shown.querySelector("image")).toHaveAttribute("href", "/api/artifacts/resolved-image/content");
+    fireEvent.click(screen.getByRole("button", { name: "Queue edited version" }));
+    await waitFor(() => expect(accept).toHaveBeenCalledTimes(1));
+    expect(accept.mock.calls[0][0]).toMatchObject({
+      inputArtifactIds: ["resolved-image"], sourceFit: { sourceArtifactId: "resolved-image", workflowRevisionId: "revision-canvas" },
+    });
+  });
+  it("allows a temporarily empty dimension without saving zero or sending the old preview", async () => {
+    const send = vi.fn();
+    mount(<Harness revisionId="revision-canvas" onSend={send}
+      initial={{ attachments: [{ id: "source-image", kind: "image", origin: "uploaded" }] }} />);
+    await chooseCanvas();
+    await screen.findByRole("img", { name: /Extension preview/ });
+    const width = screen.getByLabelText("Canvas width");
+    fireEvent.change(width, { target: { value: "" } });
+    expect(width).toHaveValue(null);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(send).not.toHaveBeenCalled();
+    fireEvent.blur(width);
+    expect(width).toHaveValue(1200);
+    expect(screen.queryByRole("img", { name: /Extension preview/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Preview canvas" }));
+    await screen.findByRole("img", { name: /Extension preview/ });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(send.mock.calls[0][7].request).toEqual({ mode: "extend", width: 1200, height: 900 });
+  });
+
+  it("covers an attached picture and its file name while pictures are covered", () => {
+    localStorage.setItem(SENSITIVE_MEDIA_KEY, "hide");
+    try {
+      mount(<Harness initial={{ attachments: [{ id: "source-image", kind: "image", origin: "uploaded" }] }} />);
+
+      const preview = screen.getByLabelText("Preview Uploaded image");
+      expect(preview.querySelector("img")).toBeNull();
+      expect(screen.queryByText("source-image")).toBeNull();
+    } finally {
+      localStorage.removeItem(SENSITIVE_MEDIA_KEY);
+    }
+  });
+
 });

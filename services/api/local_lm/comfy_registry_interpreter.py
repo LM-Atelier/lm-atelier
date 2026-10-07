@@ -67,6 +67,17 @@ async def probe_comfy_registry_runtime_target(
 ]:
     """Read wheel markers and tags from the exact managed ComfyUI interpreter."""
 
+    return await _probe_target(python_executable, require_runtime=True)
+
+
+async def _probe_target(
+    python_executable: Path, *, require_runtime: bool
+) -> tuple[
+    dict[str, str],
+    tuple[str, ...],
+    tuple[ComfyRegistryRuntimeDistribution, ...],
+]:
+
     executable = _python_executable(python_executable)
     output = await _run_probe(executable)
     try:
@@ -76,10 +87,15 @@ async def probe_comfy_registry_runtime_target(
             "interpreter_probe_invalid_output",
             "The managed runtime returned invalid wheel-target data.",
         ) from exc
-    if not isinstance(payload, dict) or frozenset(payload) not in {
-        frozenset({"marker_environment", "supported_tags"}),
-        frozenset({"marker_environment", "supported_tags", "runtime_distributions"}),
-    }:
+    if (
+        not isinstance(payload, dict)
+        or (require_runtime and "runtime_distributions" not in payload)
+        or frozenset(payload)
+        not in {
+            frozenset({"marker_environment", "supported_tags"}),
+            frozenset({"marker_environment", "supported_tags", "runtime_distributions"}),
+        }
+    ):
         raise ComfyRegistryInterpreterError(
             "interpreter_probe_invalid_output",
             "The managed runtime returned invalid wheel-target data.",
@@ -137,7 +153,7 @@ async def probe_comfy_registry_wheel_target(
     python_executable: Path,
 ) -> tuple[dict[str, str], tuple[str, ...]]:
     """Read wheel markers and tags while preserving the original probe contract."""
-    environment, tags, _ = await probe_comfy_registry_runtime_target(python_executable)
+    environment, tags, _ = await _probe_target(python_executable, require_runtime=False)
     return environment, tags
 
 

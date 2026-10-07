@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from workflow_fixtures import seed_workflow_trust
@@ -101,8 +103,13 @@ async def test_custom_node_git_does_not_inherit_credentials(
 
 
 async def test_custom_node_lifecycle_and_workflow_trust_gate(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    async def object_info() -> dict[str, Any]:
+        return {"ReviewedNode": {"input": {}, "output": [], "output_node": True}}
+
+    monkeypatch.setattr(app.state.services.engines.media, "object_info", object_info, raising=False)
+
     async def install(
         _manager: CustomNodeManager,
         session: Session,
@@ -164,11 +171,17 @@ async def test_custom_node_lifecycle_and_workflow_trust_gate(
         json={
             "name": "Node workflow",
             "operation": "text_to_image",
-            "api_graph": {"node": {"class_type": "ReviewedNode"}},
-            "ui_graph": {"last_node_id": 1, "nodes": []},
+            "api_graph": {"1": {"class_type": "ReviewedNode", "inputs": {}}},
+            "ui_graph": {
+                "version": 0.4,
+                "last_node_id": 1,
+                "nodes": [{"id": 1, "type": "ReviewedNode", "inputs": [], "outputs": []}],
+                "links": [],
+            },
             "dependencies": {"custom_nodes": [{"id": node["id"], "revision": revision}]},
         },
     )
+    assert workflow.status_code == 201, workflow.text
     seed_workflow_trust(workflow.json()["current_revision_id"])
     validation = await client.post(f"/api/workflows/{workflow.json()['id']}/validate")
     assert "not trusted" in validation.json()["errors"][0]
@@ -254,7 +267,7 @@ async def test_custom_node_change_rechecks_media_queue_inside_compute_lease(
             )
             session.commit()
 
-    response = await asyncio.wait_for(trust, timeout=2)
+    response = await asyncio.wait_for(trust, timeout=PATIENCE_SECONDS)
     assert response.status_code == 409
     assert "active or queued job" in response.json()["detail"]
     assert verified is False

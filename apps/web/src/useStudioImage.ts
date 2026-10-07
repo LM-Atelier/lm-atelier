@@ -11,21 +11,18 @@ import { useEffect, useState } from "react";
 export function useStudioImage(artifactId: string | null) {
   const [loaded, setLoaded] = useState<{
     artifactId: string | null;
+    attempt: number;
     bitmap: ImageBitmap | null;
     error: string | null;
-  }>({ artifactId: null, bitmap: null, error: null });
+  }>({ artifactId: null, attempt: 0, bitmap: null, error: null });
   const [reloads, setReloads] = useState(0);
 
   useEffect(() => {
     let live = true;
+    let ownedBitmap: ImageBitmap | null = null;
     const abort = new AbortController();
     const replace = (next: { bitmap: ImageBitmap | null; error: string | null }) =>
-      setLoaded((previous) => {
-        // The picture being replaced holds decoded memory until it is closed,
-        // and nothing else will close it.
-        if (previous.bitmap && previous.bitmap !== next.bitmap) previous.bitmap.close();
-        return { artifactId, ...next };
-      });
+      setLoaded({ artifactId, attempt: reloads, ...next });
 
     if (!artifactId) {
       // Async so the clear never runs synchronously inside the effect.
@@ -55,6 +52,7 @@ export function useStudioImage(artifactId: string | null) {
           decoded.close();
           return;
         }
+        ownedBitmap = decoded;
         replace({ bitmap: decoded, error: null });
       })
       .catch((reason: unknown) => {
@@ -68,12 +66,15 @@ export function useStudioImage(artifactId: string | null) {
     return () => {
       live = false;
       abort.abort();
+      ownedBitmap?.close();
     };
   }, [artifactId, reloads]);
 
+  // A reload releases the old bitmap too, even though its artifact ID is unchanged.
+  const current = loaded.artifactId === artifactId && loaded.attempt === reloads;
   return {
-    bitmap: loaded.artifactId === artifactId ? loaded.bitmap : null,
-    error: loaded.artifactId === artifactId ? loaded.error : null,
+    bitmap: current ? loaded.bitmap : null,
+    error: current ? loaded.error : null,
     reload: () => setReloads((attempt) => attempt + 1),
   };
 }

@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import subprocess
 import zipfile
+from pathlib import Path
 
 import pytest
 from httpx2 import AsyncClient
 
+from local_lm.config import Settings
 from local_lm.db import SessionLocal
+from local_lm.filesystem_links import is_link_or_reparse
 from local_lm.models import Job
 
 pytestmark = pytest.mark.asyncio
@@ -62,3 +67,69 @@ async def test_jobs_without_recorded_stages_are_simply_absent(client: AsyncClien
         payload = json.loads(bundle.read("diagnostics.json"))
 
     assert "download" not in payload["job_stages"]
+
+
+async def test_a_linked_log_is_not_measured(client: AsyncClient, settings: Settings) -> None:
+    outside = settings.data_dir / "outside-log"
+    outside.write_bytes(b"x" * 1_000_000)
+    link = settings.log_dir / "linked.log"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("file symlinks are unavailable")
+
+    created = await client.post("/api/diagnostics")
+    assert created.status_code == 201
+    archive = await client.get(created.json()["url"])
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
+        logs = json.loads(bundle.read("diagnostics.json"))["logs"]
+
+    ordinary = [
+        path for path in settings.log_dir.iterdir() if path.is_file() and not path.is_symlink()
+    ]
+    assert logs["file_count"] == len(ordinary)
+    assert logs["total_bytes"] < outside.stat().st_size
+    assert outside.read_bytes() == b"x" * 1_000_000
+    assert link.is_symlink()
+
+
+def _make_link_dir(link: Path, target: Path) -> bool:
+    """Create a directory-shaped redirection, or False without privileges."""
+
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            check=False,
+        )
+        return completed.returncode == 0
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError:
+        return False
+    return True
+
+
+async def test_a_linked_log_directory_is_not_measured(
+    client: AsyncClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = settings.data_dir / "outside-logs"
+    outside.mkdir()
+    secret = outside / "secret.log"
+    secret.write_bytes(b"x" * 1_000_000)
+    log_dir = settings.data_dir / "linked-logs"
+    if not _make_link_dir(log_dir, outside):
+        pytest.skip("directory links are unavailable")
+    monkeypatch.setattr(Settings, "log_dir", property(lambda _self: log_dir))
+
+    created = await client.post("/api/diagnostics")
+    assert created.status_code == 201, created.text
+    archive = await client.get(created.json()["url"])
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
+        logs = json.loads(bundle.read("diagnostics.json"))["logs"]
+
+    assert logs["file_count"] == 0
+    assert logs["total_bytes"] == 0
+    assert secret.read_bytes() == b"x" * 1_000_000
+    assert is_link_or_reparse(log_dir, missing="raise", unreadable="raise")

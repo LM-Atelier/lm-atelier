@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 
-from local_lm import api as api_module
+from local_lm import workflow_package_drafts
 from local_lm.db import SessionLocal
 from local_lm.models import WorkflowRevision
 
@@ -426,8 +426,8 @@ async def test_a_draft_identity_collision_refuses_instead_of_reusing_another_gra
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        api_module,
-        "_workflow_package_draft_identity",
+        workflow_package_drafts,
+        "workflow_package_draft_identity",
         lambda _canonical: ("wfpkgdraft_collision", "wfpkgdrev_collision", "a" * 64),
     )
     first = await client.post(
@@ -484,6 +484,7 @@ async def test_a_ready_draft_finalizes_in_place_and_retry_is_idempotent(
     assert current["input_schema_json"] == {
         "type": "object",
         "properties": {"input_image": {"type": "string"}},
+        "x-lm-atelier-graph-settings": {"version": 1, "bindings": []},
     }
     assert current["ui_graph_json"]["nodes"][0]["widgets_values"] == [
         "author-source.png",
@@ -614,6 +615,7 @@ async def test_a_source_operation_binds_the_chat_image_not_the_authors_file(
     assert revision["input_schema_json"] == {
         "type": "object",
         "properties": {"input_image": {"type": "string"}},
+        "x-lm-atelier-graph-settings": {"version": 1, "bindings": []},
     }
 
 

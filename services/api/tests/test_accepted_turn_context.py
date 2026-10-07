@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import wait_for_terminal_status
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
@@ -149,7 +150,6 @@ async def test_missing_snapshot_binding_never_falls_back_to_live_context(
 async def test_frozen_ordered_text_uses_its_accepted_producer_output(
     app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch, later_change: str
 ) -> None:
-    import asyncio
     from collections.abc import AsyncIterator
     from copy import deepcopy
 
@@ -249,16 +249,15 @@ async def test_frozen_ordered_text_uses_its_accepted_producer_output(
             assert stored_project is not None
             stored_project.instructions = "Later project instructions"
             session.commit()
-    for _ in range(200):
+
+    async def read_last() -> dict[str, Any]:
         with SessionLocal() as session:
             last = session.get(Run, last_id)
             assert last is not None
-            if last.status in {"complete", "failed", "cancelled"}:
-                assert last.status == "complete", last.error
-                break
-        await asyncio.sleep(0.05)
-    else:
-        pytest.fail("The ordered consumer did not settle")
+            return {"status": last.status, "error": last.error}
+
+    settled = await wait_for_terminal_status(read_last, what="the ordered consumer", expected=None)
+    assert settled["status"] == "complete", settled["error"]
     assert len(seen) == 2
     assert len(original_output) == 1 and original_output[0]
     consumer = seen[-1]
@@ -291,6 +290,8 @@ async def test_accepted_profile_configuration_reaches_worker_loading(
     from local_lm.models import Chat, ModelInstall, ModelProfile
     from local_lm.schemas import WorkerStatus
 
+    install: ModelInstall | None
+    profile: ModelProfile | None
     orchestrator = app.state.services.orchestrator
     neutral_fields = await orchestrator.engines.settings_for_role("chat", engine="mock")
 
@@ -397,12 +398,13 @@ async def test_accepted_profile_configuration_reaches_worker_loading(
 
         assert await orchestrator._ensure_chat_worker(run_id) is loaded
         loader.assert_awaited_once()
-        supplied_profile, supplied_install = loader.await_args.args
+        awaited = loader.await_args_list[0]
+        supplied_profile, supplied_install = awaited.args
         assert supplied_profile.load_settings_json == original_load
         assert supplied_profile.name == "Accepted launch"
         assert supplied_install.id == "model-accepted-launch"
-        assert len(loader.await_args.kwargs["launch_scope_sha256"]) == 64
-        assert loader.await_args.kwargs["vision_max_images"] == 2
+        assert len(awaited.kwargs["launch_scope_sha256"]) == 64
+        assert awaited.kwargs["vision_max_images"] == 2
         with SessionLocal() as session:
             current_profile = session.get(ModelProfile, "profile-accepted-launch")
             assert current_profile is not None
@@ -436,6 +438,8 @@ async def test_accepted_vision_bridge_uses_accepted_inputs(
     from local_lm.vision import VisionInputError
     from local_lm.workflow_compatibility import mirror_legacy_chat_workflow_selections
 
+    source: ModelSource | None
+    profile: ModelProfile | None
     orchestrator = app.state.services.orchestrator
     neutral_fields = await orchestrator.engines.settings_for_role("chat", engine="mock")
 

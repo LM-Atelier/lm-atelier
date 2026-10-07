@@ -9,15 +9,24 @@ import {
   Star,
 } from "lucide-react";
 import { CompareButton } from "./CompareButton";
+import { GenerationDetails } from "./GenerationDetails";
+import { GenerationRecordButton } from "./GenerationRecordButton";
 import { ImageStudioIcon } from "./ImageStudioIcon";
 import { LineageButton } from "./LineageButton";
+import { PagedImageHistory, type ImageHistoryTarget } from "./PagedImageHistory";
 import {
   artifactSource,
   mediaOriginLabel,
   type EditLineageStep,
   type MediaOrigin,
 } from "./messageMedia";
+import { sizeDisagreement, sizeDisagreementMessage } from "./outputSizeAgreement";
+import { useSensitiveMediaChoice } from "./sensitiveMedia";
+import { ShieldedMedia } from "./ShieldedMedia";
+import { sourcePixelsChanged } from "./sourceFitAgreement";
 import type { MessagePart } from "./types";
+import { VideoFrameButton } from "./VideoFrameButton";
+import { VideoTrimButton } from "./VideoTrimButton";
 
 export function ArtifactPart({
   part,
@@ -29,6 +38,9 @@ export function ArtifactPart({
   onToggleFavorite,
   compareSourceUrl,
   lineage,
+  editHistory,
+  generationProvenance,
+  generationRunId,
 }: {
   part: MessagePart;
   origin: MediaOrigin | null;
@@ -39,7 +51,12 @@ export function ArtifactPart({
   onToggleFavorite?: (part: MessagePart) => void;
   compareSourceUrl?: string | null;
   lineage?: EditLineageStep[];
+  editHistory?: ImageHistoryTarget;
+  generationProvenance?: unknown;
+  /** The run that made this output, which names it in its generation record. */
+  generationRunId?: string;
 }) {
+  const shielding = useSensitiveMediaChoice() !== "show";
   const proxyId = typeof part.metadata_json.browser_proxy_artifact_id === "string" ? part.metadata_json.browser_proxy_artifact_id : null;
   const posterId = typeof part.metadata_json.poster_artifact_id === "string"
     ? part.metadata_json.poster_artifact_id
@@ -53,10 +70,20 @@ export function ArtifactPart({
     return <div className="submission-progress"><LoaderCircle size={16} />Loading media</div>;
   }
   if (part.type === "attachment") {
-    const name = part.artifact?.original_name || "Attachment";
+    // A file name can say as much as the picture would, so it is covered too.
+    const name = shielding ? "Attachment" : part.artifact?.original_name || "Attachment";
     return <a className="message-attachment" href={source} download><Paperclip size={14} />{name}</a>;
   }
   const kind = part.type === "video" ? "video" : "image";
+  const recordRunId = !preview && !inputReference && origin !== null && origin !== "uploaded"
+    ? generationRunId
+    : undefined;
+  // A preview node's throwaway was never the picture that was asked for, so a
+  // size note beside it would be about the wrong file. The record already
+  // refuses those, and this is the second half of the same refusal for the
+  // streaming previews the part flag marks.
+  const sizeNote = preview ? null : sizeDisagreement(part);
+  const sourceChanged = !preview && sourcePixelsChanged(part);
   const label = preview ? "Generation preview" : mediaOriginLabel(
     origin,
     kind,
@@ -70,10 +97,12 @@ export function ArtifactPart({
             the frame reads as full without cropping anything or pretending
             the image is a shape it is not. Decorative, so it is hidden from
             assistive technology - the real image carries the description. */}
-        <div className="media-frame">
-          <img className="media-backdrop" src={source} alt="" aria-hidden="true" loading="lazy" />
-          <img src={source} alt={label} loading="lazy" />
-        </div>
+        <ShieldedMedia kind="image">
+          <div className="media-frame">
+            <img className="media-backdrop" src={source} alt="" aria-hidden="true" loading="lazy" />
+            <img src={source} alt={label} loading="lazy" />
+          </div>
+        </ShieldedMedia>
         <figcaption>
           <ImageIcon size={14} /> {label}
           {/* Icons, not labels - but each operation stays distinct: Edit
@@ -123,8 +152,9 @@ export function ArtifactPart({
               <Quote size={14} aria-hidden="true" />
             </button>
           )}
-          {!preview && compareSourceUrl && source && <CompareButton before={compareSourceUrl} after={source} />}
-          {!preview && lineage && source && <LineageButton steps={lineage} resultUrl={source} />}
+          {!preview && editHistory && <PagedImageHistory key={`${editHistory.chatId}:${editHistory.resultId}`} target={editHistory} resultUrl={source} />}
+          {!preview && !editHistory && compareSourceUrl && source && <CompareButton before={compareSourceUrl} after={source} />}
+          {!preview && !editHistory && lineage && source && <LineageButton steps={lineage} resultUrl={source} />}
           {!preview && onToggleFavorite && (
             <button
               type="button"
@@ -141,19 +171,41 @@ export function ArtifactPart({
               <Download size={14} aria-hidden="true" />
             </a>
           )}
+          {recordRunId && <GenerationRecordButton runId={recordRunId} artifactId={part.artifact_id} kind="image" />}
         </figcaption>
+        {!preview && !inputReference && origin !== null && origin !== "uploaded" && <GenerationDetails provenance={generationProvenance} />}
+        {/* Beside the picture rather than in place of it: the run succeeded and
+            the picture is real, it simply is not the shape that was asked for.
+            A status role announces it once when it appears without stealing
+            focus from whatever the person was doing. */}
+        {sizeNote && (
+          <p className="media-size-note" role="status">
+            {sizeDisagreementMessage(sizeNote)}
+          </p>
+        )}
+        {sourceChanged && (
+          <p className="media-size-note" role="status">
+            This image changed pixels in the source area. Extend was asked to preserve them.
+          </p>
+        )}
       </figure>
     );
   }
   return (
     <figure className="media-card">
-      {/* Generated media has no caption track to point at, and an empty one would claim an affordance that is not there. */}
-      {/* eslint-disable-next-line jsx-a11y-x/media-has-caption */}
-      <video src={source} poster={poster} controls preload="metadata" aria-label={label} />
+      <ShieldedMedia kind="video">
+        {/* Generated media has no caption track to point at, and an empty one would claim an affordance that is not there. */}
+        {/* eslint-disable-next-line jsx-a11y-x/media-has-caption */}
+        <video src={source} poster={poster} controls preload="metadata" aria-label={label} />
+      </ShieldedMedia>
       <figcaption>
         <Film size={14} /> {label}
         <a href={source} download>Download</a>
+        {recordRunId && <GenerationRecordButton runId={recordRunId} artifactId={part.artifact_id} kind="video" />}
+        {!preview && <VideoFrameButton artifactId={part.artifact_id} source={source} />}
+        {!preview && <VideoTrimButton artifactId={part.artifact_id} source={source} />}
       </figcaption>
+      {!preview && !inputReference && origin !== null && origin !== "uploaded" && <GenerationDetails provenance={generationProvenance} />}
     </figure>
   );
 }

@@ -99,7 +99,9 @@ class LeaseStranded(RuntimeError):
     ``kind`` names the object that would not close: ``"descriptor"`` (the C
     runtime descriptor that owned the handle), ``"handle"`` (the raw kernel
     handle before any descriptor owned it) or ``"probe"`` (the status
-    probe's write-access handle). ``number`` is that descriptor or handle
+    probe's write-access handle). A directory-probe names a temporary
+    share-all directory handle; it does not carry machine exclusion.
+    ``number`` is that descriptor or handle
     value and ``error`` the Win32 error the close returned. A strand raised
     during an acquisition - a failed initialization or a refused binding -
     is raised FROM that failure, so ``__cause__`` is the error that aborted
@@ -176,14 +178,16 @@ def _kernel32() -> Any:
     """kernel32 bound with per-call error capture.
 
     ``use_last_error=True`` copies GetLastError immediately after every call
-    through this binding, so ``ctypes.get_last_error()`` read right after a
+    through this binding, so ``_last_error()`` read right after a
     call is that call's own result - never a stale copy left by an earlier
     call through some other binding.
     """
 
+    if os.name != "nt" or sys.platform != "win32":
+        raise LeaseRefused("the machine lease requires Windows kernel handles")
     global _KERNEL32
     if _KERNEL32 is None:
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel.CreateFileW.restype = ctypes.c_void_p
         kernel.CreateFileW.argtypes = [
             ctypes.c_wchar_p,
@@ -215,6 +219,13 @@ def _kernel32() -> Any:
     return _KERNEL32
 
 
+def _last_error() -> int:
+    """Read the calling thread's captured Windows error."""
+    if os.name == "nt" and sys.platform == "win32":
+        return ctypes.get_last_error()
+    raise LeaseRefused("the machine lease requires Windows kernel handles")
+
+
 def _now_text() -> str:
     return datetime.now(UTC).isoformat(timespec="microseconds")
 
@@ -229,7 +240,7 @@ def _scrubbed_git_env() -> dict[str, str]:
 def _repo_root_default() -> Path:
     # The module's own location, never the launch cwd: a tool started from
     # inside some other repository must not point the machine lease there.
-    return Path(__file__).resolve().parent
+    return Path(__file__).resolve().parents[1]
 
 
 def _common_dir(repo: Path | None) -> Path:
@@ -274,9 +285,7 @@ def _identity(handle: int) -> tuple[int, int, int]:
     if not _kernel32().GetFileInformationByHandle(
         ctypes.c_void_p(handle), ctypes.byref(information)
     ):
-        raise LeaseRefused(
-            f"the held object's identity could not be read (error {ctypes.get_last_error()})"
-        )
+        raise LeaseRefused(f"the held object's identity could not be read (error {_last_error()})")
     return (information.volume_serial, information.index_high, information.index_low)
 
 
@@ -286,9 +295,7 @@ def _final_path(handle: int) -> str:
     buffer = ctypes.create_unicode_buffer(32768)
     length = _kernel32().GetFinalPathNameByHandleW(ctypes.c_void_p(handle), buffer, len(buffer), 0)
     if length == 0 or length >= len(buffer):
-        raise LeaseRefused(
-            f"the held directory's name could not be read (error {ctypes.get_last_error()})"
-        )
+        raise LeaseRefused(f"the held directory's name could not be read (error {_last_error()})")
     return buffer.value
 
 
@@ -313,9 +320,7 @@ def _open_directory(path: Path) -> int:
         None,
     )
     if handle is None or handle == _INVALID_HANDLE:
-        raise LeaseRefused(
-            f"the directory could not be held: {path} (error {ctypes.get_last_error()})"
-        )
+        raise LeaseRefused(f"the directory could not be held: {path} (error {_last_error()})")
     return int(handle)
 
 
@@ -325,16 +330,14 @@ def _close(handle: int) -> bool:
 
 @dataclass(frozen=True)
 class _Pin:
-    """One link of the checkout's resolution chain, held read-share only for
-    the lease lifetime: the .git entry under the repository directory, for a
-    pointer the private git directory it names and that directory's
-    commondir file, and every reparse point on the way to either. While a
-    pin lives, any open that would write, rename, delete or retarget the
-    link is refused by the kernel, so what the repository names cannot
-    change under the holder or under a child. A pin is inheritable exactly
-    as the lease is: a stage child launched while the lease is held carries
-    every pin for as long as it can act, so the chain stays held for the
-    child's lifetime even when the holder dies first."""
+    """One inheritable name hold in the checkout resolution chain.
+
+    Rename and deletion are excluded for every pin. Files, reparse points
+    and leaf directories also exclude writes. An ordinary parent shares
+    writes only after its direct child is pinned, keeping it nonempty and
+    unable to become a junction while allowing atomic child-file updates.
+    Stage children inherit the pins for their own lifetime.
+    """
 
     path: str
     role: str
@@ -393,10 +396,10 @@ def _abandon(
             cause = refusal
     for kind, number in handles:
         if not _close(number):
-            strands.append((kind, number, ctypes.get_last_error()))
+            strands.append((kind, number, _last_error()))
     for pin in pins:
         if not _close(pin.handle):
-            strands.append(("pin", pin.handle, ctypes.get_last_error()))
+            strands.append(("pin", pin.handle, _last_error()))
     if not strands:
         return None
     (kind, number, error), *others = strands
@@ -419,120 +422,124 @@ class _Binding:
     pins: tuple[_Pin, ...] = ()
 
 
-def _directory_identity(path: Path) -> tuple[int, int, int]:
+@contextlib.contextmanager
+def _directory_probe(path: Path) -> Iterator[int]:
+    """Report a temporary handle's refused close without losing the operation's error."""
     handle = _open_directory(path)
     try:
+        yield handle
+    except BaseException as refusal:
+        nested, primary = _merge_strand(refusal)
+        strand = _abandon(
+            during="a directory identity probe",
+            handles=(("directory-probe", handle),),
+            stranded=nested,
+        )
+        if strand is not None:
+            raise strand from primary
+        raise
+    else:
+        strand = _abandon(
+            during="a directory identity probe", handles=(("directory-probe", handle),)
+        )
+        if strand is not None:
+            raise strand
+
+
+def _directory_identity(path: Path) -> tuple[int, int, int]:
+    with _directory_probe(path) as handle:
         return _identity(handle)
-    finally:
-        _close(handle)
 
 
 def _attributes(path: Path) -> int:
     attributes = _kernel32().GetFileAttributesW(str(path))
     if attributes == _INVALID_FILE_ATTRIBUTES:
         raise LeaseRefused(
-            f"the resolution chain could not be read: {path} (error {ctypes.get_last_error()})"
+            f"the resolution chain could not be read: {path} (error {_last_error()})"
         )
     return int(attributes)
 
 
-def _reparse_links(path: Path, role: str, *, itself: bool = False) -> list[tuple[Path, str]]:
-    """Every reparse point among the components of a textual path, root
-    first - and the path itself when ``itself`` is set and it is one. Git
-    resolves the text at each invocation, so retargeting one of these
-    changes what the text names while the object at its end stays held;
-    each is pinned as itself. ``..`` components collapse lexically, as
-    Win32 collapses them before the kernel sees the name."""
+def _path_chain(
+    path: Path, role: str, seen: set[str], *, itself: bool = False
+) -> Iterator[tuple[Path, str]]:
+    """Yield each component before inspecting it; the caller pins each yield.
 
+    Ordinary directories matter too: an unheld directory can become a junction.
+    A link's resolved target has its own namespace, which must also be held.
+    """
     plain = Path(os.path.normpath(str(path)))
     components = list(reversed(plain.parents))[1:]
     if itself:
         components.append(plain)
-    links: list[tuple[Path, str]] = []
     for prefix in components:
+        key = os.path.normcase(str(prefix))
+        if key in seen:
+            continue
+        seen.add(key)
+        yield prefix, role if itself and prefix == plain else f"a component on the way to {role}"
         if _attributes(prefix) & _FILE_ATTRIBUTE_REPARSE_POINT:
-            links.append((prefix, f"a link on the way to {role}"))
-    return links
+            with _directory_probe(prefix) as probe:
+                identity = _identity(probe)
+                target = Path(_plain(_final_path(probe)))
+            yield from _path_chain(target, role, seen, itself=True)
+            if _directory_identity(prefix) != identity or _directory_identity(target) != identity:
+                raise LeaseRefused(f"a link target changed while its path was being held: {prefix}")
 
 
 def _named_directory(base: Path, file: Path) -> Path:
-    """The directory a commondir file names, as git reads it: its text,
-    relative to the directory holding the file."""
-
+    """The directory a commondir file names, relative to its holding directory."""
     text = file.read_text(encoding="utf-8").strip()
     named = Path(text)
     return named if named.is_absolute() else base / named
 
 
-def _resolution_chain(anchor: Path) -> list[tuple[Path, str]]:
-    """The links git follows from the repository directory to its common
-    directory, each a path whose change would change what the repository
-    names: the .git entry; for a pointer file, the private git directory it
-    names and that directory's commondir file; for a directory, its
-    commondir file if it has one; and every reparse point among the
-    components of the paths the pointer and the commondir file name. A
-    reparse point is a link as itself."""
-
+def _resolution_chain(anchor: Path) -> Iterator[tuple[Path, str]]:
+    """Walk the Git mapping only after the caller holds each yielded component."""
+    seen: set[str] = set()
+    yield from _path_chain(anchor, "the repository directory", seen, itself=True)
     entry = anchor / ".git"
-    links = [(entry, "the repository's .git entry")]
-    attributes = _attributes(entry)
-    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-        return links
-    if attributes & _FILE_ATTRIBUTE_DIRECTORY:
-        commondir = entry / "commondir"
-        if commondir.is_file():
-            links.append((commondir, "the commondir file"))
-            links.extend(
-                _reparse_links(
-                    _named_directory(entry, commondir),
-                    "the common git directory",
-                    itself=True,
-                )
-            )
-        return links
-    text = entry.read_text(encoding="utf-8")
-    if not text.startswith("gitdir:"):
-        raise LeaseRefused(f"the .git file is not a git pointer: {entry}")
-    target = Path(text[len("gitdir:") :].strip())
-    private = target if target.is_absolute() else anchor / target
-    links.extend(_reparse_links(private, "the checkout's private git directory"))
-    links.append((private, "the checkout's private git directory"))
+    yield from _path_chain(entry, "the repository's .git entry", seen, itself=True)
+    if _attributes(entry) & _FILE_ATTRIBUTE_DIRECTORY:
+        private = entry
+    else:
+        text = entry.read_text(encoding="utf-8")
+        if not text.startswith("gitdir:"):
+            raise LeaseRefused(f"the .git file is not a git pointer: {entry}")
+        target = Path(text[len("gitdir:") :].strip())
+        private = target if target.is_absolute() else anchor / target
+        yield from _path_chain(private, "the checkout's private git directory", seen, itself=True)
     commondir = private / "commondir"
     if commondir.is_file():
-        links.append((commondir, "the commondir file"))
-        links.extend(
-            _reparse_links(
-                _named_directory(private, commondir),
-                "the common git directory",
-                itself=True,
-            )
+        yield from _path_chain(commondir, "the commondir file", seen, itself=True)
+        yield from _path_chain(
+            _named_directory(private, commondir),
+            "the common git directory",
+            seen,
+            itself=True,
         )
-    return links
 
 
 def _open_pin(path: Path, role: str) -> _Pin:
-    """Hold one link against change: read share only. A directory is held
-    with backup semantics, a reparse point as itself rather than through
-    its target, and a file for reading; the kernel then refuses every other
-    open that would write, rename, delete or retarget the link."""
+    """Hold a component strictly before the walk inspects its name."""
+    return _open_shared_pin(path, role, _SHARE_READ)
 
-    attributes = _attributes(path)
-    flags = _ATTRIBUTE_NORMAL
-    if attributes & _FILE_ATTRIBUTE_DIRECTORY:
-        flags = _FILE_FLAG_BACKUP_SEMANTICS
-    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-        flags |= _FILE_FLAG_OPEN_REPARSE_POINT
+
+def _open_shared_pin(path: Path, role: str, share: int) -> _Pin:
+    """Open an inheritable name hold with the selected sharing mode."""
+
+    flags = _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT
     handle = _kernel32().CreateFileW(
         str(path),
         _FILE_READ_ATTRIBUTES | _GENERIC_READ,
-        _SHARE_READ,
+        share,
         None,
         _OPEN_EXISTING,
         flags,
         None,
     )
     if handle is None or handle == _INVALID_HANDLE:
-        error = ctypes.get_last_error()
+        error = _last_error()
         if error == _ERROR_SHARING_VIOLATION:
             raise LeaseRefused(f"{role} is open for writing elsewhere: {path}")
         raise LeaseRefused(f"{role} could not be held: {path} (error {error})")
@@ -542,14 +549,54 @@ def _open_pin(path: Path, role: str) -> _Pin:
     )
     if not marked:
         refusal = LeaseRefused(
-            f"{role} could not be held for a child's lifetime: {path} "
-            f"(error {ctypes.get_last_error()})"
+            f"{role} could not be held for a child's lifetime: {path} (error {_last_error()})"
         )
         strand = _abandon(during="a refused pinning", handles=(("pin", handle),))
         if strand is not None:
             raise strand from refusal
         raise refusal
     return _Pin(str(path), role, handle)
+
+
+def _relax_parent_pins(pins: list[_Pin], *, held_child: Path | None = None) -> None:
+    """Allow atomic child writes once a held child keeps each parent nonempty.
+
+    Every name is still held against rename/delete. Only an ordinary directory
+    with an already pinned direct child can share writes: that child cannot be
+    removed, so the directory cannot become an in-place junction. An explicitly
+    held ordinary lease file can supply that child after its no-follow open.
+    Files, reparse points and other leaves retain their strict write exclusion.
+    """
+    parents = (
+        {os.path.normcase(str(held_child.parent))}
+        if held_child is not None
+        else {os.path.normcase(str(Path(pin.path).parent)) for pin in pins}
+    )
+    for index in range(len(pins)):
+        original = pins[index]
+        if os.path.normcase(original.path) not in parents:
+            continue
+        information = _ByHandleFileInformation()
+        if not _kernel32().GetFileInformationByHandle(
+            ctypes.c_void_p(original.handle), ctypes.byref(information)
+        ):
+            raise LeaseRefused("a held parent could not be identified")
+        if (
+            not information.attributes & _FILE_ATTRIBUTE_DIRECTORY
+            or information.attributes & _FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            continue
+        replacement = _open_shared_pin(Path(original.path), original.role, _SHARE_READ | 2)
+        # Keep both handles owned until the replacement has been checked. Once
+        # the old handle is handed to cleanup, never attempt its close twice.
+        pins.append(replacement)
+        if _identity(replacement.handle) != _identity(original.handle):
+            raise LeaseRefused("a held parent changed while its sharing was adjusted")
+        pins[index] = replacement
+        pins.pop()
+        strand = _abandon(during="parent sharing adjustment", pins=(original,))
+        if strand is not None:
+            raise strand from LeaseRefused("a strict parent hold could not be retired")
 
 
 def _open_pins(anchor: Path) -> tuple[_Pin, ...]:
@@ -561,6 +608,7 @@ def _open_pins(anchor: Path) -> tuple[_Pin, ...]:
     try:
         for path, role in _resolution_chain(anchor):
             pins.append(_open_pin(path, role))
+        _relax_parent_pins(pins)
     except BaseException as refusal:
         nested, primary = _merge_strand(refusal)
         strand = _abandon(during="a refused pinning", pins=tuple(pins), stranded=nested)
@@ -585,48 +633,53 @@ def _hold_common_dir(repo: Path | None) -> tuple[int, _Binding]:
     start = repo if repo is not None else _repo_root_default()
     if not isinstance(start, Path) or not Path(start).is_absolute():
         raise LeaseRefused(f"--repo must be an absolute path: {start}")
-    anchor = _open_directory(start)
+    anchor = -1
+    directory = -1
+    pins: tuple[_Pin, ...] = ()
+    during = "a refused acquisition"
     try:
+        anchor = _open_directory(start)
         anchor_identity = _identity(anchor)
         anchor_name = _final_path(anchor)
         common = _common_dir(Path(_plain(anchor_name)))
         directory = _open_directory(common)
-        try:
-            identity = _identity(directory)
-            name = _final_path(directory)
-            if _final_path(anchor) != anchor_name or _identity(anchor) != anchor_identity:
-                raise LeaseRefused("the repository directory moved while it was being resolved")
-            if _directory_identity(_common_dir(Path(_plain(anchor_name)))) != identity:
-                raise LeaseRefused(
-                    "the repository's common git directory changed while it was being held"
-                )
-            # Every link between the repository and the held common
-            # directory is now pinned; the resolution is repeated once more
-            # through the pinned chain, so a change slipped in before the
-            # pins took hold is refused and nothing can change after them.
-            pins = _open_pins(Path(_plain(anchor_name)))
-            try:
-                pins = (
-                    *pins,
-                    _open_pin(Path(_plain(name)), "the common git directory"),
-                )
-                resolved = _common_dir(Path(_plain(anchor_name)))
-                if _directory_identity(resolved) != identity:
-                    raise LeaseRefused(
-                        "the repository's common git directory changed while it was being pinned"
-                    )
-            except BaseException as refusal:
-                nested, primary = _merge_strand(refusal)
-                strand = _abandon(during="a refused acquisition", pins=pins, stranded=nested)
-                if strand is not None:
-                    raise strand from primary
-                raise
-        except BaseException:
-            _close(directory)
-            raise
+        identity = _identity(directory)
+        name = _final_path(directory)
+        if _final_path(anchor) != anchor_name or _identity(anchor) != anchor_identity:
+            raise LeaseRefused("the repository directory moved while it was being resolved")
+        if _directory_identity(_common_dir(Path(_plain(anchor_name)))) != identity:
+            raise LeaseRefused(
+                "the repository's common git directory changed while it was being held"
+            )
+        # Pin every link before repeating resolution through the held chain.
+        during = "a refused pinning"
+        pins = _open_pins(Path(_plain(anchor_name)))
+        during = "a refused acquisition"
+        pins = (*pins, _open_pin(Path(_plain(name)), "the common git directory"))
+        resolved = _common_dir(Path(_plain(anchor_name)))
+        if _directory_identity(resolved) != identity:
+            raise LeaseRefused(
+                "the repository's common git directory changed while it was being pinned"
+            )
+        # Transfer the directory and pins only after temporary cleanup succeeds.
+        retired, anchor = anchor, -1
+        strand = _abandon(during="repository resolution", handles=(("directory-probe", retired),))
+        if strand is not None:
+            raise strand
         return directory, _Binding(anchor_name, anchor_identity, name, identity, pins)
-    finally:
-        _close(anchor)
+    except BaseException as refusal:
+        nested, primary = _merge_strand(refusal)
+        strand = _abandon(
+            during=during,
+            handles=tuple(
+                ("directory-probe", value) for value in (directory, anchor) if value != -1
+            ),
+            pins=pins,
+            stranded=nested,
+        )
+        if strand is not None:
+            raise strand from primary
+        raise
 
 
 def _open_lease_handle(
@@ -662,30 +715,57 @@ def _open_lease_handle(
             _SHARE_READ,
             None,
             disposition,
-            _ATTRIBUTE_NORMAL,
+            _ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
             None,
         )
         if opened is None or opened == _INVALID_HANDLE:
-            error = ctypes.get_last_error()
+            error = _last_error()
             if error == _ERROR_SHARING_VIOLATION:
                 raise LeaseRefused(f"contended: {_holder_line(Path(plain, LEASE_BASENAME))}")
             raise LeaseRefused(f"the lease file could not be opened (error {error})")
         handle = int(opened)
+        information = _ByHandleFileInformation()
+        if not _kernel32().GetFileInformationByHandle(
+            ctypes.c_void_p(handle), ctypes.byref(information)
+        ):
+            raise LeaseRefused("the held lease entry could not be identified")
+        if information.attributes & (_FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT):
+            raise LeaseRefused("the lease entry is not an ordinary file")
+        # The lease's no-delete hold keeps its ordinary parent nonempty. Relax
+        # both common-directory pins only now, retaining every mapping hold.
+        pins = list(binding.pins)
+        try:
+            _relax_parent_pins(pins, held_child=Path(plain, LEASE_BASENAME))
+        finally:
+            # Replacement pins remain owned even if retiring an old pin fails.
+            binding = _Binding(
+                binding.anchor,
+                binding.anchor_identity,
+                binding.common,
+                binding.common_identity,
+                tuple(pins),
+            )
         _assert_binding(binding)
+        retired, directory = directory, -1
+        strand = _abandon(during="lease acquisition", handles=(("directory-probe", retired),))
+        if strand is not None:
+            raise strand
         return handle, Path(plain, LEASE_BASENAME), binding
     except BaseException as refusal:
         nested, primary = _merge_strand(refusal)
         strand = _abandon(
             during="a refused acquisition",
-            handles=(("handle", handle),) if handle != -1 else (),
+            handles=tuple(
+                (kind, value)
+                for kind, value in (("handle", handle), ("directory-probe", directory))
+                if value != -1
+            ),
             pins=binding.pins,
             stranded=nested,
         )
         if strand is not None:
             raise strand from primary
         raise
-    finally:
-        _close(directory)
 
 
 def _assert_binding(binding: _Binding) -> None:
@@ -698,15 +778,12 @@ def _assert_binding(binding: _Binding) -> None:
     if it still held this repository's machine.
     """
 
-    anchor = _open_directory(Path(_plain(binding.anchor)))
-    try:
+    with _directory_probe(Path(_plain(binding.anchor))) as anchor:
         if _identity(anchor) != binding.anchor_identity:
             raise LeaseRefused(
                 f"the repository moved under the lease: {_plain(binding.anchor)} is another object"
             )
         resolved = _common_dir(Path(_plain(binding.anchor)))
-    finally:
-        _close(anchor)
     if _directory_identity(resolved) != binding.common_identity:
         raise LeaseRefused(
             "the repository moved under the lease: its common git directory is now "
@@ -800,7 +877,7 @@ def acquire(
         raise LeaseRefused("purpose must be a short non-empty string")
     if holder_pid is not None and (type(holder_pid) is not int or holder_pid <= 0):
         raise LeaseRefused("holder_pid must be a positive integer")
-    if os.name != "nt":
+    if os.name != "nt" or sys.platform != "win32":
         raise LeaseRefused(
             "the machine lease is implemented for Windows only; "
             "this platform has no executed hold implementation"
@@ -821,9 +898,7 @@ def acquire(
             ctypes.c_void_p(handle), _HANDLE_FLAG_INHERIT, _HANDLE_FLAG_INHERIT
         )
         if not marked:
-            raise LeaseRefused(
-                f"the hold could not be marked inheritable (error {ctypes.get_last_error()})"
-            )
+            raise LeaseRefused(f"the hold could not be marked inheritable (error {_last_error()})")
         descriptor = msvcrt.open_osfhandle(handle, os.O_RDWR)
         record = json.dumps(
             {

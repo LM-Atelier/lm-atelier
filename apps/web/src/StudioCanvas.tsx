@@ -5,17 +5,24 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
 } from "react";
-import { toAlphaImageData, type MaskRaster } from "./studioMasks";
-import type { ImagePoint, PointerTool } from "./studioTools";
+import { compareFit } from "./studioComparison";
+import { useSpaceToPan } from "./useSpaceToPan";
+import { toAlphaImageData, type MaskRaster, type MaskRegion } from "./studioMasks";
+import { CORNERS } from "./studioPerspective";
+import type { ImagePoint, PointerTool, ToolPreview } from "./studioTools";
 import {
   fitViewport,
   identityViewport,
   panBy,
+  pinchBy,
+  shownRect,
   toImagePoint,
   zoomAbout,
+  type ScreenRect,
   type Viewport,
 } from "./studioViewport";
 
@@ -24,19 +31,33 @@ import {
  * All geometry lives in the pure viewport module and all mask mutation in
  * the pure tools; this component is deliberately thin glue - it unprojects
  * pointer events, forwards them to the active tool, and repaints layers.
- * Space-drag pans, wheel zooms about the cursor, and the container's CSS
- * transform carries the one shared viewport so layers can never disagree.
+ * Space-drag pans, wheel zooms about the cursor, two fingers pinch, and the
+ * container's CSS transform carries the one shared viewport so layers can
+ * never disagree.
+ * A fourth layer, above the picture, holds an earlier picture while the two
+ * are compared; it shares that viewport, so a comparison keeps the zoom.
  */
 export function StudioCanvas({
   image,
+  shown = null,
+  tint = null,
   mask,
   tool,
   maskVersion,
+  before = null,
   onGestureStart,
   onStrokeEnd,
+  overlay,
 }: {
   image: ImageBitmap | null;
+  /** Drawn in the picture's place when given, at its size: an adjustment's preview. */
+  shown?: HTMLCanvasElement | null;
+  /** The marking's color and opacity when they stand for paint; the selection's own tint otherwise. */
+  tint?: { rgb: [number, number, number]; opacity: number } | null;
   mask: MaskRaster | null;
+  /** An earlier picture laid over this one, uncovered from the left edge
+   * across `reveal` of the width: 0 shows none of it and 1 all of it. */
+  before?: { image: ImageBitmap; reveal: number } | null;
   /** The active pointer tool; null makes the canvas view-only. */
   tool: PointerTool | null;
   /** Bump to trigger a mask repaint after undo/redo or programmatic edits. */
@@ -46,17 +67,18 @@ export function StudioCanvas({
    * the first Undo a no-op. */
   onGestureStart?: () => void;
   onStrokeEnd?: () => void;
+  /** Controls laid over the picture at screen scale, given where the picture is shown now. */
+  overlay?: (shown: ScreenRect) => ReactNode;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const imageLayer = useRef<HTMLCanvasElement>(null);
+  const beforeLayer = useRef<HTMLCanvasElement>(null);
   const maskLayer = useRef<HTMLCanvasElement>(null);
   const interactionLayer = useRef<HTMLCanvasElement>(null);
   const caret = useRef<ImagePoint | null>(null);
   const keyboardStroke = useRef(false);
   const [viewport, setViewport] = useState<Viewport>(identityViewport);
   const [panning, setPanning] = useState(false);
-  const spaceHeld = useRef(false);
-  const lastPointer = useRef<{ x: number; y: number } | null>(null);
   const activePointers = useRef<Map<number, { x: number; y: number }>>(new Map());
   const drawingPointer = useRef<number | null>(null);
 
@@ -80,8 +102,21 @@ export function StudioCanvas({
     const context = layer?.getContext("2d");
     if (!layer || !context || !image) return;
     context.clearRect(0, 0, layer.width, layer.height);
-    context.drawImage(image, 0, 0);
-  }, [image, size]);
+    context.drawImage(shown ?? image, 0, 0);
+  }, [image, shown, size]);
+
+  // Drawn once per picture and uncovered by clipping, so moving the divider
+  // repaints nothing.
+  const beforeImage = before?.image ?? null;
+  useEffect(() => {
+    const layer = beforeLayer.current;
+    const context = layer?.getContext("2d");
+    if (!layer || !context || !beforeImage) return;
+    context.clearRect(0, 0, layer.width, layer.height);
+    const fit = compareFit(beforeImage, size);
+    context.drawImage(beforeImage, fit.x, fit.y, fit.width, fit.height);
+  }, [beforeImage, size]);
+  const reveal = before ? Math.min(1, Math.max(0, before.reveal)) : 0;
 
   /** Repaint the tint from the raster as it stands right now.
    *
@@ -90,15 +125,11 @@ export function StudioCanvas({
    * an effect alone left the selection invisible until the pointer lifted.
    * Painting is the same work either way, just triggered from two places.
    */
-  const paintMask = useCallback(() => {
-    const layer = maskLayer.current;
-    const context = layer?.getContext("2d");
-    if (!layer || !context) return;
-    context.clearRect(0, 0, layer.width, layer.height);
-    if (!mask) return;
-    const tint = new ImageData(toAlphaImageData(mask, [80, 170, 255]), mask.width, mask.height);
-    context.putImageData(tint, 0, 0);
-  }, [mask]);
+  const paintMask = useCallback(
+    (stroke?: PointerTool | null) => drawMarking(maskLayer.current, mask, tint, stroke?.takeChanged?.() ?? null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [mask, tint?.rgb[0], tint?.rgb[1], tint?.rgb[2], tint?.opacity],
+  );
 
   useEffect(() => {
     paintMask();
@@ -110,47 +141,30 @@ export function StudioCanvas({
     if (!layer || !context) return;
     context.clearRect(0, 0, layer.width, layer.height);
     const preview = tool?.preview(viewport.scale);
-    if (!preview || preview.kind === "none") return;
-    context.strokeStyle = "rgba(80, 170, 255, 0.9)";
-    context.lineWidth = Math.max(1, 1.5 / viewport.scale);
-    if (preview.kind === "brush-cursor") {
-      context.beginPath();
-      context.arc(preview.center.x, preview.center.y, preview.radius, 0, Math.PI * 2);
-      context.stroke();
-    } else if (preview.kind === "rect") {
-      context.strokeRect(
-        Math.min(preview.from.x, preview.to.x),
-        Math.min(preview.from.y, preview.to.y),
-        Math.abs(preview.to.x - preview.from.x),
-        Math.abs(preview.to.y - preview.from.y),
-      );
-    } else {
-      context.beginPath();
-      preview.points.forEach((point, index) =>
-        index === 0 ? context.moveTo(point.x, point.y) : context.lineTo(point.x, point.y));
-      context.stroke();
-    }
+    if (preview) drawToolPreview(context, preview, viewport.scale);
   }, [tool, viewport.scale]);
 
+  // A tool with something to show before any gesture, such as a perspective
+  // correction's corners, shows it as soon as it is in hand.
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.code === "Space") spaceHeld.current = event.type === "keydown";
-    };
-    // A Space release outside the window would otherwise strand pan mode.
-    const onBlur = () => {
-      spaceHeld.current = false;
-      setPanning(false);
-      lastPointer.current = null;
-    };
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("keyup", onKey);
-    window.addEventListener("blur", onBlur);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("keyup", onKey);
-      window.removeEventListener("blur", onBlur);
-    };
-  }, []);
+    drawPreview();
+  }, [drawPreview]);
+
+  /** Drop the gesture being drawn: a rectangle or a lasso is abandoned, and what a brush painted stays. */
+  const cancelDrawing = () => {
+    drawingPointer.current = null;
+    tool?.cancel();
+    drawPreview();
+    onStrokeEnd?.();
+  };
+  // With focus gone, a released button is never heard: pan mode ends, a gesture
+  // still being drawn is dropped rather than carried on by the next move, and
+  // the pointers remembered as down are forgotten, or the next press would pan.
+  const spaceHeld = useSpaceToPan(() => {
+    setPanning(false);
+    activePointers.current.clear();
+    if (drawingPointer.current !== null) cancelDrawing();
+  });
 
   /** Where the caret sits, put at the middle of the picture on first use. */
   const caretPoint = (): ImagePoint => {
@@ -185,7 +199,7 @@ export function StudioCanvas({
       // hover otherwise, so this both extends a live selection and shows
       // the caret when there is none.
       tool.move(moved, viewport.scale);
-      if (tool.appliesWhileMoving) paintMask();
+      if (tool.appliesWhileMoving) paintMask(tool);
       drawPreview();
       return;
     }
@@ -202,7 +216,7 @@ export function StudioCanvas({
         onGestureStart?.();
         keyboardStroke.current = true;
         tool.down(at, viewport.scale);
-        if (tool.appliesWhileMoving) paintMask();
+        if (tool.appliesWhileMoving) paintMask(tool);
         drawPreview();
       }
       return;
@@ -266,18 +280,16 @@ export function StudioCanvas({
         drawPreview();
       }
       setPanning(true);
-      lastPointer.current = screen;
       return;
     }
     if (spaceHeld.current || event.button === 1 || !tool) {
       setPanning(true);
-      lastPointer.current = screen;
       return;
     }
     drawingPointer.current = event.pointerId;
     onGestureStart?.();
     tool.down(toImagePoint(viewport, screen), viewport.scale);
-    if (tool.appliesWhileMoving) paintMask();
+    if (tool.appliesWhileMoving) paintMask(tool);
     drawPreview();
   };
 
@@ -291,17 +303,26 @@ export function StudioCanvas({
 
   const onPointerMove = (event: ReactPointerEvent) => {
     const screen = screenPoint(event);
-    if (activePointers.current.has(event.pointerId)) {
-      activePointers.current.set(event.pointerId, screen);
-    }
-    if (panning && lastPointer.current) {
-      setViewport((current) =>
-        panBy(current, screen.x - lastPointer.current!.x, screen.y - lastPointer.current!.y));
-      lastPointer.current = screen;
+    const previous = activePointers.current.get(event.pointerId);
+    if (previous) activePointers.current.set(event.pointerId, screen);
+    if (panning) {
+      // Each pointer moves the picture from where that pointer last was, so
+      // a finger landing or lifting never throws the picture across. Both
+      // positions are fixed here: the update may run only when the view is
+      // next drawn, after later moves have replaced them.
+      if (!previous) return;
+      const down = [...activePointers.current.keys()];
+      if (down.length === 1) {
+        setViewport((current) => panBy(current, screen.x - previous.x, screen.y - previous.y));
+      } else if (down.slice(0, 2).includes(event.pointerId)) {
+        // The first two pointers down pinch; a third changes nothing until one lifts.
+        const other = activePointers.current.get(down[0] === event.pointerId ? down[1] : down[0])!;
+        setViewport((current) => pinchBy(current, [previous, other], [screen, other]));
+      }
       return;
     }
     tool?.move(toImagePoint(viewport, screen), viewport.scale);
-    if (tool?.appliesWhileMoving) paintMask();
+    if (tool?.appliesWhileMoving) paintMask(tool);
     drawPreview();
   };
 
@@ -309,26 +330,22 @@ export function StudioCanvas({
     const screen = screenPoint(event);
     activePointers.current.delete(event.pointerId);
     if (panning) {
-      if (activePointers.current.size === 0) {
-        setPanning(false);
-        lastPointer.current = null;
-      }
+      if (activePointers.current.size === 0) setPanning(false);
       return;
     }
     if (endDrawing(screen)) onStrokeEnd?.();
   };
 
-  /** Cancellation and lost capture must not leave a half-drawn gesture. */
+  /** Cancellation and lost capture must not leave a half-drawn gesture, nor finish one.
+   *
+   * The pointer never came up, so a rectangle or a lasso still being drawn is
+   * dropped, as Escape drops it, rather than closed where the pointer was lost.
+   * What a brush has already painted stays, and Undo takes it back.
+   */
   const onPointerCancel = (event: ReactPointerEvent) => {
     activePointers.current.delete(event.pointerId);
-    if (drawingPointer.current === event.pointerId) {
-      endDrawing(screenPoint(event));
-      onStrokeEnd?.();
-    }
-    if (activePointers.current.size === 0) {
-      setPanning(false);
-      lastPointer.current = null;
-    }
+    if (drawingPointer.current === event.pointerId) cancelDrawing();
+    if (activePointers.current.size === 0) setPanning(false);
   };
 
   const onWheel = (event: ReactWheelEvent) => {
@@ -341,7 +358,7 @@ export function StudioCanvas({
     /* eslint-disable-next-line jsx-a11y-x/no-noninteractive-element-interactions */
     <div
       ref={containerRef}
-      className="studio-canvas"
+      className={tool?.cursor === "move" ? "studio-canvas moving" : "studio-canvas"}
       /* The rules below read the implicit role of the tag, not the explicit
          one: a focusable canvas application is exactly what they exist to
          prevent being written by accident, and exactly what this is. */
@@ -354,9 +371,11 @@ export function StudioCanvas({
       role="application"
       aria-roledescription="Image canvas"
       aria-label={
-        tool
-          ? "Image editing canvas. Arrow keys move the selection point, Enter starts and finishes a selection, Escape cancels it, Alt with arrows pans, plus and minus zoom, zero fits the image."
-          : "Image editing canvas. Arrow keys pan, plus and minus zoom, zero fits the image."
+        tool?.cursor === "move"
+          ? "Image editing canvas. Arrow keys move the point, Enter takes hold and lets go, Escape puts back what was moved, Alt with arrows pans, plus and minus zoom, zero fits the image."
+          : tool
+            ? "Image editing canvas. Arrow keys move the selection point, Enter starts and finishes a selection, Escape cancels it, Alt with arrows pans, plus and minus zoom, zero fits the image."
+            : "Image editing canvas. Arrow keys pan, plus and minus zoom, zero fits the image."
       }
       onKeyDown={onKeyDown}
       onPointerDown={onPointerDown}
@@ -376,6 +395,15 @@ export function StudioCanvas({
         }}
       >
         <canvas ref={imageLayer} width={size.width} height={size.height} />
+        {before && (
+          <canvas
+            ref={beforeLayer}
+            width={size.width}
+            height={size.height}
+            data-layer="before"
+            style={{ clipPath: `inset(0 ${(1 - reveal) * 100}% 0 0)` }}
+          />
+        )}
         <canvas ref={maskLayer} width={size.width} height={size.height} data-layer="mask" />
         <canvas
           ref={interactionLayer}
@@ -383,7 +411,93 @@ export function StudioCanvas({
           height={size.height}
           data-layer="interaction"
         />
+        {reveal > 0 && reveal < 1 && (
+          // Scaled with the picture, so its width is divided by the zoom to
+          // stay two pixels wide on screen.
+          <div
+            className="studio-compare-divider"
+            style={{ left: `${reveal * 100}%`, width: `${2 / viewport.scale}px` }}
+            aria-hidden="true"
+          />
+        )}
       </div>
+      {image && overlay?.(shownRect(viewport, size))}
     </div>
   );
+}
+
+/** The marking as the canvas shows it: the selection's own tint, or paint in its color and opacity. */
+function drawMarking(
+  layer: HTMLCanvasElement | null,
+  mask: MaskRaster | null,
+  tint: { rgb: [number, number, number]; opacity: number } | null,
+  /** What a stroke in progress has just changed; the whole marking is drawn without it. */
+  changed: MaskRegion | null = null,
+): void {
+  const context = layer?.getContext("2d");
+  if (!layer || !context) return;
+  if (!changed || !mask) context.clearRect(0, 0, layer.width, layer.height);
+  if (!mask) return;
+  const region = changed ?? { left: 0, top: 0, width: mask.width, height: mask.height };
+  const marking = tint
+    ? toAlphaImageData(mask, tint.rgb, tint.opacity, region)
+    : toAlphaImageData(mask, [80, 170, 255], 1, region);
+  context.putImageData(new ImageData(marking, region.width, region.height), region.left, region.top);
+}
+
+/** What a tool shows over the picture as it works, in the picture's own pixels. */
+function drawToolPreview(context: CanvasRenderingContext2D, preview: ToolPreview, scale: number): void {
+  if (preview.kind === "none") return;
+  context.strokeStyle = "rgba(80, 170, 255, 0.9)";
+  context.lineWidth = Math.max(1, 1.5 / scale);
+  if (preview.kind === "brush-cursor") {
+    context.beginPath();
+    context.arc(preview.center.x, preview.center.y, preview.radius, 0, Math.PI * 2);
+    context.stroke();
+  } else if (preview.kind === "rect") {
+    context.strokeRect(
+      Math.min(preview.from.x, preview.to.x),
+      Math.min(preview.from.y, preview.to.y),
+      Math.abs(preview.to.x - preview.from.x),
+      Math.abs(preview.to.y - preview.from.y),
+    );
+  } else if (preview.kind === "corners") {
+    drawCorners(context, preview, scale);
+  } else {
+    context.beginPath();
+    preview.points.forEach((point, index) =>
+      index === 0 ? context.moveTo(point.x, point.y) : context.lineTo(point.x, point.y));
+    context.stroke();
+  }
+}
+
+/** A perspective correction's corners as handles, joined into their shape, with
+ * the thirds the corrected picture will have drawn where they fall. */
+function drawCorners(
+  context: CanvasRenderingContext2D,
+  preview: Extract<ToolPreview, { kind: "corners" }>,
+  scale: number,
+): void {
+  const points = CORNERS.map((name) => preview.corners[name]);
+  context.beginPath();
+  points.forEach((point, index) => (index === 0 ? context.moveTo(point.x, point.y) : context.lineTo(point.x, point.y)));
+  context.closePath();
+  context.stroke();
+  context.save();
+  context.globalAlpha = 0.5;
+  context.beginPath();
+  for (const [from, to] of preview.lines) {
+    context.moveTo(from.x, from.y);
+    context.lineTo(to.x, to.y);
+  }
+  context.stroke();
+  context.restore();
+  for (const name of CORNERS) {
+    const { x, y } = preview.corners[name];
+    context.beginPath();
+    context.arc(x, y, 7 / scale, 0, Math.PI * 2);
+    context.fillStyle = name === preview.active ? "rgba(80, 170, 255, 0.9)" : "rgba(255, 255, 255, 0.9)";
+    context.fill();
+    context.stroke();
+  }
 }

@@ -5,9 +5,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -27,8 +27,14 @@ from .models import (
     WorkStep,
     WorkStepDependency,
 )
+from .source_fit_recipes import RecordedSourceFitRecipe, SourceFitRecipe
 from .vision import VisionSamplingPolicy
 from .workflow_revision_reviews import revision_is_trusted
+from .workflow_use_case_preset_provenance import (
+    WorkflowUseCasePresetSnapshot,
+    read_workflow_use_case_preset,
+)
+from .workflow_use_cases_v1 import WorkflowUseCase
 
 
 class ContextMessage(BaseModel):
@@ -224,6 +230,25 @@ def resolve_accepted_workflow(
     return projection
 
 
+def settings_workflow(
+    session: Session, run: Run, snapshot: AcceptedContext | None
+) -> AcceptedWorkflow | WorkflowRevision | None:
+    """The workflow a turn's stored settings were resolved against.
+
+    The workflow the turn accepted when it recorded one, since that copy is
+    what its settings were checked against; otherwise the stored revision it
+    names. A rebuilt settings layer asks this one workflow both for its input
+    schema and for whether it takes a LoRA stack, so the two cannot disagree.
+    """
+
+    if snapshot is not None and snapshot.workflow is not None:
+        return snapshot.workflow
+    revision_id = (
+        snapshot.workflow_revision_id if snapshot is not None else run.workflow_revision_id
+    )
+    return session.get(WorkflowRevision, revision_id) if revision_id else None
+
+
 def capture_image_edit_strength(run: Run) -> dict[str, Any] | None:
     image_edit = run.provenance_json.get("image_edit")
     strength = image_edit.get("strength") if isinstance(image_edit, dict) else None
@@ -255,6 +280,7 @@ class AcceptedContext(BaseModel):
     vision_bridge_max_tokens: int = Field(ge=1)
     context_limit: int = Field(ge=1)
     operation: str
+    upscale: bool = False
     routing_mode: RoutingMode | None = None
     image_edit_strength: dict[str, Any] | None = None
     profile_id: str | None
@@ -263,6 +289,7 @@ class AcceptedContext(BaseModel):
     settings: dict[str, Any]
     preset: dict[str, Any] | None = None
     preset_layers: list[dict[str, Any]] = Field(default_factory=list)
+    workflow_use_case_preset: WorkflowUseCasePresetSnapshot | None = None
     chat_engine: str
     media_engine: str
     media_prompt: str
@@ -272,6 +299,57 @@ class AcceptedContext(BaseModel):
     profile: AcceptedProfile | None
     vision_profile: AcceptedProfile | None
     verification_profile: AcceptedProfile | None = None
+
+    source_fit: RecordedSourceFitRecipe | None = None
+
+    @model_validator(mode="after")
+    def bind_workflow_use_case_preset(self) -> Self:
+        recipe = self.workflow_use_case_preset
+        if recipe is not None and recipe.workflow_revision_id != self.workflow_revision_id:
+            raise ValueError("workflow-use-case-preset-snapshot-revision-mismatch")
+        return self
+
+    @model_validator(mode="after")
+    def bind_source_fit(self) -> Self:
+        recipe = self.source_fit
+        if recipe is None:
+            return self
+        if (
+            self.unavailable_reason is not None
+            or self.operation != Operation.IMAGE_TO_IMAGE.value
+            or self.media_engine != "comfyui"
+            or self.workflow is None
+            or self.workflow.engine != "comfyui"
+            or self.workflow.id != self.workflow_revision_id
+            or not self.input_artifact_ids
+            or self.input_artifact_ids[0] != recipe.image.source_artifact_id
+            or not recipe.retained_artifact_ids <= set(self.artifact_ids)
+        ):
+            raise ValueError("source_fit_context_binding")
+        recipe.route(self.workflow.api_graph_json)
+        return self
+
+
+def recorded_enlargement(run: Run, snapshot: AcceptedContext | None) -> bool:
+    """Read explicit intent, or an older validated enlargement recipe receipt."""
+    if snapshot is not None and "upscale" in snapshot.model_fields_set:
+        return snapshot.upscale
+    if "upscale" in run.provenance_json:
+        return run.provenance_json["upscale"] is True
+    if snapshot is not None:
+        recipe = snapshot.workflow_use_case_preset
+        operation = snapshot.operation
+    else:
+        recipe = read_workflow_use_case_preset(
+            run.provenance_json.get("workflow_use_case_preset"),
+            workflow_revision_id=run.workflow_revision_id,
+        )
+        operation = run.operation
+    return (
+        operation == Operation.IMAGE_TO_IMAGE.value
+        and recipe is not None
+        and recipe.use_case == WorkflowUseCase.IMAGE_UPSCALE
+    )
 
 
 def _digest(value: dict[str, Any]) -> str:
@@ -298,6 +376,8 @@ def save_accepted_context(
     media_prompt: str,
     context_artifact_ids: set[str],
     verification_profile_id: str | None = None,
+    source_fit: SourceFitRecipe | None = None,
+    upscale: bool = False,
     inherited_context: AcceptedContext | None = None,
     inherited_configuration: AcceptedContext | None = None,
     inherit_profile_configuration: bool = False,
@@ -328,6 +408,7 @@ def save_accepted_context(
         edit_source = (
             run.provenance_json.get("edit_source")
             or run.provenance_json.get("image_edit_verification_retry")
+            or run.provenance_json.get("regeneration_source")
             or {}
         )
         if (
@@ -344,7 +425,9 @@ def save_accepted_context(
         vision_settings = copy.deepcopy(inherited_context.vision_settings)
         vision_sampling = inherited_context.vision_sampling.model_copy(deep=True)
         vision_bridge_max_tokens = inherited_context.vision_bridge_max_tokens
-        if run.provenance_json.get("image_edit_verification_retry"):
+        if run.provenance_json.get("image_edit_verification_retry") or run.provenance_json.get(
+            "regeneration_source"
+        ):
             media_prompt = inherited_context.media_prompt
     compiled = run.provenance_json.get("compiled_step")
     prompt = compiled.get("prompt") if isinstance(compiled, dict) else None
@@ -355,6 +438,7 @@ def save_accepted_context(
     edit_source = (
         run.provenance_json.get("edit_source")
         or run.provenance_json.get("image_edit_verification_retry")
+        or run.provenance_json.get("regeneration_source")
         or {}
     )
     configuration_context = inherited_configuration or inherited_context
@@ -443,6 +527,14 @@ def save_accepted_context(
             artifact_ids.add(poster.id)
             if artifact_id in context_artifact_ids:
                 context_artifact_ids.add(poster.id)
+    if source_fit is not None:
+        # These are ordinary snapshot retention edges. The caller must supply
+        # the recipe validated from the requested transform and verified bytes.
+        # Capturing an image alone does not authorize it as the primary source.
+        retained_source_ids = set(source_fit.retained_artifact_ids)
+        if any(session.get(Artifact, artifact_id) is None for artifact_id in retained_source_ids):
+            raise ValueError("source_fit_image_unavailable")
+        artifact_ids = artifact_ids | retained_source_ids
     snapshot = AcceptedContext(
         run_id=run.id,
         chat_id=run.chat_id,
@@ -464,6 +556,7 @@ def save_accepted_context(
         vision_bridge_max_tokens=vision_bridge_max_tokens,
         context_limit=context_limit,
         operation=run.operation,
+        upscale=upscale,
         routing_mode=work_plan.summary_json.get("routing_mode") if work_plan else None,
         profile_id=run.profile_id,
         vision_profile_id=run.vision_profile_id,
@@ -472,6 +565,10 @@ def save_accepted_context(
         image_edit_strength=capture_image_edit_strength(run),
         preset=copy.deepcopy(run.provenance_json.get("preset")),
         preset_layers=copy.deepcopy(run.provenance_json.get("preset_layers") or []),
+        workflow_use_case_preset=read_workflow_use_case_preset(
+            run.provenance_json.get("workflow_use_case_preset"),
+            workflow_revision_id=run.workflow_revision_id,
+        ),
         chat_engine=chat_engine,
         media_engine=media_engine,
         media_prompt=media_prompt,
@@ -481,6 +578,7 @@ def save_accepted_context(
         profile=profile,
         vision_profile=vision_profile,
         verification_profile=verification_profile,
+        source_fit=source_fit,
     )
     payload = snapshot.model_dump(mode="json")
     digest = _digest(payload)

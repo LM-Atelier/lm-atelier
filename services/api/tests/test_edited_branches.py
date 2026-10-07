@@ -48,8 +48,10 @@ def _complete(plan_id: str) -> None:
 
 
 async def test_edited_branch_discovery_survives_paging_and_preserves_active_head(
-    app: FastAPI, client: AsyncClient
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # This projection fixture owns progress; background jobs would rewrite it.
+    monkeypatch.setattr(app.state.services.orchestrator, "start", lambda *_args: None)
     async with app.state.services.scheduler.lease("primary"):
         chat, source, first = await _accepted_pair(client)
         second = await client.post(

@@ -19,8 +19,20 @@ COLLECTION_UPDATE_TRIGGER = """
 CREATE TRIGGER media_collection_update_guard
 BEFORE UPDATE ON media_collections
 BEGIN
-  SELECT CASE WHEN NEW.id != OLD.id OR NEW.kind != OLD.kind OR NEW.name != OLD.name
-                      OR NEW.description != OLD.description
+  SELECT CASE WHEN NEW.id != OLD.id OR NEW.kind != OLD.kind
+                      OR NEW.created_at != OLD.created_at
+    THEN RAISE(ABORT, 'media collection identity is immutable') END;
+  SELECT CASE WHEN NEW.version != OLD.version + 1
+    THEN RAISE(ABORT, 'media collection version is stale') END;
+END
+"""
+
+COLLECTION_UPDATE_TRIGGER_V1 = """
+CREATE TRIGGER media_collection_update_guard
+BEFORE UPDATE ON media_collections
+BEGIN
+  SELECT CASE WHEN NEW.id != OLD.id OR NEW.kind != OLD.kind
+                      OR NEW.name != OLD.name OR NEW.description != OLD.description
                       OR NEW.created_at != OLD.created_at
     THEN RAISE(ABORT, 'media collection identity is immutable') END;
   SELECT CASE WHEN NEW.version != OLD.version + 1
@@ -70,7 +82,7 @@ BEGIN
 END
 """
 
-TAG_INSERT_TRIGGER = """
+TAG_INSERT_TRIGGER_V1 = """
 CREATE TRIGGER media_tag_insert_guard
 BEFORE INSERT ON media_tags
 BEGIN
@@ -83,7 +95,37 @@ BEGIN
 END
 """
 
-TAG_UPDATE_TRIGGER = """
+
+def normalized_tag_label_sql(column: str) -> str:
+    """Collapse every run of spaces within a two-hundred-character label."""
+
+    value = column
+    for _ in range(8):
+        value = f"replace({value}, '  ', ' ')"
+    return f"lower(replace({value}, ' ', '-'))"
+
+
+TAG_NORMALIZED_NAME_GUARD = f"""
+  SELECT CASE WHEN NEW.slug != {normalized_tag_label_sql("NEW.label")}
+    THEN RAISE(ABORT, 'media tag normalized name is invalid') END;
+"""
+
+TAG_INSERT_TRIGGER = TAG_INSERT_TRIGGER_V1.replace("\nEND\n", f"{TAG_NORMALIZED_NAME_GUARD}END\n")
+
+TAG_UPDATE_TRIGGER = f"""
+CREATE TRIGGER media_tag_update_guard
+BEFORE UPDATE ON media_tags
+BEGIN
+  SELECT CASE WHEN NEW.id != OLD.id
+                      OR NEW.created_at != OLD.created_at
+    THEN RAISE(ABORT, 'media tag identity is immutable') END;
+  SELECT CASE WHEN NEW.version != OLD.version + 1
+    THEN RAISE(ABORT, 'media tag version is stale') END;
+{TAG_NORMALIZED_NAME_GUARD}
+END
+"""
+
+TAG_UPDATE_TRIGGER_V1 = """
 CREATE TRIGGER media_tag_update_guard
 BEFORE UPDATE ON media_tags
 BEGIN
@@ -146,6 +188,21 @@ CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL = (
     MEMBERSHIP_DELETE_VERSION_TRIGGER,
     TAG_INSERT_TRIGGER,
     TAG_UPDATE_TRIGGER,
+    TAG_ASSIGNMENT_INSERT_TRIGGER,
+    TAG_ASSIGNMENT_UPDATE_TRIGGER,
+    TAG_ASSIGNMENT_INSERT_VERSION_TRIGGER,
+    TAG_ASSIGNMENT_DELETE_VERSION_TRIGGER,
+)
+
+CREATE_MEDIA_ORGANIZATION_V1_TRIGGER_SQL = (
+    COLLECTION_INSERT_TRIGGER,
+    COLLECTION_UPDATE_TRIGGER_V1,
+    MEMBERSHIP_INSERT_TRIGGER,
+    MEMBERSHIP_UPDATE_TRIGGER,
+    MEMBERSHIP_INSERT_VERSION_TRIGGER,
+    MEMBERSHIP_DELETE_VERSION_TRIGGER,
+    TAG_INSERT_TRIGGER_V1,
+    TAG_UPDATE_TRIGGER_V1,
     TAG_ASSIGNMENT_INSERT_TRIGGER,
     TAG_ASSIGNMENT_UPDATE_TRIGGER,
     TAG_ASSIGNMENT_INSERT_VERSION_TRIGGER,

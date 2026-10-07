@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import itertools
 
+from sqlalchemy.orm import Session
+
 from local_lm.adapters.contracts import ADAPTER_CONTRACT_VERSION
 from local_lm.capability_evidence import ACTIVATION_ARTIFACT_KEY, current_capability_evidence
 from local_lm.comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
@@ -46,7 +48,9 @@ def _install(suffix: str) -> ModelInstall:
     )
 
 
-def _add_revision(session, identifier: str, operation: str, artifact: str, install_id: str) -> None:  # type: ignore[no-untyped-def]
+def _add_revision(
+    session: Session, identifier: str, operation: str, artifact: str, install_id: str
+) -> None:
     """Insert a definition and its revision, which reference each other."""
     definition = WorkflowDefinition(
         id=f"wf_{identifier}", name=identifier, description="", operation=operation

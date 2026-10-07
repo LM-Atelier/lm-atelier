@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from email import policy
 from email.parser import BytesParser
+from typing import Literal
 
 from packaging.markers import Marker
 from packaging.requirements import InvalidRequirement, Requirement
@@ -74,7 +75,7 @@ class ComfyRegistryWheelMetadataFrontier:
     sources: tuple[str, ...]
     requested_extras: tuple[str, ...]
     locked_version: str | None
-    status: str
+    status: Literal["resolve", "satisfied", "conflict"]
 
 
 @dataclass(frozen=True)
@@ -98,9 +99,18 @@ class _ParsedRequirement:
 
 
 @dataclass(frozen=True)
+class ComfyRegistryWheelMetadataInput:
+    name: str
+    version: str
+    requirement: str
+    filename: str
+    metadata_sha256: str | None
+
+
+@dataclass(frozen=True)
 class _MetadataRecord:
-    artifact: ComfyRegistryWheelArtifact
-    requirements: tuple[_ParsedRequirement, ...]
+    artifact: ComfyRegistryWheelMetadataInput
+    requirements: tuple[ComfyRegistryWheelMetadataRequirement, ...]
 
 
 def plan_comfy_registry_wheel_metadata(
@@ -112,6 +122,31 @@ def plan_comfy_registry_wheel_metadata(
 ) -> ComfyRegistryWheelMetadataPlan:
     """Parse hash-bound wheel metadata into an inert transitive dependency frontier."""
     artifacts = _artifacts(manifest)
+    return plan_comfy_registry_metadata_inputs(
+        manifest.manifest_sha256,
+        tuple(
+            ComfyRegistryWheelMetadataInput(
+                item.name, item.version, item.requirement, item.filename, item.metadata_sha256
+            )
+            for item in artifacts
+        ),
+        metadata_documents,
+        marker_environment=marker_environment,
+        runtime_distributions=runtime_distributions,
+    )
+
+
+def plan_comfy_registry_metadata_inputs(
+    manifest_sha256: str,
+    inputs: Sequence[ComfyRegistryWheelMetadataInput],
+    metadata_documents: Mapping[str, bytes],
+    *,
+    marker_environment: Mapping[str, str],
+    runtime_distributions: (Mapping[str, str] | Sequence[ComfyRegistryRuntimeDistribution]) = (),
+) -> ComfyRegistryWheelMetadataPlan:
+    """Resolve metadata bound to an already validated transport-specific manifest."""
+    _digest(manifest_sha256)
+    artifacts = _metadata_inputs(inputs)
     environment = _marker_environment(marker_environment)
     documents = _metadata_documents(metadata_documents)
     expected = {
@@ -143,14 +178,14 @@ def plan_comfy_registry_wheel_metadata(
     frontier, conflicts = _frontier(requirements, artifacts, runtime)
     payload = {
         "version": 1,
-        "artifact_manifest_sha256": manifest.manifest_sha256,
+        "artifact_manifest_sha256": manifest_sha256,
         "requirements": [_requirement_payload(item) for item in requirements],
         "frontier": [_frontier_payload(item) for item in frontier],
         "unavailable_metadata": list(unavailable),
         "conflicts": list(conflicts),
     }
     return ComfyRegistryWheelMetadataPlan(
-        artifact_manifest_sha256=manifest.manifest_sha256,
+        artifact_manifest_sha256=manifest_sha256,
         requirements=requirements,
         frontier=frontier,
         unavailable_metadata=unavailable,
@@ -160,6 +195,51 @@ def plan_comfy_registry_wheel_metadata(
         conflicts=conflicts,
         plan_sha256=_payload_sha256(payload),
     )
+
+
+def _metadata_inputs(
+    inputs: Sequence[ComfyRegistryWheelMetadataInput],
+) -> tuple[ComfyRegistryWheelMetadataInput, ...]:
+    if not isinstance(inputs, tuple | list) or len(inputs) > MAX_WHEEL_ARTIFACTS:
+        raise ComfyRegistryWheelMetadataError(
+            "invalid_artifact_manifest", "Wheel metadata inputs are invalid"
+        )
+    for item in inputs:
+        if not isinstance(item, ComfyRegistryWheelMetadataInput):
+            raise ComfyRegistryWheelMetadataError(
+                "invalid_artifact_manifest", "Wheel metadata input is invalid"
+            )
+        name = _text(item.name, 200)
+        try:
+            version = Version(_text(item.version, 200))
+            requirement = Requirement(_text(item.requirement, 1_000))
+        except (InvalidRequirement, InvalidVersion) as exc:
+            raise ComfyRegistryWheelMetadataError(
+                "invalid_artifact_manifest", "Wheel metadata input identity is invalid"
+            ) from exc
+        if (
+            canonicalize_name(name) != name
+            or str(version) != item.version
+            or requirement.url is not None
+            or canonicalize_name(requirement.name) != name
+            or not requirement.specifier.contains(version, prereleases=True)
+        ):
+            raise ComfyRegistryWheelMetadataError(
+                "invalid_artifact_manifest", "Wheel metadata input identity is invalid"
+            )
+        _text(item.filename, 500)
+        if item.metadata_sha256 is not None:
+            _digest(item.metadata_sha256)
+    artifacts = tuple(inputs)
+    if (
+        len({item.name for item in artifacts}) != len(artifacts)
+        or len({item.filename for item in artifacts}) != len(artifacts)
+        or artifacts != tuple(sorted(artifacts, key=lambda item: (item.name, item.requirement)))
+    ):
+        raise ComfyRegistryWheelMetadataError(
+            "invalid_artifact_manifest", "Wheel metadata inputs are not canonical"
+        )
+    return artifacts
 
 
 def _artifacts(
@@ -331,18 +411,39 @@ def _metadata_documents(value: Mapping[str, bytes]) -> dict[str, bytes]:
 
 
 def _metadata_record(
-    artifact: ComfyRegistryWheelArtifact,
+    artifact: ComfyRegistryWheelMetadataInput,
     content: bytes,
 ) -> _MetadataRecord:
     if artifact.metadata_sha256 is None:
         raise ComfyRegistryWheelMetadataError(
             "invalid_core_metadata", "Wheel does not declare hash-bound core metadata"
         )
+    return _MetadataRecord(
+        artifact,
+        read_comfy_registry_core_metadata(
+            content,
+            name=artifact.name,
+            version=artifact.version,
+            filename=artifact.filename,
+            expected_sha256=artifact.metadata_sha256,
+        ),
+    )
+
+
+def read_comfy_registry_core_metadata(
+    content: bytes,
+    *,
+    name: str,
+    version: str,
+    filename: str,
+    expected_sha256: str,
+) -> tuple[ComfyRegistryWheelMetadataRequirement, ...]:
+    """Read bounded, hash-bound dependency declarations without choosing a transport or target."""
     if len(content) > MAX_WHEEL_CORE_METADATA_BYTES:
         raise ComfyRegistryWheelMetadataError(
             "core_metadata_too_large", "Wheel core metadata exceeds the size limit"
         )
-    if not hmac.compare_digest(hashlib.sha256(content).hexdigest(), artifact.metadata_sha256):
+    if not hmac.compare_digest(hashlib.sha256(content).hexdigest(), expected_sha256):
         raise ComfyRegistryWheelMetadataError(
             "core_metadata_hash_mismatch", "Wheel core metadata hash does not match"
         )
@@ -366,14 +467,14 @@ def _metadata_record(
         raise ComfyRegistryWheelMetadataError(
             "unsupported_core_metadata", "Wheel core metadata version is unsupported"
         )
-    name = canonicalize_name(_single_header(message.get_all("Name"), "Name"))
+    metadata_name = canonicalize_name(_single_header(message.get_all("Name"), "Name"))
     try:
-        version = Version(_single_header(message.get_all("Version"), "Version"))
+        metadata_version_value = Version(_single_header(message.get_all("Version"), "Version"))
     except InvalidVersion as exc:
         raise ComfyRegistryWheelMetadataError(
             "invalid_core_metadata", "Wheel core metadata version is invalid"
         ) from exc
-    if name != artifact.name or str(version) != artifact.version:
+    if metadata_name != name or str(metadata_version_value) != version:
         raise ComfyRegistryWheelMetadataError(
             "core_metadata_identity_mismatch",
             "Wheel core metadata identity does not match its artifact",
@@ -382,12 +483,14 @@ def _metadata_record(
     if len(values) > MAX_WHEEL_REQUIRES_DIST:
         raise ComfyRegistryWheelMetadataError(
             "too_many_transitive_requirements",
-            f"Wheel {artifact.filename} declares too many dependencies",
+            f"Wheel {filename} declares too many dependencies",
         )
     parsed = {_requirement(value) for value in values}
-    return _MetadataRecord(
-        artifact,
-        tuple(sorted(parsed, key=lambda item: (item.name, item.requirement))),
+    return tuple(
+        ComfyRegistryWheelMetadataRequirement(
+            name, version, item.name, item.requirement, item.specifier, item.marker, item.extras
+        )
+        for item in sorted(parsed, key=lambda item: (item.name, item.requirement))
     )
 
 
@@ -439,7 +542,7 @@ def _requirement(value: object) -> _ParsedRequirement:
 
 def _active_requirements(
     records: Sequence[_MetadataRecord],
-    artifacts: Sequence[ComfyRegistryWheelArtifact],
+    artifacts: Sequence[ComfyRegistryWheelMetadataInput],
     environment: Mapping[str, str],
 ) -> tuple[ComfyRegistryWheelMetadataRequirement, ...]:
     locked = {artifact.name for artifact in artifacts}
@@ -516,7 +619,7 @@ def _evaluate_requirements(
 
 def _frontier(
     requirements: Sequence[ComfyRegistryWheelMetadataRequirement],
-    artifacts: Sequence[ComfyRegistryWheelArtifact],
+    artifacts: Sequence[ComfyRegistryWheelMetadataInput],
     runtime_distributions: Mapping[str, str],
 ) -> tuple[
     tuple[ComfyRegistryWheelMetadataFrontier, ...],
@@ -536,7 +639,7 @@ def _frontier(
         locked_version = locked.get(name)
         if locked_version is None:
             locked_version = runtime_distributions.get(name)
-        status = "resolve"
+        status: Literal["resolve", "satisfied", "conflict"] = "resolve"
         if locked_version is not None:
             version = Version(locked_version)
             status = (

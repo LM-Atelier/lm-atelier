@@ -6,6 +6,19 @@ export function artifactSource(artifactId: string | null): string | null {
   return artifactId ? `/api/artifacts/${encodeURIComponent(artifactId)}/content` : null;
 }
 
+/** A format a picture can be exported in, besides the file as stored. */
+export type ExportFormat = "png" | "jpeg" | "webp";
+
+/** Where a picture is exported from in `format`, made from the stored file on request.
+ *
+ * `quality`, from 1 to 100, is for the lossy formats; without one the server
+ * writes them at its own default.
+ */
+export function exportSource(artifactId: string, format: ExportFormat, quality?: number): string {
+  const source = `/api/artifacts/${encodeURIComponent(artifactId)}/export?format=${format}`;
+  return quality === undefined || format === "png" ? source : `${source}&quality=${quality}`;
+}
+
 export function artifactOrigin(artifact?: Artifact | null): MediaOrigin | null {
   return artifact?.metadata_json.uploaded === true ? "uploaded" : null;
 }

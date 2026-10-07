@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
@@ -14,6 +15,12 @@ from local_lm.workflow_package_inputs import (
     WorkflowPackageInputError,
     prepare_workflow_package_compilation,
 )
+
+
+def _inputs(graph: Mapping[str, Mapping[str, object]], node_id: str) -> dict[str, object]:
+    inputs = graph[node_id]["inputs"]
+    assert isinstance(inputs, dict)
+    return inputs
 
 
 def _object_info() -> dict[str, Any]:
@@ -76,8 +83,8 @@ def test_one_source_is_bound_before_transient_choice_validation(
     compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
     bound = prepared.bind(compiled.api_graph)
 
-    assert compiled.api_graph["1"]["inputs"]["image"] == "author.png"
-    assert bound["1"]["inputs"]["image"] == "${input_image}"
+    assert _inputs(compiled.api_graph, "1")["image"] == "author.png"
+    assert _inputs(bound, "1")["image"] == "${input_image}"
     assert prepared.input_schema == {
         "type": "object",
         "properties": {"input_image": {"type": "string"}},
@@ -235,8 +242,8 @@ def test_a_source_inside_a_subgraph_keeps_its_namespaced_identity() -> None:
     bound = prepared.bind(compiled.api_graph)
 
     assert prepared.source_node_id == "4:1"
-    assert compiled.api_graph["4:1"]["inputs"]["image"] == "author.png"
-    assert bound["4:1"]["inputs"]["image"] == "${input_image}"
+    assert _inputs(compiled.api_graph, "4:1")["image"] == "author.png"
+    assert _inputs(bound, "4:1")["image"] == "${input_image}"
 
 
 def test_binding_refuses_a_compiled_source_value_that_did_not_come_from_the_ui() -> None:
@@ -247,7 +254,7 @@ def test_binding_refuses_a_compiled_source_value_that_did_not_come_from_the_ui()
         Operation.IMAGE_TO_VIDEO,
     )
     compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
-    compiled.api_graph["1"]["inputs"]["image"] = "different.png"
+    _inputs(compiled.api_graph, "1")["image"] = "different.png"
 
     with pytest.raises(WorkflowPackageInputError) as raised:
         prepared.bind(compiled.api_graph)
@@ -392,7 +399,7 @@ def test_source_reachability_uses_compiler_resolved_named_wires() -> None:
     compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
     bound = prepared.bind(compiled.api_graph)
 
-    assert bound["2"]["inputs"]["images"] == ["1", 0]
+    assert _inputs(bound, "2")["images"] == ["1", 0]
 
 
 def test_an_unrelated_output_sink_refuses_without_a_verified_output_capability() -> None:
@@ -678,7 +685,7 @@ def test_an_image_producer_without_an_upload_is_not_a_second_source() -> None:
     )
     compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
 
-    assert prepared.bind(compiled.api_graph)["1"]["inputs"]["image"] == "${input_image}"
+    assert _inputs(prepared.bind(compiled.api_graph), "1")["image"] == "${input_image}"
 
 
 def test_a_load_image_inside_a_bypassed_subgraph_is_not_a_source() -> None:
@@ -781,8 +788,8 @@ def test_the_modern_combo_options_upload_contract_binds() -> None:
     compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
     bound = prepared.bind(compiled.api_graph)
 
-    assert compiled.api_graph["1"]["inputs"]["image"] == "author.png"
-    assert bound["1"]["inputs"]["image"] == "${input_image}"
+    assert _inputs(compiled.api_graph, "1")["image"] == "author.png"
+    assert _inputs(bound, "1")["image"] == "${input_image}"
 
 
 def _subgraph_graph(*, inner_mode: int, nested: bool) -> dict[str, Any]:
@@ -930,7 +937,7 @@ def test_a_wired_bypassed_subgraph_still_compiles() -> None:
     assert "9:5" not in compiled.api_graph
     assert "9:6" not in compiled.api_graph
     assert prepared.output_node_ids == ("2",)
-    assert prepared.bind(compiled.api_graph)["1"]["inputs"]["image"] == "${input_image}"
+    assert _inputs(prepared.bind(compiled.api_graph), "1")["image"] == "${input_image}"
 
 
 def test_a_downstream_non_zero_output_slot_is_still_followed() -> None:
@@ -990,7 +997,7 @@ def test_a_downstream_non_zero_output_slot_is_still_followed() -> None:
     )
     compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
 
-    assert prepared.bind(compiled.api_graph)["1"]["inputs"]["image"] == "${input_image}"
+    assert _inputs(prepared.bind(compiled.api_graph), "1")["image"] == "${input_image}"
 
 
 @pytest.mark.parametrize(
@@ -1081,7 +1088,7 @@ def test_an_upload_control_that_is_not_enabled_is_not_a_second_source() -> None:
     )
     compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
 
-    assert prepared.bind(compiled.api_graph)["1"]["inputs"]["image"] == "${input_image}"
+    assert _inputs(prepared.bind(compiled.api_graph), "1")["image"] == "${input_image}"
 
 
 def test_a_second_uploader_inside_a_bypassed_scope_is_not_counted() -> None:
@@ -1128,4 +1135,4 @@ def test_a_second_uploader_inside_a_bypassed_scope_is_not_counted() -> None:
     )
     compiled = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
 
-    assert prepared.bind(compiled.api_graph)["1"]["inputs"]["image"] == "${input_image}"
+    assert _inputs(prepared.bind(compiled.api_graph), "1")["image"] == "${input_image}"

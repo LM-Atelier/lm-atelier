@@ -12,9 +12,11 @@ maintainers = [{ name = "ajccarlson" }]
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "alembic>=1.16,<2",
+  "cryptography>=50,<51",
   "fastapi>=0.116,<1",
   "huggingface-hub>=1.24.0,<2",
   "httpx>=0.28,<1",
+  "jeepney>=0.9,<1; sys_platform == 'linux'",
   "keyring>=25,<26",
   "packaging>=26,<27",
   "pydantic-settings>=2.10,<3",
@@ -37,6 +39,7 @@ dev = [
   "pytest>=9.0.3,<10",
   "pytest-asyncio>=1.0,<2",
   "pytest-cov>=7.1.0,<8",
+  "pytest-xdist>=3.6,<4",
   "ruff>=0.12,<1",
   "types-psutil>=7.0,<8",
   "types-PyYAML>=6.0,<7"
@@ -77,20 +80,14 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B", "SIM", "C901", "PLR0912", "PLR0915"]
 
 [tool.ruff.lint.mccabe]
-max-complexity = 75
+max-complexity = 70
 
 [tool.ruff.lint.pylint]
-max-branches = 76
-max-statements = 326
+max-branches = 72
+max-statements = 319
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
-# machine_lock.py is a Windows-only module: it reads GetLastError and turns a
-# kernel handle into a descriptor through msvcrt, neither of which typeshed
-# declares off Windows. The gate type-checks for the Linux platform as well as
-# this one, so including it would mean either restructuring the module around
-# platform guards or suppressing a dozen errors that are correct. Excluded here
-# rather than silently, so what is not checked is visible.
-exclude = ["alembic", 'scripts/machine_lock\.py$']
+exclude = ["alembic"]

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import local_lm.shared_asset_collection_v1 as collection
+from local_lm.filesystem_links import AnchoredDirectory, rename_entry
 from local_lm.shared_asset_collection_v1 import (
     INVALID_COLLECTION,
     SharedAssetCollectionError,
@@ -128,9 +129,11 @@ def test_replacement_before_the_anchored_rename_is_preserved(
 ) -> None:
     root, database, digest, published = _published(tmp_path)
     original = published.parent / "original-away"
-    real_rename = collection.rename_entry
+    real_rename = rename_entry
 
-    def replace_then_rename(anchor, source: str, destination: str, *, replace: bool) -> None:
+    def replace_then_rename(
+        anchor: AnchoredDirectory, source: str, destination: str, *, replace: bool
+    ) -> None:
         if source == digest:
             published.rename(original)
             published.write_bytes(b"replacement")

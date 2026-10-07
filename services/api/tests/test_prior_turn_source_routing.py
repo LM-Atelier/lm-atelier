@@ -27,7 +27,8 @@ async def _turn(client: AsyncClient, **request: Any) -> dict[str, Any]:
         session.commit()
     response = await client.post(f"/api/chats/{chat_id}/turns", json=request)
     assert response.status_code == 202, response.text
-    return response.json()
+    accepted: dict[str, Any] = response.json()
+    return accepted
 
 
 @pytest.mark.parametrize("selected_mode", ["auto", "text", "image", "video", None])

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from install_plan_fixture import bind_install_plan_identity
 
 from local_lm.comfy_workflow_packages import WorkflowAssetReference
 from local_lm.config import Settings
@@ -71,7 +72,10 @@ def _plan(
         "status": "planned",
     }
     values.update(plan_overrides or {})
-    return InstallPlan(**values)
+    plan = bind_install_plan_identity(InstallPlan(**values))
+    if plan_overrides and "plan_hash" in plan_overrides:
+        plan.plan_hash = plan_overrides["plan_hash"]
+    return plan
 
 
 def test_civitai_alias_preserves_exact_source_and_is_stable() -> None:

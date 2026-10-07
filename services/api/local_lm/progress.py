@@ -32,6 +32,7 @@ def update_job_progress(
     queue_length: int | None = None,
     blocked_by: list[str] | None = None,
     indeterminate: bool = False,
+    measured_rate: float | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Persist one validated LIFECYCLE snapshot and derive legacy fields.
@@ -65,6 +66,7 @@ def update_job_progress(
         queue_length=queue_length,
         blocked_by=blocked_by,
         indeterminate=indeterminate,
+        measured_rate=measured_rate,
         now=now,
     )
     attempt = job.attempt if isinstance(job.attempt, int) else 0
@@ -210,9 +212,15 @@ def reduce_progress(
     queue_length: int | None = None,
     blocked_by: list[str] | None = None,
     indeterminate: bool = False,
+    measured_rate: float | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Reduce any operation into the same validated, versioned snapshot."""
+    """Reduce any operation into the same validated, versioned snapshot.
+
+    The byte rate is otherwise taken from the gap since the previous write. A
+    caller whose bytes arrive in uneven blocks measures its own rate over a
+    longer window and passes it as `measured_rate`.
+    """
 
     prior = previous or {}
     current_time = now or datetime.now(UTC)
@@ -235,15 +243,24 @@ def reduce_progress(
             normalized_completed / normalized_total if normalized_total > 0 else 1.0
         )
 
-    rate, eta = _byte_rate(
-        prior,
-        stage=stage,
-        completed_units=normalized_completed,
-        total_units=normalized_total,
-        unit=unit,
-        now=current_time,
-        indeterminate=indeterminate,
-    )
+    if measured_rate is None:
+        rate, eta = _byte_rate(
+            prior,
+            stage=stage,
+            completed_units=normalized_completed,
+            total_units=normalized_total,
+            unit=unit,
+            now=current_time,
+            indeterminate=indeterminate,
+        )
+    else:
+        rate, eta = _stated_byte_rate(
+            measured_rate,
+            completed_units=normalized_completed,
+            total_units=normalized_total,
+            unit=unit,
+            indeterminate=indeterminate,
+        )
     stage_started_at, stage_elapsed_ms, completed_stages = _stage_timings(
         prior,
         stage=stage,
@@ -356,6 +373,23 @@ def _optional_datetime(value: object) -> datetime | None:
 
 def _elapsed_ms(started_at: datetime, now: datetime) -> int:
     return max(0, int(round((now - started_at).total_seconds() * 1_000)))
+
+
+def _stated_byte_rate(
+    rate: float,
+    *,
+    completed_units: int | None,
+    total_units: int | None,
+    unit: str | None,
+    indeterminate: bool,
+) -> tuple[float | None, int | None]:
+    """A rate the caller measured itself; zero means nothing is moving, so no estimate."""
+    if indeterminate or unit != "bytes" or completed_units is None or not rate > 0:
+        return None, None
+    eta = None
+    if total_units is not None and total_units >= completed_units:
+        eta = int(round((total_units - completed_units) / rate))
+    return rate, eta
 
 
 def _byte_rate(

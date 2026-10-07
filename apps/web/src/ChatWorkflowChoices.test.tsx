@@ -9,7 +9,7 @@ import type { ChatDetail, RoutingMode, WorkflowSelection } from "./types";
 
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
-  return { ...actual, api: { ...actual.api,
+  return { ...actual, api: { ...actual.api, profilesPage: vi.fn().mockResolvedValue([]),
     workflowFamilies: vi.fn(), chatWorkflowSelections: vi.fn(),
     projectWorkflowSelections: vi.fn(), setChatWorkflowSelection: vi.fn(),
   } };
@@ -27,8 +27,8 @@ const clients: QueryClient[] = [];
 function Harness({ workflowControl }: { workflowControl?: ReactNode }) {
   const [mode, setMode] = useState<RoutingMode>("auto");
   const [draft, setDraft] = useState<ComposerDraft>({ text: "", promptSource: null });
-  return <TurnEditor chat={{ ...chat, routing_mode: mode }} engines={[]} profiles={[]} workflows={[]}
-    presets={[]} stoppable={false} settings={{}} onSettings={ignore} settingsRole="chat"
+  return <TurnEditor chat={{ ...chat, routing_mode: mode }} engines={[]}
+    stoppable={false} settings={{}} onSettings={ignore} settingsRole="chat"
     onSettingsRole={ignore} presetId={null} onPreset={ignore} onMode={setMode} onSend={ignore}
     onStop={ignore} onStopAndSend={ignore} maxMediaOutputsPerPlan={4}
     draft={draft} onDraftChange={setDraft} workflowControl={workflowControl} workflowSchemaOverride={null} />;
@@ -39,6 +39,7 @@ function show(workflowControl?: ReactNode) {
   return render(<QueryClientProvider client={client}><Harness workflowControl={workflowControl} /></QueryClientProvider>);
 }
 beforeEach(() => {
+  vi.mocked(api.profilesPage).mockResolvedValue([]);
   selections = [
     { selector_capability: "chat", mode: "automatic", workflow_family_id: null, workflow_revision_id: null, legacy_profile_id: null },
     { selector_capability: "image", mode: "family", workflow_family_id: "missing-image-family", workflow_revision_id: null, legacy_profile_id: null },
@@ -55,28 +56,29 @@ beforeEach(() => {
     return next;
   });
 });
-afterEach(() => { cleanup(); for (const client of clients.splice(0)) client.clear(); vi.resetAllMocks(); });
+afterEach(() => { cleanup(); localStorage.clear(); for (const client of clients.splice(0)) client.clear(); vi.resetAllMocks(); });
 
 it("shows all three stored workflow choices in routing Auto and preserves the other types when one changes", async () => {
   show();
   const text = await screen.findByRole("combobox", { name: "Text workflow" });
   const image = screen.getByRole("combobox", { name: "Image workflow" });
   const video = screen.getByRole("combobox", { name: "Video workflow" });
-  await waitFor(() => expect(text).toHaveValue("automatic"));
-  expect(image).toHaveValue("missing-image-family");
-  expect(video).toHaveValue("compatibility:revision");
-  expect(screen.getByRole("option", { name: "Selected workflow (unavailable)" })).toBeDisabled();
+  await waitFor(() => expect(text).toHaveValue("Auto"));
+  await waitFor(() => expect(image).toHaveValue("Selected workflow (unavailable)"));
+  expect(video).toHaveValue("Existing exact workflow");
+  fireEvent.click(image);
+  expect(screen.getByRole("option", { name: "Selected workflow (unavailable)" })).toHaveAttribute("aria-disabled", "true");
   expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("auto");
   expect(api.setChatWorkflowSelection).not.toHaveBeenCalled();
-  fireEvent.change(image, { target: { value: "default" } });
-  await waitFor(() => expect(image).toHaveValue("default"));
+  fireEvent.click(screen.getByRole("option", { name: "Default" }));
+  await waitFor(() => expect(image).toHaveValue("Default"));
   expect(api.setChatWorkflowSelection).toHaveBeenCalledExactlyOnceWith(chat.id, "image", { mode: "default" });
-  expect(text).toHaveValue("automatic");
-  expect(video).toHaveValue("compatibility:revision");
+  expect(text).toHaveValue("Auto");
+  expect(video).toHaveValue("Existing exact workflow");
   fireEvent.change(screen.getByRole("combobox", { name: "Generation mode" }), { target: { value: "video" } });
   expect(text).toBeVisible();
-  expect(image).toHaveValue("default");
-  expect(video).toHaveValue("compatibility:revision");
+  expect(image).toHaveValue("Default");
+  expect(video).toHaveValue("Existing exact workflow");
   expect(api.setChatWorkflowSelection).toHaveBeenCalledTimes(1);
 });
 
@@ -88,10 +90,10 @@ it("keeps a failed capability read explicit while the other workflow controls re
   show();
   await screen.findByText("Image choices unavailable");
   const image = screen.getByRole("combobox", { name: "Image workflow" });
-  expect(image).toBeDisabled();
-  expect(image).toHaveValue("");
-  expect(screen.getByRole("combobox", { name: "Text workflow" })).toHaveValue("automatic");
-  expect(screen.getByRole("combobox", { name: "Video workflow" })).toHaveValue("compatibility:revision");
+  expect(image).toHaveAttribute("aria-disabled", "true");
+  expect(image).toHaveValue("Cannot read the current choice");
+  expect(screen.getByRole("combobox", { name: "Text workflow" })).toHaveValue("Auto");
+  expect(screen.getByRole("combobox", { name: "Video workflow" })).toHaveValue("Existing exact workflow");
   expect(api.setChatWorkflowSelection).not.toHaveBeenCalled();
 });
 

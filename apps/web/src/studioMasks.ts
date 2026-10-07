@@ -132,9 +132,167 @@ export function fillPolygon(
   }
 }
 
+/** Fill the connected region under a point with `value`.
+ *
+ * Neighbours are the four pixels sharing an edge, and `inRegion` decides
+ * which pixels belong, always judged against pixels not yet visited. The walk
+ * fills whole runs of a row and remembers only where a run starts on the rows
+ * above and below, so even a region covering the largest supported picture
+ * never recurses and never queues one entry per pixel. Returns whether any
+ * coverage actually changed.
+ */
+function fillConnected(
+  mask: MaskRaster,
+  x: number,
+  y: number,
+  inRegion: (index: number) => boolean,
+  value: number,
+): boolean {
+  const { width, height, data } = mask;
+  const column = Math.floor(x);
+  const row = Math.floor(y);
+  if (!(column >= 0 && row >= 0 && column < width && row < height)) return false;
+  const seed = row * width + column;
+  if (!inRegion(seed)) return false;
+  const visited = new Uint8Array(width * height);
+  const pending = [seed];
+  let changed = false;
+  while (pending.length > 0) {
+    const start = pending.pop()!;
+    if (visited[start]) continue;
+    const rowStart = start - (start % width);
+    let left = start;
+    while (left > rowStart && !visited[left - 1] && inRegion(left - 1)) left -= 1;
+    let right = start;
+    while (right < rowStart + width - 1 && !visited[right + 1] && inRegion(right + 1)) right += 1;
+    for (let index = left; index <= right; index += 1) {
+      visited[index] = 1;
+      if (data[index] !== value) {
+        data[index] = value;
+        changed = true;
+      }
+    }
+    for (const offset of [-width, width]) {
+      if (rowStart + offset < 0 || rowStart + offset >= data.length) continue;
+      let open = false;
+      for (let index = left + offset; index <= right + offset; index += 1) {
+        const joins = !visited[index] && inRegion(index);
+        if (joins && !open) pending.push(index);
+        open = joins;
+      }
+    }
+  }
+  return changed;
+}
+
+/** The paint bucket: fill the evenly covered region under a point.
+ *
+ * The region is every connected pixel with exactly the coverage of the one
+ * clicked, so clicking inside an outline fills the inside and stops at the
+ * outline, and clicking a selected area with `value` 0 removes that area.
+ */
+export function fillRegion(mask: MaskRaster, x: number, y: number, value = 255): boolean {
+  const column = Math.floor(x);
+  const row = Math.floor(y);
+  if (!(column >= 0 && row >= 0 && column < mask.width && row < mask.height)) return false;
+  const seedCoverage = mask.data[row * mask.width + column];
+  if (seedCoverage === value) return false;
+  return fillConnected(mask, x, y, (index) => mask.data[index] === seedCoverage, value);
+}
+
+/** The magic wand: select the connected pixels close in color to the one under a point.
+ *
+ * `pixels` is the picture as RGBA bytes at the mask's own size; anything else
+ * is refused rather than read out of step. Closeness is the largest difference
+ * in any color channel or in alpha, so a tolerance of 0 takes only the exact color.
+ */
+export function selectSimilarColor(
+  mask: MaskRaster,
+  pixels: Uint8ClampedArray,
+  x: number,
+  y: number,
+  tolerance: number,
+  value = 255,
+): boolean {
+  if (pixels.length !== mask.width * mask.height * 4) {
+    throw new Error("the picture's pixels do not match the selection's size");
+  }
+  const column = Math.floor(x);
+  const row = Math.floor(y);
+  if (!(column >= 0 && row >= 0 && column < mask.width && row < mask.height)) return false;
+  const seed = (row * mask.width + column) * 4;
+  const reach = Math.max(0, Math.min(255, Math.round(tolerance)));
+  const close = (index: number) => {
+    const at = index * 4;
+    return Math.abs(pixels[at] - pixels[seed]) <= reach
+      && Math.abs(pixels[at + 1] - pixels[seed + 1]) <= reach
+      && Math.abs(pixels[at + 2] - pixels[seed + 2]) <= reach
+      && Math.abs(pixels[at + 3] - pixels[seed + 3]) <= reach;
+  };
+  return fillConnected(mask, x, y, close, value);
+}
+
 export function invert(mask: MaskRaster): void {
   for (let index = 0; index < mask.data.length; index += 1) {
     mask.data[index] = 255 - mask.data[index];
+  }
+}
+
+/** The most feathering a selection may ask the server for, in pixels. */
+export const MAX_FEATHER_PX = 128;
+
+/** Grow the selection outward by up to `radiusPx` in every direction.
+ *
+ * Each pixel takes the strongest coverage within the square around it, so a
+ * soft edge keeps its softness and moves out with the rest. One sliding
+ * maximum per row, then per column, keeps the cost to a few passes over the
+ * pixels whatever the radius.
+ */
+export function dilate(mask: MaskRaster, radiusPx: number): void {
+  const radius = Math.floor(radiusPx);
+  if (radius < 1) return;
+  const { width, height, data } = mask;
+  const row = new Uint8Array(width);
+  for (let y = 0; y < height; y += 1) {
+    slidingMax(data, y * width, 1, width, radius, row);
+    data.set(row, y * width);
+  }
+  const column = new Uint8Array(height);
+  for (let x = 0; x < width; x += 1) {
+    slidingMax(data, x, width, height, radius, column);
+    for (let y = 0; y < height; y += 1) data[y * width + x] = column[y];
+  }
+}
+
+/** The maximum of each window of `2 * radius + 1` values along one line.
+ *
+ * A queue of positions whose values only fall from front to back: a position
+ * is dropped once it leaves the window, or once a stronger one arrives after
+ * it, so each is added and removed at most once.
+ */
+function slidingMax(
+  data: Uint8Array,
+  start: number,
+  step: number,
+  length: number,
+  radius: number,
+  out: Uint8Array,
+): void {
+  const queue = new Int32Array(length);
+  let head = 0;
+  let tail = 0;
+  let next = 0;
+  for (let index = 0; index < length; index += 1) {
+    const reach = Math.min(length - 1, index + radius);
+    while (next <= reach) {
+      const value = data[start + next * step];
+      while (tail > head && data[start + queue[tail - 1] * step] <= value) tail -= 1;
+      queue[tail] = next;
+      tail += 1;
+      next += 1;
+    }
+    while (queue[head] < index - radius) head += 1;
+    out[index] = data[start + queue[head] * step];
   }
 }
 
@@ -181,17 +339,35 @@ function clampIndex(value: number, size: number): number {
   return value < 0 ? 0 : value >= size ? size - 1 : value;
 }
 
-/** RGBA bytes with the mask as alpha, for the tint overlay or PNG export. */
+/** A rectangle of a mask, in its own pixels. */
+export type MaskRegion = { left: number; top: number; width: number; height: number };
+
+/** RGBA bytes with the mask as alpha, for the tint overlay or PNG export.
+ *
+ * Of the whole mask, or of one region of it, row by row, for repainting only
+ * the part a brush has just changed: a whole 12-megapixel tint is 48 MB to
+ * build again on every move of the pointer.
+ */
 export function toAlphaImageData(
   mask: MaskRaster,
   rgb: readonly [number, number, number] = [255, 255, 255],
+  /** How much of each marked pixel's coverage shows, from 0 to 1. */
+  opacity = 1,
+  region: MaskRegion = { left: 0, top: 0, width: mask.width, height: mask.height },
 ): Uint8ClampedArray {
-  const out = new Uint8ClampedArray(mask.data.length * 4);
-  for (let index = 0; index < mask.data.length; index += 1) {
-    out[index * 4] = rgb[0];
-    out[index * 4 + 1] = rgb[1];
-    out[index * 4 + 2] = rgb[2];
-    out[index * 4 + 3] = mask.data[index];
+  const out = new Uint8ClampedArray(region.width * region.height * 4);
+  let index = 0;
+  for (let row = 0; row < region.height; row += 1) {
+    const start = (region.top + row) * mask.width + region.left;
+    for (let column = 0; column < region.width; column += 1) {
+      const coverage = mask.data[start + column];
+      out[index] = rgb[0];
+      out[index + 1] = rgb[1];
+      out[index + 2] = rgb[2];
+      // Half rounds up, as the server does when it lays paint down.
+      out[index + 3] = opacity === 1 ? coverage : Math.floor(coverage * opacity + 0.5);
+      index += 4;
+    }
   }
   return out;
 }
@@ -201,35 +377,54 @@ export function toAlphaImageData(
  * so a fixed depth of full clones is not a safe bound - bytes are. */
 export const DEFAULT_MASK_HISTORY_BYTES = 96 * 1024 * 1024;
 
-/** Run-length encoding of one mask; masks are mostly-uniform by nature, so
- * a stored snapshot is typically orders of magnitude smaller than the
- * raster. Pathological content still encodes correctly, just larger. */
-type MaskSnapshot = {
-  readonly width: number;
-  readonly height: number;
-  /** Alternating [value, runLength] pairs over the row-major raster. */
-  readonly runs: Uint32Array;
-};
+/** One stored mask: its runs when they are the smaller record, or its bytes as they are.
+ *
+ * Masks are mostly uniform by nature, so the runs are typically orders of
+ * magnitude smaller than the raster. A speckled one, such as a similar-colors
+ * selection on a noisy photograph, changes value at nearly every pixel, and at
+ * two four-byte numbers a run its runs came to eight times the raster: one
+ * snapshot of a 32 MP mask outgrew the whole undo budget. Keeping whichever is
+ * smaller holds every snapshot to the size of the mask itself.
+ */
+type MaskSnapshot =
+  | {
+      readonly width: number;
+      readonly height: number;
+      /** Alternating [value, runLength] pairs over the row-major raster. */
+      readonly runs: Uint32Array;
+    }
+  | { readonly width: number; readonly height: number; readonly bytes: Uint8Array };
 
 export function encodeMask(mask: MaskRaster): MaskSnapshot {
-  const runs: number[] = [];
-  let value = mask.data[0] ?? 0;
-  let length = 0;
-  for (const sample of mask.data) {
-    if (sample === value) {
-      length += 1;
-      continue;
-    }
-    runs.push(value, length);
-    value = sample;
-    length = 1;
+  const { data } = mask;
+  // Counted first, so the runs go straight into an array of their exact size
+  // rather than into a growing list of numbers several times larger again.
+  let count = data.length > 0 ? 1 : 0;
+  for (let index = 1; index < data.length; index += 1) {
+    if (data[index] !== data[index - 1]) count += 1;
   }
-  if (length > 0) runs.push(value, length);
-  return { width: mask.width, height: mask.height, runs: Uint32Array.from(runs) };
+  if (count * 2 * Uint32Array.BYTES_PER_ELEMENT >= data.byteLength) {
+    return { width: mask.width, height: mask.height, bytes: data.slice() };
+  }
+  const runs = new Uint32Array(count * 2);
+  let run = 0;
+  let start = 0;
+  for (let index = 1; index <= data.length; index += 1) {
+    if (index < data.length && data[index] === data[start]) continue;
+    runs[run] = data[start];
+    runs[run + 1] = index - start;
+    run += 2;
+    start = index;
+  }
+  return { width: mask.width, height: mask.height, runs };
 }
 
 export function decodeMask(snapshot: MaskSnapshot): MaskRaster {
   const mask = createMask(snapshot.width, snapshot.height);
+  if ("bytes" in snapshot) {
+    mask.data.set(snapshot.bytes);
+    return mask;
+  }
   let offset = 0;
   for (let index = 0; index + 1 < snapshot.runs.length; index += 2) {
     const value = snapshot.runs[index];
@@ -240,8 +435,9 @@ export function decodeMask(snapshot: MaskSnapshot): MaskRaster {
   return mask;
 }
 
+/** What one snapshot holds in memory: never more than the mask it was taken of. */
 function snapshotBytes(snapshot: MaskSnapshot): number {
-  return snapshot.runs.byteLength;
+  return "bytes" in snapshot ? snapshot.bytes.byteLength : snapshot.runs.byteLength;
 }
 
 /** A byte-budgeted undo ring. Callers snapshot BEFORE the first mutation of
@@ -336,4 +532,28 @@ export async function encodeMaskPng(mask: MaskRaster): Promise<Blob | null> {
     0,
   );
   return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png"));
+}
+
+/** The smallest box around everything selected, in the raster's own pixels,
+ * or null when nothing is. Only coverage from `least` up counts, so a faint
+ * edge can be left out of the box. */
+export function maskBounds(
+  mask: MaskRaster,
+  least = 1,
+): { left: number; top: number; width: number; height: number } | null {
+  let left = mask.width;
+  let top = mask.height;
+  let right = -1;
+  let bottom = -1;
+  for (let y = 0; y < mask.height; y += 1) {
+    const row = y * mask.width;
+    for (let x = 0; x < mask.width; x += 1) {
+      if (mask.data[row + x] < least) continue;
+      if (x < left) left = x;
+      if (x > right) right = x;
+      if (y < top) top = y;
+      if (y > bottom) bottom = y;
+    }
+  }
+  return right < 0 ? null : { left, top, width: right - left + 1, height: bottom - top + 1 };
 }

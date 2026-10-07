@@ -105,6 +105,7 @@ class ValidatedWorkflowEditorReturn:
     returned_api_graph_json: str
     runtime_identity: str
     source_session: WorkflowEditorSession
+    returned_input_schema_json: str | None = None
     draft_revision_id: str | None = None
 
 
@@ -202,6 +203,7 @@ class WorkflowEditorSessions:
         returned_ui_graph: Mapping[str, Any],
         returned_api_graph: Mapping[str, Any],
         runtime_identity: str,
+        returned_input_schema: Mapping[str, Any] | None = None,
     ) -> WorkflowEditorReturn:
         session_id = _identifier(session_id, "workflow editor session")
         nonce = _nonce(nonce)
@@ -212,6 +214,9 @@ class WorkflowEditorSessions:
         returned_prompt_sha256 = workflow_api_graph_sha256(returned_api_graph)
         returned_ui_graph_json = canonical_graph(returned_ui_graph)
         returned_api_graph_json = canonical_graph(returned_api_graph)
+        returned_input_schema_json = (
+            canonical_graph(returned_input_schema) if returned_input_schema is not None else None
+        )
         runtime_identity = _identifier(runtime_identity, "workflow editor runtime")
         now = _aware_utc(self._clock())
         with self._lock:
@@ -228,6 +233,7 @@ class WorkflowEditorSessions:
                 if (
                     replay.returned_ui_graph_json != returned_ui_graph_json
                     or replay.returned_api_graph_json != returned_api_graph_json
+                    or replay.returned_input_schema_json != returned_input_schema_json
                 ):
                     raise WorkflowEditorSessionError(
                         "workflow-editor-session-replay-mismatch",
@@ -275,6 +281,7 @@ class WorkflowEditorSessions:
                 returned_api_graph_json=returned_api_graph_json,
                 runtime_identity=session.runtime_identity,
                 source_session=session,
+                returned_input_schema_json=returned_input_schema_json,
             )
             del self._sessions[session_id]
             return result

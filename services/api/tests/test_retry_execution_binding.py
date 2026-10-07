@@ -9,16 +9,16 @@ the property the record is for, and the one a shorter control would miss.
 
 from __future__ import annotations
 
+import asyncio
 import io
-import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 from PIL import Image
-from run_waits import wait_for_terminal_status
+from run_waits import PATIENCE_SECONDS, wait_for_terminal_status
 from sqlalchemy import select
 
 from local_lm.adapters.base import ChatEvent, ChatRequest, GeneratedAsset, MediaEvent, MediaRequest
@@ -27,6 +27,7 @@ from local_lm.db import SessionLocal
 from local_lm.domain import JobKind, JobStatus
 from local_lm.models import (
     Chat,
+    EditTemplate,
     Job,
     ModelInstall,
     ModelProfile,
@@ -64,10 +65,10 @@ async def _wait_for_job(client: AsyncClient, kind: str) -> dict:  # type: ignore
             )
             if matching is None:
                 return None
-            return cast(dict[str, Any], JobOut.model_validate(matching).model_dump(mode="json"))
+            return JobOut.model_validate(matching).model_dump(mode="json")
 
     return cast(
-        dict,
+        dict[str, Any],
         await wait_for_terminal_status(
             read,
             what=f"the {kind} job",
@@ -77,15 +78,19 @@ async def _wait_for_job(client: AsyncClient, kind: str) -> dict:  # type: ignore
     )
 
 
-_RETRY_ASSESSMENT = json.dumps(
-    {
-        "requested_change_visible": False,
-        "unrelated_content_preserved": True,
-        "retry_recommended": True,
-        "direction": "increase",
-        "confidence": 0.94,
-    }
+_SEEN_BEFORE = '[{"subject": "square", "appearance": "red"}]'
+_SEEN_UNCHANGED = _SEEN_BEFORE
+_SEEN_CHANGED = '[{"subject": "square", "appearance": "blue"}]'
+_CHANGED_OTHERWISE = (
+    '{"subject_present": true, "operation": "change", "requested": [0], "as_asked": false}'
 )
+_CHANGE_ATTRIBUTED = (
+    '{"subject_present": true, "operation": "change", "requested": [0], "as_asked": true}'
+)
+#: The three answers the review asks for, in order: what is in the source, what
+#: is in the result, and which listed difference the request asked for.
+_SAW_NO_CHANGE = (_SEEN_BEFORE, _SEEN_CHANGED, _CHANGED_OTHERWISE)
+_SAW_THE_CHANGE = (_SEEN_BEFORE, _SEEN_CHANGED, _CHANGE_ATTRIBUTED)
 
 
 async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
@@ -103,12 +108,15 @@ async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
     )
 
 
-@pytest.mark.parametrize("refusal_point", ["announcement", "start"])
-async def test_retry_binding_survives_failed_execution_record(
+async def _verify_an_edit_whose_retry_is_refused(
     client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch, refusal_point: str
-) -> None:
-    """A truthful not-started record must leave the same durable retry recoverable."""
-    assessment_raw = _RETRY_ASSESSMENT
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, int], dict[str, bool]]:
+    """Run one edit through its verification, refusing every start of the retry it asks for.
+
+    Returns the accepted turn, the finished verification job, how many times the
+    retry was refused, and the switch that arms the refusal.
+    """
+    answers = _SAW_NO_CHANGE
     turn_settings: dict[str, object] = {}
     announcement_fails = True
     failures = {"count": 0}
@@ -148,7 +156,7 @@ async def test_retry_binding_survives_failed_execution_record(
         # plan is the retry. Arming the refusal earlier would refuse the
         # source's own announcement and no verification would run at all.
         refuse_announcements["armed"] = announcement_fails
-        yield ChatEvent(type="delta", text=assessment_raw)
+        yield ChatEvent(type="delta", text=answers[min(len(captured) - 1, len(answers) - 1)])
         yield ChatEvent(type="complete", data={"finish_reason": "stop"})
 
     async def edited_media(
@@ -257,11 +265,26 @@ async def test_retry_binding_survives_failed_execution_record(
     )
     assert accepted.status_code == 202
     verification_job = await _wait_for_job(client, JobKind.EDIT_VERIFY.value)
+    return accepted.json(), verification_job, failures, refuse_announcements
+
+
+@pytest.mark.parametrize("refusal_point", ["announcement", "start"])
+async def test_retry_binding_survives_failed_execution_record(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch, refusal_point: str
+) -> None:
+    """A truthful not-started record must leave the same durable retry recoverable."""
+    (
+        accepted,
+        verification_job,
+        failures,
+        refuse_announcements,
+    ) = await _verify_an_edit_whose_retry_is_refused(client, app, monkeypatch, refusal_point)
+    orchestrator = app.state.services.orchestrator
 
     assert verification_job["status"] == JobStatus.COMPLETE.value
     assert verification_job["result_json"]["status"] == "complete"
     assert failures["count"] >= 2, "the initial and recovery failures were not exercised"
-    source_id = accepted.json()["run"]["id"]
+    source_id = accepted["run"]["id"]
     with SessionLocal() as session:
         source = session.get(Run, source_id)
         assert source is not None
@@ -285,6 +308,62 @@ async def test_retry_binding_survives_failed_execution_record(
     assert starts, "the same retained retry could not be started on a later healthy convergence"
 
 
+def _committing_first(
+    awaited: Callable[..., Awaitable[Any]], name: str, committed: list[str]
+) -> Callable[..., Awaitable[Any]]:
+    """Wrap an awaited call so that another connection commits before it proceeds."""
+
+    async def wrapped(*args: Any, **kwargs: Any) -> Any:
+        def write() -> None:
+            with SessionLocal() as writer:
+                writer.add(
+                    EditTemplate(
+                        name=f"Written while {name} was awaited",
+                        instruction="Prove the writer lock is free.",
+                        operation="image_to_image",
+                    )
+                )
+                writer.commit()
+
+        await asyncio.wait_for(asyncio.to_thread(write), timeout=PATIENCE_SECONDS)
+        committed.append(name)
+        return await awaited(*args, **kwargs)
+
+    return wrapped
+
+
+async def test_another_writer_commits_while_the_verification_awaits_its_retry(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry's session holds no write lock across either await of the verification.
+
+    The async boundary audit admits both awaits on this condition. Each awaited call
+    first commits a row from another connection; had the retry session entered the
+    await holding SQLite's writer lock, that commit would wait out the busy timeout
+    and fail. A refused announcement takes the verification through both: the
+    creation of the retry, then the recovery after it fails.
+    """
+    orchestrator = app.state.services.orchestrator
+    committed: list[str] = []
+    for name in ("_create_image_edit_verification_retry", "_converge_on_bound_retry"):
+        monkeypatch.setattr(
+            orchestrator, name, _committing_first(getattr(orchestrator, name), name, committed)
+        )
+
+    _accepted, verification_job, failures, _armed = await _verify_an_edit_whose_retry_is_refused(
+        client, app, monkeypatch, "announcement"
+    )
+
+    assert verification_job["status"] == JobStatus.COMPLETE.value
+    assert failures["count"] >= 2, "the creation and the recovery were not both reached"
+    assert committed[:2] == ["_create_image_edit_verification_retry", "_converge_on_bound_retry"]
+    with SessionLocal() as reader:
+        written = reader.scalars(
+            select(EditTemplate.name).where(EditTemplate.name.like("Written while %"))
+        ).all()
+    assert sorted(written) == sorted(f"Written while {name} was awaited" for name in committed)
+
+
 async def test_retry_binding_survives_an_unavailable_verification(
     client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -297,7 +376,8 @@ async def test_retry_binding_survives_an_unavailable_verification(
     the source's, taking the retry's identity with it. Nothing can converge on
     the retry afterwards, because nothing can name it any more.
     """
-    assessment_raw = _RETRY_ASSESSMENT
+    answers = _SAW_NO_CHANGE
+    asked: list[ChatRequest] = []
     announcement_failures = {"count": 0}
     reconstruction_failures = {"count": 0}
     refuse = {"announcements": False, "reconstruction": False}
@@ -313,12 +393,12 @@ async def test_retry_binding_survives_an_unavailable_verification(
         _adapter: MockChatAdapter,
         request: ChatRequest,
     ) -> AsyncIterator[ChatEvent]:
-        del request
         # The source turn has announced its own plan by now, so refusing from
         # here refuses only the retry's announcement and a verification still
         # runs. Arming earlier would leave nothing to verify.
         refuse["announcements"] = True
-        yield ChatEvent(type="delta", text=assessment_raw)
+        asked.append(request)
+        yield ChatEvent(type="delta", text=answers[min(len(asked) - 1, len(answers) - 1)])
         yield ChatEvent(type="complete", data={"finish_reason": "stop"})
 
     async def edited_media(

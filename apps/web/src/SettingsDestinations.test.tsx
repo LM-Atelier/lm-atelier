@@ -1,0 +1,124 @@
+import { useAppNavigation } from "./useAppNavigation";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { SettingsView } from "./SettingsView";
+import { SETTINGS_DESTINATIONS, settingsDestinationFor } from "./settingsDestinations";
+import { useAppearance } from "./theme";
+
+vi.mock("./api", async (original) => ({ ApiError: (await original<typeof import("./api")>()).ApiError, api: {
+  recoveryItems: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
+  system: vi.fn().mockResolvedValue(null),
+  about: vi.fn().mockResolvedValue(null),
+  profilesPage: vi.fn().mockResolvedValue([]),
+  presetsPage: vi.fn().mockResolvedValue([]),
+  workers: vi.fn().mockResolvedValue([]),
+  runtimes: vi.fn().mockResolvedValue([]),
+  backups: vi.fn().mockResolvedValue([]),
+  credentialStatus: vi.fn().mockResolvedValue({ configured: false, vault_available: true }),
+  workerSettings: vi.fn().mockResolvedValue({ worker_startup_seconds: 60 }),
+  artifactStorage: vi.fn().mockResolvedValue(null),
+  modelStorage: vi.fn().mockResolvedValue(null),
+  projects: vi.fn().mockResolvedValue([]),
+} }));
+
+const clients: QueryClient[] = [];
+function NavigationSettings() {
+  const navigation = useAppNavigation();
+  const appearance = useAppearance();
+  return <SettingsView engines={[]} appearance={appearance} destinationId={navigation.settingsDestination}
+    onDestinationChange={navigation.setSettingsDestination} focusRequest={navigation.settingsFocusRequest} />;
+}
+beforeEach(() => {
+  window.history.replaceState(null, "", "/?view=settings");
+  sessionStorage.clear();
+});
+
+afterEach(() => {
+  cleanup();
+  clients.splice(0).forEach((client) => client.clear());
+});
+
+function show() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  clients.push(client);
+  render(<QueryClientProvider client={client}><NavigationSettings /></QueryClientProvider>);
+}
+
+function rail(name: string) {
+  return screen.getByRole("button", { name });
+}
+
+it("offers every destination and announces which one you are on", () => {
+  show();
+
+  for (const destination of SETTINGS_DESTINATIONS) {
+    expect(rail(destination.label)).toBeTruthy();
+  }
+  // Pages, not tabs: the current one is the current PAGE, and exactly one is.
+  const current = screen.getAllByRole("button").filter(
+    (button) => button.getAttribute("aria-current") === "page",
+  );
+  expect(current).toHaveLength(1);
+  expect(current[0].textContent).toBe(SETTINGS_DESTINATIONS[0].label);
+});
+
+it("shows one destination at a time", () => {
+  show();
+
+  // General is where Settings opens, so its content is present and another
+  // destination's is not - the whole point of the shell.
+  expect(screen.getByRole("heading", { name: "Sending" })).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "Recovery backups" })).toBeNull();
+
+  fireEvent.click(rail("Data & backups"));
+
+  expect(screen.getByRole("heading", { name: "Recovery backups" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Project archives" })).toBeTruthy();
+  // Storage is summarised on the same page, above the backups that act on it.
+  expect(screen.getByRole("heading", { name: "Storage" })).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "Sending" })).toBeNull();
+});
+
+it("moves focus to the destination you chose, and not before you choose one", () => {
+  show();
+
+  // Nothing is stolen on arrival: whatever opened Settings keeps focus.
+  expect(document.activeElement).toBe(document.body);
+
+  fireEvent.click(rail("Advanced"));
+
+  const region = screen.getByRole("region", { name: "Advanced" });
+  expect(document.activeElement).toBe(region);
+});
+
+it("the picker and the rail are the same choice", () => {
+  show();
+
+  const picker = screen.getByLabelText("Settings section");
+  fireEvent.change(picker, { target: { value: "about-and-support" } });
+
+  expect(screen.getByRole("heading", { name: "About & support" })).toBeTruthy();
+  expect(rail("About & support").getAttribute("aria-current")).toBe("page");
+  expect((picker as HTMLSelectElement).value).toBe("about-and-support");
+});
+
+it("an id that no longer exists lands somewhere usable", () => {
+  // A destination can be renamed or retired between releases. Somebody
+  // returning to a remembered one should not get a blank page.
+  expect(settingsDestinationFor("a-destination-that-was-retired").id)
+    .toBe(SETTINGS_DESTINATIONS[0].id);
+  expect(settingsDestinationFor(undefined).id).toBe(SETTINGS_DESTINATIONS[0].id);
+  expect(settingsDestinationFor("advanced").label).toBe("Advanced");
+});
+
+it("refocuses the current destination without adding history", () => {
+  show();
+  fireEvent.click(rail("Advanced"));
+  rail("Advanced").focus();
+  const push = vi.spyOn(window.history, "pushState");
+  fireEvent.click(rail("Advanced"));
+  expect(screen.getByRole("region", { name: "Advanced" })).toHaveFocus();
+  expect(push).not.toHaveBeenCalled();
+  push.mockRestore();
+});

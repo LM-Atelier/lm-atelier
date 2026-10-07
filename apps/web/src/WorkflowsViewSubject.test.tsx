@@ -1,5 +1,6 @@
+import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { WorkflowsView } from "./WorkflowsView";
 import { api } from "./api";
@@ -7,8 +8,8 @@ import { openWorkflowEditorPopup, runWorkflowEditor } from "./workflowEditorBrid
 
 vi.mock("./api", () => ({
   api: {
-    workflows: vi.fn(),
-    workflowFamilies: vi.fn().mockResolvedValue([]),
+    workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(),
+    workflowFamilyOperations: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn().mockResolvedValue([]),
     validateWorkflow: vi.fn(),
     previewWorkflowRevisionReview: vi.fn(),
     decideWorkflowRevisionReview: vi.fn(),
@@ -88,17 +89,20 @@ function editorReturn() {
 }
 
 function renderView() {
+  mockWorkflowReadsFromFixture(() => api.workflows());
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
       <WorkflowsView />
     </QueryClientProvider>,
   );
+  return client;
 }
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.useRealTimers();
 });
 
 describe("workflow creation requests", () => {
@@ -112,6 +116,7 @@ describe("workflow creation requests", () => {
 
     renderView();
     fireEvent.click(await screen.findByText("Alpha"));
+    await screen.findByRole("button", { name: "New revision" });
     expect(screen.getByText("Trusted", { selector: ".badge" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: action }));
 
@@ -138,15 +143,18 @@ describe("a verdict belongs to the workflow it was asked about", () => {
       valid: false,
       errors: ["Alpha is missing a node"],
       warnings: [],
+      revision_id: "wf-a",
     } as never);
 
     renderView();
     fireEvent.click(await screen.findByText("Alpha"));
+    await screen.findByRole("button", { name: "New revision" });
     fireEvent.click(await screen.findByRole("button", { name: "Validate" }));
     await waitFor(() => expect(screen.getByText("Alpha is missing a node")).toBeTruthy());
 
     // The verdict was about Alpha. Beta has not been validated at all.
     fireEvent.click(screen.getByText("Beta"));
+    await screen.findByRole("button", { name: "New revision" });
 
     expect(screen.queryByText("Alpha is missing a node")).toBeNull();
   });
@@ -174,6 +182,7 @@ describe("opening a workflow in ComfyUI", () => {
 
     renderView();
     fireEvent.click(await screen.findByText("Alpha"));
+    await screen.findByRole("button", { name: "New revision" });
     fireEvent.click(screen.getByRole("button", { name: "Edit in ComfyUI (preview)" }));
 
     expect(openWorkflowEditorPopup).toHaveBeenCalledOnce();
@@ -194,6 +203,7 @@ describe("opening a workflow in ComfyUI", () => {
     vi.mocked(runWorkflowEditor).mockImplementation(() => new Promise(() => {}));
     renderView();
     fireEvent.click(await screen.findByText("Alpha"));
+    await screen.findByRole("button", { name: "New revision" });
     const edit = screen.getByRole("button", { name: "Edit in ComfyUI (preview)" });
     fireEvent.click(edit);
     fireEvent.click(edit);
@@ -218,6 +228,7 @@ describe("opening a workflow in ComfyUI", () => {
     });
     renderView();
     fireEvent.click(await screen.findByText("Alpha"));
+    await screen.findByRole("button", { name: "New revision" });
     fireEvent.click(screen.getByRole("button", { name: "Edit in ComfyUI (preview)" }));
     expect(await screen.findByRole("button", { name: "Retry validating returned edit" })).toBeTruthy();
 
@@ -254,6 +265,7 @@ describe("opening a workflow in ComfyUI", () => {
     });
     renderView();
     fireEvent.click(await screen.findByText("Alpha"));
+    await screen.findByRole("button", { name: "New revision" });
     fireEvent.click(screen.getByRole("button", { name: "Edit in ComfyUI (preview)" }));
     await waitFor(() => expect(runWorkflowEditor).toHaveBeenCalledOnce());
     expect(screen.queryByRole("button", { name: "Retry validating returned edit" })).toBeNull();
@@ -275,6 +287,7 @@ describe("opening a workflow in ComfyUI", () => {
     });
     renderView();
     fireEvent.click(await screen.findByText("Alpha"));
+    await screen.findByRole("button", { name: "New revision" });
     fireEvent.click(screen.getByRole("button", { name: "Edit in ComfyUI (preview)" }));
     await waitFor(() => expect(runWorkflowEditor).toHaveBeenCalledOnce());
     expect(screen.queryByRole("button", { name: "Retry saving validated edit" })).toBeNull();
@@ -295,6 +308,7 @@ describe("opening a workflow in ComfyUI", () => {
     });
     renderView();
     fireEvent.click(await screen.findByText("Alpha"));
+    await screen.findByRole("button", { name: "New revision" });
     fireEvent.click(screen.getByRole("button", { name: "Edit in ComfyUI (preview)" }));
     expect(await screen.findByRole("button", { name: "Retry saving validated edit" })).toBeTruthy();
 
@@ -310,6 +324,7 @@ describe("opening a workflow in ComfyUI", () => {
 
     renderView();
     fireEvent.click(await screen.findByText("Alpha"));
+    await screen.findByRole("button", { name: "New revision" });
     fireEvent.click(screen.getByRole("button", { name: "Edit in ComfyUI (preview)" }));
 
     expect(await screen.findByText(/browser blocked the workflow editor window/i)).toBeTruthy();
@@ -327,6 +342,7 @@ describe("opening a workflow in ComfyUI", () => {
 
     renderView();
     fireEvent.click(await screen.findByText("Alpha"));
+    await screen.findByRole("button", { name: "New revision" });
     fireEvent.click(screen.getByRole("button", { name: "Download UI graph" }));
 
     const link = await screen.findByRole("link", { name: "Open ComfyUI manually" });
@@ -348,6 +364,7 @@ describe("after a workflow changes", () => {
     const familiesReadBefore = vi.mocked(api.workflowFamilies).mock.calls.length;
 
     fireEvent.click(screen.getByText("Alpha"));
+    await screen.findByRole("button", { name: "New revision" });
     fireEvent.click(screen.getByRole("button", { name: "Duplicate" }));
 
     await waitFor(() =>
@@ -361,6 +378,7 @@ describe("saving a new revision", () => {
     vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
     renderView();
     fireEvent.click(await screen.findByText("Alpha"));
+    await screen.findByRole("button", { name: "New revision" });
     fireEvent.click(screen.getByRole("button", { name: "New revision" }));
   }
 
@@ -403,8 +421,14 @@ describe("the controls a revision declares", () => {
     // that throws away what you put in it is worse than plain text.
     vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
 
+    // Flush query notifications explicitly; wall-clock load must not decide
+    // whether the details arrive before the assertion's polling deadline.
+    vi.useFakeTimers();
     renderView();
-    fireEvent.click(await screen.findByText("Alpha"));
+    await act(() => vi.advanceTimersByTimeAsync(50));
+    fireEvent.click(screen.getByText("Alpha"));
+    await act(() => vi.advanceTimersByTimeAsync(50));
+    expect(screen.getByRole("button", { name: "New revision" })).toBeInTheDocument();
 
     expect(screen.getByText("Steps")).toBeTruthy();
     expect(screen.getByText("Default: 20")).toBeTruthy();
@@ -442,6 +466,7 @@ describe("reviewing the selected exact revision", () => {
     vi.mocked(api.decideWorkflowRevisionReview).mockResolvedValue({ ...preview, trusted: true, state: "approved" });
     renderView();
     fireEvent.click(await screen.findByText("Alpha"));
+    await screen.findByRole("button", { name: "New revision" });
     fireEvent.change(screen.getByRole("combobox", { name: "Revision" }), { target: { value: selected.id } });
     expect(api.previewWorkflowRevisionReview).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText("Advanced"));
@@ -458,4 +483,46 @@ describe("reviewing the selected exact revision", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "Revision" }), { target: { value: current.id } });
     expect(screen.queryByRole("button", { name: "Trust exact revision" })).toBeNull();
   });
+});
+
+it.each([
+  ["save", "retry"], ["save", "discard"], ["validate", "retry"], ["validate", "discard"],
+])("retains %s recovery after detail refresh fails and can %s", async (kind, action) => {
+  vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
+  vi.mocked(openWorkflowEditorPopup).mockReturnValue({ closed: false, close: vi.fn() } as unknown as Window);
+  const submission = { workflowId: "wf-a", sessionId: "session-1", nonce: "nonce-1",
+    baseRevisionId: "revision-1", uiGraph: { nodes: [1] }, apiPrompt: { 1: {} } };
+  vi.mocked(runWorkflowEditor).mockImplementation(async (_client, _id, _popup, options) => {
+    if (kind === "save") options?.onValidated?.(editorReturn());
+    else options?.onSubmission?.(submission);
+    throw new Error("neutral round trip interrupted");
+  });
+  vi.mocked(api.createWorkflowEditorDraft).mockRejectedValue(new Error("neutral save retry failed"));
+  vi.mocked(api.consumeWorkflowEditor).mockRejectedValue(new Error("neutral validation retry failed"));
+  const client = renderView();
+  fireEvent.click(await screen.findByText("Alpha"));
+  fireEvent.click(await screen.findByRole("button", { name: "Edit in ComfyUI (preview)" }));
+  const name = kind === "save" ? "Retry saving validated edit" : "Retry validating returned edit";
+  await screen.findByRole("button", { name });
+  vi.mocked(api.workflow).mockRejectedValue(new Error("neutral detail refresh failed"));
+  await act(async () => { await client.invalidateQueries({ queryKey: ["workflows", "detail", "wf-a"] }); });
+  await screen.findByText("neutral detail refresh failed");
+  expect(screen.queryByRole("button", { name: "Edit in ComfyUI (preview)" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Discard pending edit" })).toBeEnabled();
+  if (action === "retry") {
+    fireEvent.click(screen.getByRole("button", { name }));
+    if (kind === "save") await waitFor(() => expect(api.createWorkflowEditorDraft)
+      .toHaveBeenCalledWith("wf-a", "return-1"));
+    else await waitFor(() => expect(api.consumeWorkflowEditor).toHaveBeenCalledWith("wf-a", "session-1", {
+      nonce: "nonce-1", base_revision_id: "revision-1", ui_graph: submission.uiGraph, api_prompt: submission.apiPrompt,
+    }));
+  } else {
+    fireEvent.click(screen.getByRole("button", { name: "Discard pending edit" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name })).not.toBeInTheDocument());
+    if (kind === "validate") expect(api.cancelWorkflowEditor).toHaveBeenCalledWith("wf-a", "session-1", "nonce-1");
+    expect(api.createWorkflowEditorDraft).not.toHaveBeenCalled();
+    expect(api.consumeWorkflowEditor).not.toHaveBeenCalled();
+  }
+  client.clear();
 });

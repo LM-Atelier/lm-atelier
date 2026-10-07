@@ -6,6 +6,7 @@ import math
 import pytest
 
 from local_lm.domain import Operation
+from local_lm.image_edit_difference import ImageDifference
 from local_lm.image_edit_verification import (
     MAX_ASSESSMENT_CHARACTERS,
     ImageEditVerificationAssessment,
@@ -286,6 +287,19 @@ def test_retry_decreases_strength_when_preservation_failed() -> None:
             1,
             VerificationReason.CONTENT_ALREADY_PRESERVED,
         ),
+        (
+            _assessment(
+                visible=False,
+                preserved=False,
+                direction=VerificationDirection.DECREASE,
+            ),
+            0,
+            "denoise",
+            0.5,
+            0,
+            1,
+            VerificationReason.REQUEST_NOT_VISIBLE,
+        ),
         (_assessment(), 0, None, 0.5, 0, 1, VerificationReason.STRENGTH_UNAVAILABLE),
         (_assessment(), 0, "denoise", math.nan, 0, 1, VerificationReason.STRENGTH_UNAVAILABLE),
         (_assessment(), 0, "denoise", 0.5, 1, 0, VerificationReason.STRENGTH_UNAVAILABLE),
@@ -338,3 +352,192 @@ def test_provenance_is_bounded_and_contains_no_model_prose() -> None:
     }
     assert "prompt" not in json.dumps(provenance).casefold()
     assert "identity" not in json.dumps(provenance).casefold()
+
+
+UNCHANGED = ImageDifference(mean_absolute_difference=0.4, changed=False, comparable=True)
+CHANGED = ImageDifference(mean_absolute_difference=9.0, changed=True, comparable=True)
+UNREADABLE = ImageDifference(mean_absolute_difference=0.0, changed=True, comparable=False)
+CONFIDENT_YES = _assessment(
+    visible=True, preserved=True, retry=False, direction=VerificationDirection.NONE
+)
+
+
+def test_an_unchanged_picture_is_never_accepted_on_the_assessment_alone() -> None:
+    decision = decide_image_edit_retry(
+        CONFIDENT_YES,
+        attempt=0,
+        parameter=None,
+        current_strength=None,
+        minimum=None,
+        maximum=None,
+        difference=UNCHANGED,
+    )
+    assert (decision.retry, decision.reason) == (False, VerificationReason.NO_MEASURABLE_CHANGE)
+    assert decision.provenance(CONFIDENT_YES, UNCHANGED)["difference"] == UNCHANGED.provenance()
+
+
+def test_an_unchanged_picture_gets_its_one_stronger_retry_whatever_the_assessment_says() -> None:
+    decision = decide_image_edit_retry(
+        CONFIDENT_YES,
+        attempt=0,
+        parameter="denoise",
+        current_strength=0.5,
+        minimum=0.3,
+        maximum=0.8,
+        difference=UNCHANGED,
+    )
+    assert (decision.retry, decision.reason) == (True, VerificationReason.NO_MEASURABLE_CHANGE)
+    assert (decision.value_before, decision.value_after) == (0.5, 0.62)
+    at_limit = decide_image_edit_retry(
+        CONFIDENT_YES,
+        attempt=1,
+        parameter="denoise",
+        current_strength=0.62,
+        minimum=0.3,
+        maximum=0.8,
+        difference=UNCHANGED,
+    )
+    assert (at_limit.retry, at_limit.reason) == (False, VerificationReason.NO_MEASURABLE_CHANGE)
+    at_bound = decide_image_edit_retry(
+        CONFIDENT_YES,
+        attempt=0,
+        parameter="denoise",
+        current_strength=0.8,
+        minimum=0.3,
+        maximum=0.8,
+        difference=UNCHANGED,
+    )
+    assert (at_bound.retry, at_bound.reason) == (False, VerificationReason.NO_MEASURABLE_CHANGE)
+
+
+@pytest.mark.parametrize("difference", [CHANGED, UNREADABLE, None])
+def test_a_changed_or_incomparable_picture_leaves_the_assessment_to_decide(
+    difference: ImageDifference | None,
+) -> None:
+    decision = decide_image_edit_retry(
+        CONFIDENT_YES,
+        attempt=0,
+        parameter="denoise",
+        current_strength=0.5,
+        minimum=0.3,
+        maximum=0.8,
+        difference=difference,
+    )
+    assert (decision.retry, decision.reason) == (False, VerificationReason.ACCEPTED)
+
+
+@pytest.mark.parametrize(
+    ("steps", "after", "recorded"),
+    [
+        # Four steps: 0.12 would move 2.0 effective steps to 2.48, still two;
+        # a quarter of the strength is one more step.
+        (4, 0.75, True),
+        # Eight steps: one step is 0.125, just over the ordinary step.
+        (8, 0.625, True),
+        # Twenty steps: the ordinary step is already more than one step.
+        (20, 0.62, False),
+        (None, 0.62, False),
+        (0, 0.62, False),
+        (-4, 0.62, False),
+        (math.inf, 0.62, False),
+        (math.nan, 0.62, False),
+    ],
+)
+def test_a_short_schedule_widens_the_retry_step_toward_one_effective_step(
+    steps: float | None, after: float, recorded: bool
+) -> None:
+    decision = decide_image_edit_retry(
+        _assessment(),
+        attempt=0,
+        parameter="denoise",
+        current_strength=0.5,
+        minimum=0.3,
+        maximum=0.8,
+        schedule_steps=steps,
+    )
+
+    assert decision.retry is True
+    assert decision.value_after == after
+    adjustment = decision.provenance(_assessment())["strength_adjustment"]
+    assert ("schedule" in adjustment) is recorded
+    if recorded:
+        assert steps is not None
+        assert adjustment["schedule"] == {
+            "resolved_steps": steps,
+            "effective_steps_before": round(0.5 * steps, 4),
+            "effective_steps_after": round(after * steps, 4),
+        }
+
+
+def test_the_schedule_step_is_capped_and_still_bounded() -> None:
+    """Two steps would ask for half the strength; the step stops at a quarter,
+    and the bound still wins over both."""
+    capped = decide_image_edit_retry(
+        _assessment(),
+        attempt=0,
+        parameter="denoise",
+        current_strength=0.4,
+        minimum=0.3,
+        maximum=1.0,
+        schedule_steps=2,
+    )
+    bounded = decide_image_edit_retry(
+        _assessment(),
+        attempt=0,
+        parameter="denoise",
+        current_strength=0.7,
+        minimum=0.3,
+        maximum=0.8,
+        schedule_steps=4,
+    )
+
+    assert capped.value_after == 0.65
+    assert bounded.value_after == 0.8
+
+
+def test_an_unchanged_picture_on_a_short_schedule_retries_one_step_stronger() -> None:
+    decision = decide_image_edit_retry(
+        CONFIDENT_YES,
+        attempt=0,
+        parameter="denoise",
+        current_strength=0.5,
+        minimum=0.3,
+        maximum=0.8,
+        difference=UNCHANGED,
+        schedule_steps=4,
+    )
+
+    assert (decision.retry, decision.reason) == (True, VerificationReason.NO_MEASURABLE_CHANGE)
+    assert (decision.value_before, decision.value_after) == (0.5, 0.75)
+
+
+@pytest.mark.parametrize(
+    ("steps", "current", "maximum", "after"),
+    [
+        # Two steps: one more step would be half the strength, past the cap, so
+        # 1.0 effective step becomes 1.5, not 2.
+        (2, 0.5, 1.0, 0.75),
+        # Four steps near the bound: 3.0 effective steps can only reach 3.2.
+        (4, 0.75, 0.8, 0.8),
+    ],
+)
+def test_the_widened_step_can_fall_short_of_a_whole_step_and_says_so(
+    steps: float, current: float, maximum: float, after: float
+) -> None:
+    """A bounded best effort: the retry still runs, and its record shows how far
+    it moved in effective steps, which here is less than one."""
+    decision = decide_image_edit_retry(
+        _assessment(),
+        attempt=0,
+        parameter="denoise",
+        current_strength=current,
+        minimum=0.3,
+        maximum=maximum,
+        schedule_steps=steps,
+    )
+
+    assert decision.retry is True
+    assert decision.value_after == after
+    schedule = decision.provenance(_assessment())["strength_adjustment"]["schedule"]
+    moved = schedule["effective_steps_after"] - schedule["effective_steps_before"]
+    assert 0 < moved < 1

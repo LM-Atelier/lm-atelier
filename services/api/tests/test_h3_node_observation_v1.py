@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from local_lm.h3_node_observation_v1 import (
@@ -133,7 +135,9 @@ def test_public_constructor_cannot_authorize() -> None:
     with pytest.raises(H3NodeObservationError, match=INVALID_OBSERVATION):
         H3NodeObservationV1()
     with pytest.raises(TypeError):
-        H3NodeObservationV1(
+        # Keywords the constructor does not take, passed on purpose: the
+        # refusal is the point, so the call goes around the type.
+        cast(Any, H3NodeObservationV1)(
             schema="lm-atelier-h3-node-observation-v1",
             schema_version=1,
             execution_authorized=True,

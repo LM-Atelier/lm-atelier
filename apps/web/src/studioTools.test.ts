@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { coverage, createMask, fillRect, isEmpty } from "./studioMasks";
-import { BrushTool, LassoTool, RectTool } from "./studioTools";
+import { BrushTool, LassoTool, magicWandTool, paintBucketTool, RectTool } from "./studioTools";
 import { defaultInstruction, initialToolState, toolUsesMask } from "./studioToolState";
 
 describe("brush tool", () => {
@@ -67,6 +67,42 @@ describe("brush tool", () => {
     // The zoomed-out raster covers more pixels only because each image pixel
     // is smaller on screen.
     expect(coverage(zoomedOutMask)).toBeGreaterThan(coverage(zoomedInMask));
+  });
+});
+
+describe("what a brush has changed", () => {
+  it("covers every pixel a stroke painted, and starts over once asked", () => {
+    const mask = createMask(200, 100);
+    const brush = new BrushTool(mask, 6);
+    brush.down({ x: 40, y: 50 });
+    brush.move({ x: 90, y: 55 });
+
+    const changed = brush.takeChanged()!;
+    for (let y = 0; y < mask.height; y += 1) {
+      for (let x = 0; x < mask.width; x += 1) {
+        if (mask.data[y * mask.width + x] === 0) continue;
+        expect(x).toBeGreaterThanOrEqual(changed.left);
+        expect(x).toBeLessThan(changed.left + changed.width);
+        expect(y).toBeGreaterThanOrEqual(changed.top);
+        expect(y).toBeLessThan(changed.top + changed.height);
+      }
+    }
+    // Far smaller than the mask: only the stroke's neighbourhood.
+    expect(changed.width * changed.height).toBeLessThan((mask.width * mask.height) / 4);
+    expect(brush.takeChanged()).toBeNull();
+  });
+
+  it("stays inside the mask at its edge", () => {
+    const mask = createMask(50, 30);
+    const brush = new BrushTool(mask, 10, 0);
+    brush.down({ x: 2, y: 28 });
+
+    const changed = brush.takeChanged()!;
+    expect(changed.left).toBe(0);
+    expect(changed.top).toBeGreaterThanOrEqual(0);
+    expect(changed.left + changed.width).toBeLessThanOrEqual(mask.width);
+    // The dab runs past the bottom edge; the box stops there.
+    expect(changed.top + changed.height).toBe(mask.height);
   });
 });
 
@@ -168,13 +204,30 @@ describe("what travels with a turn", () => {
     expect(toolUsesMask("enhance")).toBe(false);
     expect(toolUsesMask("extend")).toBe(false);
     expect(toolUsesMask("instruct")).toBe(false);
+    // The box around the words is what keeps the rest of the picture as it was.
+    expect(toolUsesMask("text")).toBe(true);
+    expect(toolUsesMask("remove")).toBe(true);
+  });
+
+  it("says which words to replace, and with what, once there are new words", () => {
+    const text = { ...initialToolState(), kind: "text" as const };
+    expect(defaultInstruction(text)).toBe("");
+    expect(defaultInstruction({ ...text, currentWords: "  ", newWords: " " })).toBe("");
+
+    expect(defaultInstruction({ ...text, newWords: " Open late " })).toBe(
+      'Replace the text with "Open late". Keep the same font, color, size and position, and leave everything else unchanged.',
+    );
+    expect(defaultInstruction({ ...text, currentWords: "Open daily", newWords: "Open late" })).toBe(
+      'Replace the text "Open daily" with "Open late". Keep the same font, color, size and position, and leave everything else unchanged.',
+    );
   });
 
   it("gives the wordless tools something true to say", () => {
     // The turn contract requires text and these two ask for none, so an empty
     // box was refused by the server before anything ran.
-    const enhance = { ...initialToolState(), kind: "enhance" as const, upscaleFactor: 2 };
-    expect(defaultInstruction(enhance)).toBe("Enhance to 2x");
+    const enhance = { ...initialToolState(), kind: "enhance" as const };
+    // The size is the workflow's to say, so the words name none.
+    expect(defaultInstruction(enhance)).toBe("Enlarge the picture and restore its detail");
 
     const extend = {
       ...initialToolState(),
@@ -184,5 +237,71 @@ describe("what travels with a turn", () => {
     expect(defaultInstruction(extend)).toBe("Extend past the top, left");
 
     expect(defaultInstruction({ ...initialToolState(), kind: "instruct" as const })).toBe("");
+  });
+});
+
+describe("paint bucket and magic wand tools", () => {
+  it("select where the pointer went down, once it lifts", () => {
+    const mask = createMask(10, 10);
+    fillRect(mask, 5, 0, 6, 10);
+    const bucket = paintBucketTool(mask);
+
+    bucket.down({ x: 1, y: 1 });
+    expect(isEmpty(mask)).toBe(false);
+    expect(coverage(mask)).toBe(0.1);
+    // Lifting over the other side of the line does not move the click.
+    expect(bucket.up({ x: 8, y: 8 })).toBe(true);
+
+    expect(mask.data[1 * 10 + 1]).toBe(255);
+    expect(mask.data[8 * 10 + 8]).toBe(0);
+  });
+
+  it("apply nothing when abandoned, or lifted without a press", () => {
+    const mask = createMask(6, 6);
+    const pixels = new Uint8ClampedArray(6 * 6 * 4);
+    const wand = magicWandTool(mask, pixels, 0);
+
+    wand.down({ x: 2, y: 2 });
+    wand.cancel();
+    expect(wand.up({ x: 2, y: 2 })).toBe(false);
+    expect(isEmpty(mask)).toBe(true);
+  });
+
+  it("select by color with the wand and show no preview", () => {
+    const mask = createMask(4, 1);
+    const pixels = new Uint8ClampedArray([9, 9, 9, 255, 9, 9, 9, 255, 90, 9, 9, 255, 9, 9, 9, 255]);
+    const wand = magicWandTool(mask, pixels, 8);
+
+    wand.down({ x: 0.5, y: 0.5 });
+    expect(wand.preview()).toEqual({ kind: "none" });
+    expect(wand.up({ x: 0.5, y: 0.5 })).toBe(true);
+
+    expect(Array.from(mask.data)).toEqual([255, 255, 0, 0]);
+  });
+});
+
+describe("a crop box", () => {
+  it("replaces the last box rather than adding to it", () => {
+    const mask = createMask(100, 60);
+    const box = new RectTool(mask, true);
+    box.down({ x: 10, y: 10 });
+    box.up({ x: 30, y: 30 });
+    box.down({ x: 50, y: 20 });
+    box.up({ x: 70, y: 40 });
+
+    expect(mask.data[15 * 100 + 15]).toBe(0);
+    expect(mask.data[25 * 100 + 60]).toBe(255);
+  });
+
+  it("keeps an ordinary rectangle selection adding boxes together", () => {
+    const mask = createMask(100, 60);
+    const rect = new RectTool(mask);
+    rect.down({ x: 10, y: 10 });
+    rect.up({ x: 30, y: 30 });
+    rect.down({ x: 50, y: 20 });
+    rect.up({ x: 70, y: 40 });
+
+    expect(mask.data[15 * 100 + 15]).toBe(255);
+    expect(mask.data[25 * 100 + 60]).toBe(255);
   });
 });

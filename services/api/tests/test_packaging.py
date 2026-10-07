@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
 import re
 import runpy
 import shutil
+import socket
 import subprocess
 import sys
 import tomllib
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import FunctionType
+from typing import Any
 
 import pytest
 import yaml
@@ -105,7 +110,7 @@ def test_payload_sbom_reconciliation_marks_build_only_components_excluded() -> N
     namespace = runpy.run_path(str(ROOT / "scripts/inventory-frozen-payload.py"))
     reconcile_sbom = namespace["reconcile_sbom"]
     root_ref = "pkg:generic/lm-atelier@0.1.7"
-    sbom = {
+    sbom: dict[str, Any] = {
         "metadata": {
             "component": {"bom-ref": root_ref},
             "properties": [],
@@ -180,7 +185,7 @@ def test_payload_sbom_adds_frozen_vendored_distribution_and_license(
     license_path.write_text("Apache License\nVersion 2.0\n", encoding="utf-8")
     (metadata_root / "third-party-licenses").mkdir(parents=True)
     root_ref = "pkg:generic/lm-atelier@0.1.7"
-    sbom = {
+    sbom: dict[str, Any] = {
         "metadata": {
             "component": {"bom-ref": root_ref},
             "properties": [],
@@ -240,7 +245,7 @@ def test_payload_sbom_rejects_unreviewed_frozen_distribution_license(
     )
     (dist_info / "LICENSE").write_text("unknown terms", encoding="utf-8")
     (metadata_root / "third-party-licenses").mkdir(parents=True)
-    sbom = {"components": []}
+    sbom: dict[str, Any] = {"components": []}
 
     with pytest.raises(RuntimeError, match="unreviewed license metadata"):
         namespace["augment_sbom_with_frozen_metadata"](
@@ -1139,7 +1144,9 @@ def test_ci_plan_rejects_malformed_event_shas() -> None:
         require_sha("base SHA", "--output=unexpected")
 
 
-def test_ci_plan_requires_exact_protected_develop_promotion(monkeypatch) -> None:
+def test_ci_plan_requires_exact_protected_develop_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
     validate = namespace["validate_develop_promotion"]
     base = "a" * 40
@@ -1207,11 +1214,17 @@ def test_ci_plan_requires_exact_protected_develop_promotion(monkeypatch) -> None
     ],
 )
 def test_ci_plan_verifies_generated_merge_group_changes(
-    tmp_path: Path, monkeypatch, paths: list[str], mode: str, audit: str, windows: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    paths: list[str],
+    mode: str,
+    audit: str,
+    windows: str,
 ) -> None:
     """Plan the combined queue diff, whose event has no pull-request fields."""
     namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
     main = namespace["main"]
+    assert isinstance(main, FunctionType)
     base, head = "a" * 40, "b" * 40
     output = tmp_path / "outputs"
     monkeypatch.setattr(
@@ -1256,7 +1269,7 @@ def test_ci_plan_verifies_generated_merge_group_changes(
 @pytest.mark.parametrize(
     "defect", ["main-target", "pr-head-ref", "checkout", "unrelated-base", "missing-sha"]
 )
-def test_ci_plan_refuses_unbound_merge_groups(monkeypatch, defect: str) -> None:
+def test_ci_plan_refuses_unbound_merge_groups(monkeypatch: pytest.MonkeyPatch, defect: str) -> None:
     namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
     validate = namespace["validate_merge_group"]
     base, head = "a" * 40, "b" * 40
@@ -1286,7 +1299,9 @@ def test_ci_plan_refuses_unbound_merge_groups(monkeypatch, defect: str) -> None:
 
 
 @pytest.mark.parametrize("pr_fields", [{}, {"DRAFT": "", "BASE_CHANGED": "false"}])
-def test_merge_gate_accepts_verified_merge_group_without_pull_request_fields(pr_fields) -> None:
+def test_merge_gate_accepts_verified_merge_group_without_pull_request_fields(
+    pr_fields: dict[str, str],
+) -> None:
     namespace = runpy.run_path(str(ROOT / "scripts/ci-merge-gate.py"))
     environment = {
         "EVENT_NAME": "merge_group",
@@ -1309,6 +1324,57 @@ def test_merge_gate_accepts_verified_merge_group_without_pull_request_fields(pr_
         for job in ("PLAN", "UBUNTU", "WINDOWS"):
             refused = {**environment, job: result, "WINDOWS_REQUIRED": "true"}
             assert namespace["decide"](refused, []) == 1, (job, result)
+
+
+def test_the_ffmpeg_fetch_waits_long_enough_for_a_real_outage() -> None:
+    """The retry budget is a decision, so it cannot shrink without saying so.
+
+    ffmpeg comes from a community feed that returns 503 and 504 on its own, and
+    the Windows leg cannot start verification without it. On 2026-09-10 an
+    outage outlasted the original ninety-second budget: every attempt failed
+    inside 105 seconds and a merge-group run was dequeued with no test having
+    run. Waiting longer is the right answer rather than making the install
+    optional, because three tests in test_integrated_hardening.py drive the real
+    video path and FAIL, not skip, when ffmpeg is absent.
+    """
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    windows = workflow.split("  windows-compatibility:", 1)[1].split("  scheduled-audit:", 1)[0]
+
+    declared = re.search(r"\$waits = @\(([\d, ]+)\)", windows)
+    assert declared, "the ffmpeg retry waits are no longer declared as one array"
+    waits = [int(value) for value in declared.group(1).split(",")]
+
+    assert sum(waits) >= 300, (
+        f"the ffmpeg retry budget is {sum(waits)}s; a recorded outage already "
+        "outlasted 90s, so this must stay well above it"
+    )
+    assert waits == sorted(waits), "back off progressively rather than hammering the feed"
+
+
+def test_verification_has_room_to_finish_inside_the_merge_queue_window() -> None:
+    """Each platform job's limit sits between what the suite needs and what the queue allows.
+
+    Passing Windows runs take up to 54 minutes as the suite grows, and passing
+    runs on both platforms were cancelled at 55 on busy runners, so a limit
+    below 70 cancels real verification. The queue waits at most its check
+    response timeout for every required check, and the plan job runs first, so a
+    limit that does not fit inside it dequeues the change instead.
+    """
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    plan = workflow.split("  verification-plan:", 1)[1].split("  compatibility:", 1)[0]
+    ubuntu = workflow.split("  compatibility:", 1)[1].split("  merge-gate:", 1)[0]
+    windows = workflow.split("  windows-compatibility:", 1)[1].split("  scheduled-audit:", 1)[0]
+    ruleset = json.loads((ROOT / ".github/rulesets/public-develop-queue.json").read_text())
+    queue = next(rule for rule in ruleset["rules"] if rule["type"] == "merge_queue")
+
+    def limit(job: str) -> int:
+        found = re.search(r"^    timeout-minutes: (\d+)$", job, re.MULTILINE)
+        assert found, "the job no longer declares its own timeout"
+        return int(found.group(1))
+
+    for job in (ubuntu, windows):
+        assert limit(job) >= 70
+        assert limit(plan) + limit(job) <= queue["parameters"]["check_response_timeout_minutes"]
 
 
 def test_ci_workflow_retains_required_check_for_every_pr_scope() -> None:
@@ -1443,7 +1509,7 @@ def test_each_production_shape_reaches_the_branch_that_names_it(
 # The exit code alone cannot separate "found an advisory" from "could not look",
 # which is the distinction the script exists to make, so these assert the reason
 # as well.
-AUDIT_REPORTS = (
+AUDIT_REPORTS: tuple[tuple[str, dict[str, object], int, str], ...] = (
     (
         "a clean closure with only our own package skipped",
         {
@@ -1645,15 +1711,109 @@ def test_public_repository_configuration_verifies_every_applied_control() -> Non
     assert "allow_auto_merge = $false" not in script
 
 
+def test_the_managed_media_engine_needs_only_the_standard_library() -> None:
+    """The product may launch this fixture with an interpreter it cannot choose.
+
+    `ProcessSupervisor.start_media` resolves the configured executable with
+    `Path.resolve(strict=True)`. On Linux a virtual environment's `bin/python`
+    is a symlink to the base interpreter, so resolving it discards the
+    environment and the fixture starts under a Python with none of the project's
+    packages; on Windows the launcher is a real file and the environment
+    survives. That difference is invisible locally and cost a hosted Ubuntu run
+    with `No module named 'uvicorn'`, so the constraint is checked rather than
+    described.
+    """
+
+    engine = ROOT / "e2e/fixtures/managed_media_engine.py"
+    tree = ast.parse(engine.read_text())
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imported.add(node.module.split(".")[0])
+    outside = sorted(imported - sys.stdlib_module_names - {"__future__"})
+    assert not outside, f"the managed media engine must not import {outside}"
+
+
 def test_browser_runners_do_not_execute_an_environment_selected_program() -> None:
-    for runner in (
-        ROOT / "scripts/run-browser-e2e.mjs",
+    """No browser run may start a Python the environment chose for it.
+
+    Two runners share their machinery, so the resolution they use lives in the
+    harness rather than in each of them. Asserting the literal in every runner
+    would therefore have forced the code to be copied back out - so this names
+    the files that may CHOOSE an interpreter, requires the explicit-path
+    resolution there, and requires every other runner to delegate and to contain
+    no resolution of its own. That is what keeps one place to audit.
+    """
+
+    harness = ROOT / "scripts/isolated-e2e-harness.mjs"
+    delegating = (
         ROOT / "scripts/run-workflow-editor-e2e.mjs",
-    ):
-        source = runner.read_text()
-        assert "LM_ATELIER_E2E_PYTHON" not in source
+        ROOT / "scripts/run-managed-media-e2e.mjs",
+    )
+    choosing = (ROOT / "scripts/run-browser-e2e.mjs", harness)
+
+    for chooser in choosing:
+        source = chooser.read_text()
         assert "firstExistingPath([environmentPython, projectPython])" in source
         assert 'process.platform === "win32" ? "python.exe" : "python3"' in source
+
+    for runner in delegating:
+        source = runner.read_text()
+        assert "pythonExecutable" in source
+        # Delegation is the point: a second resolution here would be a second
+        # thing to audit, and the one that drifted would be the unaudited one.
+        assert "firstExistingPath" not in source
+        assert "python3" not in source
+
+    # An environment override would be introduced in one of these files, so the
+    # refusal has to cover every one of them rather than the two it started with.
+    for source_file in (*choosing, *delegating):
+        assert "LM_ATELIER_E2E_PYTHON" not in source_file.read_text()
+
+
+def test_isolated_runs_reserve_all_their_ports_while_holding_them() -> None:
+    """One run's ports are all distinct, so none of its servers finds its port taken.
+
+    Reserving a port and closing it before reserving the next let the system
+    hand the same port to two of a run's servers, and the second could not
+    bind it. Each runner now asks for all of its ports at once, and the harness
+    holds every listener until each has a port.
+    """
+
+    harness = ROOT / "scripts/isolated-e2e-harness.mjs"
+    assert "reserveLoopbackPort(" not in harness.read_text()
+    for runner, count in (
+        ("scripts/run-workflow-editor-e2e.mjs", 3),
+        ("scripts/run-managed-media-e2e.mjs", 2),
+    ):
+        source = (ROOT / runner).read_text()
+        assert source.count("reserveLoopbackPorts(") == 1
+        assert f"await reserveLoopbackPorts({count});" in source
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Reserving ports is checked with the repository's Node.")
+    reserved = subprocess.run(
+        [
+            node,
+            "--input-type=module",
+            "-e",
+            f"const harness = await import({json.dumps(harness.as_uri())});"
+            "console.log(JSON.stringify(await harness.reserveLoopbackPorts(8)));",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    ports = json.loads(reserved.stdout)
+    assert len(ports) == 8 and len(set(ports)) == 8
+    # Each is free again once reserved: the run's own server is the next to bind it.
+    for port in ports:
+        with socket.create_server(("127.0.0.1", port)):
+            pass
 
 
 def test_frozen_installer_contracts_are_explicit() -> None:
@@ -1827,6 +1987,44 @@ def test_release_metadata_contains_licenses_and_sbom() -> None:
         shutil.rmtree(output, ignore_errors=True)
 
 
+def test_gates_keep_the_data_directory_outside_the_pytest_scratch() -> None:
+    """Neither gate may put the data directory inside the one pytest empties.
+
+    pytest clears its basetemp as it starts, and with work split across
+    processes the controller has already imported the application and taken
+    ownership of the data directory by then. A data directory inside that
+    basetemp therefore cannot be removed, and on Windows the run ends before a
+    single test has been collected. Both paths still belong under the same
+    held parent, so this is about which of the two contains the other rather
+    than about moving the data somewhere looser.
+    """
+
+    linux = (ROOT / "scripts" / "verify.sh").read_text(encoding="utf-8")
+    scratch = re.search(r'^pytest_temp="([^"]+)"', linux, re.M)
+    data = re.search(r'^export LOCAL_LM_DATA_DIR="\$\{LOCAL_LM_DATA_DIR:-([^}]+)\}"', linux, re.M)
+    assert scratch is not None and data is not None
+
+    def resolved(expression: str, scratch_value: str = "") -> Path:
+        expression = expression.replace("$$", "1234").replace("$root", "/repository")
+        return Path(expression.replace("$pytest_temp", scratch_value))
+
+    scratch_path = resolved(scratch.group(1))
+    # The scratch is substituted here as well, and it has to be: written as
+    # "$pytest_temp/data" an unexpanded name is its own parent, so the
+    # containment check below would pass the exact layout it exists to refuse.
+    data_path = resolved(data.group(1), str(scratch_path))
+    assert data_path != scratch_path
+    assert scratch_path not in data_path.parents
+    assert data_path.parent == scratch_path.parent
+
+    windows = (ROOT / "scripts" / "verify.ps1").read_text(encoding="utf-8")
+    assignment = re.search(r"^\s*\$env:LOCAL_LM_DATA_DIR = (.+)$", windows, re.M)
+    assert assignment is not None
+    # The parent of the scratch, not the scratch: the parent is the directory
+    # the lease pins, and the scratch is the one pytest empties.
+    assert assignment.group(1).strip() == 'Join-Path (Split-Path -Parent $PytestTemp) "data"'
+
+
 def test_strict_mypy_gates_load_the_strict_api_config() -> None:
     """A check that promises more than it enforces is worse than one that
     promises less.
@@ -1904,35 +2102,49 @@ def _workflow_namespace() -> dict[str, object]:
     return runpy.run_path(str(ROOT / "scripts/validate-workflows.py"))
 
 
-def _shipped_ci() -> tuple[Path, str, dict]:
+def _shipped_ci() -> tuple[Path, str, dict[str | bool, Any]]:
     path = ROOT / ".github/workflows/ci.yml"
     content = path.read_text(encoding="utf-8")
-    return Path("ci.yml"), content, yaml.safe_load(content)
+    workflow = yaml.safe_load(content)
+    assert isinstance(workflow, dict)
+    return Path("ci.yml"), content, workflow
 
 
-def _triggers(workflow: dict) -> dict:
-    return workflow.get("on") or workflow.get(True)
+def _triggers(workflow: dict[str | bool, Any]) -> dict[str, Any]:
+    triggers = workflow.get("on") or workflow.get(True)
+    assert isinstance(triggers, dict)
+    return triggers
 
 
-def _merge_gate(workflow: dict) -> dict:
-    return workflow["jobs"]["merge-gate"]
+def _merge_gate(workflow: dict[str | bool, Any]) -> dict[str, Any]:
+    gate = workflow["jobs"]["merge-gate"]
+    assert isinstance(gate, dict)
+    return gate
 
 
-def _first_checkout(workflow: dict) -> dict:
+def _first_checkout(workflow: dict[str | bool, Any]) -> dict[str, Any]:
     for job in workflow["jobs"].values():
         for step in job.get("steps") or []:
             if str(step.get("uses", "")).startswith("actions/checkout@"):
+                assert isinstance(step, dict)
                 return step
     raise AssertionError("ci.yml has no checkout step")
 
 
-def _job_mutations() -> list[tuple[str, object]]:
+WorkflowMutation = Callable[[str, dict[str | bool, Any]], object]
+
+
+def _job_mutations() -> list[tuple[str, WorkflowMutation]]:
     """Merge-gate job and step drifts. Each edits the parsed workflow."""
 
-    def job(name, apply):  # noqa: ANN001, ANN202
+    def job(name: str, apply: Callable[[dict[str, Any]], object]) -> tuple[str, WorkflowMutation]:
         return (name, lambda content, workflow: apply(_merge_gate(workflow)))
 
-    steps = lambda j: j["steps"]  # noqa: E731
+    def steps(job: dict[str, Any]) -> list[dict[str, Any]]:
+        value = job["steps"]
+        assert isinstance(value, list)
+        return value
+
     return [
         job("job continue-on-error", lambda j: j.update({"continue-on-error": True})),
         job("job defaults shell", lambda j: j.update({"defaults": {"run": {"shell": "bash"}}})),
@@ -2056,8 +2268,10 @@ def _job_mutations() -> list[tuple[str, object]]:
     ]
 
 
-def _trigger_mutations() -> list[tuple[str, object]]:
-    def trig(name, apply):  # noqa: ANN001, ANN202
+def _trigger_mutations() -> list[tuple[str, WorkflowMutation]]:
+    def trig(
+        name: str, apply: Callable[[dict[str | bool, Any]], object]
+    ) -> tuple[str, WorkflowMutation]:
         return (name, lambda content, workflow: apply(workflow))
 
     return [
@@ -2120,32 +2334,32 @@ def _trigger_mutations() -> list[tuple[str, object]]:
     ]
 
 
-def _policy_mutations() -> list[tuple[str, object]]:
+def _policy_mutations() -> list[tuple[str, WorkflowMutation]]:
     """Drifts caught by the other validators the coordinator wires in.
 
     These prove the coordinator calls more than the merge gate: each one is
     invisible to the gate checks and must still be refused.
     """
 
-    def doc(name, apply):  # noqa: ANN001, ANN202
+    def doc(name: str, apply: WorkflowMutation) -> tuple[str, WorkflowMutation]:
         return (name, apply)
 
-    def widen_permissions(content, workflow):
+    def widen_permissions(content: str, workflow: dict[str | bool, Any]) -> None:
         workflow["permissions"] = {"contents": "write"}
 
-    def drop_permissions(content, workflow):
+    def drop_permissions(content: str, workflow: dict[str | bool, Any]) -> None:
         workflow.pop("permissions")
 
-    def job_write_permission(content, workflow):
+    def job_write_permission(content: str, workflow: dict[str | bool, Any]) -> None:
         _merge_gate(workflow)["permissions"] = {"contents": "write"}
 
-    def runner_context_in_env(content, workflow):
+    def runner_context_in_env(content: str, workflow: dict[str | bool, Any]) -> None:
         _merge_gate(workflow)["env"] = {"TEMP_DIR": "${{ runner.temp }}"}
 
-    def persist_credentials_elsewhere(content, workflow):
+    def persist_credentials_elsewhere(content: str, workflow: dict[str | bool, Any]) -> None:
         _first_checkout(workflow)["with"]["persist-credentials"] = True
 
-    def drop_credentials_block_elsewhere(content, workflow):
+    def drop_credentials_block_elsewhere(content: str, workflow: dict[str | bool, Any]) -> None:
         _first_checkout(workflow).pop("with")
 
     return [
@@ -2186,19 +2400,21 @@ def _content_mutations() -> list[tuple[str, str, str]]:
     ]
 
 
-def _queue_binding_mutations() -> list[tuple[str, object]]:
-    def job(name, key, apply):
+def _queue_binding_mutations() -> list[tuple[str, WorkflowMutation]]:
+    def job(
+        name: str, key: str, apply: Callable[[dict[str, Any]], object]
+    ) -> tuple[str, WorkflowMutation]:
         return name, lambda content, workflow: apply(workflow["jobs"][key])
 
-    def checkout_ref(ref):
-        def apply(candidate):
+    def checkout_ref(ref: str) -> Callable[[dict[str, Any]], None]:
+        def apply(candidate: dict[str, Any]) -> None:
             for step in candidate["steps"]:
                 if str(step.get("uses", "")).startswith("actions/checkout@"):
                     step["with"]["ref"] = ref
 
         return apply
 
-    mutations = [
+    mutations: list[tuple[str, WorkflowMutation]] = [
         (
             "missing merge group trigger",
             lambda content, workflow: _triggers(workflow).pop("merge_group", None),
@@ -2281,12 +2497,15 @@ def test_workflow_policy_rejects_pull_request_merge_ref(job_key: str) -> None:
                 "${{ github.event_name == 'merge_group' && "
                 "github.event.merge_group.head_sha || github.sha }}"
             )
-    assert namespace["validate_workflow_document"](path, content, workflow)
+    validate = namespace["validate_workflow_document"]
+    assert callable(validate)
+    assert validate(path, content, workflow)
 
 
 def test_workflow_policy_rejects_merge_group_binding_drift() -> None:
     namespace = _workflow_namespace()
     validate = namespace["validate_workflow_document"]
+    assert callable(validate)
     path, content, shipped = _shipped_ci()
     assert validate(path, content, shipped) == []
     accepted = []
@@ -2298,7 +2517,7 @@ def test_workflow_policy_rejects_merge_group_binding_drift() -> None:
     assert not accepted, accepted
 
 
-def _all_workflow_mutations() -> list[tuple[str, object]]:
+def _all_workflow_mutations() -> list[tuple[str, WorkflowMutation]]:
     return _job_mutations() + _trigger_mutations() + _policy_mutations()
 
 
@@ -2312,6 +2531,7 @@ def test_workflow_policy_refuses_every_recorded_production_drift() -> None:
     """
     namespace = _workflow_namespace()
     validate_document = namespace["validate_workflow_document"]
+    assert callable(validate_document)
     named, content, shipped = _shipped_ci()
 
     # The shipped file must satisfy the whole coordinator, or every refusal
@@ -2351,6 +2571,7 @@ def test_exact_comparator_refuses_every_equal_but_differently_typed_value() -> N
     """
     namespace = _workflow_namespace()
     exactly_equal = namespace["exactly_equal"]
+    assert callable(exactly_equal)
 
     scalar_pairs = [
         (False, 0),
@@ -2384,7 +2605,9 @@ def test_exact_comparator_refuses_every_equal_but_differently_typed_value() -> N
 
 
 @pytest.mark.parametrize("surface", ["verification", "merge-gate"])
-def test_invalid_workflow_does_not_execute_the_merge_decision(monkeypatch, surface: str) -> None:
+def test_invalid_workflow_does_not_execute_the_merge_decision(
+    monkeypatch: pytest.MonkeyPatch, surface: str
+) -> None:
     namespace = _workflow_namespace()
     path, content, workflow = _shipped_ci()
     if surface == "verification":
@@ -2392,26 +2615,50 @@ def test_invalid_workflow_does_not_execute_the_merge_decision(monkeypatch, surfa
     else:
         workflow["jobs"]["merge-gate"]["continue-on-error"] = True
 
-    def unexpected_execution(*args, **kwargs):
+    def unexpected_execution(*args: object, **kwargs: object) -> None:
         raise AssertionError("An invalid workflow executed the merge decision")
 
     monkeypatch.setattr(namespace["subprocess"], "run", unexpected_execution)
-    assert namespace["validate_workflow_document"](path, content, workflow)
+    validate = namespace["validate_workflow_document"]
+    assert callable(validate)
+    assert validate(path, content, workflow)
 
 
-def test_valid_workflow_still_executes_every_merge_decision_case(monkeypatch) -> None:
+def test_valid_workflow_still_executes_every_merge_decision_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     namespace = _workflow_namespace()
     path, content, workflow = _shipped_ci()
-    original_run = namespace["subprocess"].run
-    executed = []
+    assert namespace["subprocess"] is subprocess
+    original_run = subprocess.run
+    executed: list[list[str]] = []
 
-    def record_execution(command, **kwargs):
+    def record_execution(
+        command: list[str],
+        *,
+        env: dict[str, str],
+        capture_output: bool,
+        text: bool,
+        timeout: int,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
         executed.append(command)
-        return original_run(command, **kwargs)
+        return original_run(
+            command,
+            env=env,
+            capture_output=capture_output,
+            text=text,
+            timeout=timeout,
+            check=check,
+        )
 
     monkeypatch.setattr(namespace["subprocess"], "run", record_execution)
-    assert namespace["validate_workflow_document"](path, content, workflow) == []
-    assert len(executed) == len(namespace["MERGE_GATE_MATRIX"])
+    validate = namespace["validate_workflow_document"]
+    assert callable(validate)
+    assert validate(path, content, workflow) == []
+    matrix = namespace["MERGE_GATE_MATRIX"]
+    assert isinstance(matrix, (list, tuple))
+    assert len(executed) == len(matrix)
     expected_command = [sys.executable, str(Path("scripts") / "ci-merge-gate.py")]
     assert all(command == expected_command for command in executed)
 
@@ -2475,6 +2722,7 @@ def _hygiene_namespace() -> dict[str, object]:
 
 def test_hygiene_diagnostics_do_not_echo_rejected_values() -> None:
     listed = _hygiene_namespace()["_listed"]
+    assert callable(listed)
     first = "docs/sensitive-source-name.md"
     second = "docs/another-sensitive-source-name.md:4"
 
@@ -2494,6 +2742,7 @@ def test_repository_hygiene_passes_a_clean_candidate(
 ) -> None:
     namespace = _hygiene_namespace()
     main = namespace["main"]
+    assert isinstance(main, FunctionType)
 
     monkeypatch.chdir(tmp_path)
     (tmp_path / "docs").mkdir()
@@ -2510,6 +2759,7 @@ def test_unsafe_candidate_is_refused_before_content_readers(
 ) -> None:
     namespace = _hygiene_namespace()
     main = namespace["main"]
+    assert isinstance(main, FunctionType)
     opened: list[str] = []
 
     def recording_reader(path: str) -> bool:

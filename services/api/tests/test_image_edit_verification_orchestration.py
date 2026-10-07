@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -34,30 +35,37 @@ from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.scheduler import JobClaim
 from local_lm.schemas import WorkerStatus
 from local_lm.vision import VisionInputError
+from local_lm.workflow_use_case_execution import InheritedWorkflowUseCasePreset
 
 
 def _orchestrator(*, session_factory=None) -> ConversationOrchestrator:  # type: ignore[no-untyped-def]
     session_factory = session_factory or Mock()
     return ConversationOrchestrator(
-        engines=SimpleNamespace(
-            settings=SimpleNamespace(),
-            chat=SimpleNamespace(cancel=AsyncMock()),
-            media=SimpleNamespace(cancel=AsyncMock()),
+        engines=cast(
+            Any,
+            SimpleNamespace(
+                settings=SimpleNamespace(),
+                chat=SimpleNamespace(cancel=AsyncMock()),
+                media=SimpleNamespace(cancel=AsyncMock()),
+            ),
         ),
         artifacts=Mock(),
-        events=SimpleNamespace(publish=AsyncMock()),
-        scheduler=SimpleNamespace(publish_job=AsyncMock()),
-        processes=SimpleNamespace(
-            statuses=Mock(
-                return_value=[
-                    WorkerStatus(
-                        name="chat",
-                        state="stopped",
-                        managed=False,
-                        running=False,
-                    )
-                ]
-            )
+        events=cast(Any, SimpleNamespace(publish=AsyncMock())),
+        scheduler=cast(Any, SimpleNamespace(publish_job=AsyncMock())),
+        processes=cast(
+            Any,
+            SimpleNamespace(
+                statuses=Mock(
+                    return_value=[
+                        WorkerStatus(
+                            name="chat",
+                            state="stopped",
+                            managed=False,
+                            running=False,
+                        )
+                    ]
+                )
+            ),
         ),
         session_factory=session_factory,
     )
@@ -66,7 +74,9 @@ def _orchestrator(*, session_factory=None) -> ConversationOrchestrator:  # type:
 _TEST_CLAIM = JobClaim(token="attempt-token-a", attempt=1)
 
 
-def test_successful_edit_queues_one_detached_low_priority_verifier(monkeypatch) -> None:
+def test_successful_edit_queues_one_detached_low_priority_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source = SimpleNamespace(id="artifact-source", media_type="image/png")
     result = SimpleNamespace(id="artifact-result", media_type="image/png")
     chat = SimpleNamespace(
@@ -81,6 +91,7 @@ def test_successful_edit_queues_one_detached_low_priority_verifier(monkeypatch) 
         operation=Operation.IMAGE_TO_IMAGE.value,
         work_plan_id=plan.id,
         work_step_id="step-source",
+        settings_json={},
         provenance_json={
             "image_edit": {
                 "strength": {
@@ -177,7 +188,7 @@ def test_successful_edit_queues_one_detached_low_priority_verifier(monkeypatch) 
 
 
 async def test_verifier_starts_after_media_handoff_and_inside_primary_lease(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     order: list[str] = []
     job = SimpleNamespace(
@@ -198,6 +209,7 @@ async def test_verifier_starts_after_media_handoff_and_inside_primary_lease(
         work_plan_id="plan-source",
         work_step_id="step-source",
         standalone_prompt="Make the top red",
+        provenance_json={},
     )
 
     class FakeSession:
@@ -224,13 +236,16 @@ async def test_verifier_starts_after_media_handoff_and_inside_primary_lease(
 
     @asynccontextmanager
     async def lease(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        on_claim_lost = kwargs.pop("on_claim_lost")
+        assert callable(on_claim_lost)
         assert kwargs == {"resource": "media_compute", "group": "primary", "priority": 0}
         order.append("lease entered")
         yield
         order.append("lease released")
 
     orchestrator = _orchestrator(session_factory=FakeSession)
-    orchestrator.scheduler.job_lease = lease
+    # The stand-in scheduler has no lease until the test gives it one.
+    monkeypatch.setattr(orchestrator.scheduler, "job_lease", lease, raising=False)
     orchestrator._resolve_step_inputs = Mock()  # type: ignore[method-assign]
     orchestrator._set_work_status = Mock()  # type: ignore[method-assign]
     orchestrator._arm_step_prewarm = Mock()  # type: ignore[method-assign]
@@ -243,8 +258,8 @@ async def test_verifier_starts_after_media_handoff_and_inside_primary_lease(
     async def complete_handoff(_profile_id: str) -> None:
         order.append("chat restored")
 
-    orchestrator._execute_media = execute_media  # type: ignore[method-assign]
-    orchestrator._complete_media_handoff = complete_handoff  # type: ignore[method-assign]
+    monkeypatch.setattr(orchestrator, "_execute_media", execute_media)
+    monkeypatch.setattr(orchestrator, "_complete_media_handoff", complete_handoff)
     orchestrator.start = Mock(side_effect=lambda *_args: order.append("verifier started"))  # type: ignore[method-assign]
     orchestrator._finalize_setup_verification_run = AsyncMock()  # type: ignore[method-assign]
     monkeypatch.setattr("local_lm.orchestrator.mark_setup_verification_running", Mock())
@@ -260,7 +275,9 @@ async def test_verifier_starts_after_media_handoff_and_inside_primary_lease(
     ]
 
 
-async def test_foreground_dispatch_preempts_a_running_image_edit_check() -> None:
+async def test_foreground_dispatch_preempts_a_running_image_edit_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     verification_job = Job(
         id="job-running-check",
         kind=JobKind.EDIT_VERIFY.value,
@@ -300,8 +317,9 @@ async def test_foreground_dispatch_preempts_a_running_image_edit_check() -> None
         await asyncio.Event().wait()
 
     orchestrator = _orchestrator(session_factory=FakeSession)
-    orchestrator.scheduler.job_lease = lease
-    orchestrator._execute_image_edit_verification = block  # type: ignore[method-assign]
+    # The stand-in scheduler has no lease until the test gives it one.
+    monkeypatch.setattr(orchestrator.scheduler, "job_lease", lease, raising=False)
+    monkeypatch.setattr(orchestrator, "_execute_image_edit_verification", block)
     task = asyncio.create_task(orchestrator._execute(verification_job.id, None))
     await started.wait()
 
@@ -322,7 +340,11 @@ async def test_foreground_dispatch_preempts_a_running_image_edit_check() -> None
 
 async def test_preemption_cancels_the_running_check_before_foreground_execution() -> None:
     verification_job_id = "job-running-check"
-    blocker = asyncio.create_task(asyncio.Event().wait())
+
+    async def wait_forever() -> None:
+        await asyncio.Event().wait()
+
+    blocker = asyncio.create_task(wait_forever())
 
     class Result:
         @staticmethod
@@ -345,15 +367,22 @@ async def test_preemption_cancels_the_running_check_before_foreground_execution(
     await orchestrator._preempt_running_image_edit_verifications()
 
     assert blocker.cancelled()
-    orchestrator.engines.chat.cancel.assert_awaited_once_with(verification_job_id)
+    cast(AsyncMock, orchestrator.engines.chat.cancel).assert_awaited_once_with(verification_job_id)
     assert orchestrator._preempted_image_edit_verifications == set()
 
 
-async def test_automatic_edit_retry_does_not_preempt_its_own_check() -> None:
+async def test_automatic_edit_retry_does_not_preempt_its_own_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     orchestrator = _orchestrator()
     orchestrator._is_image_edit_verification_retry = Mock(return_value=True)  # type: ignore[method-assign]
     orchestrator._preempt_running_image_edit_verifications = AsyncMock()  # type: ignore[method-assign]
     orchestrator._execute = AsyncMock()  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        orchestrator,
+        "session_factory",
+        lambda: nullcontext(SimpleNamespace(get=lambda *_args: None)),
+    )
 
     await orchestrator._execute_after_preempting_verification("job-retry", "run-retry")
 
@@ -445,9 +474,9 @@ async def test_cancelling_runless_verifier_emits_no_run_event() -> None:
 
     assert await orchestrator.cancel(job.id) is True
     assert job.status == JobStatus.CANCELLED.value
-    orchestrator.engines.chat.cancel.assert_awaited_once_with(job.id)
-    orchestrator.engines.media.cancel.assert_not_called()
-    orchestrator.events.publish.assert_not_awaited()
+    cast(AsyncMock, orchestrator.engines.chat.cancel).assert_awaited_once_with(job.id)
+    cast(AsyncMock, orchestrator.engines.media.cancel).assert_not_called()
+    cast(AsyncMock, orchestrator.events.publish).assert_not_awaited()
 
 
 def test_late_verification_updates_its_revision_without_replacing_current_media() -> None:
@@ -624,7 +653,9 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
         },
     )
     retry_run = SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
-    workflow_revision = SimpleNamespace(input_schema_json={"type": "object"})
+    workflow_revision = SimpleNamespace(
+        api_graph_json={}, input_schema_json={"type": "object"}, dependencies_json={}
+    )
     profile = SimpleNamespace(engine="comfyui")
     accepted_run = SimpleNamespace(
         id=retry_run.id,
@@ -636,7 +667,7 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
             }
         },
     )
-    accepted = SimpleNamespace(run=accepted_run)
+    accepted: Any = SimpleNamespace(run=accepted_run)
     verification_job = SimpleNamespace(status=JobStatus.RUNNING.value)
     commits: list[bool] = []
 
@@ -705,6 +736,7 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
     assert result is accepted
     assert commits == [True], "the retry provenance is written in the creation transaction"
     call = orchestrator.create_turn.await_args
+    assert call is not None
     hook = call.kwargs.get("before_commit")
     assert callable(hook), "the retry did not bind its durable turn to the claim"
     hook(FakeSession(), retry_run)
@@ -718,6 +750,7 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
     assert request.input_artifact_ids == ["artifact-original"]
     assert request.settings == {"steps": 8, "denoise": 0.62}
     assert {k: v for k, v in call.kwargs.items() if k != "before_commit"} == {
+        "inherited_use_case_preset": InheritedWorkflowUseCasePreset(None),
         "resolve_source": None,
         "use_explicit_parent": True,
         "replacement_message_id": source_assistant.id,
@@ -744,12 +777,43 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
     }
 
 
-def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
+_SAW_THE_CHANGE = (
+    '[{"subject": "mug", "appearance": "blue"}]',
+    '[{"subject": "mug", "appearance": "green"}]',
+    '{"subject_present": true, "operation": "change", "requested": [0], "as_asked": true}',
+)
+#: The fourth answer, asked once per changed area: this region holds the one
+#: difference the request asked for and nothing else.
+_AREA_HOLDS_THE_REQUEST = '{"subjects": [0]}'
+_AREA_HOLDS_SOMETHING_ELSE = '{"subjects": [0], "unlisted": true}'
+_SAW_THE_CHANGE_AND_LOOKED = _SAW_THE_CHANGE + (_AREA_HOLDS_THE_REQUEST,)
+_SAW_NO_CHANGE = (
+    '[{"subject": "mug", "appearance": "blue"}]',
+    '[{"subject": "mug", "appearance": "blue"}]',
+    '{"subject_present": true, "operation": "change", "requested": []}',
+)
+
+
+def _verification_world(  # type: ignore[no-untyped-def]
+    *,
+    lose_at: str,
+    answers: tuple[str, ...] = _SAW_THE_CHANGE,
+    mask: dict[str, object] | None = None,
+    settings: dict[str, object] | None = None,
+    workflow_schema: dict[str, object] | None = None,
+):
     """A verification job with a complete source, a verifying chat, both
     artifacts and a verified vision profile, over a fake session whose
     ownership probe stops answering for the test claim once ``lose_at`` is
     reached: "preparation", "stop", "workers", "assessment" or "restore".
-    Returns (job, orchestrator, world)."""
+    ``mask`` becomes the source run's selection setting, and a stored mask
+    artifact named "artifact-mask" answers for it. ``answers`` are the replies
+    to the three questions the review asks, in order: what is in the source, what
+    is in the result, and which listed difference the request asked for.
+    ``settings`` are further
+    settings of the source run, and ``workflow_schema`` makes the source run's
+    workflow revision answer with that input schema. Returns (job,
+    orchestrator, world)."""
 
     job = Job(
         id="job-verify-owned",
@@ -776,16 +840,20 @@ def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
         status=RunStatus.COMPLETE.value,
         chat_id="chat-v",
         standalone_prompt="make the mug green",
+        settings_json={**(settings or {}), **({} if mask is None else {"mask": mask})},
+        workflow_revision_id="wfrev-source" if workflow_schema is not None else None,
         provenance_json={},
     )
     chat = SimpleNamespace(id="chat-v", vision_settings_json={"verify_image_edits": True})
     source = SimpleNamespace(id="artifact-source")
     result = SimpleNamespace(id="artifact-result")
+    stored_mask = SimpleNamespace(id="artifact-mask")
+    workflow_revision = SimpleNamespace(id="wfrev-source", input_schema_json=workflow_schema)
     install = SimpleNamespace(id="install-vision", active=True)
     profile = SimpleNamespace(id="profile-vision", model_install_id=install.id)
     previous = SimpleNamespace(id="profile-chat", model_install_id="install-chat")
     previous_install = SimpleNamespace(id="install-chat", active=True)
-    world = {"owned": True, "lost_at": None}
+    world: dict[str, Any] = {"owned": True, "lost_at": None}
 
     class FakeSession:
         def __enter__(self):  # type: ignore[no-untyped-def]
@@ -801,6 +869,8 @@ def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
                 (Chat, chat.id): chat,
                 (Artifact, source.id): source,
                 (Artifact, result.id): result,
+                (Artifact, stored_mask.id): stored_mask,
+                (WorkflowRevision, workflow_revision.id): workflow_revision,
                 (ModelProfile, profile.id): profile,
                 (ModelProfile, previous.id): previous,
                 (ModelInstall, install.id): install,
@@ -816,6 +886,9 @@ def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
         def rollback(self) -> None:
             return None
 
+        def close(self) -> None:
+            return None
+
         def execute(self, _statement):  # type: ignore[no-untyped-def]
             owned = world["owned"]
             return SimpleNamespace(
@@ -828,13 +901,14 @@ def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
             )
 
     orchestrator = _orchestrator(session_factory=FakeSession)
-    orchestrator.engines = SimpleNamespace(
+    engines: Any = SimpleNamespace(
         settings=SimpleNamespace(
             chat_engine="llama.cpp", media_engine="comfyui", vision_bridge_max_tokens=256
         ),
         chat=SimpleNamespace(cancel=AsyncMock()),
         media=SimpleNamespace(cancel=AsyncMock()),
     )
+    orchestrator.engines = engines
 
     loads: list[object] = []
 
@@ -857,7 +931,7 @@ def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
 
     world["loads"] = loads
 
-    orchestrator.processes = SimpleNamespace(
+    processes: Any = SimpleNamespace(
         statuses=Mock(
             return_value=[
                 WorkerStatus(
@@ -869,43 +943,64 @@ def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
         stop=AsyncMock(side_effect=stop_worker),
         load_chat=AsyncMock(side_effect=load_chat),
     )
+    orchestrator.processes = processes
     orchestrator._profile_has_verified_vision = Mock(return_value=True)  # type: ignore[method-assign]
     orchestrator._schedule_media_restart = Mock()  # type: ignore[method-assign]
     orchestrator._release_deferred_media_restart = Mock()  # type: ignore[method-assign]
     orchestrator._persist_image_edit_verification = Mock(return_value=True)  # type: ignore[method-assign]
 
-    async def prepare(*_args: object, **_kwargs: object) -> object:
+    async def prepare(artifacts: list[Any], **_kwargs: object) -> object:
         if lose_at == "preparation":
             world["owned"] = False
             world["lost_at"] = "preparation"
-        return SimpleNamespace(inspected_artifact_ids=[source.id, result.id])
+        # Each picture is prepared on its own now, so the stub answers for
+        # whichever one it was handed.
+        return SimpleNamespace(inspected_artifact_ids=[item.id for item in artifacts])
+
+    regions: list[list[tuple[str, Any]]] = []
+
+    def region_context(crops):  # type: ignore[no-untyped-def]
+        # One call per changed area, carrying the part of the source and the
+        # part of the result, each with the artifact it was cut from.
+        regions.append([(artifact.id, box) for artifact, box, _content in crops])
+        return SimpleNamespace(frames=tuple(content for _a, _box, content in crops))
 
     orchestrator.vision = SimpleNamespace(  # type: ignore[assignment]
         prepare=AsyncMock(side_effect=prepare),
         attach_to_latest_user=Mock(side_effect=lambda messages, _visual: messages),
+        region_context=Mock(side_effect=region_context),
     )
 
     async def chat_capabilities() -> object:
         return SimpleNamespace(input_modalities=["text", "image"])
 
-    orchestrator.engines.chat_capabilities = chat_capabilities  # type: ignore[attr-defined]
+    engines.chat_capabilities = chat_capabilities
     consumed: list[str] = []
 
-    async def stream(_request):  # type: ignore[no-untyped-def]
+    asked: list[str] = []
+    questions: list[str] = []
+
+    async def stream(request):  # type: ignore[no-untyped-def]
         from local_lm.adapters.base import ChatEvent
 
+        questions.append(str(request.messages[-1]["content"]))
+        answer = answers[min(len(asked), len(answers) - 1)]
+        asked.append(answer)
         consumed.append("first")
-        yield ChatEvent(type="delta", text="{", data={})
+        yield ChatEvent(type="delta", text=answer[:1], data={})
         if lose_at == "assessment":
             world["owned"] = False
             world["lost_at"] = "assessment"
         consumed.append("second")
-        yield ChatEvent(type="delta", text="}", data={})
+        yield ChatEvent(type="delta", text=answer[1:], data={})
         consumed.append("complete")
         yield ChatEvent(type="complete", text="", data={})
 
-    orchestrator.engines.chat.stream = stream  # type: ignore[attr-defined]
+    engines.chat.stream = stream
     world["consumed"] = consumed
+    world["asked"] = asked
+    world["questions"] = questions
+    world["regions"] = regions
     return job, orchestrator, world
 
 
@@ -923,7 +1018,7 @@ async def test_a_verification_that_never_loaded_chat_restores_nothing() -> None:
     async def refuse(*_args: object, **_kwargs: object) -> object:
         raise VisionInputError("the source and result could not be read together")
 
-    orchestrator.vision.prepare = AsyncMock(side_effect=refuse)  # type: ignore[attr-defined]
+    orchestrator.vision.prepare = AsyncMock(side_effect=refuse)
 
     await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
 
@@ -1059,7 +1154,7 @@ async def test_a_verification_that_loses_its_claim_restoring_chat_schedules_no_r
 async def test_failed_verification_load_restores_displaced_chat() -> None:
     """A startup failure can follow stopping the previous chat worker."""
     job, orchestrator, world = _verification_world(lose_at="never")
-    running_profile = "profile-chat"
+    running_profile: str | None = "profile-chat"
 
     async def load(profile, *_args, **_kwargs):  # type: ignore[no-untyped-def]
         nonlocal running_profile
@@ -1106,3 +1201,345 @@ async def test_shutdown_does_not_restore_chat_from_active_verification() -> None
     assert [profile.id for profile in world["loads"]] == ["profile-vision"], (
         "shutdown restored chat from verification only to destroy it next"
     )
+
+
+def _picture(*recolour: tuple[int, int, int, int] | None) -> bytes:
+    import io
+
+    from PIL import Image
+
+    image = Image.new("RGB", (64, 64), (40, 90, 180))
+    for box in recolour:
+        if box is not None:
+            image.paste((200, 40, 60), box)
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+def _selection(box: tuple[int, int, int, int]) -> bytes:
+    """A mask selecting one rectangle, white inside and black outside."""
+
+    import io
+
+    from PIL import Image
+
+    mask = Image.new("L", (64, 64), 0)
+    mask.paste(255, box)
+    buffer = io.BytesIO()
+    mask.save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("patch", "reason"),
+    [
+        (None, "no_measurable_change"),
+        # A change the pixels agree with, and the one area that moved answers
+        # that it holds the requested difference and nothing else. That is the
+        # evidence the two readings could not supply, so the edit passes.
+        ((16, 16, 48, 48), "accepted"),
+        # A sixty-fourth and a thousandth of the picture: each averages under
+        # the threshold over the whole picture, and each is a real change.
+        ((28, 28, 36, 36), "accepted"),
+        ((30, 30, 32, 32), "accepted"),
+    ],
+)
+async def test_a_confident_yes_does_not_accept_a_picture_whose_pixels_did_not_change(
+    patch: tuple[int, int, int, int] | None, reason: str
+) -> None:
+    """The model is asked, and so are the pixels. An unchanged result gets the
+    one stronger retry, however sure the assessment was that the edit happened,
+    and a small real change is not mistaken for none."""
+    recoloured = patch is not None
+
+    job, orchestrator, _world = _verification_world(
+        lose_at="never", answers=_SAW_THE_CHANGE_AND_LOOKED
+    )
+    pictures = {"artifact-source": _picture(None), "artifact-result": _picture(patch)}
+    orchestrator.artifacts.verified_bytes = Mock(
+        side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
+    )
+    retry = SimpleNamespace(
+        run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
+    )
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    record = orchestrator._persist_image_edit_verification.call_args.args[2]
+    assert record["reason"] == reason
+    assert record["difference"]["comparable"] is True
+    assert record["difference"]["changed"] is recoloured
+    if recoloured:
+        # The area that moved was looked at and held only what was asked for,
+        # so the verdict is available and nothing is retried.
+        assert record["assessment"]["requested_change_visible"] is True
+        assert record["assessment"]["unrelated_content_preserved"] is True
+        assert record["assessment"]["confidence"] == 0.9
+        orchestrator._create_image_edit_verification_retry.assert_not_awaited()
+    else:
+        assert record["assessment"]["requested_change_visible"] is False
+        decision = orchestrator._create_image_edit_verification_retry.await_args.args[2]
+        assert (decision.retry, decision.value_before, decision.value_after) == (True, 0.5, 0.62)
+        assert record["automatic_retry_executed"] is True
+
+
+@pytest.mark.parametrize(
+    ("patch", "stored", "reason"),
+    [
+        # Inverted, the selection is everything but the centre: a change only
+        # there left the selection as it was.
+        ((24, 24, 40, 40), True, "no_measurable_change"),
+        ((2, 2, 10, 10), True, "accepted"),
+        # A selection whose mask is no longer stored measures nothing, so the
+        # assessment decides.
+        (None, False, "change_unaccounted"),
+    ],
+)
+async def test_a_selection_is_measured_where_it_selects_through_the_real_check(
+    patch: tuple[int, int, int, int] | None, stored: bool, reason: str
+) -> None:
+    selection: dict[str, object] = {
+        "artifact_id": "artifact-mask" if stored else "artifact-gone",
+        "invert": True,
+    }
+    job, orchestrator, _world = _verification_world(
+        lose_at="never", answers=_SAW_THE_CHANGE_AND_LOOKED, mask=selection
+    )
+    pictures = {
+        "artifact-source": _picture(None),
+        "artifact-result": _picture(patch),
+        "artifact-mask": _selection((24, 24, 40, 40)),
+    }
+    orchestrator.artifacts.verified_bytes = Mock(
+        side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
+    )
+    retry = SimpleNamespace(
+        run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
+    )
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    record = orchestrator._persist_image_edit_verification.call_args.args[2]
+    assert record["reason"] == reason
+    assert record["difference"]["comparable"] is stored
+
+
+def _calibrated_schema(*, steps_default: int = 4) -> dict[str, object]:
+    from local_lm.workflow_edit_calibration import standard_edit_calibration
+
+    return {
+        "type": "object",
+        "properties": {
+            "denoise": {"type": "number", "minimum": 0.3, "maximum": 0.8, "default": 0.5},
+            "steps": {"type": "integer", "minimum": 1, "default": steps_default},
+        },
+        "x-lm-atelier-edit-calibration": standard_edit_calibration(
+            parameter="denoise", minimum=0.3, maximum=0.8, steps_parameter="steps"
+        ),
+    }
+
+
+async def test_the_review_asks_about_one_picture_at_a_time_then_about_the_lists() -> None:
+    """Three bounded questions replace the one that asked for a verdict.
+
+    Each picture is prepared and asked about on its own, and which difference
+    the request asked for is settled from the two lists with no picture
+    attached, because that is the question a vision model answers dependably.
+    """
+
+    job, orchestrator, world = _verification_world(lose_at="never", answers=_SAW_THE_CHANGE)
+    pictures = {"artifact-source": _picture(None), "artifact-result": _picture((16, 16, 48, 48))}
+    orchestrator.artifacts.verified_bytes = Mock(
+        side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
+    )
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    prepared: list[list[Any]] = [
+        list(call.args[0]) for call in orchestrator.vision.prepare.await_args_list
+    ]
+    assert [[item.id for item in group] for group in prepared] == [
+        ["artifact-source"],
+        ["artifact-result"],
+    ]
+    questions: list[str] = world["questions"]
+    assert len(questions) == 4
+    assert questions[0] == questions[1] and "attached picture" in questions[0]
+    assert "no picture is attached" in questions[2]
+    assert "make the mug green" in questions[2]
+    # Then one more, about the single area that moved, with both crops of it
+    # attached: the two readings agreed, and agreement is what has to be
+    # checked against the picture rather than taken.
+    assert "Two crops of the same region are attached" in questions[3]
+    regions: list[list[tuple[str, Any]]] = world["regions"]
+    assert len(regions) == 1
+    shown = regions[0]
+    assert [artifact_id for artifact_id, _box in shown] == ["artifact-source", "artifact-result"]
+    assert shown[0][1] == shown[1][1], "the same region of both pictures"
+    # The verdict is the product's, worked out from those answers. Three
+    # readings that agree still cannot show that nothing else moved, so a
+    # fourth question is asked about the one area that changed. This world has
+    # no fourth answer to give and repeats its third, which is not a reading of
+    # a region, so the review records that it could not tell rather than
+    # treating an unparseable answer as agreement.
+    record = orchestrator._persist_image_edit_verification.call_args.args[2]
+    assert record["status"] == "skipped"
+    assert record["reason"] == "change_unaccounted"
+    assert record["automatic_retry_executed"] is False
+    assert "assessment" not in record
+
+
+@pytest.mark.parametrize(
+    ("settings", "schema", "after"),
+    [
+        # The source ran four steps: the retry step widens to one whole step.
+        ({"steps": 4}, _calibrated_schema(steps_default=20), 0.75),
+        # No steps setting: the step field's own default decides.
+        ({}, _calibrated_schema(steps_default=4), 0.75),
+        # A long schedule keeps the ordinary step.
+        ({"steps": 20}, _calibrated_schema(), 0.62),
+        # A workflow that declares no schedule keeps the ordinary step.
+        ({"steps": 4}, None, 0.62),
+    ],
+)
+async def test_a_retry_steps_by_the_schedule_the_source_ran_with(
+    settings: dict[str, object], schema: dict[str, object] | None, after: float
+) -> None:
+    job, orchestrator, _world = _verification_world(
+        lose_at="never",
+        answers=_SAW_NO_CHANGE,
+        settings=settings,
+        workflow_schema=schema,
+    )
+    # Nothing was seen to change and nothing measurably did: the two signals
+    # agree, which is the edit that earns the one stronger retry.
+    pictures = {"artifact-source": _picture(None), "artifact-result": _picture(None)}
+    orchestrator.artifacts.verified_bytes = Mock(
+        side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
+    )
+    retry = SimpleNamespace(
+        run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
+    )
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    decision = orchestrator._create_image_edit_verification_retry.await_args.args[2]
+    assert (decision.value_before, decision.value_after) == (0.5, after)
+    record = orchestrator._persist_image_edit_verification.call_args.args[2]
+    assert ("schedule" in record["strength_adjustment"]) is (after == 0.75)
+
+
+async def test_an_area_holding_something_unlisted_refuses_the_edit() -> None:
+    """The case a count can never catch: one area, and something else in it.
+
+    The two readings agree that the mug changed and name nothing else, which is
+    exactly the shape a clean edit has. Looking at the area that moved is what
+    separates them, and here it answers that the region holds something neither
+    list described.
+    """
+
+    job, orchestrator, world = _verification_world(
+        lose_at="never", answers=_SAW_THE_CHANGE + (_AREA_HOLDS_SOMETHING_ELSE,)
+    )
+    pictures = {"artifact-source": _picture(None), "artifact-result": _picture((16, 16, 48, 48))}
+    orchestrator.artifacts.verified_bytes = Mock(
+        side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
+    )
+    retry = SimpleNamespace(
+        run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
+    )
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    record = orchestrator._persist_image_edit_verification.call_args.args[2]
+    assert record["assessment"]["unrelated_content_preserved"] is False
+    assert record["assessment"]["direction"] == "decrease"
+    assert record["reason"] != "accepted"
+    assert len(world["questions"]) == 4
+
+
+async def test_an_uncertain_area_decides_nothing_rather_than_passing_the_edit() -> None:
+    job, orchestrator, _world = _verification_world(
+        lose_at="never", answers=_SAW_THE_CHANGE + ('{"uncertain": true}',)
+    )
+    pictures = {"artifact-source": _picture(None), "artifact-result": _picture((16, 16, 48, 48))}
+    orchestrator.artifacts.verified_bytes = Mock(
+        side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
+    )
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    record = orchestrator._persist_image_edit_verification.call_args.args[2]
+    assert record["status"] == "skipped"
+    assert record["reason"] == "change_unaccounted"
+    assert "assessment" not in record
+
+
+async def test_a_review_that_would_retry_anyway_asks_about_no_areas() -> None:
+    """The crops are spent only where they decide something.
+
+    Nothing measurable changed, so the verdict is already settled and the three
+    ordinary questions are the whole cost.
+    """
+
+    job, orchestrator, world = _verification_world(
+        lose_at="never", answers=_SAW_NO_CHANGE + (_AREA_HOLDS_THE_REQUEST,)
+    )
+    pictures = {"artifact-source": _picture(None), "artifact-result": _picture(None)}
+    orchestrator.artifacts.verified_bytes = Mock(
+        side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
+    )
+    retry = SimpleNamespace(
+        run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
+    )
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    assert len(world["questions"]) == 3
+    assert world["regions"] == []
+
+
+async def test_a_selected_edit_does_not_certify_the_corner_it_never_looked_at() -> None:
+    """A selection bounds the measurement, and preservation is not a bounded claim.
+
+    The requested change is inside the selection and the crops of it answer
+    that it holds only what was asked for. Something else changed in a corner
+    the selection never covered. A verdict drawn from the masked comparison
+    would never see that corner: it is not a changed area, so every area is
+    explained and the edit passes. The areas therefore come from the whole
+    picture, and this refuses.
+    """
+
+    selection = {"artifact_id": "artifact-mask", "invert": False}
+    job, orchestrator, world = _verification_world(
+        lose_at="never", answers=_SAW_THE_CHANGE_AND_LOOKED, mask=selection
+    )
+    pictures = {
+        "artifact-source": _picture(None),
+        "artifact-result": _picture((24, 24, 40, 40), (2, 2, 10, 10)),
+        "artifact-mask": _selection((20, 20, 44, 44)),
+    }
+    orchestrator.artifacts.verified_bytes = Mock(
+        side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
+    )
+    retry = SimpleNamespace(
+        run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
+    )
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    record = orchestrator._persist_image_edit_verification.call_args.args[2]
+    assert record["reason"] != "accepted", record
+    assert record.get("assessment", {}).get("unrelated_content_preserved") is not True
+    # It refuses before spending a single crop: two places moved and one
+    # difference was named, which the whole picture shows and the masked
+    # comparison cannot. The cheapest refusal is the one that never asks.
+    assert world["regions"] == []
+    assert record["reason"] == "change_unaccounted"

@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -15,8 +15,16 @@ import httpx
 from pydantic import ValidationError
 
 from .catalog_cache import CatalogCachePolicy, CatalogCacheStore
+from .catalog_sources import WorkflowGraphArtifact
+from .civitai_delivery import (
+    MAX_DELIVERY_HOPS,
+    carries_catalog_credentials,
+    permitted_delivery_url,
+)
 from .config import Settings
+from .model_edit_capability import instruction_edit_declaration
 from .network import shared_tls_context
+from .provider_descriptions import merge_provider_descriptions, normalize_html_provider_description
 from .schemas import CatalogModel, CatalogPage, ContentRating
 
 _ITEM_ID = re.compile(r"^[1-9][0-9]{0,11}$")
@@ -34,9 +42,26 @@ _SORTS = {
     "updated": "Newest",
     "compatible": "Most Downloaded",
 }
+# BOTH of these carry ComfyUI workflows and they do not overlap. The published
+# enums page documents only "Workflows"; "ComfyWorkflows" is live and absent
+# from it, so asking for the documented one alone silently returns a partial
+# library. Sent as repeated query parameters: the comma-joined form is refused
+# with HTTP 400, and the bracket form is accepted and then ignored, which
+# returns checkpoints and LoRAs as though the filter had never been applied.
+_WORKFLOW_TYPES = ("Workflows", "ComfyWorkflows")
 _MAX_RETRY_AFTER_SECONDS = 30.0
+# A base-model filter names CivitAI's own base-model labels ("SDXL 1.0",
+# "Flux.1 D"). They are sent as repeated parameters for the same reason the
+# workflow types are, and kept short and few so a filter cannot grow the URL.
+_BASE_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+-]{0,63}$")
+_MAX_BASE_MODELS = 8
 _MAX_METADATA_VALUES = 128
-_NORMALIZATION_VERSION = 2
+_NORMALIZATION_VERSION = 5
+# A workflow graph is JSON describing nodes, not model weights, so it gets its
+# own far smaller ceiling than a catalog response. Exceeding it is REFUSED
+# rather than truncated: a truncated graph is invalid JSON, and failing at the
+# parse would report the wrong cause.
+_MAX_WORKFLOW_GRAPH_BYTES = 2 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 _GENERAL_LEVEL_MASK = 1 | 2
 _MATURE_LEVEL_MASK = 4 | 8 | 16 | 32
@@ -87,6 +112,17 @@ class CivitaiCatalog:
     def validate_item_id(item_id: str) -> bool:
         return bool(_ITEM_ID.fullmatch(item_id))
 
+    @staticmethod
+    def _base_model_filter(base_models: Sequence[str]) -> tuple[str, ...]:
+        if isinstance(base_models, str):
+            raise ValueError("CivitAI base models must be a list of names")
+        values = tuple(base_models)
+        if len(values) > _MAX_BASE_MODELS or len(set(values)) != len(values):
+            raise ValueError("CivitAI base models are invalid")
+        if any(type(value) is not str or not _BASE_MODEL.fullmatch(value) for value in values):
+            raise ValueError("CivitAI base models are invalid")
+        return values
+
     async def search(
         self,
         *,
@@ -105,7 +141,9 @@ class CivitaiCatalog:
         max_parameters: int | None = None,
         max_size_bytes: int | None = None,
         updated_within_days: int | None = None,
+        base_models: Sequence[str] = (),
     ) -> CatalogPage:
+        base_model_filter = self._base_model_filter(base_models)
         if role in {"chat", "video"}:
             return CatalogPage(items=[])
         params: dict[str, Any] = {
@@ -119,10 +157,20 @@ class CivitaiCatalog:
             params["types"] = "Checkpoint"
         elif role == "lora":
             params["types"] = "LORA"
+        if base_model_filter:
+            params["baseModels"] = list(base_model_filter)
         url = self._validated_cursor(cursor) if cursor else "/api/v1/models"
+        if cursor and sorted(parse_qs(urlparse(url).query).get("baseModels") or []) != sorted(
+            base_model_filter
+        ):
+            # A continuation answers the question its first page asked. One
+            # that dropped or changed the base-model filter would fill a
+            # family's suggestions with LoRAs for another model.
+            raise ValueError("CivitAI catalog cursor is invalid")
         cache_path = self._cache_path(
             "search",
             url,
+            base_model_filter,
             None if cursor else params,
             role,
             compatibility,
@@ -188,6 +236,173 @@ class CivitaiCatalog:
             if stale is None:
                 raise
             return stale.model_copy(update={"stale": True})
+
+    async def search_workflows(
+        self,
+        *,
+        query: str = "",
+        sort: str = "trending",
+        limit: int = 30,
+        cursor: str | None = None,
+    ) -> CatalogPage:
+        """Workflows from the same /models endpoint, under their own types.
+
+        CivitAI has no workflows resource; a workflow is a model whose type is
+        one of the two workflow types. So this shares the model search's
+        transport, cache policy and stale fallback, and differs only in what it
+        asks for and what it refuses to assume.
+
+        `primaryFileOnly` is deliberately NOT sent. It returns one file per
+        version, and for a workflow the file that matters is the graph, which is
+        not reliably the primary one - selecting it is a client-side choice over
+        the whole file list.
+        """
+
+        params: dict[str, Any] = {
+            "query": query or None,
+            "sort": _SORTS.get(sort, _SORTS["trending"]),
+            "limit": max(1, min(limit, 100)),
+            "nsfw": "false",
+            "types": list(_WORKFLOW_TYPES),
+        }
+        url = self._validated_workflow_cursor(cursor) if cursor else "/api/v1/models"
+        # A distinct first segment, so a workflow search and a model search with
+        # the same words can never read each other's cached page.
+        cache_path = self._cache_path("workflow-search", url, None if cursor else params)
+        cached = self._read_page_cache(
+            cache_path,
+            max_age_seconds=self._cache.policy.fresh_seconds,
+        )
+        if cached is not None:
+            return cached.model_copy(update={"stale": False})
+        try:
+            payload = await self._request_json(url, params=None if cursor else params)
+            items = [
+                self._normalize(item, None, version=version)
+                for item in self._items(payload)
+                if self._is_general_item(item)
+                for version in self._versions(item)
+                if self._is_general_version(version)
+            ]
+            result = CatalogPage(items=items, next_cursor=self._next_workflow_cursor(payload))
+            self._cache.write_text(cache_path, result.model_dump_json())
+            return result
+        except (httpx.HTTPError, ValueError, ValidationError) as error:
+            if not self._is_transient_error(error):
+                raise
+            stale = self._read_page_cache(
+                cache_path,
+                max_age_seconds=self._cache.policy.stale_seconds,
+            )
+            if stale is None:
+                raise
+            return stale.model_copy(update={"stale": True})
+
+    async def fetch_workflow_graph(self, version_id: str) -> WorkflowGraphArtifact:
+        """The graph for one version, bounded, with nothing named by the caller.
+
+        The version's file list is the only place that says which file is the
+        graph, and a version can carry several files - the graph itself, a
+        bundle, sample images. Exactly one candidate is required. Zero and
+        several are both REFUSED, naming what was found, because the plan's
+        one-click install pauses at a genuine ambiguity rather than guessing
+        which file somebody meant.
+
+        The download URL comes back inside a response body, so it is checked
+        the same way a pagination cursor is: it is followed only while it still
+        points at this provider over https with no credentials.
+        """
+
+        if not self.validate_item_id(version_id):
+            raise ValueError("CivitAI model version id must be a positive decimal integer")
+        payload = await self._request_json(f"/api/v1/model-versions/{version_id}")
+        files = [value for value in payload.get("files") or [] if isinstance(value, dict)]
+        candidates = [value for value in files if self._is_workflow_graph(value)]
+        if not candidates:
+            raise ValueError(
+                "This version has no workflow graph file. It carries: "
+                + (", ".join(sorted(str(value.get("name") or "?") for value in files)) or "nothing")
+            )
+        if len(candidates) > 1:
+            raise ValueError(
+                "This version carries more than one workflow graph, so which to install is "
+                "ambiguous: "
+                + ", ".join(sorted(str(value.get("name") or "?") for value in candidates))
+            )
+        selected = candidates[0]
+        url = str(selected.get("downloadUrl") or "")
+        raw = await self._bounded_bytes(url)
+        try:
+            graph = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise ValueError("The workflow graph is not valid JSON") from error
+        if not isinstance(graph, dict) or not graph:
+            raise ValueError("The workflow graph is not a JSON object")
+        return WorkflowGraphArtifact(
+            version_id=version_id,
+            graph=graph,
+            raw=raw,
+            sha256=hashlib.sha256(raw).hexdigest(),
+            provider_filename=str(selected.get("name") or ""),
+        )
+
+    @staticmethod
+    def _is_workflow_graph(value: dict[str, Any]) -> bool:
+        """The provider's own file type first, its name only as a fallback.
+
+        `type` is what CivitAI declares the file to be, so it is the better
+        signal; the suffix is checked too because the type is not guaranteed
+        present on every record and a `.json` beside a `.zip` is still the
+        graph.
+        """
+
+        if str(value.get("type") or "").casefold() == "workflow":
+            return True
+        return Path(str(value.get("name") or "")).suffix.casefold() == ".json"
+
+    async def _bounded_bytes(self, url: str) -> bytes:
+        """Read a body through the provider's delivery hop, bounded at both ends.
+
+        CivitAI answers a download with a redirect to whichever host actually
+        holds the bytes, so a reader that refuses redirects never reaches a file
+        at all. The hop is followed here rather than by the client, because the
+        client must keep `follow_redirects=False` for every other request and
+        because two things have to happen per hop that a blanket setting cannot
+        do: each destination is checked against the delivery policy, and our
+        catalog credentials are dropped the moment we leave the API host.
+
+        The signed address CivitAI issues already authorizes the file, so the
+        token buys nothing on a delivery host and sending it would disclose a
+        credential to somebody who never needed it.
+        """
+
+        async with self._request_lock:
+            target = permitted_delivery_url(url)
+            for _ in range(MAX_DELIVERY_HOPS):
+                request = self._client.build_request("GET", target)
+                if not carries_catalog_credentials(target):
+                    # Removed from the built request rather than passed as an
+                    # override: httpx rejects a None header value outright, so
+                    # a header cannot be unset by supplying one.
+                    request.headers.pop("authorization", None)
+                response = await self._client.send(request, stream=True)
+                try:
+                    if response.is_redirect:
+                        location = response.headers.get("location", "")
+                        target = permitted_delivery_url(str(response.url.join(location)))
+                        continue
+                    response.raise_for_status()
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        body.extend(chunk)
+                        if len(body) > _MAX_WORKFLOW_GRAPH_BYTES:
+                            raise ValueError(
+                                "The workflow graph is larger than this reader accepts"
+                            )
+                    return bytes(body)
+                finally:
+                    await response.aclose()
+            raise ValueError("CivitAI redirected the workflow graph too many times")
 
     async def inspect(
         self,
@@ -451,6 +666,10 @@ class CivitaiCatalog:
             str(item.get("description") or "")[:4096],
             str(version.get("description") or "")[:4096],
         ]
+        description = merge_provider_descriptions(
+            normalize_html_provider_description(value)
+            for value in (item.get("description"), version.get("description"))
+        )
         metadata = {
             "provider": cls.source_id,
             "source_model_id": str(item.get("id") or ""),
@@ -462,6 +681,10 @@ class CivitaiCatalog:
             "base_models": base_models,
             "tags": tags,
             "trained_words": trained_words,
+            "description": description,
+            "instruction_edit_capability": instruction_edit_declaration(
+                [*tags, item.get("name"), version.get("name")]
+            ),
             "edit_tailored": (
                 "declared"
                 if any(_EDIT_DECLARATION.search(value) for value in declared_values)
@@ -627,6 +850,16 @@ class CivitaiCatalog:
         return selected
 
     def _next_cursor(self, payload: dict[str, Any]) -> str | None:
+        return self._continuation(payload, self._validated_cursor)
+
+    def _next_workflow_cursor(self, payload: dict[str, Any]) -> str | None:
+        return self._continuation(payload, self._validated_workflow_cursor)
+
+    @staticmethod
+    def _continuation(
+        payload: dict[str, Any],
+        validate: Callable[[str | None], str],
+    ) -> str | None:
         metadata = payload.get("metadata")
         if not isinstance(metadata, dict):
             return None
@@ -634,12 +867,23 @@ class CivitaiCatalog:
         if not candidate:
             return None
         try:
-            return self._validated_cursor(candidate)
+            return validate(candidate)
         except ValueError:
             return None
 
     @staticmethod
-    def _validated_cursor(cursor: str | None) -> str:
+    def _safe_cursor_query(cursor: str | None) -> dict[str, list[str]]:
+        """Where a continuation may point, regardless of what it asks for.
+
+        Origin, path and content-rating constraints are the same question for
+        every search: this URL came back in a response body, so it is only
+        followed when it still points at the endpoint we meant, over https, with
+        no credentials and no fragment. What the continuation FILTERS for is a
+        separate question, and each search answers it separately - a model
+        cursor and a workflow cursor are not interchangeable, and treating them
+        as one was a real defect rather than a theoretical one.
+        """
+
         if not cursor or len(cursor) > 2048:
             raise ValueError("CivitAI catalog cursor is invalid")
         parsed = urlparse(cursor)
@@ -653,10 +897,35 @@ class CivitaiCatalog:
             or parsed.path != "/api/v1/models"
             or parsed.fragment
             or query.get("nsfw") != ["false"]
-            or query.get("primaryFileOnly") != ["true"]
         ):
             raise ValueError("CivitAI catalog cursor is invalid")
-        return cursor
+        return query
+
+    @classmethod
+    def _validated_cursor(cls, cursor: str | None) -> str:
+        query = cls._safe_cursor_query(cursor)
+        if query.get("primaryFileOnly") != ["true"]:
+            raise ValueError("CivitAI catalog cursor is invalid")
+        return str(cursor)
+
+    @classmethod
+    def _validated_workflow_cursor(cls, cursor: str | None) -> str:
+        """A workflow continuation must still be asking the workflow question.
+
+        Two ways this goes wrong if the model policy is reused. A workflow
+        response's own nextPage carries no `primaryFileOnly`, so the model
+        policy rejects it and the page is silently truncated to its first page.
+        And a model cursor - one file per version, types=Checkpoint - satisfies
+        the model policy, so it would be followed here and answer a workflow
+        search with models.
+        """
+
+        query = cls._safe_cursor_query(cursor)
+        if sorted(query.get("types") or []) != sorted(_WORKFLOW_TYPES):
+            raise ValueError("CivitAI catalog cursor is invalid")
+        if "primaryFileOnly" in query:
+            raise ValueError("CivitAI catalog cursor is invalid")
+        return str(cursor)
 
     def _cache_path(self, *parts: Any) -> Path:
         payload = json.dumps(

@@ -6,8 +6,12 @@ import json
 import zipfile
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
+from typing import Any, cast
 
+import pytest
+from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS, wait_for_terminal_status, wait_until
 from sqlalchemy import select, update
 
 from local_lm.adapters.base import MediaEvent, MediaRequest
@@ -17,6 +21,7 @@ from local_lm.auxiliary_assets import checkpoint_lora_extension
 from local_lm.db import SessionLocal
 from local_lm.domain import utcnow
 from local_lm.models import (
+    Artifact,
     Job,
     ModelAssetInstall,
     Run,
@@ -29,41 +34,41 @@ async def _wait_for_run(
     client: AsyncClient,
     run_id: str,
     expected: str = "complete",
-) -> dict:  # type: ignore[type-arg]
-    deadline = asyncio.get_running_loop().time() + 8
-    run: dict = {}  # type: ignore[type-arg]
-    while asyncio.get_running_loop().time() < deadline:
+) -> dict[str, Any]:
+    async def read() -> dict[str, Any]:
         response = await client.get(f"/api/runs/{run_id}")
         assert response.status_code == 200
-        run = response.json()
-        if run["status"] in {"complete", "failed", "cancelled"}:
-            assert run["status"] == expected, run
-            return run
-        await asyncio.sleep(0.03)
-    raise AssertionError(f"run {run_id} did not become {expected}: {run}")
+        run: dict[str, Any] = response.json()
+        return run
+
+    return cast(
+        dict[str, Any],
+        await wait_for_terminal_status(read, what=f"run {run_id}", expected=expected),
+    )
 
 
 async def _wait_for_step_states(
     client: AsyncClient,
     plan_id: str,
     expected: list[str],
-) -> dict:  # type: ignore[type-arg]
-    deadline = asyncio.get_running_loop().time() + 8
-    plan: dict = {}  # type: ignore[type-arg]
-    while asyncio.get_running_loop().time() < deadline:
+) -> dict[str, Any]:
+    async def read_plan() -> dict[str, Any]:
         response = await client.get(f"/api/work-plans/{plan_id}")
         assert response.status_code == 200
-        plan = response.json()
-        if [step["status"] for step in plan["steps"]] == expected:
-            return plan
-        await asyncio.sleep(0.03)
-    raise AssertionError(f"plan {plan_id} did not reach {expected}: {plan}")
+        plan: dict[str, Any] = response.json()
+        return plan
+
+    return await wait_until(
+        read_plan,
+        lambda plan: [step["status"] for step in plan["steps"]] == expected,
+        what=f"the steps of plan {plan_id} reaching {expected}",
+    )
 
 
 async def test_ordered_story_image_video_summary_retries_only_cancelled_video(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original_generate = MockMediaAdapter.generate
     video_started = asyncio.Event()
 
@@ -103,7 +108,7 @@ async def test_ordered_story_image_video_summary_retries_only_cancelled_video(
         "image_to_video",
         "text",
     ]
-    await asyncio.wait_for(video_started.wait(), timeout=8)
+    await asyncio.wait_for(video_started.wait(), timeout=PATIENCE_SECONDS)
 
     video_step = plan["steps"][2]
     cancelled = await client.post(f"/api/work-steps/{video_step['id']}/cancel")
@@ -150,8 +155,8 @@ async def test_ordered_story_image_video_summary_retries_only_cancelled_video(
 
 async def test_lora_image_regeneration_cancel_retry_revision_switch_and_export(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with SessionLocal() as session:
         definition = session.scalar(
             select(WorkflowDefinition).where(WorkflowDefinition.operation == "text_to_image")
@@ -262,7 +267,7 @@ async def test_lora_image_regeneration_cancel_retry_revision_switch_and_export(
     assert regenerated.status_code == 202
     replacement_run_id = regenerated.json()["run"]["id"]
     replacement_step_id = regenerated.json()["run"]["work_step_id"]
-    await asyncio.wait_for(regeneration_started.wait(), timeout=8)
+    await asyncio.wait_for(regeneration_started.wait(), timeout=PATIENCE_SECONDS)
     cancelled = await client.post(f"/api/work-steps/{replacement_step_id}/cancel")
     assert cancelled.status_code == 200
     await _wait_for_run(client, replacement_run_id, "cancelled")
@@ -354,8 +359,8 @@ async def test_lora_image_regeneration_cancel_retry_revision_switch_and_export(
 
 async def test_exhausted_media_storage_rejects_before_any_turn_is_written(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         "local_lm.orchestrator.shutil.disk_usage",
         lambda _path: SimpleNamespace(free=0),
@@ -374,10 +379,10 @@ async def test_exhausted_media_storage_rejects_before_any_turn_is_written(
     assert (await client.get("/api/work-plans", params={"chat_id": chat["id"]})).json() == []
 
 
-async def test_media_oom_fails_truthfully_then_retries_without_duplicate_output(
+async def test_media_oom_exhausts_retries_then_recovers_without_duplicate_output(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original_generate = MockMediaAdapter.generate
 
     async def fail_with_oom(
@@ -396,9 +401,22 @@ async def test_media_oom_fails_truthfully_then_retries_without_duplicate_output(
     assert accepted.status_code == 202
     run_id = accepted.json()["run"]["id"]
     failed = await _wait_for_run(client, run_id, "failed")
+    assert "out of memory" in str(failed["error"]).casefold()
+    with SessionLocal() as session:
+        job = session.scalar(select(Job).where(Job.run_id == run_id))
+        assert job and job.attempt == 4
+    assert failed["provenance_json"]["failure_retries"] == {
+        "limit": 3,
+        "used": 3,
+        "pending": False,
+    }
     assert failed["provenance_json"].get("outputs") in (None, [])
     message_id = accepted.json()["assistant_message"]["id"]
     failed_message = (await client.get(f"/api/messages/{message_id}")).json()
+    assert any(
+        part["type"] == "error" and "out of memory" in (part.get("text") or "").casefold()
+        for part in failed_message["parts"]
+    )
     assert not any(part["type"] == "image" for part in failed_message["parts"])
 
     monkeypatch.setattr(MockMediaAdapter, "generate", original_generate)
@@ -411,17 +429,17 @@ async def test_media_oom_fails_truthfully_then_retries_without_duplicate_output(
     assert sum(part["type"] == "image" for part in completed_message["parts"]) == 1
     with SessionLocal() as session:
         job = session.scalar(select(Job).where(Job.run_id == run_id))
-        assert job and job.attempt == 2
+        assert job and job.attempt == 5
 
 
 async def test_video_postprocessing_never_holds_a_sqlite_write_transaction(
-    app,
+    app: FastAPI,
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     poster_checked = asyncio.Event()
 
-    async def poster_with_concurrent_progress_write(_artifact) -> None:  # type: ignore[no-untyped-def]
+    async def poster_with_concurrent_progress_write(_artifact: Artifact) -> None:
         with SessionLocal() as concurrent:
             concurrent.execute(
                 update(Job).where(Job.status == "running").values(updated_at=utcnow())
@@ -446,14 +464,14 @@ async def test_video_postprocessing_never_holds_a_sqlite_write_transaction(
 
 
 async def test_video_proxy_is_ingested_from_disk_and_staging_is_removed(
-    app,
+    app: FastAPI,
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     proxy_content = b"file-backed-proxy-output"
     staged_path = app.state.services.artifacts.root / "owned-proxy-test.mp4"
 
-    async def staged_proxy(_artifact) -> StagedArtifactFile:  # type: ignore[no-untyped-def]
+    async def staged_proxy(_artifact: Artifact) -> StagedArtifactFile:
         staged_path.write_bytes(proxy_content)
         return StagedArtifactFile(
             path=staged_path,
@@ -461,7 +479,7 @@ async def test_video_proxy_is_ingested_from_disk_and_staging_is_removed(
             original_name="owned-proxy.mp4",
         )
 
-    async def no_poster(_artifact) -> None:  # type: ignore[no-untyped-def]
+    async def no_poster(_artifact: Artifact) -> None:
         return None
 
     monkeypatch.setattr(

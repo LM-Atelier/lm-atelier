@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, CircleStop, Pause, Play, RotateCcw } from "lucide-react";
 import { api } from "./api";
 import { jobProgressFraction, jobProgressText } from "./jobProgress";
+import "./JobsPanel.css";
 
 const RECENT_UNSUCCESSFUL_JOB_LIMIT = 3;
 const DISMISSED_JOB_ISSUES_KEY = "lm-atelier-dismissed-job-issues-before";
@@ -10,6 +11,8 @@ const DISMISSED_JOB_ISSUES_KEY = "lm-atelier-dismissed-job-issues-before";
 function jobDisplayName(kind: string): string {
   if (kind === "edit_verify") return "Image edit check";
   if (kind === "registry_prepare") return "Package preparation";
+  if (kind === "workflow_install") return "Workflow installation";
+  if (kind === "media_utility") return "Video utility";
   return kind;
 }
 
@@ -19,15 +22,21 @@ export function JobsPanel() {
     const saved = Number(localStorage.getItem(DISMISSED_JOB_ISSUES_KEY));
     return Number.isFinite(saved) && saved > 0 ? saved : 0;
   });
-  const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 3_000 });
+  const [activeLimit, setActiveLimit] = useState(100);
+  const jobs = useQuery({
+    queryKey: ["jobs", "activity", activeLimit], queryFn: () => api.jobActivity(activeLimit),
+    placeholderData: keepPreviousData, refetchInterval: 3_000,
+  });
   const refresh = () => void client.invalidateQueries({ queryKey: ["jobs"] });
   const cancel = useMutation({ mutationFn: api.cancelJob, onSuccess: refresh });
   const pause = useMutation({ mutationFn: api.pauseDownload, onSuccess: refresh });
   const resume = useMutation({ mutationFn: api.resumeDownload, onSuccess: refresh });
   const retry = useMutation({ mutationFn: api.retryJob, onSuccess: refresh });
-  const visibleJobs = jobs.data?.filter((job) => job.kind !== "edit_verify") ?? [];
+  const visibleJobs = jobs.data?.active.filter((job) => job.kind !== "edit_verify") ?? [];
   const active = visibleJobs.filter((job) => ["queued", "running", "paused"].includes(job.status));
-  const recentUnsuccessful = visibleJobs
+  const activeCount = jobs.data?.active_count ?? 0;
+  const recentUnsuccessful = (jobs.data?.recent_issues ?? [])
+    .filter((job) => job.kind !== "edit_verify")
     .filter((job) => ["failed", "cancelled", "interrupted"].includes(job.status))
     .filter((job) => Date.parse(job.updated_at) > dismissedBefore)
     .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
@@ -58,14 +67,14 @@ export function JobsPanel() {
       </aside>
     );
   }
-  if (!active.length && !recentUnsuccessful.length) return null;
+  if (!activeCount && !recentUnsuccessful.length) return null;
   return (
     <aside className="jobs-panel" aria-label="Jobs">
       <header>
         <Activity size={16} />
         <span>
-          {active.length
-            ? `${active.length} active job${active.length === 1 ? "" : "s"}`
+          {activeCount
+            ? `${activeCount} active job${activeCount === 1 ? "" : "s"}`
             : "Recent job issues"}
         </span>
         {recentUnsuccessful.length > 0 && (
@@ -78,6 +87,17 @@ export function JobsPanel() {
           </button>
         )}
       </header>
+      {active.length < activeCount && (
+        <div className="jobs-page-summary">
+          <span>Showing {active.length} of {activeCount} active jobs.</span>
+          {activeLimit < 500 && (
+            <button className="secondary compact-button" disabled={jobs.isFetching}
+              onClick={() => setActiveLimit((limit) => Math.min(500, limit + 100))}>
+              Show more active jobs
+            </button>
+          )}
+        </div>
+      )}
       {active.map((job) => (
         <div className="job-row" key={job.id}>
           <div>
@@ -147,7 +167,7 @@ export function JobsPanel() {
           <span className="job-actions">
             <button
               className="icon-button"
-              aria-label={`Retry ${job.kind} job`}
+              aria-label={job.kind === "workflow_install" ? "Retry workflow installation" : `Retry ${job.kind} job`}
               disabled={retry.isPending && retry.variables === job.id}
               onClick={() => retry.mutate(job.id)}
             >

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -42,7 +43,7 @@ def _seed_install(*, trusted: bool = False, active: bool = False) -> str:
         return install.id
 
 
-def _configure_runtime(settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def _configure_runtime(settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     executable = tmp_path / "python.exe"
     executable.write_bytes(b"")
     monkeypatch.setattr(settings, "comfy_executable", executable)
@@ -92,7 +93,7 @@ async def test_revoking_trust_needs_no_runtime_verification(
     client: AsyncClient,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """Revocation must always be possible; only granting trust verifies files."""
 
@@ -115,22 +116,22 @@ async def test_granting_trust_runs_the_full_launch_verification(
     client: AsyncClient,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     _configure_runtime(settings, monkeypatch, tmp_path)
     install_id = _seed_install()
 
-    import local_lm.comfy_registry_activation as activation_module
+    import local_lm.comfy_registry_launch_verification as launch_module
     from local_lm.comfy_registry_installs import ComfyRegistryLaunchContract
 
-    def verified(session, **_kwargs: object) -> ComfyRegistryLaunchContract:
+    def verified(installs: list[object], **_kwargs: object) -> ComfyRegistryLaunchContract:
         from local_lm.models import ComfyRegistryInstall
 
-        install = session.get(ComfyRegistryInstall, install_id)
-        assert install is not None
+        (install,) = installs
+        assert isinstance(install, ComfyRegistryInstall) and install.id == install_id
         return ComfyRegistryLaunchContract((install.installed_path,), (), ("ExampleNode",))
 
-    monkeypatch.setattr(activation_module, "trusted_comfy_registry_launch_contract", verified)
+    monkeypatch.setattr(launch_module, "_verified_comfy_registry_launch_contract", verified)
 
     response = await client.post(
         f"/api/workflows/packages/installs/{install_id}/review",
@@ -149,7 +150,7 @@ async def test_typed_refusals_keep_their_codes_and_statuses(
     client: AsyncClient,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     _configure_runtime(settings, monkeypatch, tmp_path)
 
@@ -171,7 +172,7 @@ async def test_a_running_media_worker_refuses_activation_changes(
     app: FastAPI,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     """The stopped-worker requirement is told truthfully, not assumed."""
 
@@ -212,7 +213,7 @@ async def test_dependency_renewal_queues_the_exact_inactive_install(
     app: FastAPI,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     _configure_runtime(settings, monkeypatch, tmp_path)
     _write_install_paths(settings, environment=False)
@@ -262,7 +263,7 @@ async def test_a_stale_install_is_visible_and_removable(
     client: AsyncClient,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     _configure_runtime(settings, monkeypatch, tmp_path)
     _write_install_paths(settings, node=False)
@@ -295,7 +296,7 @@ async def test_removal_refuses_an_active_install_without_mutation(
     client: AsyncClient,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     _configure_runtime(settings, monkeypatch, tmp_path)
     _write_install_paths(settings)
@@ -319,7 +320,7 @@ async def test_renewal_refuses_when_the_package_files_are_missing(
     app: FastAPI,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     _configure_runtime(settings, monkeypatch, tmp_path)
     _write_install_paths(settings, node=False)
@@ -341,7 +342,7 @@ async def test_dependency_renewal_refuses_active_or_running_packages(
     app: FastAPI,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     _configure_runtime(settings, monkeypatch, tmp_path)
     _write_install_paths(settings)

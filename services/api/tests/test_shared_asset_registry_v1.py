@@ -752,7 +752,7 @@ def _relax_then_restore_schema(database: Path, rows: list[tuple[object, ...]]) -
 
     connection = sqlite3.connect(database)
     try:
-        exact = connection.execute(
+        exact: str = connection.execute(
             "SELECT sql FROM sqlite_master WHERE name = 'package_claims'"
         ).fetchone()[0]
     finally:

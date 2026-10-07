@@ -2,10 +2,11 @@
 
 An installed row is comparable only when its manifest records which provider
 version it is. Auxiliary assets carry it in file metadata; checkpoint installs
-must agree with their linked provider source. Rows without that identity
-are absent from the report rather than guessed at: a wrong "up to date" would
-teach the user to stop checking, and a wrong "update available" would teach
-them to stop believing it.
+must agree with their linked provider source, and version-card installs also
+need an activated plan that proves the parent model for their exact files.
+Rows without that identity are absent from the report rather than guessed at.
+A wrong "up to date" would teach the user to stop checking, and a wrong
+"update available" would teach them to stop believing it.
 
 The comparison itself never touches the network; callers fetch the provider's
 version list and pass it in. Choosing what "newer" means stays in one place:
@@ -23,7 +24,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import ModelAssetInstall, ModelInstall, ModelSource
+from .models import InstallPlan, ModelAssetInstall, ModelInstall, ModelSource
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,10 @@ def installed_civitai_identities(session: Session) -> tuple[InstalledCivitaiIden
             continue
         if model_id != source.remote_id or version_id != source.revision:
             continue
+        if model_id == version_id:
+            model_id = _checkpoint_parent_model(session, install, version_id)
+            if model_id is None:
+                continue
         identities.append(
             InstalledCivitaiIdentity(
                 install_id=install.id,
@@ -105,6 +110,65 @@ def installed_civitai_identities(session: Session) -> tuple[InstalledCivitaiIden
             )
         )
     return tuple(identities)
+
+
+def _checkpoint_parent_model(
+    session: Session, install: ModelInstall, version_id: str
+) -> str | None:
+    """Recover a version card's parent from plans matching its installed bytes.
+
+    Version cards use the version id for both remote id and revision. The
+    activated plan retains the distinct parent id on each artifact. Require
+    the whole installed file set and every checksum to agree before using it;
+    missing or conflicting provenance cannot turn a version into a model id.
+    """
+    files = install.manifest_json.get("files")
+    hashes = install.manifest_json.get("expected_sha256")
+    if (
+        not isinstance(files, list)
+        or not files
+        or not all(isinstance(path, str) and path for path in files)
+        or len(set(files)) != len(files)
+        or not isinstance(hashes, dict)
+        or set(hashes) != set(files)
+        or not all(
+            isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
+            for digest in hashes.values()
+        )
+    ):
+        return None
+    parents: set[str] = set()
+    plans = session.scalars(
+        select(InstallPlan).where(
+            InstallPlan.provider == "civitai",
+            InstallPlan.remote_id == version_id,
+            InstallPlan.revision == version_id,
+            InstallPlan.role == install.role,
+            InstallPlan.engine == install.engine,
+            InstallPlan.status == "activated",
+        )
+    ).all()
+    for plan in plans:
+        artifacts = [item for item in plan.artifacts_json if item.get("required", True)]
+        if (
+            len(artifacts) != len(files)
+            or {item.get("path") for item in artifacts} != set(files)
+            or any(
+                item.get("sha256") != hashes.get(item.get("path"))
+                or item.get("source_version_id") != version_id
+                or item.get("source_revision") != version_id
+                or not _provider_id(item.get("source_remote_id"))
+                or not _provider_id(item.get("source_file_id"))
+                for item in artifacts
+            )
+        ):
+            continue
+        parents.update(str(item["source_remote_id"]) for item in artifacts)
+    return next(iter(parents)) if len(parents) == 1 else None
+
+
+def _provider_id(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[1-9][0-9]{0,11}", value) is not None
 
 
 class ModelUpdateBaselineUnavailable(ValueError):

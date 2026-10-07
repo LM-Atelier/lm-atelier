@@ -7,15 +7,19 @@ import os
 import socket
 import subprocess
 import sys
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
-from unittest.mock import AsyncMock
+from typing import Any, cast
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import psutil
 import pytest
-from sqlalchemy.orm import object_session
+from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS, wait_until
+from sqlalchemy.orm import Session, object_session
 
 import local_lm.comfy_registry_interpreter as registry_interpreter_module
 import local_lm.processes as processes_module
@@ -28,6 +32,7 @@ from local_lm.comfy_editor_bridge import (
 from local_lm.comfy_registry_installs import ComfyRegistryLaunchContract
 from local_lm.comfy_registry_paths import registry_wheel_environment_root
 from local_lm.comfy_registry_runtime import ComfyRegistryRuntimeDistribution
+from local_lm.config import Settings
 from local_lm.custom_nodes import CustomNodeManager
 from local_lm.db import SessionLocal
 from local_lm.events import EventBroker
@@ -49,13 +54,23 @@ from local_lm.processes import (
     _RotatingWorkerLog,
     _with_comfy_registry_overlays,
 )
+from local_lm.runtime_provisioning import RuntimeProvisioner
+from local_lm.schemas import CustomNodeContainmentStatus
 from local_lm.security import trusted_browser_origins
 from local_lm.worker_failures import WorkerFailureCode
 from local_lm.workflow_activations import (
     WorkflowActivationLaunchScope,
     WorkflowAssetLaunchBinding,
     WorkflowModelLaunchBinding,
+    WorkflowRegistryLaunchBinding,
 )
+
+
+def _windows_creation_flags() -> int:
+    value = vars(subprocess)["CREATE_NO_WINDOW"]
+    assert isinstance(value, int)
+    return value
+
 
 # Reproduced from CPython 3.12 by making the socket teardown inside
 # `_ProactorBasePipeTransport._call_connection_lost` raise. asyncio composes the
@@ -95,10 +110,10 @@ async def wait_for_worker_event(events: EventBroker, event_type: str) -> None:
 
 
 async def test_trusted_registry_node_types_preserve_package_version_ownership(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     install = ComfyRegistryInstall(
         package_id="comfyui-kjnodes",
         package_version="1.2.3",
@@ -150,10 +165,10 @@ async def test_trusted_registry_node_types_preserve_package_version_ownership(
 
 
 async def test_trusted_manual_node_types_preserve_reviewed_package_ownership(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     install = CustomNodeInstall(
         id="node_reviewed_inventory",
         name="comfyui-kjnodes",
@@ -192,10 +207,10 @@ async def test_trusted_manual_node_types_preserve_reviewed_package_ownership(
 
 
 async def test_unreviewed_manual_node_types_are_not_launchable_package_evidence(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     install = CustomNodeInstall(
         id="node_unreviewed_inventory",
         name="comfyui-kjnodes",
@@ -280,8 +295,8 @@ def test_llama_arguments_are_explicit_and_shell_free() -> None:
 
 
 def test_workflow_editor_authority_requires_the_live_ready_verified_launch(
-    settings,
-    tmp_path: Path,  # type: ignore[no-untyped-def]
+    settings: Settings,
+    tmp_path: Path,
 ) -> None:
     supervisor = ProcessSupervisor(settings)
     process = FakeRunningProcess(34567, terminate_code=0)
@@ -317,8 +332,8 @@ def test_workflow_editor_authority_requires_the_live_ready_verified_launch(
 
 
 def test_workflow_editor_support_reports_a_live_ready_refusal(
-    settings,
-    tmp_path: Path,  # type: ignore[no-untyped-def]
+    settings: Settings,
+    tmp_path: Path,
 ) -> None:
     supervisor = ProcessSupervisor(settings)
     support = ComfyEditorBridgeSupport(
@@ -458,9 +473,9 @@ def test_worker_log_rotation_enforces_file_and_retention_bounds(tmp_path: Path) 
 
 
 async def test_startup_exit_retains_redacted_stderr_and_actionable_status(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     settings.hf_token = "hf_private_worker_token"
     settings.civitai_token = "civitai_private_worker_token"
@@ -502,9 +517,9 @@ async def test_startup_exit_retains_redacted_stderr_and_actionable_status(
 
 
 async def test_startup_exit_with_empty_stderr_has_no_synthetic_tail(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
     monkeypatch.setattr(supervisor, "_ensure_port_available", AsyncMock())
@@ -523,9 +538,9 @@ async def test_startup_exit_with_empty_stderr_has_no_synthetic_tail(
 
 
 async def test_worker_subprocess_does_not_inherit_application_or_cloud_secrets(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
     captured: dict[str, object] = {}
@@ -564,16 +579,16 @@ async def test_worker_subprocess_does_not_inherit_application_or_cloud_secrets(
     assert "GITHUB_TOKEN" not in environment
     assert "AWS_SECRET_ACCESS_KEY" not in environment
     if os.name == "nt":
-        assert captured["creationflags"] == subprocess.CREATE_NO_WINDOW
+        assert captured["creationflags"] == _windows_creation_flags()
     else:
         assert "creationflags" not in captured
     await supervisor.close()
 
 
 async def test_worker_port_is_preflighted_before_spawn(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
     create_process = AsyncMock()
@@ -590,8 +605,8 @@ async def test_worker_port_is_preflighted_before_spawn(
 
 
 async def test_worker_port_preflight_distinguishes_free_and_bound_ports(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as temporary:
@@ -615,8 +630,8 @@ async def test_worker_port_preflight_distinguishes_free_and_bound_ports(
 
 
 async def test_port_refusal_names_the_process_holding_the_port(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """A user who hits this must learn what to close.
 
     The listener here is the test process itself, so the expected name and pid
@@ -642,9 +657,9 @@ async def test_port_refusal_names_the_process_holding_the_port(
 
 
 async def test_port_refusal_keeps_its_original_wording_when_the_holder_is_unknown(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     """Enumerating sockets is privileged on some systems.
 
     Degradation guard rather than a regression: this passes on the parent too,
@@ -659,7 +674,7 @@ async def test_port_refusal_keeps_its_original_wording_when_the_holder_is_unknow
     def refuse_enumeration(*_args: object, **_kwargs: object) -> list[object]:
         raise psutil.AccessDenied(pid=None, name="net_connections")
 
-    monkeypatch.setattr(processes_module.psutil, "net_connections", refuse_enumeration)
+    monkeypatch.setattr(psutil, "net_connections", refuse_enumeration)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         listener.listen()
@@ -677,9 +692,9 @@ async def test_port_refusal_keeps_its_original_wording_when_the_holder_is_unknow
 
 
 async def test_cancelled_worker_start_terminates_and_forgets_starting_process(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
     waiting = asyncio.Event()
@@ -730,18 +745,22 @@ async def test_cancelled_worker_start_terminates_and_forgets_starting_process(
 
 
 async def test_stopping_worker_terminates_descendant_process_tree(
-    settings,
+    settings: Settings,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     settings.worker_shutdown_seconds = 1
     supervisor = ProcessSupervisor(settings)
     child_pid_file = tmp_path / "child.pid"
+    # Written under another name and renamed into place: writing the file where
+    # it is read creates it empty first, and a read in that moment finds no id.
+    unfinished = tmp_path / "child.pid.part"
     script = (
         "import pathlib, subprocess, sys, time; "
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
-        f"pathlib.Path({str(child_pid_file)!r}).write_text(str(child.pid)); "
+        f"pathlib.Path({str(unfinished)!r}).write_text(str(child.pid)); "
+        f"pathlib.Path({str(unfinished)!r}).replace({str(child_pid_file)!r}); "
         "time.sleep(60)"
     )
 
@@ -760,12 +779,15 @@ async def test_stopping_worker_terminates_descendant_process_tree(
             [sys.executable, "-c", script],
             "http://127.0.0.1:12341/health",
         )
-        for _attempt in range(100):
-            if child_pid_file.is_file():
-                child_pid = int(child_pid_file.read_text())
-                break
-            await asyncio.sleep(0.02)
-        assert child_pid is not None
+
+        async def written_id() -> str:
+            return child_pid_file.read_text() if child_pid_file.is_file() else ""
+
+        # Two interpreters start before the id is written, which on a busy
+        # runner takes seconds, so this waits with the suite's usual patience.
+        child_pid = int(
+            await wait_until(written_id, bool, what="the worker's child process id", interval=0.02)
+        )
         assert psutil.pid_exists(child_pid)
 
         await supervisor.stop("chat")
@@ -778,9 +800,9 @@ async def test_stopping_worker_terminates_descendant_process_tree(
 
 
 async def test_exited_record_reaps_exact_persisted_descendants(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
     persisted = SimpleNamespace(pid=987_654_399)
@@ -810,10 +832,10 @@ async def test_exited_record_reaps_exact_persisted_descendants(
 
 
 def test_persisted_worker_identity_reaps_only_matching_process(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     settings.prepare()
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    creationflags = _windows_creation_flags() if os.name == "nt" else 0
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         creationflags=creationflags,
@@ -848,10 +870,10 @@ def test_persisted_worker_identity_reaps_only_matching_process(
 
 
 def test_persisted_worker_identity_does_not_kill_reused_pid(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     settings.prepare()
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    creationflags = _windows_creation_flags() if os.name == "nt" else 0
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         creationflags=creationflags,
@@ -885,7 +907,7 @@ def test_persisted_worker_identity_does_not_kill_reused_pid(
             child.wait(timeout=5)
 
 
-def test_malformed_worker_identity_record_fails_safe(settings) -> None:  # type: ignore[no-untyped-def]
+def test_malformed_worker_identity_record_fails_safe(settings: Settings) -> None:
     settings.prepare()
     identity_path = settings.state_dir / "worker-processes.json"
     identity_path.write_text("not-json", encoding="utf-8")
@@ -896,9 +918,9 @@ def test_malformed_worker_identity_record_fails_safe(settings) -> None:  # type:
 
 
 async def test_worker_status_records_spawn_to_health_duration(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
     ticks = iter((100.0, 100.456))
@@ -940,9 +962,9 @@ async def test_worker_status_records_spawn_to_health_duration(
 
 
 async def test_worker_health_probe_ignores_proxy_environment(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
     captured: dict[str, object] = {}
@@ -963,9 +985,11 @@ async def test_worker_health_probe_ignores_proxy_environment(
 
     monkeypatch.setattr("local_lm.processes.httpx.AsyncClient", FakeClient)
     monkeypatch.setattr(supervisor, "_listener_owned_by_worker", lambda *_args: True)
-    record = SimpleNamespace(
+    record = WorkerRecord(
         name="chat",
-        process=SimpleNamespace(pid=os.getpid(), returncode=None),
+        process=Mock(spec=asyncio.subprocess.Process, pid=os.getpid(), returncode=None),
+        command=[],
+        log=Mock(spec=_RotatingWorkerLog),
     )
 
     await supervisor._wait_healthy(record, "http://127.0.0.1:12341/health")
@@ -978,15 +1002,17 @@ async def test_worker_health_probe_ignores_proxy_environment(
 
 
 async def test_worker_health_probe_backs_off_between_loading_responses(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
     delays: list[float] = []
-    record = SimpleNamespace(
+    record = WorkerRecord(
         name="chat",
-        process=SimpleNamespace(pid=456_789_123, returncode=None),
+        process=Mock(spec=asyncio.subprocess.Process, pid=456_789_123, returncode=None),
+        command=[],
+        log=Mock(spec=_RotatingWorkerLog),
     )
 
     class FakeClient:
@@ -1006,7 +1032,7 @@ async def test_worker_health_probe_backs_off_between_loading_responses(
     async def sleep(delay: float) -> None:
         delays.append(delay)
         if len(delays) == 4:
-            record.process.returncode = 1
+            monkeypatch.setattr(record.process, "returncode", 1)
 
     monkeypatch.setattr("local_lm.processes.httpx.AsyncClient", FakeClient)
     monkeypatch.setattr("local_lm.processes.asyncio.sleep", sleep)
@@ -1019,9 +1045,9 @@ async def test_worker_health_probe_backs_off_between_loading_responses(
 
 
 async def test_worker_health_rejects_listener_owned_by_another_process(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
 
@@ -1041,9 +1067,11 @@ async def test_worker_health_rejects_listener_owned_by_another_process(
 
     monkeypatch.setattr("local_lm.processes.httpx.AsyncClient", FakeClient)
     monkeypatch.setattr(supervisor, "_listener_owned_by_worker", lambda *_args: False)
-    record = SimpleNamespace(
+    record = WorkerRecord(
         name="chat",
-        process=SimpleNamespace(pid=456_789_123, returncode=None),
+        process=Mock(spec=asyncio.subprocess.Process, pid=456_789_123, returncode=None),
+        command=[],
+        log=Mock(spec=_RotatingWorkerLog),
     )
 
     with pytest.raises(RuntimeError, match="another process"):
@@ -1051,9 +1079,9 @@ async def test_worker_health_rejects_listener_owned_by_another_process(
 
 
 async def test_runtime_exit_captures_only_a_bounded_stderr_tail(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
 
@@ -1062,6 +1090,15 @@ async def test_runtime_exit_captures_only_a_bounded_stderr_tail(
 
     monkeypatch.setattr(supervisor, "_wait_healthy", healthy_immediately)
     monkeypatch.setattr(supervisor, "_ensure_port_available", AsyncMock())
+    real_matching = supervisor._matching_worker_processes
+
+    def slow_matching(name: str) -> list[psutil.Process]:
+        # The cleanup after an exit looks the worker's processes up in a
+        # thread; a slow lookup is what a busy machine gives it.
+        time.sleep(0.2)
+        return real_matching(name)
+
+    monkeypatch.setattr(supervisor, "_matching_worker_processes", slow_matching)
     await supervisor._replace(
         "chat",
         [
@@ -1071,12 +1108,17 @@ async def test_runtime_exit_captures_only_a_bounded_stderr_tail(
         ],
         "http://127.0.0.1:9/health",
     )
-    await supervisor._workers["chat"].process.wait()
-    output_task = supervisor._workers["chat"].output_task
+    record = supervisor._workers["chat"]
+    await record.process.wait()
+    output_task = record.output_task
     assert output_task is not None
     await output_task
+    # The exit is recorded by the worker's monitor, which cleans up after the
+    # process before it reports the exit, so its end, not the output's, is
+    # when the status is final.
+    assert record.monitor_task is not None
+    await asyncio.wait_for(record.monitor_task, timeout=30)
 
-    record = supervisor._workers["chat"]
     status = supervisor.statuses()[0]
     assert status.state == "exited"
     assert status.exit_code == 9
@@ -1089,9 +1131,9 @@ async def test_runtime_exit_captures_only_a_bounded_stderr_tail(
 
 
 async def test_media_replacement_rotates_verified_editor_launch_authority(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
 
@@ -1134,8 +1176,8 @@ async def test_media_replacement_rotates_verified_editor_launch_authority(
 
 
 async def test_loading_health_503_lines_do_not_displace_stderr_tail(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
     stdout = asyncio.StreamReader()
@@ -1183,8 +1225,8 @@ async def _captured_stderr(
 
 
 async def test_a_failure_is_classified_from_output_the_display_tail_cannot_show(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """The line that names an out-of-memory failure is printed when it happens.
 
     Everything after it - unloading, shutdown, the engine's parting messages -
@@ -1215,8 +1257,8 @@ async def test_a_failure_is_classified_from_output_the_display_tail_cannot_show(
 
 
 async def test_connection_teardown_noise_never_displaces_the_real_failure(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """The diagnostic a user sees must not be filled with routine teardown.
 
     asyncio logs eight lines when a proactor transport's socket refuses its
@@ -1248,8 +1290,8 @@ async def test_connection_teardown_noise_never_displaces_the_real_failure(
 
 
 async def test_the_frozen_runtime_form_of_the_teardown_block_is_filtered(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """The shape that actually ships, not the one a bare interpreter prints.
 
     A packaged worker prefixes the level tag, renders the callback with empty
@@ -1277,8 +1319,8 @@ async def test_the_frozen_runtime_form_of_the_teardown_block_is_filtered(
 
 
 async def test_a_real_traceback_after_teardown_noise_is_kept_in_full(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """Suppression ends at the block's own exception line, not on a line budget.
 
     Ending only on a budget would let the next traceback - which starts with the
@@ -1313,8 +1355,8 @@ async def test_a_real_traceback_after_teardown_noise_is_kept_in_full(
 
 
 async def test_an_unrelated_callback_exception_is_still_reported(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """Only this one teardown callback is filtered, not every asyncio error."""
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
@@ -1334,8 +1376,8 @@ async def test_an_unrelated_callback_exception_is_still_reported(
 
 
 async def test_teardown_suppression_is_bounded_when_the_block_never_ends(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """A malformed block cannot silence the stream indefinitely."""
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
@@ -1356,11 +1398,11 @@ async def test_teardown_suppression_is_bounded_when_the_block_never_ends(
 
 @pytest.mark.parametrize("scope", [None, "a" * 64])
 async def test_chat_first_use_provisions_missing_runtime(
-    settings,
+    settings: Settings,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     scope: str | None,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     model_path = tmp_path / "model.gguf"
     model_path.write_bytes(b"GGUF")
     executable = tmp_path / "llama-server.exe"
@@ -1370,7 +1412,7 @@ async def test_chat_first_use_provisions_missing_runtime(
         executable.write_bytes(b"runtime")
         settings.llama_executable = executable
 
-    runtimes = SimpleNamespace(ensure=AsyncMock(side_effect=provision))
+    runtimes = Mock(spec=RuntimeProvisioner, ensure=AsyncMock(side_effect=provision))
     supervisor = ProcessSupervisor(settings, runtimes)
     captured: dict[str, list[str]] = {}
 
@@ -1445,9 +1487,9 @@ def _pretend_orphan(
 
 
 def test_a_worker_that_outlived_its_record_is_named(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     """ "Stopped" is true of this process and not of the machine.
 
     A child this application started in an earlier session goes on serving, so
@@ -1475,9 +1517,9 @@ def test_a_worker_that_outlived_its_record_is_named(
 
 
 def test_an_orphan_that_is_not_listening_is_not_reported(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     """The state the user sees is stopped-but-working, and that needs a listener.
 
     A matched process that holds nothing is not what the card is wrong about,
@@ -1493,7 +1535,7 @@ def test_an_orphan_that_is_not_listening_is_not_reported(
     assert chat.failure_detail is None
 
 
-def test_an_ordinary_stopped_worker_reports_no_fault(settings) -> None:  # type: ignore[no-untyped-def]
+def test_an_ordinary_stopped_worker_reports_no_fault(settings: Settings) -> None:
     """The half that must not change, and the one that caught the first design.
 
     An earlier version probed the configured port itself, so a status read
@@ -1512,7 +1554,120 @@ def test_an_ordinary_stopped_worker_reports_no_fault(settings) -> None:  # type:
         assert worker.failure_remedy is None
 
 
-def test_the_report_and_the_start_read_one_endpoint(settings) -> None:  # type: ignore[no-untyped-def]
+def test_stopped_status_reports_media_containment_without_running_a_canary(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stopped media worker reports the host capability and does not launch the canary.
+
+    Chat has no custom-node host. The stopped media record stays unavailable,
+    with neither grant.
+    """
+
+    def refuse_canary(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a status read must not run the containment canary")
+
+    monkeypatch.setattr("local_lm.custom_node_containment.subprocess.run", refuse_canary)
+    by_name = {item.name: item for item in ProcessSupervisor(settings).statuses()}
+
+    chat = by_name["chat"]
+    assert chat.custom_node_containment is None
+    assert chat.state == "stopped"
+    assert chat.active_jobs == 0
+    assert chat.queued_jobs == 0
+    media = by_name["media"]
+    assert media.state == "stopped"
+    assert media.managed is False
+    assert media.running is False
+    assert media.active_jobs == 0
+    assert media.queued_jobs == 0
+    report = media.custom_node_containment
+    assert report is not None
+    assert report.level == "unavailable"
+    assert report.platform == sys.platform
+    assert report.profile_version == 1
+    assert report.backend == "none"
+    assert report.backend_version == "0"
+    assert report.profile_sha256 is None
+    assert report.file_denial_provable is False
+    assert report.connect_denial_provable is False
+    assert report.authorizes_execution is False
+    assert report.offline_badge is False
+
+
+def _unavailable_containment(report: CustomNodeContainmentStatus | None) -> None:
+    assert report is not None
+    assert report.level == "unavailable"
+    assert report.platform == sys.platform
+    assert report.profile_version == 1
+    assert report.backend == "none"
+    assert report.backend_version == "0"
+    assert report.profile_sha256 is None
+    assert report.file_denial_provable is False
+    assert report.connect_denial_provable is False
+    assert report.authorizes_execution is False
+    assert report.offline_badge is False
+
+
+def test_ready_and_external_media_workers_stay_unavailable(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ready worker and an external one report the same unavailable record.
+
+    Ready means the worker can take work. It does not confine custom-node
+    code. An external process left from an earlier session is not confined
+    either. Neither read runs the canary, and chat stays unset.
+    """
+
+    def refuse_canary(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a status read must not run the containment canary")
+
+    monkeypatch.setattr("local_lm.custom_node_containment.subprocess.run", refuse_canary)
+    settings.prepare()
+    ready_supervisor = ProcessSupervisor(settings)
+    ready_supervisor._workers["media"] = WorkerRecord(
+        name="media",
+        process=cast(
+            asyncio.subprocess.Process, FakeRunningProcess(987_654_320, terminate_code=-15)
+        ),
+        command=["worker"],
+        log=_RotatingWorkerLog(settings.log_dir / "ready-media.log"),
+        state="ready",
+        profile_id="profile_media",
+    )
+    ready = {item.name: item for item in ready_supervisor.statuses()}
+    assert ready["chat"].custom_node_containment is None
+    assert ready["media"].state == "ready"
+    assert ready["media"].managed is True
+    assert ready["media"].running is True
+    assert ready["media"].profile_id == "profile_media"
+    assert ready["media"].active_jobs == 0
+    assert ready["media"].queued_jobs == 0
+    _unavailable_containment(ready["media"].custom_node_containment)
+
+    external_supervisor = ProcessSupervisor(settings)
+    _pretend_orphan(
+        external_supervisor,
+        monkeypatch,
+        name="media",
+        listening=True,
+        process_name="python.exe",
+        pid=4243,
+    )
+    external = {item.name: item for item in external_supervisor.statuses()}
+    assert external["chat"].custom_node_containment is None
+    assert external["chat"].failure_code is None
+    assert external["media"].state == "stopped"
+    assert external["media"].managed is False
+    assert external["media"].running is False
+    assert external["media"].failure_code == "port_in_use"
+    assert external["media"].active_jobs == 0
+    assert external["media"].queued_jobs == 0
+    _unavailable_containment(external["media"].custom_node_containment)
+
+
+def test_the_report_and_the_start_read_one_endpoint(settings: Settings) -> None:
     """Both sides derive the endpoint from the same place.
 
     The start paths each built this string themselves, which is why nothing
@@ -1531,10 +1686,10 @@ def test_the_report_and_the_start_read_one_endpoint(settings) -> None:  # type: 
 
 
 async def test_media_first_use_provisions_missing_runtime(
-    settings,
+    settings: Settings,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     runtime = tmp_path / "ComfyUI"
     executable = tmp_path / "python.exe"
 
@@ -1546,7 +1701,7 @@ async def test_media_first_use_provisions_missing_runtime(
         settings.comfy_directory = runtime
         settings.comfy_executable = executable
 
-    runtimes = SimpleNamespace(ensure=AsyncMock(side_effect=provision))
+    runtimes = Mock(spec=RuntimeProvisioner, ensure=AsyncMock(side_effect=provision))
     supervisor = ProcessSupervisor(settings, runtimes)
     model_paths = tmp_path / "extra-model-paths.yaml"
     model_paths.write_text("{}", encoding="utf-8")
@@ -1567,7 +1722,9 @@ async def test_media_first_use_provisions_missing_runtime(
         *,
         estimated_memory_bytes: int | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
+        environment_overrides: dict[str, str] | None = None,
     ) -> None:
+        assert environment_overrides is None
         del estimated_memory_bytes
         assert editor_bridge_support is not None
         assert not editor_bridge_support.supported
@@ -1587,8 +1744,10 @@ async def test_media_first_use_provisions_missing_runtime(
         "Validating media dependencies",
         "Starting media runtime",
     ]
-    assert captured["command"][0] == str(executable.resolve())
-    assert captured["command"][1] == str((runtime / "main.py").resolve())
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[0] == str(executable.resolve())
+    assert command[1] == str((runtime / "main.py").resolve())
     assert captured["health_url"] == settings.comfy_url + "/system_stats"
 
 
@@ -1601,12 +1760,12 @@ async def test_media_first_use_provisions_missing_runtime(
     ],
 )
 async def test_a_refused_media_phase_stops_before_the_next_process_effect(
-    settings,
+    settings: Settings,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     refused_phase: str,
     effects_before_it: list[str],
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     """A refusing callback stops the start at the phase it refused.
 
     The sibling above shows the ordinary run: three phases, each followed by
@@ -1636,7 +1795,7 @@ async def test_a_refused_media_phase_stops_before_the_next_process_effect(
         settings.comfy_directory = runtime
         settings.comfy_executable = executable
 
-    runtimes = SimpleNamespace(ensure=AsyncMock(side_effect=provision))
+    runtimes = Mock(spec=RuntimeProvisioner, ensure=AsyncMock(side_effect=provision))
     supervisor = ProcessSupervisor(settings, runtimes)
     model_paths = tmp_path / "extra-model-paths.yaml"
     model_paths.write_text("{}", encoding="utf-8")
@@ -1670,10 +1829,10 @@ async def test_a_refused_media_phase_stops_before_the_next_process_effect(
 
 
 async def test_a_broken_media_phase_report_does_not_stop_the_start(
-    settings,
+    settings: Settings,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     """The other half of the distinction, held in place.
 
     A callback that raises anything else is a reporting bug, and a reporting
@@ -1717,12 +1876,12 @@ async def test_a_broken_media_phase_report_does_not_stop_the_start(
 @pytest.mark.parametrize("scope", [None, "a" * 64])
 @pytest.mark.parametrize("frozen_image_limit", [None, 2, 8])
 async def test_vllm_chat_launches_complete_modelopt_snapshot(
-    settings,
+    settings: Settings,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     scope: str | None,
     frozen_image_limit: int | None,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     model_dir = tmp_path / "modelopt-snapshot"
     model_dir.mkdir()
     (model_dir / "config.json").write_text("{}", encoding="utf-8")
@@ -1826,9 +1985,9 @@ async def test_vllm_chat_launches_complete_modelopt_snapshot(
 
 
 async def test_vllm_chat_rejects_incomplete_snapshot(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     model_dir = tmp_path / "incomplete-modelopt"
     model_dir.mkdir()
     (model_dir / "config.json").write_text("{}", encoding="utf-8")
@@ -1860,10 +2019,10 @@ async def test_vllm_chat_rejects_incomplete_snapshot(
 
 
 async def test_chat_launches_split_gguf_from_first_shard(
-    settings,
+    settings: Settings,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     model_dir = tmp_path / "split-model"
     model_dir.mkdir()
     first = model_dir / "model-Q4_K_M-00001-of-00002.gguf"
@@ -1919,10 +2078,10 @@ async def test_chat_launches_split_gguf_from_first_shard(
 
 
 async def test_chat_launches_multimodal_projector_and_includes_its_memory(
-    settings,
+    settings: Settings,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     model_dir = tmp_path / "vision-model"
     model_dir.mkdir()
     model = model_dir / "vision-model-4B-Q4_K_M.gguf"
@@ -1978,9 +2137,9 @@ async def test_chat_launches_multimodal_projector_and_includes_its_memory(
 
 
 async def test_media_start_disables_unapproved_custom_nodes(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
 ) -> None:
     runtime = tmp_path / "comfyui"
     runtime.mkdir()
@@ -2005,7 +2164,9 @@ async def test_media_start_disables_unapproved_custom_nodes(
         *,
         estimated_memory_bytes: int | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
+        environment_overrides: dict[str, str] | None = None,
     ) -> None:
+        assert environment_overrides is None
         assert name == "media"
         assert estimated_memory_bytes is None
         assert editor_bridge_support is not None
@@ -2028,9 +2189,9 @@ async def test_media_start_disables_unapproved_custom_nodes(
 
 
 async def test_media_start_retains_a_bridge_staging_refusal_without_blocking_media(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
 ) -> None:
     runtime = tmp_path / "comfyui"
     runtime.mkdir()
@@ -2058,7 +2219,9 @@ async def test_media_start_retains_a_bridge_staging_refusal_without_blocking_med
         *,
         estimated_memory_bytes: int | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
+        environment_overrides: dict[str, str] | None = None,
     ) -> None:
+        assert environment_overrides is None
         assert name == "media"
         assert estimated_memory_bytes is None
         captured["command"] = command
@@ -2078,13 +2241,15 @@ async def test_media_start_retains_a_bridge_staging_refusal_without_blocking_med
         "workflow-editor-bridge-staging-failed",
         "The verified workflow editor bridge could not be staged.",
     )
-    assert "--whitelist-custom-nodes" not in captured["command"]
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert "--whitelist-custom-nodes" not in command
 
 
 async def test_media_start_whitelists_only_the_verified_first_party_editor_bridge(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
 ) -> None:
     portable = tmp_path / "ComfyUI_windows_portable"
     runtime = portable / "ComfyUI"
@@ -2123,6 +2288,7 @@ async def test_media_start_whitelists_only_the_verified_first_party_editor_bridg
         *,
         estimated_memory_bytes: int | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
+        environment_overrides: dict[str, str] | None = None,
     ) -> None:
         assert estimated_memory_bytes is None
         assert editor_bridge_support is not None
@@ -2131,11 +2297,31 @@ async def test_media_start_whitelists_only_the_verified_first_party_editor_bridg
         assert editor_bridge_support.comfyui_version == "0.28.0"
         assert editor_bridge_support.frontend_version == "1.45.21"
         captured["command"] = command
+        bridge_name = bridge_directory_name(trusted_browser_origins(settings))
+        bridge = runtime / "custom_nodes" / bridge_name / "__init__.py"
+        environment = dict(os.environ)
+        environment.pop("PYTHONDONTWRITEBYTECODE", None)
+        environment.pop("PYTHONPYCACHEPREFIX", None)
+        environment.update(environment_overrides or {})
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import importlib.util, sys; "
+                "spec = importlib.util.spec_from_file_location('editor_bridge', sys.argv[1]); "
+                "module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)",
+                str(bridge),
+            ],
+            env=environment,
+            capture_output=True,
+            check=True,
+        )
 
     monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", trusted_nodes)
     monkeypatch.setattr(supervisor, "_write_comfy_model_paths", lambda: model_paths)
     monkeypatch.setattr(supervisor, "_replace", replace)
 
+    await supervisor.start_media()
     await supervisor.start_media()
 
     command = captured["command"]
@@ -2149,9 +2335,9 @@ async def test_media_start_whitelists_only_the_verified_first_party_editor_bridg
 
 
 async def test_media_start_retains_the_exact_unsupported_runtime_fact(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
 ) -> None:
     portable = tmp_path / "ComfyUI_windows_portable"
     runtime = portable / "ComfyUI"
@@ -2187,7 +2373,9 @@ async def test_media_start_retains_the_exact_unsupported_runtime_fact(
         *,
         estimated_memory_bytes: int | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
+        environment_overrides: dict[str, str] | None = None,
     ) -> None:
+        assert environment_overrides is None
         assert estimated_memory_bytes is None
         captured["command"] = command
         captured["support"] = editor_bridge_support
@@ -2212,9 +2400,9 @@ async def test_media_start_retains_the_exact_unsupported_runtime_fact(
 
 
 async def test_media_start_uses_only_the_exact_activation_scope(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
 ) -> None:
     runtime = tmp_path / "comfyui"
     runtime.mkdir()
@@ -2281,7 +2469,7 @@ async def test_media_start_uses_only_the_exact_activation_scope(
         _estimated_memory_bytes: int | None = None,
         *,
         environment_overrides: dict[str, str] | None = None,
-        ready_check=None,  # type: ignore[no-untyped-def]
+        ready_check: Callable[[], Awaitable[None]] | None = None,
         launch_scope_sha256: str | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
     ) -> None:
@@ -2345,9 +2533,9 @@ async def test_media_start_uses_only_the_exact_activation_scope(
 
 
 async def test_activation_scoped_worker_is_reused_only_for_the_same_ready_launch(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
 ) -> None:
     supervisor = ProcessSupervisor(settings)
     command = ["python", "worker.py"]
@@ -2407,8 +2595,8 @@ async def test_activation_scoped_worker_is_reused_only_for_the_same_ready_launch
 
 
 async def test_activation_scope_cannot_be_broadened_with_provisional_paths(
-    settings,
-    tmp_path: Path,  # type: ignore[no-untyped-def]
+    settings: Settings,
+    tmp_path: Path,
 ) -> None:
     supervisor = ProcessSupervisor(settings)
     scope = WorkflowActivationLaunchScope(
@@ -2433,9 +2621,9 @@ async def test_activation_scope_cannot_be_broadened_with_provisional_paths(
 
 
 async def test_media_start_uses_only_verified_registry_overlay_contract(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
 ) -> None:
     runtime = tmp_path / "comfyui"
     runtime.mkdir()
@@ -2463,7 +2651,7 @@ async def test_media_start_uses_only_verified_registry_overlay_contract(
         _estimated_memory_bytes: int | None = None,
         *,
         environment_overrides: dict[str, str] | None = None,
-        ready_check=None,  # type: ignore[no-untyped-def]
+        ready_check: Callable[[], Awaitable[None]] | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
     ) -> None:
         assert editor_bridge_support is not None
@@ -2487,7 +2675,9 @@ async def test_media_start_uses_only_verified_registry_overlay_contract(
         ),
     )
 
-    async def probe_runtime(_executable: Path):  # type: ignore[no-untyped-def]
+    async def probe_runtime(
+        _executable: Path,
+    ) -> tuple[dict[str, str], tuple[()], tuple[ComfyRegistryRuntimeDistribution, ...]]:
         return {}, (), runtime_baseline
 
     monkeypatch.setattr(
@@ -2514,25 +2704,32 @@ async def test_media_start_uses_only_verified_registry_overlay_contract(
 
 
 def test_registry_launch_contracts_use_the_managed_registry_root(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     supervisor = ProcessSupervisor(settings)
     expected_root = registry_wheel_environment_root(settings.registry_dir)
     observed: list[Path] = []
 
-    def trusted_contract(_session, *, custom_node_root, environment_root):  # type: ignore[no-untyped-def]
+    def trusted_contract(
+        _session: Session,
+        *,
+        custom_node_root: Path,
+        environment_root: Path,
+        reviewed_inputs: Any = None,
+    ) -> ComfyRegistryLaunchContract:
         assert custom_node_root == settings.custom_node_dir
         observed.append(environment_root)
         return ComfyRegistryLaunchContract((), (), ())
 
-    def scoped_contract(  # type: ignore[no-untyped-def]
-        _session,
-        bindings,
+    def scoped_contract(
+        _session: Session,
+        bindings: Sequence[WorkflowRegistryLaunchBinding],
         *,
-        custom_node_root,
-        environment_root,
-    ):
+        custom_node_root: Path,
+        environment_root: Path,
+        reviewed_inputs: Any = None,
+    ) -> ComfyRegistryLaunchContract:
         assert tuple(bindings) == scope.registry_packages
         assert custom_node_root == settings.custom_node_dir
         observed.append(environment_root)
@@ -2558,9 +2755,9 @@ def test_registry_launch_contracts_use_the_managed_registry_root(
 
 
 async def test_media_start_refuses_registry_overlay_after_runtime_drift(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
 ) -> None:
     runtime = tmp_path / "comfyui"
     runtime.mkdir()
@@ -2575,7 +2772,9 @@ async def test_media_start_refuses_registry_overlay_after_runtime_drift(
     async def trusted_nodes() -> list[str]:
         return []
 
-    async def drifted_runtime(_executable: Path):  # type: ignore[no-untyped-def]
+    async def drifted_runtime(
+        _executable: Path,
+    ) -> tuple[dict[str, str], tuple[()], tuple[ComfyRegistryRuntimeDistribution, ...]]:
         return {}, (), (ComfyRegistryRuntimeDistribution("torch", "2.14.0+cu130"),)
 
     monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", trusted_nodes)
@@ -2630,11 +2829,11 @@ def test_registry_overlay_bootstrap_imports_without_executing_pth(tmp_path: Path
 
 @pytest.mark.parametrize(("inventory", "missing"), [({"ExampleLoader": {}}, False), ({}, True)])
 async def test_registry_node_inventory_is_verified_before_ready(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
     inventory: dict[str, object],
     missing: bool,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
 
@@ -2648,7 +2847,7 @@ async def test_registry_node_inventory_is_verified_before_ready(
         def raise_for_status(self) -> None:
             return None
 
-        async def aiter_bytes(self):  # type: ignore[no-untyped-def]
+        async def aiter_bytes(self) -> AsyncIterator[bytes]:
             yield json.dumps(inventory).encode()
 
     class FakeClient:
@@ -2677,10 +2876,10 @@ async def test_registry_node_inventory_is_verified_before_ready(
 
 
 async def test_media_whitelist_contains_only_active_verified_trusted_installs(
-    client,
-    settings,
+    client: AsyncClient,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
 ) -> None:
     del client
     runtime = tmp_path / "comfyui"
@@ -2725,9 +2924,9 @@ async def test_media_whitelist_contains_only_active_verified_trusted_installs(
 
 
 async def test_every_installed_asset_kind_reaches_the_runtime(
-    client,
-    settings,
-    tmp_path: Path,  # type: ignore[no-untyped-def]
+    client: AsyncClient,
+    settings: Settings,
+    tmp_path: Path,
 ) -> None:
     """A verified asset the runtime cannot see is a download that bought nothing."""
 
@@ -2782,9 +2981,9 @@ async def test_every_installed_asset_kind_reaches_the_runtime(
 
 
 async def test_liveness_probe_requires_success_from_the_owned_listener(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
     process = FakeRunningProcess(987_654_320, terminate_code=-15)
@@ -2838,9 +3037,9 @@ async def test_liveness_probe_requires_success_from_the_owned_listener(
 
 
 async def test_supervisor_reports_unexpected_worker_exit_without_status_polling(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     events = EventBroker()
     supervisor = ProcessSupervisor(
@@ -2868,15 +3067,15 @@ async def test_supervisor_reports_unexpected_worker_exit_without_status_polling(
     assert status.failure_detail == "chat worker exited with code 9."
     assert event.entity_id == "chat"
     assert event.payload == {"name": "chat", "state": "exited", "exit_code": 9}
-    await asyncio.wait_for(record.monitor_task, timeout=1)
+    await asyncio.wait_for(record.monitor_task, timeout=PATIENCE_SECONDS)
     assert record.monitor_task.done()
     await supervisor.close()
 
 
 async def test_supervisor_stops_worker_after_consecutive_health_failures(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     events = EventBroker()
     supervisor = ProcessSupervisor(
@@ -2908,9 +3107,9 @@ async def test_supervisor_stops_worker_after_consecutive_health_failures(
 
 
 async def test_supervisor_tolerates_transient_health_failure_and_cleans_monitor(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     events = EventBroker()
     supervisor = ProcessSupervisor(
@@ -2954,9 +3153,9 @@ async def test_supervisor_tolerates_transient_health_failure_and_cleans_monitor(
 
 
 async def test_supervisor_fails_closed_when_monitor_itself_errors(
-    settings,
+    settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     settings.prepare()
     events = EventBroker()
     supervisor = ProcessSupervisor(
@@ -3037,8 +3236,8 @@ def test_a_worker_environment_still_inherits_nothing_it_should_not() -> None:
 
 
 async def test_stopping_a_worker_with_no_live_record_still_stops_its_process(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """Losing the handle must not make the worker unstoppable.
 
     Measured on a live install: /api/workers reported the media worker stopped
@@ -3055,7 +3254,7 @@ async def test_stopping_a_worker_with_no_live_record_still_stops_its_process(
     """
 
     settings.prepare()
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    creationflags = _windows_creation_flags() if os.name == "nt" else 0
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         creationflags=creationflags,
@@ -3082,8 +3281,8 @@ async def test_stopping_a_worker_with_no_live_record_still_stops_its_process(
 
 
 async def test_stopping_a_worker_with_no_record_does_not_kill_a_reused_pid(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """The recovery must not become a licence to kill by pid alone.
 
     The control for the test above. A persisted identity whose creation time no
@@ -3094,7 +3293,7 @@ async def test_stopping_a_worker_with_no_record_does_not_kill_a_reused_pid(
     """
 
     settings.prepare()
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    creationflags = _windows_creation_flags() if os.name == "nt" else 0
     stranger = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         creationflags=creationflags,
@@ -3121,8 +3320,8 @@ async def test_stopping_a_worker_with_no_record_does_not_kill_a_reused_pid(
 
 
 async def test_a_port_held_by_our_own_child_is_reclaimed_without_any_identity(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """The incident had no usable identity, and this is the path that recovers it.
 
     The persisted identities are not sufficient on their own, and believing they
@@ -3140,7 +3339,7 @@ async def test_a_port_held_by_our_own_child_is_reclaimed_without_any_identity(
 
     settings.prepare()
     port = _free_port()
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    creationflags = _windows_creation_flags() if os.name == "nt" else 0
     holder = subprocess.Popen(
         [
             sys.executable,
@@ -3184,8 +3383,8 @@ async def test_a_port_held_by_our_own_child_is_reclaimed_without_any_identity(
 
 
 async def test_a_port_held_by_a_process_we_did_not_parent_is_left_alone(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """Reclaiming must never become killing by port number.
 
     The control for the test above. A listener this application did not parent is
@@ -3227,9 +3426,9 @@ def _free_port() -> int:
 
 
 async def test_replace_reclaims_the_port_before_it_judges_the_port(
-    settings,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The reclaim must be wired in, and wired in BEFORE the preflight.
 
     The other reclaim tests call it directly, so they would all still pass with
@@ -3274,7 +3473,7 @@ async def test_replace_reclaims_the_port_before_it_judges_the_port(
 def _listener_child(address: str, port: int) -> subprocess.Popen[bytes]:
     """A child of this process that holds one listening socket and then waits."""
 
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    creationflags = _windows_creation_flags() if os.name == "nt" else 0
     return subprocess.Popen(
         [
             sys.executable,
@@ -3324,8 +3523,8 @@ async def _await_listener(root_pid: int, address: str, port: int) -> int:
 
 
 async def test_a_descendant_on_another_address_at_the_same_port_survives(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """The port number is not the endpoint, and terminating on it is destruction.
 
     A child of ours listening on 127.0.0.2 at the same number is not what stands
@@ -3378,8 +3577,8 @@ async def test_a_descendant_on_another_address_at_the_same_port_survives(
 
 
 async def test_a_wildcard_descendant_is_recognised_as_holding_the_address(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """The other half of the same distinction, and it must not be lost with it.
 
     A listener on the unspecified address covers every address of its family.
@@ -3418,9 +3617,9 @@ async def test_a_wildcard_descendant_is_recognised_as_holding_the_address(
 
 
 async def test_an_exact_holder_is_preferred_and_a_wildcard_bystander_is_spared(
-    settings,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Both tiers present, and only the exact one may be terminated.
 
     This is the case the two socket tests cannot reach, and the reason is the
@@ -3461,8 +3660,8 @@ async def test_an_exact_holder_is_preferred_and_a_wildcard_bystander_is_spared(
 
 
 async def test_localhost_names_the_loopback_addresses_and_nothing_else(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """A named host has to be resolved deliberately, in both directions.
 
     `localhost` is a SUPPORTED value here - `validate_worker_url` accepts it
@@ -3510,9 +3709,9 @@ async def test_localhost_names_the_loopback_addresses_and_nothing_else(
 
 
 async def test_the_reclaim_retries_a_briefly_unbindable_address(
-    settings,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A terminated listener can leave the address unbindable for a moment.
 
     Judging that moment as a refusal would fail the start for a condition that
@@ -3542,7 +3741,7 @@ async def test_the_reclaim_retries_a_briefly_unbindable_address(
 
     terminated: list[int] = []
 
-    def record_termination(processes, timeout) -> None:  # type: ignore[no-untyped-def]
+    def record_termination(processes: list[psutil.Process], timeout: float) -> None:
         terminated.append(len(processes))
 
     monkeypatch.setattr(supervisor, "_port_is_free", scripted_probe)
@@ -3559,8 +3758,8 @@ async def test_the_reclaim_retries_a_briefly_unbindable_address(
 
 
 async def test_a_sibling_worker_on_the_same_endpoint_is_never_terminated(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """Endpoint ownership proves a process is in the way, not that it is ours to take.
 
     Nothing requires two workers to be configured on DIFFERENT endpoints:
@@ -3628,8 +3827,8 @@ async def test_a_sibling_worker_on_the_same_endpoint_is_never_terminated(
 
 
 def test_an_ipv6_wildcard_is_not_evidence_for_an_ipv4_target(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """Cross-family wildcard evidence is unprovable here, so it must not authorise.
 
     A socket bound to `::` accepts IPv4 connections wherever the platform leaves
@@ -3651,7 +3850,7 @@ def test_an_ipv6_wildcard_is_not_evidence_for_an_ipv4_target(
         status=psutil.CONN_LISTEN,
         laddr=SimpleNamespace(ip="::", port=51234),
     )
-    process = SimpleNamespace(net_connections=lambda kind="tcp": [listener])
+    process = Mock(spec=psutil.Process, net_connections=lambda kind="tcp": [listener])
 
     assert supervisor._listening_match(process, "127.0.0.1", 51234) is None, (
         "an IPv6 wildcard was accepted as evidence for an IPv4 target, which "
@@ -3663,8 +3862,8 @@ def test_an_ipv6_wildcard_is_not_evidence_for_an_ipv4_target(
 
 
 def test_localhost_selects_only_the_family_the_probe_uses(
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    settings: Settings,
+) -> None:
     """The evidence and the decision have to be about one endpoint.
 
     `_port_is_free` and `_ensure_port_available` both pick the address family
@@ -3676,17 +3875,19 @@ def test_localhost_selects_only_the_family_the_probe_uses(
 
     settings.prepare()
     supervisor = ProcessSupervisor(settings)
-    on_v6 = SimpleNamespace(
+    on_v6 = Mock(
+        spec=psutil.Process,
         net_connections=lambda kind="tcp": [
             SimpleNamespace(status=psutil.CONN_LISTEN, laddr=SimpleNamespace(ip="::1", port=51235))
-        ]
+        ],
     )
-    on_v4 = SimpleNamespace(
+    on_v4 = Mock(
+        spec=psutil.Process,
         net_connections=lambda kind="tcp": [
             SimpleNamespace(
                 status=psutil.CONN_LISTEN, laddr=SimpleNamespace(ip="127.0.0.1", port=51235)
             )
-        ]
+        ],
     )
 
     assert supervisor._listening_match(on_v6, "localhost", 51235) is None, (

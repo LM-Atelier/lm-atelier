@@ -8,14 +8,27 @@ import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
 import { WorkflowFamilyArchive } from "./WorkflowFamilyArchive";
+import { WorkflowFamilyRecovery } from "./WorkflowFamilyRecovery";
+import "./WorkflowsView.css";
 import { WorkflowFamilyList } from "./WorkflowFamilyList";
+import { useSelectedWorkflowFamily } from "./useWorkflowLibraryReads";
 import { WorkflowFamilyUsage } from "./WorkflowFamilyUsage";
+import { WorkflowInstallStatus } from "./WorkflowInstallStatus";
+import { WorkflowInstallOfferDialog } from "./WorkflowInstallOfferDialog";
 import { WorkflowFamilyVariants } from "./WorkflowFamilyVariants";
+import { WorkflowRevisionHistory } from "./WorkflowRevisionHistory";
+import { WorkflowRevisionComparison } from "./WorkflowRevisionComparison";
 import { WorkflowFamilyPreferences } from "./WorkflowFamilyPreferences";
 import { WorkflowFamilyDependencies } from "./WorkflowFamilyDependencies";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
 import { WorkflowRevisionReviewPanel } from "./WorkflowRevisionReviewPanel";
+import { WorkflowActivationPanel } from "./WorkflowActivationPanel";
 import { useWorkflowPackageImport } from "./useWorkflowPackageImport";
+import { useWorkflowInstallReview } from "./useWorkflowInstallReview";
+import { WorkflowDiscover } from "./WorkflowDiscover";
+import { WorkflowRecipeManagerAction } from "./WorkflowRecipeManager";
+import { WorkflowDestinations } from "./WorkflowDestinations";
+import { useWorkflowDestination } from "./useWorkflowDestination";
 import { downloadJson } from "./format";
 import {
   openWorkflowEditorPopup,
@@ -23,7 +36,7 @@ import {
   type WorkflowEditorPhase,
   type WorkflowEditorSubmission,
 } from "./workflowEditorBridge";
-import type { WorkflowEditorReturn, WorkflowFamily } from "./types";
+import type { WorkflowEditorReturn, WorkflowFamily, WorkflowRevision } from "./types";
 
 const editorPhaseLabel: Record<WorkflowEditorPhase, string> = {
   preparing: "Preparing the native editor…",
@@ -85,19 +98,40 @@ export function WorkflowControls({ schema }: { schema: Record<string, unknown> }
     </dl>
   );
 }
+function WorkflowRevisionActivation({ workflowId, revision, current, available }: {
+  workflowId: string; revision: WorkflowRevision; current: boolean; available: boolean;
+}) {
+  const contract = revision.dependency_contract_sha256;
+  if (!current || !available || !revision.trusted
+      || typeof contract !== "string" || !/^[a-f0-9]{64}$/.test(contract)) return null;
+  return <WorkflowActivationPanel key={workflowId + ":" + revision.id + ":" + contract}
+    workflowId={workflowId} revisionId={revision.id} contractSha256={contract} />;
+}
+
+// The details announce the installation they show, and the family list then summarizes it.
+function installationInDetails(family: WorkflowFamily | undefined, workflowId?: string, revisionId?: string) {
+  const progress = family?.variants.find((variant) => variant.id === workflowId)?.install_progress;
+  return { progress, workflowId: progress && progress.workflow_revision_id === revisionId ? workflowId : null };
+}
+
 export function WorkflowsView() {
   const client = useQueryClient();
   const [includeArchived, setIncludeArchived] = useState(false);
-  const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
-  const families = useQuery({
-    queryKey: ["workflow-families", "library", includeArchived],
-    queryFn: () => api.workflowFamilies(undefined, includeArchived),
-  });
+  const { installReview, setInstallReview, downloadsQueued, setDownloadsQueued, reviewInstall } = useWorkflowInstallReview();
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selected = workflows.data?.find((workflow) => workflow.id === selectedId) ?? null; const selectedFamily = families.data?.find((family) => family.variants.some((variant) => variant.id === selectedId));
+  const selectedDetail = useQuery({
+    queryKey: ["workflows", "detail", selectedId],
+    queryFn: ({ signal }) => api.workflow(selectedId ?? "", signal),
+    enabled: selectedId !== null,
+  });
+  const selected = !selectedDetail.error && selectedDetail.data?.id === selectedId
+    ? selectedDetail.data : null;
+  const selectedFamilyRead = useSelectedWorkflowFamily(selectedId);
+  const selectedFamily = selectedFamilyRead.error ? undefined : selectedFamilyRead.data ?? undefined;
   const [archiveFamily, setArchiveFamily] = useState<WorkflowFamily | null>(null);
   const [selectedRevisionId, setSelectedRevisionId] = useState<string | null>(null);
   const [newOpen, setNewOpen] = useState(false);
+  const { destination, discoverVisited, show: showDestination } = useWorkflowDestination();
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState("Custom image workflow");
   const [description, setDescription] = useState("");
@@ -135,7 +169,8 @@ export function WorkflowsView() {
   const save = useMutation({
     mutationFn: async () => {
       const revision = { engine_version: null, api_graph: JSON.parse(graph), ui_graph: JSON.parse(uiGraph), input_schema: JSON.parse(inputSchema), dependencies: JSON.parse(dependencies) };
-      if (editing && selected) {
+      if (editing) {
+        if (!selected) throw new Error("Reload workflow details before saving this revision.");
         // Two writes, and the second is the one that validates: a rejected
         // schema or dependency block used to leave a committed rename behind
         // while the dialog reported one failed save. Skipping the write that
@@ -295,24 +330,34 @@ export function WorkflowsView() {
   } = useWorkflowPackageImport(refresh);
   const openCreate = () => { setEditing(false); setName("Custom image workflow"); setDescription(""); setOperation("text_to_image"); setGraph("{}"); setUiGraph("{}"); setInputSchema("{}"); setDependencies("{}"); setNewOpen(true); };
   const openEdit = () => { if (!selected) return; const revision = selected.revisions.find((item) => item.id === selected.current_revision_id) ?? selected.revisions.at(-1); if (!revision) return; setEditing(true); setName(selected.name); setDescription(selected.description); setOperation(selected.operation); setGraph(JSON.stringify(revision.api_graph_json, null, 2)); setUiGraph(JSON.stringify(revision.ui_graph_json, null, 2)); setInputSchema(JSON.stringify(revision.input_schema_json, null, 2)); setDependencies(JSON.stringify(revision.dependencies_json, null, 2)); setNewOpen(true); };
-  // A verdict is about the workflow that was validated. Held globally by
-  // the mutation it stayed on screen when the selection moved, reading as
-  // the new workflow's result - the right answer under the wrong name.
-  const verdict = validate.data && validate.variables === selected?.id ? validate.data : null;
   const selectedRevision = selected?.revisions.find((revision) => revision.id === selectedRevisionId) ?? selected?.revisions.find((revision) => revision.id === selected.current_revision_id) ?? selected?.revisions.at(-1);
   const currentRevision = selected?.revisions.find((revision) => revision.id === selected.current_revision_id);
+  const viewingCurrentRevision = Boolean(currentRevision && selectedRevision?.id === currentRevision.id);
+  const detailInstall = installationInDetails(selectedFamily, selected?.id, selectedRevision?.id);
+  // The endpoint validates the current revision and returns its identity.
+  const verdict = viewingCurrentRevision && validate.variables === selected?.id
+    && validate.data?.revision_id === selectedRevision?.id ? validate.data : null;
   const editorRecoveryReady = !nativeEditor.isPending
     && !retrySubmission.isPending
     && !retryDraft.isPending;
   return (
-    <div className="page-view">
-      <header className="page-header"><div><h1>Workflows</h1></div><div className="storage-actions"><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => importInput.current?.click()}>Import bundle</button><button className="primary" onClick={openCreate}><Plus size={17} />New workflow</button></div></header>
-      {/* A list that could not be read is not an empty list, and a family
-          list that failed is not "no preferences". Both used to render as
-          the unselected state, which invites the reader to pick from
-          nothing and tells them nothing went wrong. */}
-      {(workflows.error || families.error) && (
-        <ErrorCallout message={((workflows.error ?? families.error) as Error).message} />
+    <div className="page-view workflow-page">
+      <header className="page-header"><div><h1>Workflows</h1></div>
+        <WorkflowDestinations current={destination} onChoose={showDestination} />
+        {/* Library actions show the library first: a dialog under a hidden region would lock the page invisibly. */}
+        <div className="storage-actions"><WorkflowRecipeManagerAction /><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => { showDestination("library"); importInput.current?.click(); }}>Import bundle</button><button className="primary" onClick={() => { showDestination("library"); openCreate(); }}><Plus size={17} />New workflow</button></div></header>
+      <WorkflowFamilyRecovery family={destination === "library" ? selectedFamily : undefined} selectedId={selectedId} onSelectionChange={setSelectedId} />
+      <div hidden={destination !== "library"}>
+      {selectedFamilyRead.error && <div>
+        <ErrorCallout message={selectedFamilyRead.error.message} />
+        <button className="secondary compact-button" onClick={() => void selectedFamilyRead.refetch()}>Retry workflow family</button>
+      </div>}
+      {selectedDetail.error && (
+        <div>
+          <ErrorCallout message={selectedDetail.error.message} />
+          <button className="secondary compact-button" disabled={selectedDetail.isFetching}
+            onClick={() => void selectedDetail.refetch()}>Retry workflow details</button>
+        </div>
       )}
       {(importError || clone.error || restore.error || exportBundle.error || downloadForComfy.error || nativeEditor.error || retrySubmission.error || retryDraft.error || popupError || validate.error) && <ErrorCallout message={(importError || clone.error || restore.error || exportBundle.error || downloadForComfy.error || nativeEditor.error || retrySubmission.error || retryDraft.error || popupError || validate.error)?.message} />}
       {packageReview && <WorkflowPackageReview analysis={packageReview.analysis} fileName={packageReview.fileName} uiGraph={packageReview.uiGraph} onImported={() => { closePackageReview(); refresh(); }} onClose={closePackageReview} />}
@@ -341,6 +386,10 @@ export function WorkflowsView() {
               Open ComfyUI manually
             </a>
           )}
+        </div>
+      )}
+      {(editorPhase || pendingDraft || pendingSubmission || editorNotice) && (
+        <div className="storage-actions">
           {editorPhase && <span role="status" className="muted">{editorPhaseLabel[editorPhase]}</span>}
           {pendingDraft && editorRecoveryReady && (
             <button
@@ -372,7 +421,7 @@ export function WorkflowsView() {
           {editorNotice && <span role="status" className="muted">{editorNotice}</span>}
         </div>
       )}
-      {selectedFamily && <WorkflowFamilyVariants key={`variants-${selectedFamily.id}`} family={selectedFamily} />}
+      {selectedFamily && <WorkflowFamilyVariants key={`variants-${selectedFamily.id}`} family={selectedFamily} onReviewInstall={reviewInstall} />}
       {selectedFamily && <WorkflowFamilyDependencies key={`dependencies-${selectedFamily.id}`} familyId={selectedFamily.id} />}
       {selectedFamily && <WorkflowFamilyPreferences family={selectedFamily} />}
       {selectedFamily && <WorkflowFamilyUsage key={`usage-${selectedFamily.id}`} familyId={selectedFamily.id} />}
@@ -390,10 +439,13 @@ export function WorkflowsView() {
           onClose={() => setArchiveFamily(null)}
         />
       )}
+      {downloadsQueued && <p role="status">Downloads queued. Follow their progress in Jobs.</p>}
+      {installReview && <WorkflowInstallOfferDialog key={installReview.offer.id}
+        offer={installReview.offer} workflowName={installReview.name}
+        onClose={() => setInstallReview(null)}
+        onQueued={() => { setInstallReview(null); setDownloadsQueued(true); }} />}
       <div className="workflow-layout">
         <WorkflowFamilyList
-          families={families.data ?? []}
-          workflows={workflows.data ?? []}
           selectedId={selectedId}
           onSelect={(workflow) => {
             setSelectedId(workflow.id);
@@ -401,15 +453,27 @@ export function WorkflowsView() {
           }}
           includeArchived={includeArchived}
           onIncludeArchivedChange={setIncludeArchived}
-          loading={families.isPending || workflows.isPending}
+          onReviewInstall={reviewInstall}
+          installationInDetails={detailInstall.workflowId}
         />
-        <div className="workflow-detail">{selected && selectedRevision ? <><div className="detail-title"><div><small>{selected.operation}</small><h2>{selected.name}</h2><p>{selected.description}</p></div><div className="row-actions"><button className="secondary compact-button" onClick={openEdit}>New revision</button><button className="secondary compact-button" onClick={() => clone.mutate(selected.id)}>Duplicate</button><button className="secondary compact-button" onClick={() => exportBundle.mutate(selected.id)}>Export</button><button className="secondary compact-button" onClick={() => validate.mutate(selected.id)}>Validate</button></div></div><div className="workflow-revision-bar"><label>Revision<select value={selectedRevision.id} onChange={(event) => setSelectedRevisionId(event.target.value)}>{[...selected.revisions].sort((a, b) => b.version - a.version).map((revision) => <option key={revision.id} value={revision.id}>v{revision.version}{revision.id === selected.current_revision_id ? " · current" : ""}</option>)}</select></label>{selectedRevision.id !== selected.current_revision_id && <button className="secondary compact-button" onClick={() => restore.mutate({ id: selected.id, revisionId: selectedRevision.id })}>Restore as new revision</button>}<span className={`badge ${selectedRevision.trusted ? "likely" : "advanced_import"}`}>{selectedRevision.trusted ? "Trusted" : "Untrusted"}</span></div>
+        <div className="workflow-detail">{selected && selectedRevision ? <><div className="detail-title"><div><small>{selected.operation}</small><h2>{selected.name}</h2><p>{selected.description}</p></div><div className="row-actions"><button className="secondary compact-button" onClick={openEdit}>New revision</button><button className="secondary compact-button" onClick={() => clone.mutate(selected.id)}>Duplicate</button><button className="secondary compact-button" onClick={() => exportBundle.mutate(selected.id)}>Export</button><button className="secondary compact-button" disabled={!viewingCurrentRevision || validate.isPending} onClick={() => validate.mutate(selected.id)}>{validate.isPending ? "Validating..." : "Validate"}</button></div></div><div className="workflow-revision-bar"><label>Revision<select value={selectedRevision.id} onChange={(event) => setSelectedRevisionId(event.target.value)}>{[...selected.revisions].sort((a, b) => b.version - a.version).map((revision) => <option key={revision.id} value={revision.id}>v{revision.version}{revision.id === selected.current_revision_id ? " · current" : ""}</option>)}</select></label>{selectedRevision.id !== selected.current_revision_id && <button className="secondary compact-button" onClick={() => restore.mutate({ id: selected.id, revisionId: selectedRevision.id })}>Restore as new revision</button>}<span className={`badge ${selectedRevision.trusted ? "likely" : "advanced_import"}`}>{selectedRevision.trusted ? "Trusted" : "Untrusted"}</span></div>
+          <WorkflowInstallStatus
+            progress={detailInstall.progress}
+            workflowName={selected.name} revisionId={selectedRevision.id} />
+          <WorkflowRevisionHistory key={selected.id} workflow={selected}
+            selectedRevisionId={selectedRevision.id} onInspect={setSelectedRevisionId} />
           <WorkflowRevisionReviewPanel
             key={`${selected.id}:${selectedRevision.id}`}
             workflowId={selected.id}
             revisionId={selectedRevision.id}
           />
-          <section className="workflow-input-section"><h3>Declared controls</h3><WorkflowControls schema={selectedRevision.input_schema_json} /></section><details open><summary>Executable graph</summary><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre></details><details><summary>Dependencies</summary><pre>{JSON.stringify(selectedRevision.dependencies_json, null, 2)}</pre></details>{currentRevision && currentRevision.id !== selectedRevision.id && <details><summary>Compare with current revision</summary><div className="workflow-compare"><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre><pre>{JSON.stringify(currentRevision.api_graph_json, null, 2)}</pre></div></details>}{verdict && <div className={`callout ${verdict.valid ? "success" : "error"}`} role={verdict.valid ? "status" : "alert"}>{verdict.valid ? "Workflow and declared dependencies are valid for the active media engine." : verdict.errors.join("\n")}{verdict.warnings.map((warning) => `\nWarning: ${warning}`)}</div>}</> : <EmptyState icon={<WorkflowIcon />} title="Select a workflow" body="Review its revision, inputs, dependencies, and validation." />}</div>
+          <WorkflowRevisionActivation workflowId={selected.id} revision={selectedRevision}
+            current={viewingCurrentRevision}
+            available={!selectedFamilyRead.isLoading && !selectedFamilyRead.error
+              && !(selected?.family_id && !selectedFamily)
+              && !(selectedFamily?.archived || selectedFamily?.enabled === false)} />
+          {!viewingCurrentRevision && <p className="muted">Select the current revision to validate it.</p>}
+          <section className="workflow-input-section"><h3>Declared controls</h3><WorkflowControls schema={selectedRevision.input_schema_json} /></section><details open><summary>Executable graph</summary><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre></details><details><summary>Dependencies</summary><pre>{JSON.stringify(selectedRevision.dependencies_json, null, 2)}</pre></details>{currentRevision && currentRevision.id !== selectedRevision.id && <WorkflowRevisionComparison key={selectedRevision.id + ":" + currentRevision.id} selected={selectedRevision} current={currentRevision} />}{verdict && <div className={`callout ${verdict.valid ? "success" : "error"}`} role={verdict.valid ? "status" : "alert"}>{verdict.valid ? "Workflow and declared dependencies are valid for the active media engine." : verdict.errors.join("\n")}{verdict.warnings.map((warning) => `\nWarning: ${warning}`)}</div>}</> : selectedId && selectedDetail.isPending ? <p role="status">Loading workflow details…</p> : selectedDetail.error ? <p className="muted">Workflow details are unavailable.</p> : <EmptyState icon={<WorkflowIcon />} title="Select a workflow" body="Review its revision, inputs, dependencies, and validation." />}</div>
       </div>
       <RegistryInstallsPanel />
       <CustomNodesPanel />
@@ -428,10 +492,19 @@ export function WorkflowsView() {
           <label>UI workflow JSON<textarea rows={5} value={uiGraph} onChange={(event) => setUiGraph(event.target.value)} /></label>
           <label>Declared input schema JSON<textarea rows={6} value={inputSchema} onChange={(event) => setInputSchema(event.target.value)} /></label>
           <label>Dependencies JSON<textarea rows={5} value={dependencies} onChange={(event) => setDependencies(event.target.value)} /></label>
+          {editing && !selected && (
+            <div role="alert">
+              <p>Workflow details are unavailable. Your edits remain in this dialog.</p>
+              <button className="secondary compact-button" disabled={selectedDetail.isFetching}
+                onClick={() => void selectedDetail.refetch()}>Reload workflow details</button>
+            </div>
+          )}
           {save.error && <ErrorCallout message={save.error.message} />}
-          <footer><button className="secondary" onClick={() => setNewOpen(false)}>Cancel</button><button className="primary" disabled={!name.trim() || save.isPending} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : editing ? "Create revision" : "Save workflow"}</button></footer>
+          <footer><button className="secondary" onClick={() => setNewOpen(false)}>Cancel</button><button className="primary" disabled={!name.trim() || save.isPending || (editing && !selected)} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : editing ? "Create revision" : "Save workflow"}</button></footer>
         </AccessibleDialog>
       )}
+      </div>
+      {discoverVisited && <div hidden={destination !== "discover"}><WorkflowDiscover onImported={() => { refresh(); showDestination("library"); }} /></div>}
     </div>
   );
 }

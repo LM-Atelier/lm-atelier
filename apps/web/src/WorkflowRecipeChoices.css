@@ -1,0 +1,11 @@
+.chat-workflow-recipes { min-width: 0; grid-column: 1 / -1; }
+.chat-workflow-recipe-body { max-height: min(18vh, 160px); overflow: auto; }
+.chat-workflow-recipes summary { cursor: pointer; color: var(--ink-secondary); font-size: 12px; }
+.chat-workflow-recipes p { color: var(--ink-muted); font-size: 12px; overflow-wrap: anywhere; }
+.workflow-recipe-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: calc(10px * var(--spacing-scale, 1)); min-width: 0; }
+.workflow-recipe-choice { display: grid; align-content: start; gap: calc(5px * var(--spacing-scale, 1)); min-width: 0; }
+.workflow-recipe-choice label { color: var(--ink-secondary); font-size: 12px; }
+.workflow-recipe-choice select { min-width: 0; width: 100%; color: var(--ink-primary); background: var(--panel-2); border: 1px solid var(--line-control); border-radius: 8px; padding: calc(8px * var(--spacing-scale, 1)); }
+.workflow-recipe-status { color: var(--ink-muted); overflow-wrap: anywhere; }
+.workflow-recipe-status small { font-size: 12px; }
+@media (max-width: 600px) { .workflow-recipe-choices { grid-template-columns: minmax(0, 1fr); } }

@@ -5,11 +5,14 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import uuid
 from pathlib import Path
 
 import pytest
+from directory_security import create_owned_directory
+from test_shared_asset_volume_qualification import eligible_disk as eligible_disk
 
 from local_lm import filesystem_links as links
 from local_lm import shared_asset_contract_v1 as contract
@@ -25,6 +28,13 @@ from local_lm.shared_asset_contract_v1 import (
     require_usable_root,
     store_access_mode,
 )
+
+#: A settled identity for the cases below whose parameter name is the record
+#: itself. Generating one would name the same case differently in every process,
+#: and cases that cannot agree on their names cannot be shared between
+#: processes. The second is the first written the way a store must not write it.
+_SETTLED_LIBRARY_UUID = "0f1d4c3b-2a69-4e57-9b80-15d7c6e2a834"
+_SETTLED_LIBRARY_UUID_UNPUNCTUATED = "0F1D4C3B2A694E579B8015D7C6E2A834"
 
 
 def _identity_record(**overrides: object) -> dict[str, object]:
@@ -98,7 +108,7 @@ def test_concurrent_initializers_converge_on_one_identity(
     # on the one this platform actually uses. Patching the other seam would
     # pass while testing nothing.
     if os.name == "nt":
-        real_link_entry = contract.link_entry
+        real_link_entry = links.link_entry
 
         def gated_nt_link(anchor: object, source: str, destination: str) -> bool:
             first = gate()
@@ -111,13 +121,26 @@ def test_concurrent_initializers_converge_on_one_identity(
     else:
         real_link = os.link
 
-        def gated_link(source: str, destination: str, **kwargs: object) -> None:
+        def gated_link(
+            source: str,
+            destination: str,
+            *,
+            src_dir_fd: int | None = None,
+            dst_dir_fd: int | None = None,
+            follow_symlinks: bool = True,
+        ) -> None:
             first = gate()
-            real_link(source, destination, **kwargs)
+            real_link(
+                source,
+                destination,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+                follow_symlinks=follow_symlinks,
+            )
             if first:
                 first_published.set()
 
-        monkeypatch.setattr(contract.os, "link", gated_link)
+        monkeypatch.setattr(os, "link", gated_link)
     results: list[StoreIdentity] = []
     errors: list[BaseException] = []
 
@@ -256,8 +279,8 @@ def test_write_probes_never_run_after_containment_failure(
             raise AssertionError("write probe ran after containment failure")
         return real_open(path, flags, *args)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(contract.os, "replace", record_replace)
-    monkeypatch.setattr(contract.os, "open", record_open)
+    monkeypatch.setattr(os, "replace", record_replace)
+    monkeypatch.setattr(os, "open", record_open)
     report = probe_store_root(root=link, minimum_free_bytes=0)
     assert not report.usable
     assert writes == []
@@ -282,14 +305,14 @@ def test_injected_filesystem_failures_never_leak_paths(
         else:
             # On POSIX this also covers the anchor's own open, which must
             # refuse just as quietly.
-            monkeypatch.setattr(contract.os, "open", explode)
+            monkeypatch.setattr(os, "open", explode)
     elif target == "link":
         if windows:
             monkeypatch.setattr(contract, "link_entry", explode)
         else:
-            monkeypatch.setattr(contract.os, "link", explode)
+            monkeypatch.setattr(os, "link", explode)
     else:
-        monkeypatch.setattr(contract.os, "fsync", explode)
+        monkeypatch.setattr(os, "fsync", explode)
     with pytest.raises(SharedAssetContractError) as caught:
         initialize_store_identity(root=root)
     assert str(caught.value) == "shared asset store is invalid"
@@ -377,7 +400,7 @@ def test_a_root_swapped_before_the_anchor_is_never_adopted(
     root.mkdir()
     foreign = tmp_path / "foreign"
     outcomes: list[str] = []
-    real_anchor = contract.AnchoredDirectory
+    real_anchor = links.AnchoredDirectory
 
     def swap_then_anchor(store: Path, **kwargs: object) -> object:
         outcomes.append(_swap_root_for_redirect(root, foreign))
@@ -404,7 +427,7 @@ def test_the_held_root_cannot_be_removed_while_anchored(tmp_path: Path) -> None:
 
     root = tmp_path / "packages"
     root.mkdir()
-    with contract.AnchoredDirectory(root), pytest.raises(OSError):
+    with links.AnchoredDirectory(root), pytest.raises(OSError):
         os.rmdir(root)
     os.rmdir(root)
     assert not root.exists()
@@ -422,7 +445,7 @@ def test_publication_persists_the_directory_entry_on_posix(
         synced.append(fd)
         real_fsync(fd)
 
-    monkeypatch.setattr(contract.os, "fsync", record_fsync)
+    monkeypatch.setattr(os, "fsync", record_fsync)
     initialize_store_identity(root=root)
     # One fsync for the staged record, one for the directory entry.
     assert len(synced) == 2
@@ -518,11 +541,15 @@ def test_an_oversized_supplementary_name_refuses_before_any_native_call(
         b"not json at all",
         b"\xff\xfe\x00\x00",
         json.dumps({"schema": "some-other-store"}).encode(),
-        json.dumps(_identity_record(schema="some-other-store")).encode(),
-        json.dumps(_identity_record(format_version=0)).encode(),
-        json.dumps(_identity_record(min_reader_version=True)).encode(),
+        json.dumps(
+            _identity_record(schema="some-other-store", library_uuid=_SETTLED_LIBRARY_UUID)
+        ).encode(),
+        json.dumps(_identity_record(format_version=0, library_uuid=_SETTLED_LIBRARY_UUID)).encode(),
+        json.dumps(
+            _identity_record(min_reader_version=True, library_uuid=_SETTLED_LIBRARY_UUID)
+        ).encode(),
         json.dumps(_identity_record(library_uuid="not-a-uuid")).encode(),
-        json.dumps(_identity_record(library_uuid=uuid.uuid4().hex.upper())).encode(),
+        json.dumps(_identity_record(library_uuid=_SETTLED_LIBRARY_UUID_UNPUNCTUATED)).encode(),
         json.dumps([1, 2, 3]).encode(),
     ],
 )
@@ -548,10 +575,11 @@ def test_an_unreadable_identity_refuses_rather_than_reading_as_absent(tmp_path: 
     assert str(caught.value) == INVALID_STORE
 
 
+@pytest.mark.usefixtures("eligible_disk")
 def test_rename_probe_is_wired_to_a_real_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "packages"
+    root = create_owned_directory(tmp_path / "packages")
     initialize_store_identity(root=root)
 
     def refuse(*_args: object, **_kwargs: object) -> None:
@@ -621,12 +649,12 @@ def test_negotiation_orders_reader_before_writer() -> None:
     with pytest.raises(SharedAssetContractError):
         negotiate_store_access(compatible, reader_version=0)
     with pytest.raises(SharedAssetContractError):
-        negotiate_store_access(compatible, writer_version=True)  # type: ignore[arg-type]
+        negotiate_store_access(compatible, writer_version=True)
 
 
+@pytest.mark.usefixtures("eligible_disk")
 def test_probe_battery_accepts_a_plain_writable_directory(tmp_path: Path) -> None:
-    root = tmp_path / "packages"
-    root.mkdir()
+    root = create_owned_directory(tmp_path / "packages")
     report = probe_store_root(root=root, minimum_free_bytes=0)
     assert report.directory
     assert report.no_reparse_points
@@ -647,7 +675,7 @@ def _convert_to_junction_in_place(directory: Path, target: Path) -> bool:
     two operations was not enough - and no elevation.
     """
 
-    if os.name != "nt":
+    if sys.platform != "win32":
         return False
     import ctypes
     from ctypes import wintypes
@@ -843,8 +871,7 @@ def test_the_probe_refuses_a_root_whose_locks_child_is_redirected(tmp_path: Path
     chain, which really is clean. The usability verdict is what must refuse.
     """
 
-    root = tmp_path / "packages"
-    root.mkdir()
+    root = create_owned_directory(tmp_path / "packages")
     foreign = tmp_path / "foreign"
     foreign.mkdir()
     if os.name == "nt":
@@ -877,6 +904,7 @@ def test_probe_battery_fails_closed_for_missing_or_file_roots(tmp_path: Path) ->
         require_usable_root(root=file_root)
 
 
+@pytest.mark.usefixtures("eligible_disk")
 def test_every_probe_in_one_report_sees_the_same_held_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -888,13 +916,17 @@ def test_every_probe_in_one_report_sees_the_same_held_directory(
     probe is handed, it is the SAME held directory.
     """
 
-    root = tmp_path / "packages"
-    root.mkdir()
+    root = create_owned_directory(tmp_path / "packages")
     seen: list[object] = []
 
+    real_private = links.directory_private_to_current_user
     real_rename = contract._probe_atomic_rename
     real_create = contract._probe_exclusive_create
-    real_capacity = contract.available_bytes
+    real_capacity = links.available_bytes
+
+    def record_private(anchor: links.AnchoredDirectory) -> bool:
+        seen.append(anchor)
+        return real_private(anchor)
 
     def record_rename(anchor: object) -> bool:
         seen.append(anchor)
@@ -908,13 +940,14 @@ def test_every_probe_in_one_report_sees_the_same_held_directory(
         seen.append(anchor)
         return real_capacity(anchor)  # type: ignore[arg-type]
 
+    monkeypatch.setattr(contract, "directory_private_to_current_user", record_private)
     monkeypatch.setattr(contract, "_probe_atomic_rename", record_rename)
     monkeypatch.setattr(contract, "_probe_exclusive_create", record_create)
     monkeypatch.setattr(contract, "available_bytes", record_capacity)
 
     report = probe_store_root(root=root)
 
-    assert len(seen) == 3, "a probe stopped being exercised"
+    assert len(seen) == 4, "a probe stopped being exercised"
     first = seen[0]
     assert all(entry is first for entry in seen), "the report combined two identities"
     assert report.usable
@@ -938,8 +971,7 @@ def test_a_refused_capacity_query_fails_closed(
 ) -> None:
     """An unanswerable capacity question is not a passing one."""
 
-    root = tmp_path / "packages"
-    root.mkdir()
+    root = create_owned_directory(tmp_path / "packages")
 
     def refuse(_anchor: object) -> int:
         raise links.AnchoredDirectoryError(links.CONTAINMENT_REFUSED)
@@ -1063,8 +1095,7 @@ def test_rename_into_a_free_name_works_in_either_mode(tmp_path: Path) -> None:
 
 
 def test_free_space_floor_is_enforced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    root = tmp_path / "packages"
-    root.mkdir()
+    root = create_owned_directory(tmp_path / "packages")
     # Injected at the anchored capacity query, which is now the mechanism.
     # Patching a pathname-based one would no longer be reached, and a probe
     # that silently stopped being exercised would still go green.
@@ -1075,20 +1106,20 @@ def test_free_space_floor_is_enforced(tmp_path: Path, monkeypatch: pytest.Monkey
     with pytest.raises(SharedAssetContractError):
         probe_store_root(root=root, minimum_free_bytes=-1)
     with pytest.raises(SharedAssetContractError):
-        probe_store_root(root=root, minimum_free_bytes=True)  # type: ignore[arg-type]
+        probe_store_root(root=root, minimum_free_bytes=True)
 
 
 def test_access_mode_requires_an_existing_identity(tmp_path: Path) -> None:
-    root = tmp_path / "packages"
-    root.mkdir()
+    root = create_owned_directory(tmp_path / "packages")
     with pytest.raises(SharedAssetContractError):
         store_access_mode(root=root)
 
 
+@pytest.mark.usefixtures("eligible_disk")
 def test_access_mode_resolves_read_write_then_degrades(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "packages"
+    root = create_owned_directory(tmp_path / "packages")
     initialize_store_identity(root=root)
     assert store_access_mode(root=root) == "read_write"
     # A store written by a newer format degrades this build to read-only.
@@ -1112,6 +1143,7 @@ def test_access_mode_never_creates_a_library(tmp_path: Path) -> None:
     assert not root.exists()
 
 
+@pytest.mark.usefixtures("eligible_disk")
 def test_the_exclusive_probe_refuses_a_wrong_failure_as_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1124,9 +1156,9 @@ def test_the_exclusive_probe_refuses_a_wrong_failure_as_proof(
     that passes precisely when the thing it measures is broken.
     """
 
-    root = tmp_path / "packages"
+    root = create_owned_directory(tmp_path / "packages")
     initialize_store_identity(root=root)
-    real_create = contract.create_entry
+    real_create = links.create_entry
     calls: list[str] = []
 
     def fail_second_create(anchor: object, name: str) -> int:
@@ -1148,10 +1180,11 @@ def test_the_exclusive_probe_refuses_a_wrong_failure_as_proof(
     assert not report.usable
 
 
+@pytest.mark.usefixtures("eligible_disk")
 def test_a_collision_still_proves_exclusive_creation(tmp_path: Path) -> None:
     """The other direction, so the control above cannot pass vacuously."""
 
-    root = tmp_path / "packages"
+    root = create_owned_directory(tmp_path / "packages")
     initialize_store_identity(root=root)
     report = probe_store_root(root=root, minimum_free_bytes=0)
     assert report.exclusive_create

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 
 import httpx
+from run_waits import PATIENCE_SECONDS
 
-from local_lm.adapters.base import ChatRequest, estimate_chat_tokens
+from local_lm.adapters.base import ChatEvent, ChatRequest, estimate_chat_tokens
 from local_lm.adapters.contracts import MAX_ADAPTER_EVENT_BYTES
 from local_lm.adapters.llama_cpp import LlamaCppAdapter
 
@@ -235,7 +237,7 @@ async def test_llama_adapter_sends_tools_and_streams_structured_deltas() -> None
 
 async def test_llama_adapter_completes_when_terminal_choice_does_not_close_stream() -> None:
     class NeverClosingTerminalStream(httpx.AsyncByteStream):
-        async def __aiter__(self):  # type: ignore[no-untyped-def]
+        async def __aiter__(self) -> AsyncIterator[bytes]:
             yield b'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
             yield (
                 b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
@@ -264,7 +266,7 @@ async def test_llama_adapter_completes_when_terminal_choice_does_not_close_strea
                     messages=[{"role": "user", "content": "Finish"}],
                 ),
             ),
-            timeout=0.5,
+            timeout=PATIENCE_SECONDS,
         )
         assert [event.type for event in events] == ["delta", "usage", "complete"]
         assert events[-1].data["finish_reason"] == "stop"
@@ -352,9 +354,9 @@ async def test_llama_adapter_cancels_a_blocked_non_streaming_vision_completion()
     )
     task = asyncio.create_task(_collect_events(adapter, request))
     try:
-        await asyncio.wait_for(started.wait(), timeout=0.5)
+        await asyncio.wait_for(started.wait(), timeout=PATIENCE_SECONDS)
         await adapter.cancel(request.run_id)
-        events = await asyncio.wait_for(task, timeout=0.5)
+        events = await asyncio.wait_for(task, timeout=PATIENCE_SECONDS)
         assert [event.type for event in events] == ["cancelled"]
     finally:
         if not task.done():
@@ -363,13 +365,13 @@ async def test_llama_adapter_cancels_a_blocked_non_streaming_vision_completion()
         await adapter.close()
 
 
-async def _collect_events(adapter: LlamaCppAdapter, request: ChatRequest):  # type: ignore[no-untyped-def]
+async def _collect_events(adapter: LlamaCppAdapter, request: ChatRequest) -> list[ChatEvent]:
     return [event async for event in adapter.stream(request)]
 
 
 async def test_llama_adapter_names_an_http_error_after_partial_stream_output() -> None:
     class BrokenStream(httpx.AsyncByteStream):
-        async def __aiter__(self):  # type: ignore[no-untyped-def]
+        async def __aiter__(self) -> AsyncIterator[bytes]:
             yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
             raise httpx.ReadError("")
 
@@ -406,7 +408,7 @@ async def test_llama_adapter_names_an_http_error_after_partial_stream_output() -
 
 async def test_llama_adapter_recovers_when_only_length_terminal_frames_are_lost() -> None:
     class TerminalBrokenStream(httpx.AsyncByteStream):
-        async def __aiter__(self):  # type: ignore[no-untyped-def]
+        async def __aiter__(self) -> AsyncIterator[bytes]:
             yield b'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
             yield b'data: {"choices":[{"delta":{"content":"b"}}]}\n\n'
             raise httpx.ReadError("")
@@ -448,7 +450,7 @@ async def test_llama_adapter_recovers_when_only_length_terminal_frames_are_lost(
 
 async def test_llama_adapter_retries_a_fixed_seed_truncated_stream_once() -> None:
     class TruncatedStream(httpx.AsyncByteStream):
-        async def __aiter__(self):  # type: ignore[no-untyped-def]
+        async def __aiter__(self) -> AsyncIterator[bytes]:
             yield b'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
             raise httpx.ReadError("")
 
@@ -503,7 +505,7 @@ async def test_llama_adapter_retries_a_fixed_seed_truncated_stream_once() -> Non
 
 async def test_llama_adapter_does_not_merge_a_mismatched_retry() -> None:
     class TruncatedStream(httpx.AsyncByteStream):
-        async def __aiter__(self):  # type: ignore[no-untyped-def]
+        async def __aiter__(self) -> AsyncIterator[bytes]:
             yield b'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
             raise httpx.ReadError("")
 
@@ -614,7 +616,7 @@ async def test_llama_adapter_cancel_wakes_a_blocked_stream() -> None:
     receiving = asyncio.Event()
 
     class StalledStream(httpx.AsyncByteStream):
-        async def __aiter__(self):  # type: ignore[no-untyped-def]
+        async def __aiter__(self) -> AsyncIterator[bytes]:
             receiving.set()
             await asyncio.Event().wait()
             yield b"unreachable"
@@ -635,9 +637,9 @@ async def test_llama_adapter_cancel_wakes_a_blocked_stream() -> None:
     request = ChatRequest(run_id="cancel-blocked", messages=[])
     collecting = asyncio.create_task(_collect_events(adapter, request))
     try:
-        await asyncio.wait_for(receiving.wait(), timeout=0.5)
+        await asyncio.wait_for(receiving.wait(), timeout=PATIENCE_SECONDS)
         await adapter.cancel(request.run_id)
-        events = await asyncio.wait_for(collecting, timeout=0.5)
+        events = await asyncio.wait_for(collecting, timeout=PATIENCE_SECONDS)
     finally:
         if not collecting.done():
             collecting.cancel()
@@ -685,7 +687,7 @@ async def test_llama_adapter_redacts_http_error_details() -> None:
 
 async def test_llama_adapter_stops_a_silent_stream_after_inactivity() -> None:
     class StalledStream(httpx.AsyncByteStream):
-        async def __aiter__(self):  # type: ignore[no-untyped-def]
+        async def __aiter__(self) -> AsyncIterator[bytes]:
             await asyncio.Event().wait()
             yield b"unreachable"
 

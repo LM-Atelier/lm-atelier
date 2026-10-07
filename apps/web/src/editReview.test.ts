@@ -56,6 +56,45 @@ describe("editReviewSummary", () => {
     })).toBe("Edit review found your change");
   });
 
+  it("reports a result whose pixels did not change, whatever the model said", () => {
+    expect(editReviewSummary({
+      image_edit_verification: {
+        status: "complete",
+        reason: "no_measurable_change",
+        assessment,
+        difference: { mean_absolute_difference: 0.2, changed: false, comparable: true },
+      },
+    })).toBe("Edit review measured no change where you asked for one");
+  });
+
+  it("says the picture changed when the review did not find the change but the pixels moved", () => {
+    expect(editReviewSummary({
+      image_edit_verification: {
+        status: "complete",
+        automatic_retry_executed: false,
+        assessment: { ...assessment, requested_change_visible: false },
+        difference: { mean_absolute_difference: 15.55, changed: true, comparable: true, threshold: 2 },
+      },
+    })).toBe("Edit review did not find the change you asked for · the picture did change");
+  });
+
+  it("keeps the flat wording when the comparison agrees or could not be made", () => {
+    for (const difference of [
+      { mean_absolute_difference: 0.4, changed: false, comparable: true, threshold: 2 },
+      { mean_absolute_difference: 0, changed: true, comparable: false, threshold: 2 },
+      undefined,
+    ]) {
+      expect(editReviewSummary({
+        image_edit_verification: {
+          status: "complete",
+          automatic_retry_executed: false,
+          assessment: { ...assessment, requested_change_visible: false },
+          ...(difference ? { difference } : {}),
+        },
+      })).toBe("Edit review did not find the change you asked for");
+    }
+  });
+
   it("reports a missing change and collateral change separately", () => {
     expect(editReviewSummary({
       image_edit_verification: {
@@ -74,7 +113,7 @@ describe("editReviewSummary", () => {
   });
 
   it("stays silent for the skips that describe an ordinary message", () => {
-    for (const reason of ["not_image_edit", "disabled", "eligible", "cancelled"]) {
+    for (const reason of ["not_image_edit", "disabled", "eligible", "cancelled", "new_canvas"]) {
       expect(editReviewSummary({
         image_edit_verification: { status: "skipped", reason, automatic_retry_executed: false },
       })).toBeNull();
@@ -89,6 +128,38 @@ describe("editReviewSummary", () => {
         automatic_retry_executed: false,
       },
     })).toBe("Edit review did not run");
+  });
+
+  it("says a review that ran and reached no verdict could not tell", () => {
+    for (const reason of [
+      "change_unaccounted",
+      "inventory_unavailable",
+      "assessment_unavailable",
+      "invalid_assessment",
+    ]) {
+      expect(editReviewSummary({
+        image_edit_verification: { status: "skipped", reason, automatic_retry_executed: false },
+      })).toBe("Edit review could not tell");
+    }
+  });
+
+  it("keeps the measurement beside a review that could not tell", () => {
+    expect(editReviewSummary({
+      image_edit_verification: {
+        status: "skipped",
+        reason: "change_unaccounted",
+        automatic_retry_executed: false,
+        difference: { comparable: true, changed: true },
+      },
+    })).toBe("Edit review could not tell · the picture did change");
+    expect(editReviewSummary({
+      image_edit_verification: {
+        status: "skipped",
+        reason: "change_unaccounted",
+        automatic_retry_executed: false,
+        difference: { comparable: true, changed: false },
+      },
+    })).toBe("Edit review could not tell");
   });
 
   it("invents nothing from an absent or malformed record", () => {

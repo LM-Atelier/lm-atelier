@@ -24,7 +24,7 @@ _UNIVERSAL_TAG = "py3-none-any"
 
 
 def _environment(**updates: str) -> dict[str, str]:
-    environment = default_environment()
+    environment = {key: str(value) for key, value in default_environment().items()}
     environment["extra"] = ""
     environment.update(updates)
     return environment
@@ -32,6 +32,7 @@ def _environment(**updates: str) -> dict[str, str]:
 
 def _file(
     filename: str = "example_package-1.2.3-py3-none-any.whl",
+    /,
     **updates: object,
 ) -> dict[str, object]:
     record: dict[str, object] = {

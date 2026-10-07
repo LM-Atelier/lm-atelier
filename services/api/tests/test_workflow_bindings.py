@@ -684,6 +684,22 @@ def test_model_asset_identity_includes_the_runtime_loader_name() -> None:
         first_identity.resource_kind, first_identity.identity
     ) != workflow_resource_identity_sha256(second_identity.resource_kind, second_identity.identity)
 
+    utility = ModelAssetInstall(
+        name="Background removal",
+        kind="background_removal",
+        local_path="C:/models/background-removal",
+        manifest_json={"sha256": "b" * 64, "comfy_name": "birefnet.safetensors"},
+        active=True,
+        verified_at=utcnow(),
+    )
+    utility_identity = materialize_model_asset(utility)
+    assert utility_identity.identity == {
+        "kind": "model_asset",
+        "asset_kind": "background_removal",
+        "runtime_reference": "birefnet.safetensors",
+        "sha256": "b" * 64,
+    }
+
     first.kind = "unsupported"
     with pytest.raises(WorkflowBindingError) as raised:
         materialize_model_asset(first)

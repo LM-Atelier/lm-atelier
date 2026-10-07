@@ -80,6 +80,10 @@ from .chat_item_removal_schema import (
     CREATE_CHAT_ITEM_REMOVAL_TRIGGER_SQL,
     DROP_CHAT_ITEM_REMOVAL_TRIGGER_SQL,
 )
+from .chat_recovery_schema import (
+    CREATE_CHAT_RECOVERY_TRIGGER_SQL,
+    DROP_CHAT_RECOVERY_TRIGGER_SQL,
+)
 from .db import Base
 from .domain import (
     ArtifactKind,
@@ -98,9 +102,22 @@ from .domain import (
     new_id,
     utcnow,
 )
+from .media_organization_catalog_schema import (
+    CATALOG_SEED_SQL,
+    CREATE_CATALOG_TRIGGER_SQL,
+    DROP_CATALOG_TRIGGER_SQL,
+)
 from .media_organization_schema import (
     CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL,
     DROP_MEDIA_ORGANIZATION_TRIGGER_SQL,
+)
+from .media_recovery_schema import (
+    CREATE_MEDIA_RECOVERY_TRIGGER_SQL,
+    DROP_MEDIA_RECOVERY_TRIGGER_SQL,
+)
+from .project_recovery_schema import (
+    CREATE_PROJECT_RECOVERY_TRIGGER_SQL,
+    DROP_PROJECT_RECOVERY_TRIGGER_SQL,
 )
 from .prompt_expansion_schema import (
     CREATE_PROMPT_EXPANSION_TRIGGER_SQL,
@@ -113,6 +130,10 @@ from .prompt_template_schema import (
 from .reference_review_schema import (
     CREATE_REFERENCE_REVIEW_TRIGGER_SQL,
     DROP_REFERENCE_REVIEW_TRIGGER_SQL,
+)
+from .workflow_recovery_schema import (
+    CREATE_WORKFLOW_RECOVERY_TRIGGER_SQL,
+    DROP_WORKFLOW_RECOVERY_TRIGGER_SQL,
 )
 
 
@@ -255,6 +276,77 @@ class Chat(TimestampMixin, Base):
     )
 
 
+class RecoveryItem(Base):
+    """A deletion membership whose subject keeps its own canonical history."""
+
+    __tablename__ = "recovery_items"
+    __table_args__ = (
+        UniqueConstraint("kind", "subject_id", name="uq_recovery_item_subject"),
+        Index("ix_recovery_item_expiry", "state", "purge_after", "deletion_id"),
+    )
+
+    deletion_id: Mapped[str] = mapped_column(
+        String(40), primary_key=True, default=lambda: new_id("recover")
+    )
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    # This identity survives permanent deletion, so it is not a cascading foreign key.
+    subject_id: Mapped[str] = mapped_column(String(128), index=True)
+    display_label: Mapped[str] = mapped_column(String(240))
+    original_project_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    original_project_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    purge_after: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    state: Mapped[str] = mapped_column(String(16), default="recoverable", index=True)
+    subject_revision: Mapped[str] = mapped_column(String(64))
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    delete_generated_media: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class RecoveryOperation(Base):
+    """Keep a bounded command result so retries never repeat a resource transition."""
+
+    __tablename__ = "recovery_operations"
+
+    kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    subject_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    operation_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    action: Mapped[str] = mapped_column(String(16))
+    deletion_id: Mapped[str] = mapped_column(String(40), index=True)
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    # Only the recovery DTO is kept, never a copy of the chat graph or its payloads.
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class RecoveryPreviewRecord(Base):
+    """A short-lived opaque revision bound to state that never leaves the server."""
+
+    __tablename__ = "recovery_previews"
+    __table_args__ = (Index("ix_recovery_preview_expiry", "expires_at"),)
+
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    subject_id: Mapped[str] = mapped_column(String(128), index=True)
+    deletion_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    subject_fingerprint: Mapped[str] = mapped_column(String(64))
+    impact_sha256: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class RecoveryBatchRecord(Base):
+    """Materialize bounded recovery identities and keep their committed replay result."""
+
+    __tablename__ = "recovery_batches"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    preview_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    fingerprints_json: Mapped[dict[str, str]] = mapped_column(JSON)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    operation_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
+    request_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    response_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+
 class Message(TimestampMixin, Base):
     __tablename__ = "messages"
 
@@ -368,6 +460,85 @@ class WorkPlan(TimestampMixin, Base):
         cascade="all, delete-orphan",
         order_by="WorkStep.ordinal",
     )
+
+
+class WorkPlanControl(Base):
+    """Queue eligibility, kept separate from execution and portable history."""
+
+    __tablename__ = "work_plan_controls"
+
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("work_plans.id", ondelete="CASCADE"), primary_key=True
+    )
+    state: Mapped[str] = mapped_column(String(16), default="eligible")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    eligible_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WorkPlanControlReceipt(Base):
+    """Exact successful command responses, retained for the owner's lifetime."""
+
+    __tablename__ = "work_plan_control_receipts"
+
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("work_plans.id", ondelete="CASCADE"), primary_key=True
+    )
+    command_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    action: Mapped[str] = mapped_column(String(16))
+    expected_revision: Mapped[int] = mapped_column(Integer)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class GenerationQueuePolicy(Base):
+    """Database-local dispatch policy; never part of portable conversation history."""
+
+    __tablename__ = "generation_queue_policies"
+
+    lane: Mapped[str] = mapped_column(String(16), primary_key=True)
+    dispatch_state: Mapped[str] = mapped_column(String(16), default="open")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class GenerationQueueReceipt(Base):
+    """Exact command retries retained for the database policy's lifetime."""
+
+    __tablename__ = "generation_queue_receipts"
+
+    lane: Mapped[str] = mapped_column(
+        ForeignKey("generation_queue_policies.lane", ondelete="CASCADE"), primary_key=True
+    )
+    command_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    action: Mapped[str] = mapped_column(String(24))
+    expected_revision: Mapped[int] = mapped_column(Integer)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class QueueOrderEntry(Base):
+    """Explicit ordering of visible owners, separate from acceptance audit facts."""
+
+    __tablename__ = "queue_order_entries"
+    __table_args__ = (CheckConstraint("position >= 0", name="ck_queue_order_position"),)
+
+    lane: Mapped[str] = mapped_column(String(16), primary_key=True)
+    owner_type: Mapped[str] = mapped_column(String(16), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    queue_group: Mapped[str] = mapped_column(String(100))
+    queue_resource: Mapped[str] = mapped_column(String(100))
+    priority: Mapped[int] = mapped_column(Integer)
+    position: Mapped[int] = mapped_column(Integer)
+
+
+class QueueOrderReceipt(Base):
+    """A durable relative move and its exact successful response."""
+
+    __tablename__ = "queue_order_receipts"
+
+    lane: Mapped[str] = mapped_column(
+        ForeignKey("generation_queue_policies.lane", ondelete="CASCADE"), primary_key=True
+    )
+    command_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    command_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON)
 
 
 class WorkStep(TimestampMixin, Base):
@@ -532,6 +703,12 @@ class ResponseRevision(TimestampMixin, Base):
     )
     sequence: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16), default=MessageStatus.PENDING.value, index=True)
+    activity_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    @property
+    def activity(self) -> dict[str, Any] | None:
+        """Return the activity identity captured with this response snapshot."""
+        return self.activity_json
 
     feedback_rows: Mapped[list[ResponseFeedback]] = relationship(
         cascade="all, delete-orphan", foreign_keys="ResponseFeedback.response_revision_id"
@@ -550,6 +727,32 @@ class ResponseRevision(TimestampMixin, Base):
         cascade="all, delete-orphan",
         order_by="ResponseRevisionPart.position",
     )
+
+
+class ChatActivityEvent(Base):
+    """Keep terminal activity identities separate from portable conversation content."""
+
+    __tablename__ = "chat_activity_events"
+    __table_args__ = (
+        UniqueConstraint("job_id", "attempt", name="uq_chat_activity_attempt"),
+        Index("ix_chat_activity_chat_sequence", "chat_id", "sequence"),
+        {"sqlite_autoincrement": True},
+    )
+
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[str] = mapped_column(String(40), unique=True)
+    chat_id: Mapped[str] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"))
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), index=True
+    )
+    response_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("response_revisions.id", ondelete="CASCADE"), index=True
+    )
+    # Retaining the execution identity also retains deduplication after job cleanup.
+    job_id: Mapped[str] = mapped_column(String(40))
+    attempt: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(16))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class ResponseRevisionPart(TimestampMixin, Base):
@@ -708,6 +911,7 @@ class MediaCollection(TimestampMixin, Base):
             name="ck_media_collection_description",
         ),
         CheckConstraint("version > 0", name="ck_media_collection_version_positive"),
+        Index("ix_media_collection_catalog_order", "created_at", "id"),
     )
 
     id: Mapped[str] = mapped_column(String(43), primary_key=True)
@@ -765,6 +969,7 @@ class MediaTag(TimestampMixin, Base):
             name="ck_media_tag_color",
         ),
         CheckConstraint("version > 0", name="ck_media_tag_version_positive"),
+        Index("ix_media_tag_catalog_order", "created_at", "id"),
     )
 
     id: Mapped[str] = mapped_column(String(41), primary_key=True)
@@ -772,6 +977,42 @@ class MediaTag(TimestampMixin, Base):
     label: Mapped[str] = mapped_column(String(200))
     color: Mapped[str | None] = mapped_column(String(7), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class MediaOrganizationCatalogRevision(Base):
+    """A catalog-wide revision also advanced by membership version changes."""
+
+    __tablename__ = "media_organization_catalog_revisions"
+    __table_args__ = (
+        CheckConstraint("kind IN ('albums', 'tags')", name="ck_media_catalog_kind"),
+        CheckConstraint(
+            "typeof(revision) = 'integer' AND revision BETWEEN 1 AND 9007199254740991",
+            name="ck_media_catalog_revision",
+        ),
+    )
+
+    kind: Mapped[str] = mapped_column(String(8), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer)
+
+
+class MediaOrganizationCreation(Base):
+    """The original response to an explicitly keyed catalog creation."""
+
+    __tablename__ = "media_organization_creations"
+    __table_args__ = (
+        CheckConstraint("kind IN ('albums', 'tags')", name="ck_media_creation_kind"),
+        CheckConstraint(
+            "length(operation_key) = 32 AND operation_key NOT GLOB '*[^0-9a-f]*'",
+            name="ck_media_creation_key",
+        ),
+    )
+
+    operation_key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(8))
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    entity_id: Mapped[str] = mapped_column(String(43))
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    response_sha256: Mapped[str] = mapped_column(String(64))
 
 
 class MediaTagAssignment(Base):
@@ -786,6 +1027,23 @@ class MediaTagAssignment(Base):
         ForeignKey("artifact_library_entries.id", ondelete="RESTRICT"), primary_key=True
     )
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MediaOrganizationImpact(Base):
+    """An expiring non-owning selection and its atomic organization result."""
+
+    __tablename__ = "media_organization_impacts"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    preview_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    input_sha256: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    recovery_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    operation_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
+    response_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    response_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class PromptTemplateDefinition(TimestampMixin, Base):
@@ -858,7 +1116,7 @@ class PromptExpansionBatch(TimestampMixin, Base):
             name="ck_prompt_expansion_batch_queue_key",
         ),
         CheckConstraint("schema_version = 1", name="ck_prompt_expansion_batch_schema_version"),
-        CheckConstraint("codec_version = 2", name="ck_prompt_expansion_batch_codec_version"),
+        CheckConstraint("codec_version IN (2, 3)", name="ck_prompt_expansion_batch_codec_version"),
         CheckConstraint(
             _lowercase_sha256_check("contract_sha256"),
             name="ck_prompt_expansion_batch_contract_sha256",
@@ -1064,6 +1322,8 @@ class PromptTemplateImportWinner(Base):
 
 
 for _statement in CREATE_TRIGGER_SQL:
+    if _statement.split()[2] == "artifact_library_entry_delete_guard":
+        continue
     event.listen(
         Base.metadata,
         "after_create",
@@ -1075,6 +1335,25 @@ for _statement in DROP_TRIGGER_SQL:
         "before_drop",
         DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
     )
+
+
+def _seed_media_catalog(_target: object, connection: Connection, **_kwargs: object) -> None:
+    if connection.dialect.name == "sqlite":
+        connection.exec_driver_sql(CATALOG_SEED_SQL)
+
+
+event.listen(Base.metadata, "after_create", _seed_media_catalog)
+for _statement in CREATE_CATALOG_TRIGGER_SQL:
+    event.listen(Base.metadata, "after_create", _install_sqlite_trigger(_statement))
+
+
+def _drop_media_catalog(_target: object, connection: Connection, **_kwargs: object) -> None:
+    if connection.dialect.name == "sqlite":
+        for statement in DROP_CATALOG_TRIGGER_SQL:
+            connection.exec_driver_sql(statement)
+
+
+event.listen(Base.metadata, "before_drop", _drop_media_catalog)
 for _statement in CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL:
     event.listen(
         Base.metadata,
@@ -1135,6 +1414,33 @@ for _statement in DROP_CHAT_ITEM_REMOVAL_TRIGGER_SQL:
         "before_drop",
         DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
     )
+
+
+for _statement in CREATE_CHAT_RECOVERY_TRIGGER_SQL:
+    event.listen(Base.metadata, "after_create", _install_sqlite_trigger(_statement))
+for _statement in CREATE_MEDIA_RECOVERY_TRIGGER_SQL[1:]:
+    event.listen(Base.metadata, "after_create", _install_sqlite_trigger(_statement))
+for _statement in CREATE_PROJECT_RECOVERY_TRIGGER_SQL:
+    event.listen(Base.metadata, "after_create", _install_sqlite_trigger(_statement))
+for _statement in CREATE_WORKFLOW_RECOVERY_TRIGGER_SQL:
+    event.listen(Base.metadata, "after_create", _install_sqlite_trigger(_statement))
+
+
+def _drop_chat_recovery_triggers(
+    _target: object, connection: Connection, **_kwargs: object
+) -> None:
+    if connection.dialect.name == "sqlite":
+        for statement in DROP_WORKFLOW_RECOVERY_TRIGGER_SQL:
+            connection.exec_driver_sql(statement)
+        for statement in DROP_PROJECT_RECOVERY_TRIGGER_SQL:
+            connection.exec_driver_sql(statement)
+        for statement in DROP_MEDIA_RECOVERY_TRIGGER_SQL:
+            connection.exec_driver_sql(statement)
+        for statement in DROP_CHAT_RECOVERY_TRIGGER_SQL:
+            connection.exec_driver_sql(statement)
+
+
+event.listen(Base.metadata, "before_drop", _drop_chat_recovery_triggers)
 
 
 class ModelSource(TimestampMixin, Base):
@@ -1248,9 +1554,14 @@ class ModelAssetInstall(TimestampMixin, Base):
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     use_case: Mapped[str] = mapped_column(Text, default="")
+    use_case_derived: Mapped[bool] = mapped_column(Boolean, default=False)
     auto_apply: Mapped[bool] = mapped_column(Boolean, default=False)
     default_model_strength: Mapped[float] = mapped_column(Float, default=1.0)
     default_clip_strength: Mapped[float] = mapped_column(Float, default=1.0)
+    #: Trigger words a person recorded for this LoRA. They are stored apart from
+    #: the words measured from the file, which stay in the manifest as the record
+    #: of what the file itself declared, so rewriting the manifest never loses them.
+    typed_trigger_words: Mapped[list[str]] = mapped_column(JSON, default=list)
     verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -1383,6 +1694,69 @@ class GenerationPreset(TimestampMixin, Base):
     role: Mapped[str] = mapped_column(String(16), default=ModelRole.CHAT.value, index=True)
     settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class WorkflowUseCasePreset(TimestampMixin, Base):
+    __tablename__ = "workflow_use_case_presets"
+    __table_args__ = (
+        UniqueConstraint("use_case", "name", name="uq_workflow_use_case_preset_name"),
+        UniqueConstraint("id", "use_case", name="uq_workflow_use_case_preset_target"),
+        CheckConstraint(
+            "is_default = 0 OR enabled = 1", name="ck_workflow_use_case_default_enabled"
+        ),
+        Index(
+            "uq_workflow_use_case_default",
+            "use_case",
+            unique=True,
+            sqlite_where=text("is_default = 1"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("wfuc"))
+    name: Mapped[str] = mapped_column(String(200))
+    use_case: Mapped[str] = mapped_column(String(32))
+    settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    builtin: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class ProjectWorkflowUseCaseSelection(TimestampMixin, Base):
+    """Persist Automatic as a null target; an absent row inherits the default."""
+
+    __tablename__ = "project_workflow_use_case_selections"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["preset_id", "use_case"],
+            ["workflow_use_case_presets.id", "workflow_use_case_presets.use_case"],
+            ondelete="RESTRICT",
+        ),
+    )
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    use_case: Mapped[str] = mapped_column(String(32), primary_key=True)
+    preset_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class ChatWorkflowUseCaseSelection(TimestampMixin, Base):
+    """Persist a chat override without changing its project or role settings."""
+
+    __tablename__ = "chat_workflow_use_case_selections"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["preset_id", "use_case"],
+            ["workflow_use_case_presets.id", "workflow_use_case_presets.use_case"],
+            ondelete="RESTRICT",
+        ),
+    )
+
+    chat_id: Mapped[str] = mapped_column(
+        ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True
+    )
+    use_case: Mapped[str] = mapped_column(String(32), primary_key=True)
+    preset_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
 class EditTemplate(TimestampMixin, Base):
@@ -2390,6 +2764,24 @@ class MessageReference(TimestampMixin, Base):
     artifact_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
+class WorkflowPackageInstallPlan(TimestampMixin, Base):
+    """One immutable source and dependency preview, before installation approval."""
+
+    __tablename__ = "workflow_package_install_plans"
+    __table_args__ = (
+        UniqueConstraint("plan_sha256", name="uq_workflow_package_install_plan_sha256"),
+        CheckConstraint(
+            _lowercase_sha256_check("plan_sha256"),
+            name="ck_workflow_package_install_plan_sha256",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    plan_sha256: Mapped[str] = mapped_column(String(64))
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    preflight_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
 class WorkflowInstallOffer(TimestampMixin, Base):
     """One reviewed, content-bound way to make a workflow locally installable."""
 
@@ -2415,8 +2807,15 @@ class WorkflowInstallOffer(TimestampMixin, Base):
             "status IN ('ready', 'queued', 'invalidated', 'completed', 'expired')",
             name="ck_workflow_install_offer_status",
         ),
-        CheckConstraint("plan_count > 0", name="ck_workflow_install_offer_plan_count"),
-        CheckConstraint("total_bytes > 0", name="ck_workflow_install_offer_total_bytes"),
+        CheckConstraint(
+            "plan_count >= 0 AND (source_plan_id IS NOT NULL OR plan_count > 0)",
+            name="ck_workflow_install_offer_plan_count",
+        ),
+        CheckConstraint(
+            "total_bytes >= 0 AND (source_plan_id IS NOT NULL OR total_bytes > 0)",
+            name="ck_workflow_install_offer_total_bytes",
+        ),
+        UniqueConstraint("source_plan_id", name="uq_workflow_install_offer_source_plan_id"),
         Index(
             "ix_workflow_install_offer_revision_status",
             "workflow_revision_id",
@@ -2432,6 +2831,12 @@ class WorkflowInstallOffer(TimestampMixin, Base):
     dependency_contract_sha256: Mapped[str] = mapped_column(String(64))
     binding_plan_sha256: Mapped[str] = mapped_column(String(64))
     offer_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    source_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow_package_install_plans.id", ondelete="RESTRICT"), nullable=True
+    )
+    completion_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="RESTRICT"), nullable=True, unique=True
+    )
     selections_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     assets_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     plan_count: Mapped[int] = mapped_column(Integer)
@@ -2444,6 +2849,47 @@ class WorkflowInstallOffer(TimestampMixin, Base):
     invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     invalidation_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     invalidation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completion_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+
+class WorkflowInstallOfferDownload(TimestampMixin, Base):
+    """The accepted download request and its durable job for one workflow offer."""
+
+    __tablename__ = "workflow_install_offer_downloads"
+    __table_args__ = (UniqueConstraint("offer_id", "request_sha256"),)
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("wfdl"))
+    offer_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_install_offers.id", ondelete="CASCADE"), index=True
+    )
+    offer_sha256: Mapped[str] = mapped_column(String(64))
+    job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class WorkflowInstallOfferPackage(TimestampMixin, Base):
+    """Keep the accepted extension plan and its exact durable preparation result."""
+
+    __tablename__ = "workflow_install_offer_packages"
+    __table_args__ = (UniqueConstraint("offer_id", "package_id"),)
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("wfpkg"))
+    offer_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_install_offers.id", ondelete="CASCADE"), index=True
+    )
+    offer_sha256: Mapped[str] = mapped_column(String(64))
+    package_id: Mapped[str] = mapped_column(String(100))
+    execution_plan_sha256: Mapped[str] = mapped_column(String(64))
+    job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    registry_install_id: Mapped[str | None] = mapped_column(
+        ForeignKey("comfy_registry_installs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    preparation_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class Job(TimestampMixin, Base):
@@ -2505,3 +2951,328 @@ def _guard_artifact_reference_flush(
     from .artifact_library import guard_artifact_reference_flush
 
     guard_artifact_reference_flush(session, flush_context, instances)
+
+
+class WebSearchProposal(TimestampMixin, Base):
+    """Exact query approval; transport credentials never belong in this row."""
+
+    __tablename__ = "web_search_proposals"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("search"))
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"),
+        unique=True,
+    )
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"),
+        unique=True,
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    state: Mapped[str] = mapped_column(String(32), default="awaiting_approval")
+    query: Mapped[str] = mapped_column(Text)
+    provider_endpoint: Mapped[str] = mapped_column(Text)
+    provider_revision: Mapped[str] = mapped_column(String(80))
+    approved_automatically: Mapped[bool] = mapped_column(Boolean, default=False)
+    dispatch_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dispatch_owner: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    dispatch_attempt: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+
+class EmptyChatPreviewRecord(TimestampMixin, Base):
+    """One preview of an empty-chat cleanup the server issued, and when it stops being spendable.
+
+    The deadline lives here rather than in the request because a client-supplied
+    instant is not a fact the server can check: the digest algorithm is not a
+    secret, so a caller could mint any evaluation time it liked and hash a
+    matching digest around it. Binding the deadline to a row the server wrote
+    makes expiry something the server knows rather than something it is told.
+
+    One row per issuance, and its deadline is never rewritten. Keying rows by
+    digest, so that previewing the same selection again refreshed one shared
+    row, would let a second preview push the first one's deadline past the
+    instant the first response named. A deadline another request can move is
+    not a deadline.
+
+    Nothing here is readable: the digest is a hash, and each bound chat is
+    recorded only as a fingerprint of its state, by id. The fingerprints live
+    here and nowhere else - not in the digest the caller holds and not in a
+    completed deletion's record - and go when the row is swept.
+    """
+
+    __tablename__ = "empty_chat_previews"
+
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default=lambda: new_id("emptyprev")
+    )
+    digest: Mapped[str] = mapped_column(String(64), index=True)
+    chat_states_json: Mapped[dict[str, str]] = mapped_column(JSON)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class EmptyChatDeletion(TimestampMixin, Base):
+    """One completed empty-chat cleanup, kept so a retry cannot delete twice.
+
+    The client generates `operation_id` before it asks. A repeat of the same id
+    returns this row unchanged rather than deleting again: the client cannot tell
+    a lost response from a lost request, and the difference between them is a
+    second deletion.
+
+    `deleted_ids_json` holds ids only. The feature is about chats somebody may
+    not want, so its durable record is the wrong place to keep anything they
+    wrote.
+    """
+
+    __tablename__ = "empty_chat_deletions"
+
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default=lambda: new_id("emptydel")
+    )
+    #: Client-generated idempotency key; unique, so the retry guard is the
+    #: constraint rather than a read that two concurrent retries could both pass.
+    operation_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    digest: Mapped[str] = mapped_column(String(64))
+    deleted_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    deleted_count: Mapped[int] = mapped_column(Integer)
+    deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ChatComposerDraft(TimestampMixin, Base):
+    """What somebody was writing in one chat and has not sent yet, stored so a restart keeps it.
+
+    One row per chat, deleted with the chat. The revision is the whole
+    concurrency story: every write names the revision it read, and a write
+    against an older one is refused rather than merged, so two windows editing
+    the same chat cannot silently undo each other.
+
+    Everything that would change what a send does is here: the words, the
+    Prompt Library item they came from, the mode, the references, how many
+    outputs, and the template settings. Attachments are rows of their own
+    below, because they name stored files.
+
+    The mode is enforced where it is written, like every other stored
+    vocabulary here.
+    """
+
+    __tablename__ = "chat_composer_drafts"
+
+    chat_id: Mapped[str] = mapped_column(
+        ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    text: Mapped[str] = mapped_column(Text, default="")
+    prompt_source_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    mode: Mapped[str] = mapped_column(String(16), default=RoutingMode.AUTO.value)
+    output_count: Mapped[int] = mapped_column(Integer, default=1)
+    mentions_json: Mapped[list[dict[str, str]]] = mapped_column(JSON, default=list)
+    template_settings_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    attachments: Mapped[list[ChatComposerDraftAttachment]] = relationship(
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ChatComposerDraftAttachment.position",
+    )
+
+
+class ChatComposerDraftAttachment(Base):
+    """One file attached to an unsent draft, holding that file until the draft lets go.
+
+    A foreign key to the artifact, not an id copied into JSON, so the database
+    itself refuses to delete a file a draft still holds, and retention counts it
+    like any other reference. Replacing the draft's attachments, discarding the
+    draft, or deleting the chat removes these rows, and with them the hold.
+    """
+
+    __tablename__ = "chat_composer_draft_attachments"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "artifact_id", name="uq_chat_composer_draft_attachment"),
+    )
+
+    chat_id: Mapped[str] = mapped_column(
+        ForeignKey("chat_composer_drafts.chat_id", ondelete="CASCADE"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(16))
+    origin: Mapped[str] = mapped_column(String(16))
+
+
+class RetentionPolicy(TimestampMixin, Base):
+    """How long retention keeps media nothing uses, once somebody has chosen.
+
+    At most one row, keyed by what it governs. Until it exists the installation's
+    configuration decides both windows; once it does, it decides them for every
+    clearing pass, whether at start or from Clear now. Kept in the workspace
+    database rather than the installation's configuration, so a choice travels
+    with the workspace's backups.
+    """
+
+    __tablename__ = "retention_policies"
+
+    scope: Mapped[str] = mapped_column(String(16), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    media_days: Mapped[int] = mapped_column(Integer)
+    temporary_hours: Mapped[int] = mapped_column(Integer)
+
+
+class GenerationExperiment(TimestampMixin, Base):
+    """One comparison of two generation choices against one frozen request.
+
+    Everything both choices share is kept here as it was accepted, and each
+    choice keeps the exact snapshot it was resolved to. Digests over both are
+    checked whenever the comparison is read, so a record that changed after it
+    was accepted is refused rather than shown as if it were the one accepted.
+    """
+
+    __tablename__ = "generation_experiments"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_generation_experiment_idempotency"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("gexp"))
+    name: Mapped[str] = mapped_column(String(200))
+    state: Mapped[str] = mapped_column(String(16))
+    operation: Mapped[str] = mapped_column(String(32))
+    contract_version: Mapped[int] = mapped_column(Integer)
+    app_version: Mapped[str] = mapped_column(String(32))
+    seed_policy: Mapped[str] = mapped_column(String(32))
+    seed_equivalence: Mapped[str] = mapped_column(String(16))
+    common_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    estimate_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    preflight_sha256: Mapped[str] = mapped_column(String(64))
+    snapshot_sha256: Mapped[str] = mapped_column(String(64))
+    idempotency_key: Mapped[str] = mapped_column(String(200))
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    # Set once, when the comparison is started; its work plan holds the pictures.
+    work_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("work_plans.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
+    start_idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    start_request_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    arms: Mapped[list[GenerationExperimentArm]] = relationship(
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="GenerationExperimentArm.ordinal",
+    )
+    evaluations: Mapped[list[GenerationExperimentEvaluation]] = relationship(
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="GenerationExperimentEvaluation.sequence",
+    )
+
+
+class GenerationExperimentArm(Base):
+    """One choice in a comparison, frozen to the exact model and workflow it resolved to.
+
+    The profile and revision are recorded by id without a foreign key, as a
+    work step records them: the snapshot carries what they were, so editing or
+    removing them later cannot change what this choice was.
+    """
+
+    __tablename__ = "generation_experiment_arms"
+    __table_args__ = (
+        UniqueConstraint("experiment_id", "ordinal", name="uq_generation_experiment_arm_ordinal"),
+        UniqueConstraint("experiment_id", "label", name="uq_generation_experiment_arm_label"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("garm"))
+    experiment_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_experiments.id", ondelete="CASCADE")
+    )
+    ordinal: Mapped[int] = mapped_column(Integer)
+    label: Mapped[str] = mapped_column(String(80))
+    profile_id: Mapped[str] = mapped_column(String(40))
+    workflow_revision_id: Mapped[str] = mapped_column(String(40))
+    workflow_activation_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    model_family: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    requested_settings_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    effective_settings_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    snapshot_sha256: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    trials: Mapped[list[GenerationExperimentTrial]] = relationship(
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="GenerationExperimentTrial.ordinal",
+    )
+
+
+class GenerationExperimentTrial(Base):
+    """One picture a choice will make, with the seed it got when the comparison was accepted."""
+
+    __tablename__ = "generation_experiment_trials"
+    __table_args__ = (
+        UniqueConstraint("arm_id", "ordinal", name="uq_generation_experiment_trial_ordinal"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("gtrial"))
+    arm_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_experiment_arms.id", ondelete="CASCADE")
+    )
+    ordinal: Mapped[int] = mapped_column(Integer)
+    seed: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # The step and run that make this picture, once the comparison is started.
+    work_step_id: Mapped[str | None] = mapped_column(
+        ForeignKey("work_steps.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
+    run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
+
+
+class GenerationExperimentEvaluation(Base):
+    """Which of a comparison's pictures the person preferred, as they said it, kept as said.
+
+    Each saying is kept in order, and the latest is the comparison's answer.
+    The preference is the person's own judgement; nothing reads it as a score.
+    """
+
+    __tablename__ = "generation_experiment_evaluations"
+    __table_args__ = (
+        UniqueConstraint(
+            "experiment_id", "sequence", name="uq_generation_experiment_evaluation_sequence"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("geval"))
+    experiment_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_experiments.id", ondelete="CASCADE"), index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    # How the pictures were shown when this was said: with their choices named, or not.
+    mode: Mapped[str] = mapped_column(String(16))
+    preference: Mapped[str] = mapped_column(String(16))
+    # The choice preferred; none for a tie or when neither suits.
+    preferred_arm_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_experiment_arms.id", ondelete="CASCADE"), nullable=True
+    )
+    note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class GenerationExperimentBlindView(Base):
+    """One viewing of a blind comparison: its own order of the pictures, and its saying."""
+
+    __tablename__ = "generation_experiment_blind_views"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("gview"))
+    experiment_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_experiments.id", ondelete="CASCADE"), index=True
+    )
+    # The choices' ids in the order this viewing shows their pictures.
+    order_json: Mapped[list[str]] = mapped_column(JSON)
+    evaluation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_experiment_evaluations.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

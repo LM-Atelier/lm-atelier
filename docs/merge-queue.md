@@ -17,7 +17,7 @@ is not a substitute for the current queue checks.
 
 The queue uses squash merges (`SQUASH`) and requires every integration commit to
 pass (`ALLGREEN`). It allows three concurrent verification builds, lands one pull
-request at a time, and gives required checks 60 minutes to report a conclusion.
+request at a time, and gives required checks 90 minutes to report a conclusion.
 Each landed commit uses the pull-request title and number as its subject, with an
 empty commit body. Keep the title descriptive and put the explanation and
 validation details in the pull-request description.

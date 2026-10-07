@@ -17,8 +17,9 @@ from __future__ import annotations
 import os
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import TypedDict, Unpack
 
 import pytest
 from sqlalchemy import create_engine
@@ -35,6 +36,13 @@ from local_lm.filesystem_links import (
     list_entries,
     remove_entry,
 )
+
+
+class _ListEntriesOptions(TypedDict, total=False):
+    limit: int
+    include_metadata: bool
+    should_stop: Callable[[], bool] | None
+
 
 DIGEST_A = "aabb" + "0" * 60
 DIGEST_B = "aabb" + "1" * 60
@@ -94,7 +102,9 @@ def store_session(tmp_path: Path) -> Iterator[tuple[ArtifactStore, Session, Path
     settings = Settings(data_dir=tmp_path / "data")
     settings.prepare()
     engine = create_engine(f"sqlite:///{tmp_path / 'artifacts.sqlite3'}")
-    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("BEGIN")
+        Base.metadata.create_all(connection)
     session = Session(engine, expire_on_commit=False)
     try:
         yield ArtifactStore(settings, root=root), session, root
@@ -379,7 +389,9 @@ def test_a_shard_swapped_after_it_was_named_is_not_followed(
             _swap()
         return real_iterdir(self)
 
-    def fake_list_entries(anchor: AnchoredDirectory, **kwargs: int) -> tuple[AnchoredEntry, ...]:
+    def fake_list_entries(
+        anchor: AnchoredDirectory, **kwargs: Unpack[_ListEntriesOptions]
+    ) -> tuple[AnchoredEntry, ...]:
         listed = list_entries(anchor, **kwargs)
         if not swapped and anchor.path.resolve() == root.resolve():
             _swap()
@@ -438,7 +450,9 @@ def test_a_file_whose_age_could_not_be_measured_is_skipped(
     store, session, root = store_session
     orphan = _write_aged(root / "aa" / "bb" / DIGEST_A, b"unmeasurable")
 
-    def unmeasured(anchor: AnchoredDirectory, **kwargs: int) -> tuple[AnchoredEntry, ...]:
+    def unmeasured(
+        anchor: AnchoredDirectory, **kwargs: Unpack[_ListEntriesOptions]
+    ) -> tuple[AnchoredEntry, ...]:
         return tuple(
             AnchoredEntry(name=entry.name, kind=entry.kind) if entry.name == DIGEST_A else entry
             for entry in list_entries(anchor, **kwargs)
@@ -477,7 +491,9 @@ def test_an_unmeasurable_EMPTY_file_is_skipped_rather_than_counted_as_zero(
     orphan = _write_aged(root / "aa" / "bb" / DIGEST_A, b"")
     assert orphan.stat().st_size == 0, "the point of this test is the zero"
 
-    def unmeasured(anchor: AnchoredDirectory, **kwargs: int) -> tuple[AnchoredEntry, ...]:
+    def unmeasured(
+        anchor: AnchoredDirectory, **kwargs: Unpack[_ListEntriesOptions]
+    ) -> tuple[AnchoredEntry, ...]:
         return tuple(
             AnchoredEntry(name=entry.name, kind=entry.kind) if entry.name == DIGEST_A else entry
             for entry in list_entries(anchor, **kwargs)
@@ -513,6 +529,38 @@ def test_an_aged_file_this_store_did_not_write_survives_in_the_root(
     assert not temporary.exists()
     assert settings_file.read_bytes() == b"someone else's"
     assert almost.read_bytes() == b"wrong suffix"
+
+
+def test_a_copy_made_for_a_tool_and_left_by_a_crash_is_swept(
+    store_session: tuple[ArtifactStore, Session, Path],
+) -> None:
+    """A tool's copy is removed when its call ends; one a crash left behind is the sweep's.
+
+    Only the exact name a copy is given is the sweep's to remove: `tool-input-`,
+    32 lowercase hex digits and `.tmp`. Anything merely resembling it stays.
+    """
+
+    store, session, root = store_session
+    digits = "0123456789abcdef" * 2
+    abandoned = _write_aged(root / f"tool-input-{digits}.tmp", b"copy")
+    resembling = [
+        _write_aged(root / name, name.encode())
+        for name in (
+            "tool-input-abandoned.tmp",
+            f"tool-input-{digits}.mp4",
+            f"tool-input-{digits[:-1]}.tmp",
+            f"tool-input-{digits}0.tmp",
+            # Different digits: on a case-insensitive disk the same ones name the same file.
+            f"tool-input-{'FEDCBA9876543210' * 2}.tmp",
+            f"tool-input-{digits}.tmp.keep",
+        )
+    ]
+
+    removed, reclaimed = _sweep(store, session)
+
+    assert (removed, reclaimed) == (1, len(b"copy"))
+    assert not abandoned.exists()
+    assert [path.read_bytes() for path in resembling] == [path.name.encode() for path in resembling]
 
 
 def test_a_removal_that_refuses_is_not_counted_and_does_not_end_the_pass(
@@ -574,7 +622,7 @@ def test_a_same_size_replacement_is_still_refused_on_its_age(
     real_list_entries = list_entries
 
     def replace_after_listing(
-        anchor: AnchoredDirectory, **kwargs: int
+        anchor: AnchoredDirectory, **kwargs: Unpack[_ListEntriesOptions]
     ) -> tuple[AnchoredEntry, ...]:
         listed = real_list_entries(anchor, **kwargs)
         if not replaced and any(entry.name == DIGEST_A for entry in listed):
@@ -613,7 +661,7 @@ def test_an_aged_replacement_of_another_size_is_refused_on_its_size(
     real_list_entries = list_entries
 
     def replace_after_listing(
-        anchor: AnchoredDirectory, **kwargs: int
+        anchor: AnchoredDirectory, **kwargs: Unpack[_ListEntriesOptions]
     ) -> tuple[AnchoredEntry, ...]:
         listed = real_list_entries(anchor, **kwargs)
         if not replaced and any(entry.name == DIGEST_A for entry in listed):
@@ -654,7 +702,7 @@ def test_a_leaf_replaced_after_it_was_measured_is_not_deleted(
     real_list_entries = list_entries
 
     def replace_after_listing(
-        anchor: AnchoredDirectory, **kwargs: int
+        anchor: AnchoredDirectory, **kwargs: Unpack[_ListEntriesOptions]
     ) -> tuple[AnchoredEntry, ...]:
         listed = real_list_entries(anchor, **kwargs)
         if not replaced and any(entry.name == DIGEST_A for entry in listed):
@@ -671,3 +719,35 @@ def test_a_leaf_replaced_after_it_was_measured_is_not_deleted(
     assert replaced == ["once"], "the seam never fired, so nothing was measured"
     assert (removed, reclaimed) == (0, 0)
     assert orphan.read_bytes() == b"freshly published bytes"
+
+
+def test_a_file_made_for_a_tool_to_write_is_swept_only_in_its_exact_shape(
+    store_session: tuple[ArtifactStore, Session, Path],
+) -> None:
+    """A tool's output file is removed when its call ends; one a crash left behind is the sweep's.
+
+    Only the exact name such a file is given is the sweep's to remove:
+    `tool-output-`, 32 lowercase hex digits and `.tmp`. Anything merely
+    resembling it stays.
+    """
+
+    store, session, root = store_session
+    digits = "13579bdf02468ace" * 2
+    abandoned = _write_aged(root / f"tool-output-{digits}.tmp", b"output")
+    resembling = [
+        _write_aged(root / name, name.encode())
+        for name in (
+            "tool-output-abandoned.tmp",
+            f"tool-output-{digits}.mp4",
+            f"tool-output-{digits[:-1]}.tmp",
+            f"tool-output-{digits}0.tmp",
+            f"tool-output-{'FEDCBA9876543210' * 2}.tmp",
+            f"tool-output-{digits}.tmp.keep",
+        )
+    ]
+
+    removed, reclaimed = _sweep(store, session)
+
+    assert (removed, reclaimed) == (1, len(b"output"))
+    assert not abandoned.exists()
+    assert [path.read_bytes() for path in resembling] == [path.name.encode() for path in resembling]

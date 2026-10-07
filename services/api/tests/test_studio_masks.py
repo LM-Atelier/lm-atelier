@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import TypedDict
+
 import pytest
+from httpx2 import AsyncClient
 
 from local_lm.studio_masks import (
     MaskContractError,
@@ -18,6 +21,15 @@ MASK_SCHEMA = {
     "type": "object",
     "properties": {"mask": {"type": "object", "x-lm-atelier-kind": "mask"}},
 }
+
+
+class _GeometryInputs(TypedDict, total=False):
+    source_width: int
+    source_height: int
+    mask_width: int
+    mask_height: int
+    orientation: int
+    threshold: int
 
 
 def test_only_a_declared_mask_input_counts() -> None:
@@ -53,6 +65,117 @@ def test_a_valid_selection_normalizes_its_defaults() -> None:
     assert softened is not None
     assert softened.feather_px == 12
     assert softened.invert is True
+
+
+def test_a_blend_selection_needs_no_mask_input() -> None:
+    selection = parse_mask_setting(
+        {"mask": {"artifact_id": ARTIFACT, "feather_px": 4, "apply": "blend"}},
+        {"properties": {}},
+        operation="image_to_image",
+        source_count=1,
+    )
+
+    assert selection is not None
+    assert selection.blend is True
+    assert selection.as_dict() == {
+        "artifact_id": ARTIFACT,
+        "feather_px": 4,
+        "invert": False,
+        "apply": "blend",
+    }
+
+
+def test_an_ordinary_selection_records_no_apply() -> None:
+    selection = parse_mask_setting({"mask": {"artifact_id": ARTIFACT}}, MASK_SCHEMA)
+
+    assert selection is not None
+    assert selection.blend is False
+    assert "apply" not in selection.as_dict()
+
+
+@pytest.mark.parametrize(
+    ("operation", "source_count"),
+    [("text_to_image", 0), ("image_to_image", 0), ("image_to_image", 2), ("image_to_video", 1)],
+)
+def test_a_blend_selection_needs_exactly_one_picture_being_edited(
+    operation: str, source_count: int
+) -> None:
+    with pytest.raises(MaskContractError) as raised:
+        parse_mask_setting(
+            {"mask": {"artifact_id": ARTIFACT, "apply": "blend"}},
+            MASK_SCHEMA,
+            operation=operation,
+            source_count=source_count,
+        )
+    assert raised.value.code == "mask-blend-needs-one-source"
+
+
+def test_a_blend_selection_may_name_the_pictures_after_its_source_as_references() -> None:
+    selection = parse_mask_setting(
+        {"mask": {"artifact_id": ARTIFACT, "apply": "blend", "references": 1}},
+        None,
+        operation="image_to_image",
+        source_count=2,
+    )
+
+    assert selection is not None
+    assert selection.references == 1
+    assert selection.as_dict()["references"] == 1
+    # Without a reference the record reads as it always has.
+    plain = parse_mask_setting(
+        {"mask": {"artifact_id": ARTIFACT, "apply": "blend"}},
+        None,
+        operation="image_to_image",
+        source_count=1,
+    )
+    assert plain is not None
+    assert "references" not in plain.as_dict()
+
+
+@pytest.mark.parametrize(
+    ("references", "source_count", "code"),
+    [
+        (1, 1, "mask-blend-needs-one-source"),
+        (1, 3, "mask-blend-needs-one-source"),
+        (-1, 0, "mask-references-invalid"),
+        (True, 2, "mask-references-invalid"),
+        (1.0, 2, "mask-references-invalid"),
+        ("1", 2, "mask-references-invalid"),
+    ],
+)
+def test_references_leave_exactly_one_picture_being_edited(
+    references: object, source_count: int, code: str
+) -> None:
+    with pytest.raises(MaskContractError) as raised:
+        parse_mask_setting(
+            {"mask": {"artifact_id": ARTIFACT, "apply": "blend", "references": references}},
+            None,
+            operation="image_to_image",
+            source_count=source_count,
+        )
+    assert raised.value.code == code
+
+
+def test_only_a_blend_selection_names_references() -> None:
+    with pytest.raises(MaskContractError) as raised:
+        parse_mask_setting(
+            {"mask": {"artifact_id": ARTIFACT, "references": 1}},
+            MASK_SCHEMA,
+            operation="image_to_image",
+            source_count=2,
+        )
+    assert raised.value.code == "mask-references-invalid"
+
+
+def test_an_unknown_apply_refuses() -> None:
+    with pytest.raises(MaskContractError) as raised:
+        parse_mask_setting(
+            {"mask": {"artifact_id": ARTIFACT, "apply": "somehow"}},
+            MASK_SCHEMA,
+            operation="image_to_image",
+            source_count=1,
+        )
+    assert raised.value.code == "mask-apply-invalid"
 
 
 @pytest.mark.parametrize(
@@ -101,15 +224,16 @@ def test_a_selection_drawn_on_a_different_shape_refuses() -> None:
         ({"threshold": 300}, "mask-threshold-invalid"),
     ],
 )
-def test_impossible_geometry_refuses_typed(kwargs: dict[str, int], code: str) -> None:
-    base = {
+def test_impossible_geometry_refuses_typed(kwargs: _GeometryInputs, code: str) -> None:
+    base: _GeometryInputs = {
         "source_width": 800,
         "source_height": 600,
         "mask_width": 800,
         "mask_height": 600,
     }
     with pytest.raises(MaskContractError) as raised:
-        mask_geometry(**{**base, **kwargs})
+        geometry: _GeometryInputs = {**base, **kwargs}
+        mask_geometry(**geometry)
     assert raised.value.code == code
 
 
@@ -135,7 +259,7 @@ def test_provenance_carries_the_whole_story() -> None:
     assert raised.value.code == "mask-coverage-invalid"
 
 
-async def test_a_masked_edit_is_accepted_by_the_real_turn_route(client) -> None:
+async def test_a_masked_edit_is_accepted_by_the_real_turn_route(client: AsyncClient) -> None:
     """The defect this file previously claimed to cover, exercised for real.
 
     Splitting the selection out of the tunables was necessary and not
@@ -197,7 +321,7 @@ async def test_a_masked_edit_is_accepted_by_the_real_turn_route(client) -> None:
     assert response.status_code == 202, response.text
 
 
-def test_the_mask_contract_refuses_a_workflow_without_one(client) -> None:
+def test_the_mask_contract_refuses_a_workflow_without_one(client: AsyncClient) -> None:
     """A masked edit must refuse before acceptance, not after execution."""
 
     from local_lm.db import SessionLocal

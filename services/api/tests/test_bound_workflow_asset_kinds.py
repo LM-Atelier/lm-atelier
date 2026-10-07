@@ -18,6 +18,7 @@ from local_lm.workflow_asset_bindings import (
 @pytest.mark.parametrize(
     ("kind", "folder"),
     [
+        ("background_removal", "background_removal"),
         ("checkpoint", "checkpoints"),
         ("embedding", "embeddings"),
         ("lora", "loras"),

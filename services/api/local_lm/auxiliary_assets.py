@@ -5,16 +5,23 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .comfy_workflow_packages import (
+    MAX_UI_GRAPH_DEPTH,
+    MAX_UI_GRAPH_VALUES,
+    WorkflowPackageError,
+    validate_bounded_workflow_json,
+)
 from .lora_constraints import MAX_LORA_STRENGTH
 from .models import (
     ModelAssetInstall,
     ModelInstall,
     ModelProfile,
+    WorkflowActivation,
     WorkflowDependencyBinding,
     WorkflowRevision,
 )
@@ -42,10 +49,44 @@ _MODEL_SAMPLER_CLASS_TYPES = {
 }
 
 
+class LoraWorkflowDocument(Protocol):
+    """What a workflow says about its LoRAs: its graph, its settings and its dependencies.
+
+    A stored revision answers, and so does the snapshot a turn accepted, which
+    is the one to ask whenever the turn recorded one: a question about a turn's
+    LoRAs has to be put to the same workflow its settings came from.
+    """
+
+    @property
+    def api_graph_json(self) -> dict[str, Any]: ...
+
+    @property
+    def input_schema_json(self) -> dict[str, Any]: ...
+
+    @property
+    def dependencies_json(self) -> dict[str, Any]: ...
+
+
 @dataclass(frozen=True)
 class ResolvedLoraStack:
     settings: list[dict[str, Any]]
     provenance: list[dict[str, Any]]
+    graph_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedLoraGraph:
+    """One Added-LoRA resolution and its fresh detached API graph.
+
+    The dataclass contract is immutable, while the graph field is deliberately
+    a mutable, caller-owned JSON payload. Every resolution receives a fresh
+    graph so mutating it cannot affect the workflow revision, the supplied
+    base graph, or another resolution.
+    """
+
+    settings: list[dict[str, Any]]
+    provenance: list[dict[str, Any]]
+    graph: dict[str, Any]
     graph_sha256: str
 
 
@@ -91,6 +132,77 @@ def _installed_lora_trigger_words(metadata: object) -> list[str]:
     return words
 
 
+def lora_trigger_words(asset: ModelAssetInstall) -> list[str]:
+    """Return every trigger word a LoRA carries: the file's own, then the typed ones.
+
+    One list, because a run applies a word the same way whichever place it came
+    from. The two stay apart where they are stored: the manifest holds only
+    what the file declared, and what a person typed lives beside it.
+    """
+
+    words = _installed_lora_trigger_words(asset.manifest_json.get("metadata"))
+    typed = asset.typed_trigger_words
+    if typed is None:
+        return words
+    if not isinstance(typed, list):
+        raise _invalid_lora_trigger_words()
+    seen = {word.casefold() for word in words}
+    for value in typed:
+        if not isinstance(value, str):
+            raise _invalid_lora_trigger_words()
+        word = value.strip()
+        if not word or len(word) > MAX_LORA_TRIGGER_WORD_LENGTH:
+            raise _invalid_lora_trigger_words()
+        folded = word.casefold()
+        if folded in seen:
+            continue
+        if len(words) == MAX_LORA_TRIGGER_WORDS:
+            raise _invalid_lora_trigger_words()
+        seen.add(folded)
+        words.append(word)
+    return words
+
+
+def normalize_typed_trigger_words(values: list[str], asset: ModelAssetInstall) -> list[str]:
+    """Return the trigger words a person submitted for a LoRA, cleaned and bounded.
+
+    Blank entries are dropped and repeats collapse in any casing, keeping the
+    first. The bound counts the words the file declares as well, since both are
+    applied together. Errors never repeat a submitted word.
+    """
+
+    typed: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        word = value.strip()
+        if not word:
+            continue
+        if len(word) > MAX_LORA_TRIGGER_WORD_LENGTH:
+            raise ValueError(
+                f"A trigger word can be at most {MAX_LORA_TRIGGER_WORD_LENGTH} characters."
+            )
+        folded = word.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        typed.append(word)
+    measured = _installed_lora_trigger_words(asset.manifest_json.get("metadata"))
+    combined = {word.casefold() for word in measured} | seen
+    if len(combined) > MAX_LORA_TRIGGER_WORDS:
+        raise ValueError(
+            f"A LoRA can have at most {MAX_LORA_TRIGGER_WORDS} trigger words, "
+            "counting the ones its file declares."
+        )
+    return typed
+
+
+@dataclass(frozen=True, slots=True)
+class _NormalizedLoraStack:
+    settings: list[dict[str, Any]]
+    provenance: list[dict[str, Any]]
+    transform_items: list[dict[str, Any]]
+
+
 _LORA_MATCH_STOP_WORDS = {
     "a",
     "an",
@@ -123,7 +235,7 @@ def select_automatic_lora_stack(
     *,
     workflow_activation_id: str | None = None,
 ) -> AutomaticLoraSelection:
-    """Select a small deterministic LoRA stack from user-authored use cases."""
+    """Select a small deterministic LoRA stack from saved use cases."""
 
     if not workflow_lora_extension(revision):
         return AutomaticLoraSelection([], _automatic_selection_provenance([]))
@@ -162,10 +274,11 @@ def select_automatic_lora_stack(
             ModelAssetInstall.verified_at.is_not(None),
         )
     ).all()
+    base_keys = {_family_key(family) for family in base_families}
     ranked: list[tuple[int, float, int, str, str, ModelAssetInstall, list[str], str]] = []
     for asset in assets:
-        family = asset.family.casefold() if asset.family else None
-        if not family or family not in base_families:
+        family = _family_key(asset.family) if asset.family else ""
+        if not family or family not in base_keys:
             continue
         comfy_name = asset.manifest_json.get("comfy_name")
         sha256 = asset.manifest_json.get("sha256")
@@ -217,6 +330,7 @@ def select_automatic_lora_stack(
                 **setting,
                 "name": asset.name,
                 "use_case": asset.use_case,
+                "use_case_derived": asset.use_case_derived,
                 "matched_terms": matched_terms,
                 "reason": match_type,
             }
@@ -291,9 +405,75 @@ def detect_lora_extension(graph: dict[str, Any]) -> dict[str, Any] | None:
     return checkpoint_lora_extension(graph) or model_only_lora_extension(graph)
 
 
-def workflow_lora_extension(revision: WorkflowRevision) -> dict[str, Any] | None:
-    extensions = revision.dependencies_json.get("extensions")
+def derived_lora_extension(graph: dict[str, Any]) -> dict[str, Any] | None:
+    """The insertion point a graph offers, when it offers exactly one.
+
+    A revision records where LoRAs go at the moment it is compiled here. A
+    revision that arrived some other way - imported, or carried across from an
+    older installation - can be missing that record while its graph plainly
+    offers the same single point, and nothing can add it afterwards: the record
+    is written when a revision is built, and no route rewrites a built one. So
+    a workflow somebody runs every day could refuse every LoRA permanently over
+    a line of missing metadata rather than anything about its graph.
+
+    Reading the graph gives the same answer through the same functions that
+    write that record in the first place, under the same conditions: one
+    unambiguous point, feeding every sampler the graph samples with, on a graph
+    that has not already reserved the identifiers an insertion uses.
+    """
+
+    extension = detect_lora_extension(graph)
+    if extension is None:
+        return None
+    if any(str(node_id).startswith("lma_lora_") for node_id in graph):
+        return None
+    links = [extension["model"]]
+    if extension.get("mode") != "model_only":
+        links.append(extension["clip"])
+    if not all(_graph_contains_link(graph, link) for link in links):
+        return None
+    return extension
+
+
+def lora_setting_property() -> dict[str, object]:
+    """The LoRA setting as a workflow declares it.
+
+    A revision that provides an insertion point but declares no setting is
+    offered this one, so the control a person sees is the control a declaring
+    workflow would have given them, down to the cap the contract validates
+    against. Returned fresh each time because callers put it into a schema
+    they then own.
+    """
+
+    return {
+        "type": "array",
+        "title": "LoRAs",
+        "description": "Optional verified LoRAs applied in order.",
+        "default": [],
+        "maxItems": MAX_LORA_STACK_SIZE,
+    }
+
+
+def workflow_lora_extension(revision: LoraWorkflowDocument) -> dict[str, Any] | None:
+    dependencies = revision.dependencies_json
+    extensions = dependencies.get("extensions") if isinstance(dependencies, dict) else None
+    if extensions is not None and not isinstance(extensions, dict):
+        return None
     raw = extensions.get("lora") if isinstance(extensions, dict) else None
+    if raw is not None:
+        return _declared_lora_extension(raw)
+    graph = revision.api_graph_json
+    return derived_lora_extension(graph) if isinstance(graph, dict) else None
+
+
+def _declared_lora_extension(raw: object) -> dict[str, Any] | None:
+    """Read a recorded insertion point exactly, or refuse it.
+
+    A revision that says where its LoRAs go and says it wrongly is not a
+    revision that says nothing. Measuring its graph instead would paper over
+    the damage rather than report it, so a malformed record still refuses.
+    """
+
     if not isinstance(raw, dict):
         return None
     model = raw.get("model")
@@ -375,16 +555,38 @@ def validate_lora_workflow_contract(
             )
 
 
+def revision_accepts_added_loras(revision: LoraWorkflowDocument) -> bool:
+    """Whether a stack added to this revision would be applied or refused.
+
+    One definition, because the run and the settings panel have to answer this
+    the same way and they reach it by different routes. It is the run's own
+    two steps in order, and both of them matter. The contract refuses a
+    revision that records an extension point while declaring no setting, or
+    the reverse, so such a workflow accepts nothing and a control offered for
+    it would be one the run cannot honour. Past that, the insertion point is
+    what decides: one the revision records, or one read from its graph when it
+    records none, which is the case the contract passes over in silence and
+    the case this question was asked for.
+    """
+
+    try:
+        validate_lora_workflow_contract(
+            revision.api_graph_json,
+            revision.input_schema_json,
+            revision.dependencies_json,
+        )
+    except ValueError:
+        return False
+    return workflow_lora_extension(revision) is not None
+
+
 def resolve_lora_stack(
     session: Session,
     revision: WorkflowRevision,
     value: object,
 ) -> ResolvedLoraStack:
-    if not isinstance(value, list):
-        raise ValueError("LoRA stack must be a list.")
-    if len(value) > MAX_LORA_STACK_SIZE:
-        raise ValueError(f"A LoRA stack can contain at most {MAX_LORA_STACK_SIZE} assets.")
-    if not value:
+    stack = _lora_stack_items(value)
+    if not stack:
         graph_hash = _graph_hash(revision.api_graph_json)
         return ResolvedLoraStack([], [], graph_hash)
     validate_lora_workflow_contract(
@@ -396,7 +598,90 @@ def resolve_lora_stack(
     if not extension:
         raise ValueError("The selected workflow does not provide a LoRA extension point.")
 
-    base_families = _workflow_families(session, revision)
+    normalized = _normalize_lora_stack(session, revision, stack)
+    transformed = transform_lora_graph(
+        revision.api_graph_json,
+        extension,
+        normalized.transform_items,
+    )
+    return ResolvedLoraStack(
+        normalized.settings,
+        normalized.provenance,
+        _graph_hash(transformed),
+    )
+
+
+def resolve_lora_stack_against_graph(
+    session: Session,
+    revision: WorkflowRevision,
+    value: object,
+    *,
+    base_api_graph: object,
+    workflow_activation_id: str | None = None,
+) -> ResolvedLoraGraph:
+    """Apply the existing Added-LoRA transform to one caller-owned base graph.
+
+    The supplied graph may already contain authorized workflow-native scalar
+    edits. This function validates the revision's declared Added insertion
+    boundary against that exact detached graph, then performs only the existing
+    Added transform. It grants no authority to create or change the base graph.
+    """
+
+    base_graph = _detached_exact_api_graph(base_api_graph)
+    stack = _lora_stack_items(value)
+    validate_lora_workflow_contract(
+        base_graph,
+        revision.input_schema_json,
+        revision.dependencies_json,
+    )
+    if not stack:
+        return ResolvedLoraGraph([], [], base_graph, _graph_hash(base_graph))
+
+    extension = workflow_lora_extension(revision)
+    if not extension:
+        raise ValueError("The selected workflow does not provide a LoRA extension point.")
+    normalized = _normalize_lora_stack(
+        session,
+        revision,
+        stack,
+        workflow_activation_id=workflow_activation_id,
+    )
+    transformed = transform_lora_graph(
+        base_graph,
+        extension,
+        normalized.transform_items,
+    )
+    return ResolvedLoraGraph(
+        normalized.settings,
+        normalized.provenance,
+        transformed,
+        _graph_hash(transformed),
+    )
+
+
+def _lora_stack_items(value: object) -> list[object]:
+    if not isinstance(value, list):
+        raise ValueError("LoRA stack must be a list.")
+    if len(value) > MAX_LORA_STACK_SIZE:
+        raise ValueError(f"A LoRA stack can contain at most {MAX_LORA_STACK_SIZE} assets.")
+    return value
+
+
+def _normalize_lora_stack(
+    session: Session,
+    revision: WorkflowRevision,
+    value: list[object],
+    *,
+    workflow_activation_id: str | None = None,
+) -> _NormalizedLoraStack:
+    base_families = _workflow_families(
+        session,
+        revision,
+        workflow_activation_id=workflow_activation_id,
+    )
+    if workflow_activation_id is not None and not base_families:
+        raise ValueError("The workflow activation does not identify exactly one model family.")
+    base_keys = {_family_key(family) for family in base_families}
     seen: set[str] = set()
     settings: list[dict[str, Any]] = []
     provenance: list[dict[str, Any]] = []
@@ -423,7 +708,7 @@ def resolve_lora_stack(
             raise ValueError(
                 "A selected LoRA is unavailable or no longer verified. Choose an installed LoRA."
             )
-        if asset.family and base_families and asset.family.casefold() not in base_families:
+        if asset.family and base_keys and _family_key(asset.family) not in base_keys:
             raise ValueError(
                 f"{asset.name} targets {asset.family}, which is incompatible with this workflow."
             )
@@ -442,7 +727,7 @@ def resolve_lora_stack(
             "clip_strength": clip_strength,
             "enabled": enabled,
         }
-        trigger_words = _installed_lora_trigger_words(asset.manifest_json.get("metadata"))
+        trigger_words = lora_trigger_words(asset)
         settings.append(normalized)
         provenance.append(
             {
@@ -463,8 +748,7 @@ def resolve_lora_stack(
                     "clip_strength": clip_strength,
                 }
             )
-    transformed = transform_lora_graph(revision.api_graph_json, extension, transform_items)
-    return ResolvedLoraStack(settings, provenance, _graph_hash(transformed))
+    return _NormalizedLoraStack(settings, provenance, transform_items)
 
 
 def trigger_words_to_apply(provenance: list[dict[str, Any]], prompt: str) -> list[str]:
@@ -613,6 +897,73 @@ def _replace_links(
     return value
 
 
+def _detached_exact_api_graph(value: object) -> dict[str, Any]:
+    _validate_exact_json(value)
+    try:
+        validate_bounded_workflow_json(value)
+    except WorkflowPackageError as exc:
+        raise ValueError("The supplied LoRA base graph is not bounded canonical JSON.") from exc
+    if type(value) is not dict:
+        raise ValueError("The supplied LoRA base graph must be an exact built-in JSON object.")
+    exact_graph = cast(dict[str, Any], value)
+    for node_id, node in exact_graph.items():
+        if type(node_id) is not str or not node_id:
+            raise ValueError("The supplied LoRA base graph has an invalid node identifier.")
+        if node_id.startswith("lma_lora_"):
+            raise ValueError("The workflow reserves an LM Atelier LoRA node identifier.")
+        if (
+            type(node) is not dict
+            or type(node.get("class_type")) is not str
+            or not node["class_type"]
+            or type(node.get("inputs")) is not dict
+        ):
+            raise ValueError("The supplied LoRA base graph is not a valid ComfyUI API graph.")
+    try:
+        detached = copy.deepcopy(exact_graph)
+    except (RecursionError, TypeError, ValueError) as exc:
+        raise ValueError("The supplied LoRA base graph could not be detached.") from exc
+    return detached
+
+
+def _validate_exact_json(value: object) -> None:
+    stack = [(value, 1)]
+    seen_containers: set[int] = set()
+    values = 0
+    while stack:
+        current, depth = stack.pop()
+        values += 1
+        if values > MAX_UI_GRAPH_VALUES or depth > MAX_UI_GRAPH_DEPTH:
+            raise ValueError("The supplied LoRA base graph is not bounded canonical JSON.")
+        current_type = type(current)
+        if current_type is dict:
+            current_dict = cast(dict[object, object], current)
+            identity = id(current)
+            if identity in seen_containers:
+                raise ValueError(
+                    "The supplied LoRA base graph must not share or cycle JSON containers."
+                )
+            seen_containers.add(identity)
+            for key, child in current_dict.items():
+                if type(key) is not str:
+                    raise ValueError(
+                        "The supplied LoRA base graph must use exact built-in JSON keys."
+                    )
+                stack.append((child, depth + 1))
+        elif current_type is list:
+            current_list = cast(list[object], current)
+            identity = id(current)
+            if identity in seen_containers:
+                raise ValueError(
+                    "The supplied LoRA base graph must not share or cycle JSON containers."
+                )
+            seen_containers.add(identity)
+            stack.extend((child, depth + 1) for child in current_list)
+        elif current is not None and current_type not in {str, int, float, bool}:
+            raise ValueError(
+                "The supplied LoRA base graph must contain only exact built-in JSON values."
+            )
+
+
 def _strength(value: object, index: int, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"LoRA item {index} has an invalid {label} strength.")
@@ -625,6 +976,36 @@ def _strength(value: object, index: int, label: str) -> float:
     return result
 
 
+def workflow_model_family(session: Session, revision: WorkflowRevision) -> str | None:
+    """The one model family a workflow revision runs, or None when that is not known.
+
+    A revision with a dependency contract answers only through its current ready
+    activation, the same binding automatic LoRA selection reads; one without a
+    contract falls back to its legacy install ids, or, declaring none, to the
+    installed model its checkpoint loader names or, with no checkpoint loader,
+    the registered diffusion model its model loader names. Anything partial,
+    mixed or invalid is unknown rather than a guess.
+    """
+
+    activation_id: str | None = None
+    if revision.dependency_contract_sha256 is not None:
+        activation = session.scalar(
+            select(WorkflowActivation).where(
+                WorkflowActivation.workflow_revision_id == revision.id,
+                WorkflowActivation.is_active.is_(True),
+                WorkflowActivation.state == "ready",
+            )
+        )
+        if activation is None:
+            return None
+        activation_id = activation.id
+    try:
+        families = _workflow_families(session, revision, workflow_activation_id=activation_id)
+    except ValueError:
+        return None
+    return next(iter(families)) if len(families) == 1 else None
+
+
 def _workflow_families(
     session: Session,
     revision: WorkflowRevision,
@@ -635,15 +1016,38 @@ def _workflow_families(
 
     An activation is the authoritative local binding for a portable workflow.
     Legacy install IDs are only a fallback for revisions without a typed
-    activation. Every declared model binding must resolve and agree: an empty,
-    partial, or mixed-family answer cannot safely authorize an automatic LoRA.
+    activation, and a revision without a contract that declares none answers
+    through the one installed model its checkpoint loader names or, with no
+    checkpoint loader, the one registered diffusion model its model loader
+    names. Every model binding must resolve and agree: an empty, partial, or
+    mixed-family answer cannot safely authorize an automatic LoRA. Bindings
+    agree when their families differ only in case and punctuation, and the
+    answer is then one of their spellings.
     """
 
     install_ids: list[str] = []
-    if workflow_activation_id:
+    if workflow_activation_id is not None:
+        if (
+            type(workflow_activation_id) is not str
+            or not workflow_activation_id.startswith("wfact_")
+            or len(workflow_activation_id) > 40
+            or len(workflow_activation_id) == len("wfact_")
+            or any(
+                not character.isascii() or (not character.isalnum() and character not in {"_", "-"})
+                for character in workflow_activation_id
+            )
+        ):
+            raise ValueError("Workflow activation identity is invalid.")
+        activation = session.get(WorkflowActivation, workflow_activation_id)
+        if activation is None:
+            raise ValueError("Workflow activation is unavailable.")
+        if activation.workflow_revision_id != revision.id:
+            raise ValueError(
+                "Workflow activation does not belong to the selected workflow revision."
+            )
         bindings = session.scalars(
             select(WorkflowDependencyBinding).where(
-                WorkflowDependencyBinding.workflow_activation_id == workflow_activation_id,
+                WorkflowDependencyBinding.workflow_activation_id == activation.id,
                 WorkflowDependencyBinding.workflow_revision_id == revision.id,
             )
         ).all()
@@ -659,6 +1063,15 @@ def _workflow_families(
             return set()
     else:
         raw_ids = revision.dependencies_json.get("model_install_ids")
+        if revision.dependency_contract_sha256 is None and (raw_ids is None or raw_ids == []):
+            # A hand-built or imported workflow declares no model, but its
+            # graph still names the checkpoint, or the diffusion model, it
+            # loads. A declaration that is present and malformed stays unknown
+            # rather than being read past.
+            raw_ids = _checkpoint_install_ids(session, revision)
+            if not raw_ids:
+                family = _diffusion_model_family(session, revision)
+                return {family} if family is not None else set()
         if not isinstance(raw_ids, list) or not raw_ids:
             return set()
         if any(not isinstance(item, str) or not item for item in raw_ids):
@@ -669,10 +1082,111 @@ def _workflow_families(
     for install_id in install_ids:
         install = session.get(ModelInstall, install_id)
         family = install.manifest_json.get("family") if install else None
-        if not isinstance(family, str) or not family.strip():
+        if not isinstance(family, str) or not _family_key(family):
             return set()
         families.add(family.strip().casefold())
-    return families if len(families) == 1 else set()
+    keys = {_family_key(family) for family in families}
+    return {min(families)} if len(keys) == 1 else set()
+
+
+def _checkpoint_install_ids(session: Session, revision: WorkflowRevision) -> list[str]:
+    """The installed model a workflow's one checkpoint loader names, as its install id.
+
+    The family then comes from what was recorded about that model when it was
+    installed, not from anything the graph claims. One loader naming a file
+    that exactly one installed model holds is the only answer: no loader,
+    several, a name that is not text, or a file no model or several models
+    hold, leaves the family unknown, which is what it was before.
+    """
+
+    graph = revision.api_graph_json
+    if not isinstance(graph, dict):
+        return []
+    loaders = [
+        node
+        for node in graph.values()
+        if isinstance(node, dict) and node.get("class_type") == "CheckpointLoaderSimple"
+    ]
+    if len(loaders) != 1:
+        return []
+    inputs = loaders[0].get("inputs")
+    named = inputs.get("ckpt_name") if isinstance(inputs, dict) else None
+    if not isinstance(named, str) or not named.strip():
+        return []
+    wanted = _file_name(named)
+    holders: list[str] = []
+    for install in session.scalars(select(ModelInstall)).all():
+        files = install.manifest_json.get("files")
+        if isinstance(files, list) and any(
+            isinstance(entry, str) and _file_name(entry) == wanted for entry in files
+        ):
+            holders.append(install.id)
+    return holders if len(holders) == 1 else []
+
+
+def _file_name(path: str) -> str:
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _diffusion_model_family(session: Session, revision: WorkflowRevision) -> str | None:
+    """The family of the one registered diffusion model a graph's model loader names.
+
+    A graph that builds its model from a diffusion-model loader, rather than a
+    checkpoint, names the file by the name the runtime loads it under. A
+    registered diffusion model records exactly that name, beside the digest of
+    the file it measured and the family recorded for it. One such loader in a
+    graph with no checkpoint loader, naming a file exactly one registered
+    diffusion model answers to, is the only answer, and that model has to be
+    active, verified and carry a family. Anything else leaves the family
+    unknown, which is what it was.
+    """
+
+    graph = revision.api_graph_json
+    if not isinstance(graph, dict):
+        return None
+    nodes = [node for node in graph.values() if isinstance(node, dict)]
+    if any(node.get("class_type") == "CheckpointLoaderSimple" for node in nodes):
+        return None
+    loaders = [node for node in nodes if node.get("class_type") == "UNETLoader"]
+    if len(loaders) != 1:
+        return None
+    inputs = loaders[0].get("inputs")
+    named = inputs.get("unet_name") if isinstance(inputs, dict) else None
+    if not isinstance(named, str) or not named.strip():
+        return None
+    wanted = _loader_name(named)
+    holders = [
+        asset
+        for asset in session.scalars(
+            select(ModelAssetInstall).where(ModelAssetInstall.kind == "diffusion_model")
+        ).all()
+        if isinstance(asset.manifest_json.get("comfy_name"), str)
+        and _loader_name(asset.manifest_json["comfy_name"]) == wanted
+    ]
+    if len(holders) != 1:
+        return None
+    asset = holders[0]
+    if not asset.active or asset.verified_at is None or not asset.family:
+        return None
+    return asset.family.strip().casefold() if _family_key(asset.family) else None
+
+
+def _loader_name(name: str) -> str:
+    return name.replace("\\", "/").casefold()
+
+
+def _family_key(family: str) -> str:
+    """The spelling one base model family is compared by.
+
+    Files and installs record a family as each of them spells it: one base
+    model arrives as krea2 and as Krea-2, another as z-image-turbo and as
+    zimage-turbo. Compared as written, a LoRA made for the model a workflow
+    runs would be refused as made for another one. Case and everything but
+    letters and digits are set aside, so only a difference in the name itself
+    makes a different family.
+    """
+
+    return "".join(character for character in family.casefold() if character.isalnum())
 
 
 def _valid_link(value: object) -> bool:

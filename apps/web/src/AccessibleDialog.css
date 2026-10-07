@@ -1,0 +1,7 @@
+.modal-backdrop.dialog-viewport { grid-template-rows: minmax(0, 1fr); }
+.modal-backdrop.dialog-viewport > .modal { max-width: 100%; max-height: min(92vh, 100%); }
+.modal-backdrop.dialog-viewport > .modal.settings-drawer { max-height: 100%; }
+
+@media (max-width: 680px) {
+  .modal-backdrop.dialog-viewport > .modal:not(.settings-drawer) { max-height: min(94vh, 100%); }
+}

@@ -19,7 +19,7 @@ produce a picture that is quietly not the one the author drew.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .workflow_dependency_error_types import SubgraphExpansionErrorCode
@@ -126,6 +126,15 @@ def _expand(
                 "recursive_subgraph", "workflow contains a subgraph that contains itself"
             )
         definition = subgraphs[definition_id]
+        input_slots = _instance_input_slots(instance, definition)
+        links = [
+            replace(link, target_slot=input_slots[link.target_slot])
+            if link.target_id == identifier
+            and input_slots is not None
+            and 0 <= link.target_slot < len(input_slots)
+            else link
+            for link in links
+        ]
 
         # A disabled instance never contributes its interior. Resolve nested
         # structure only far enough to compose pure boundary pass-through, then
@@ -140,7 +149,9 @@ def _expand(
                 depth=depth + 1,
                 seen=(*seen, definition_id),
             )
-            links = _compose_bypassed_instance(instance, identifier, links, sandbox_links)
+            links = _compose_bypassed_instance(
+                instance, identifier, links, sandbox_links, input_slots
+            )
             continue
 
         scope = f"{identifier}:"
@@ -182,6 +193,7 @@ def _expand(
             links,
             inner_links,
             {str(node["id"]): node for node in inner_nodes},
+            input_slots,
         )
 
     _refuse_duplicate_ids(plain)
@@ -263,6 +275,39 @@ def _require_declared_slot(node: Mapping[str, Any], key: str, slot: int) -> None
         )
 
 
+def _instance_input_slots(
+    instance: Mapping[str, Any], definition: Mapping[str, Any]
+) -> list[int] | None:
+    """The definition input each of an instance's input sockets stands for.
+
+    An instance lists only the inputs it shows as sockets, so its slot numbers
+    need not match the definition's; the name is what they share. A socket
+    whose name the definition does not declare keeps its own number. None means
+    the instance declares no input slots at all.
+    """
+    if _declared_slot_count(instance, "inputs") is None:
+        return None
+    declared: dict[str, int] = {}
+    for index, slot in enumerate(_slots_of(definition.get("inputs"))):
+        if isinstance(slot, Mapping) and isinstance(slot.get("name"), str):
+            declared.setdefault(slot["name"], index)
+    return [
+        declared.get(slot["name"], position)
+        if isinstance(slot, Mapping) and isinstance(slot.get("name"), str)
+        else position
+        for position, slot in enumerate(_slots_of(instance.get("inputs")))
+    ]
+
+
+def _require_declared_input(input_slots: list[int] | None, slot: int) -> None:
+    """Refuse a boundary input that no socket of the instance stands for."""
+    if input_slots is not None and slot not in input_slots:
+        raise SubgraphExpansionError(
+            "inconsistent_subgraph_boundary",
+            "a subgraph boundary slot is outside the instance's declared slots",
+        )
+
+
 def _require_matching_kinds(*kinds: str | None) -> None:
     named = [kind for kind in kinds if kind is not None]
     if len(named) >= 2 and any(kind != named[0] for kind in named[1:]):
@@ -277,6 +322,7 @@ def _compose_bypassed_instance(
     identifier: str,
     outer: list[_Link],
     inner: list[_Link],
+    input_slots: list[int] | None,
 ) -> list[_Link]:
     """Wire around a mode-4 subgraph without admitting any of its nodes.
 
@@ -314,7 +360,7 @@ def _compose_bypassed_instance(
         if inside.origin_id != INPUT_BOUNDARY:
             # Interior work is disabled; there is no value to carry onward.
             continue
-        _require_declared_slot(instance, "inputs", inside.origin_slot)
+        _require_declared_input(input_slots, inside.origin_slot)
         source = _unique_feeder(outer, identifier, inside.origin_slot)
         _require_matching_kinds(source.kind, inside.kind, link.kind)
         # The feeder may still be an enclosing boundary during nested
@@ -357,6 +403,7 @@ def _splice(
     outer: list[_Link],
     inner: list[_Link],
     inner_nodes: Mapping[str, Mapping[str, Any]],
+    input_slots: list[int] | None,
 ) -> list[_Link]:
     """Join a subgraph's insides to the graph the instance sat in.
 
@@ -434,7 +481,7 @@ def _splice(
         # level so no negative id remains in the final host graph. Missing,
         # ambiguous, mistyped, or out-of-range boundary evidence fails closed.
         if origin_id == INPUT_BOUNDARY:
-            _require_declared_slot(instance, "inputs", origin_slot)
+            _require_declared_input(input_slots, origin_slot)
             source = _unique_feeder(outer, identifier, origin_slot)
             _require_matching_kinds(source.kind, inside.kind, link.kind)
             origin_id = source.origin_id

@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     auto_unload_chat_for_media: bool = True
     hf_token: str | None = None
     civitai_token: str | None = None
+    crw_endpoint: str | None = Field(default=None, max_length=2000)
+    crw_token: str | None = Field(default=None, repr=False, exclude=True)
+    credential_namespace: str = Field(
+        default="lm-atelier", min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$", repr=False
+    )
     max_upload_bytes: int = 100 * 1024 * 1024
     vision_max_images: int = Field(default=4, ge=1, le=16)
     vision_max_image_bytes: int = Field(
@@ -59,6 +64,8 @@ class Settings(BaseSettings):
     # a chat still has to be allowed individually. A deployment that must
     # never egress pins this off and no conversation can override it.
     web_access_enabled: bool = False
+    # While durable work runs, ask the operating system not to sleep on its idle timer.
+    keep_awake_during_work: bool = True
     vision_prior_visual_lookback: int = Field(default=4, ge=0, le=64)
     vision_max_video_frames: int = Field(default=6, ge=3, le=16)
     vision_max_video_duration_seconds: int = Field(default=3600, ge=1, le=86_400)
@@ -89,6 +96,10 @@ class Settings(BaseSettings):
     backup_weekly_count: int = Field(default=4, ge=0, le=52)
     max_concurrent_downloads: int = Field(default=2, ge=1, le=8)
     event_history_size: int = Field(default=2_000, ge=100, le=50_000)
+    # Clears the saved workspace lock and its PIN at startup, for a forgotten PIN
+    # or a saved setting that can no longer be read. It weakens nothing: anyone
+    # who can restart the service with a changed environment can read its data.
+    reset_workspace_lock: bool = False
 
     @field_validator("host")
     @classmethod

@@ -2,9 +2,10 @@
 
 A ComfyUI workflow shared as a package can name custom nodes and Python
 dependencies that this machine has never seen. LM Atelier will fetch and stage
-all of it for you, but it never lets any of it run on someone else's say-so:
-what a package needs is shown before anything downloads, and downloaded code
-stays inert until you explicitly trust it and separately activate it.
+all of it for you. What a package needs is shown before anything downloads.
+Installing and enabling a verified ComfyUI Registry release can record trust
+and activate it automatically. Code that needs review stays inactive until
+you approve the exact package in **Prepared packages**.
 
 ## Reviewing before anything lands
 
@@ -12,27 +13,57 @@ Importing a workflow bundle opens a review of what the package needs: the
 nodes it uses, the model files it references, the custom node packages it
 depends on, and any findings that block an import outright - links that
 connect to nothing, references that reach outside the model folders, formats
-the app never loads. Nothing is installed, executed, or trusted from this
-dialog.
+the app never loads. Opening the review changes nothing; installation starts
+only when you choose **Install and enable** for a pinned package or approve
+the model files it needs.
+
+## Settings from the graph
+
+When a workflow is created or imported, LM Atelier maps supported graph controls
+to generation settings using the media runtime's node definitions. Saved values
+become defaults, and controls retain the node's supported ranges and choices.
+The application also applies its own limits; a saved value outside those limits
+must be changed explicitly rather than silently replaced during import.
+
+This includes size controls, sampling controls and supported video controls. A
+workflow that uses an aspect-ratio choice, a megapixel budget and a rounding
+multiple keeps those controls instead of gaining unrelated width and height
+fields. Separate stages keep separate settings. Existing explicit input bindings
+and the dedicated LoRA controls retain their own behavior.
+
+Connections inside the graph are preserved. A value supplied by another node,
+fixed by a primitive node or disconnected from the output is shown with an
+explanation instead of an ineffective control. A dynamic choice that changes a
+node's inputs must be changed in the native editor.
+
+The media worker must be available when mapping a new workflow or changed graph.
+This applies to both visual workflows and API-only graphs. An unchanged workflow
+with saved mappings can be exported, imported or cloned while the worker is
+offline. Saving a changed graph derives its mappings again, so controls do not
+keep references to a previous revision.
 
 ## Preparing an exact version
 
 When a needed package is not installed and pins exactly one version, the
-review offers **Prepare**. Preparation is a normal job: it resolves the
+review offers **Install and enable**. Installation is a normal job: it resolves the
 package against the ComfyUI Registry, downloads the archive and every wheel
 its dependencies need, verifies hashes end to end, and assembles an offline
 environment. Progress shows in the jobs panel stage by stage, and the job can
 be cancelled at any point.
 
-A successful preparation is always committed **inactive and untrusted**.
-Preparation needs the media worker stopped; a running worker refuses the job
-rather than racing it.
+Preparation first commits the downloaded package inactive and untrusted.
+The installation then verifies its exact Registry identity, archive, files,
+and dependency environment before recording trust and enabling eligible
+releases. Unknown warnings, unreviewed commit sources, and an explicit trust
+revocation require review; installation never silently overrides them.
+Preparation needs the media worker stopped, so every preparation waits for
+current media work, stops a running worker, and restarts it with its previous
+setup when preparation ends.
 
 ## Trusting and activating
 
 Prepared packages appear in the **Prepared packages** panel on the Workflows
-page, each showing its identity hashes and the two decisions it is waiting
-for:
+page, each showing its identity hashes, current state, and any remaining decisions:
 
 - **Trust** is a statement about you, not the package: that you reviewed this
   exact code and accept it running inside ComfyUI. Granting it re-verifies the

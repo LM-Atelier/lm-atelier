@@ -1,3 +1,25 @@
+export type * from "./queueOrderTypes";
+export type * from "./backupRestoreTypes";
+export type * from "./workflowReadTypes";
+export type * from "./chatEditLineageTypes";
+export type * from "./acceptedTurnTypes";
+import type { TurnAccepted } from "./acceptedTurnTypes";
+import type { HardwareFitAdvice } from "./hardwareFitTypes";
+export type * from "./hardwareFitTypes";
+export type * from "./customNodeContainmentTypes";
+import type { WorkerStatus } from "./workerStatusTypes";
+export type * from "./workerStatusTypes";
+import type { WorkflowInstallOffer } from "./workflowInstallOfferTypes";
+export type * from "./workflowInstallOfferTypes";
+export type * from "./priorTurnEditTypes";
+export type * from "./videoUtilityTypes";
+export type * from "./studioLocalEditTypes";
+export type * from "./enlargementTypes";
+export type * from "./recipeDraftTypes";
+export type * from "./workspaceLockTypes";
+export type * from "./backupArchiveTypes";
+import type { PriorTurnEditConfiguration } from "./priorTurnEditTypes";
+
 import type { ComposerPromptSource } from "./composerPromptSource";
 
 export type RoutingMode = "auto" | "text" | "image" | "video";
@@ -9,7 +31,9 @@ export type JobKind =
   | "activate"
   | "download"
   | "registry_prepare"
-  | "export";
+  | "workflow_install"
+  | "export"
+  | "media_utility";
 export type JobStatus =
   | "queued"
   | "running"
@@ -101,6 +125,15 @@ export interface ArtifactCleanupResult {
   truncated?: boolean;
 }
 
+/** The retention windows in force; revision 0 while they are the installation's own. */
+export interface RetentionPolicy {
+  media_days: number;
+  temporary_hours: number;
+  revision: number;
+  default_media_days: number;
+  default_temporary_hours: number;
+}
+
 export interface ArtifactDeleteResult {
   artifact_id: string;
   reference_count: number;
@@ -166,8 +199,35 @@ export interface ResponseRevision {
   status: "complete" | "pending" | "failed" | "cancelled";
   parts: MessagePart[];
   feedback?: "up" | "down" | null;
+  activity?: ChatActivityReference | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface ChatActivityReference {
+  id: string;
+  sequence: number;
+  message_id: string;
+  response_revision_id: string;
+  occurred_at: string;
+}
+
+export interface ChatActivity {
+  active_work_count: number;
+  unresolved_failed_count: number;
+  last_output: ChatActivityReference | null;
+  last_failure: ChatActivityReference | null;
+}
+
+export interface ChatSummary {
+  id: string;
+  project_id: string | null;
+  title: string;
+  archived: boolean;
+  pinned: boolean;
+  created_at: string;
+  updated_at: string;
+  activity: ChatActivity;
 }
 
 export interface Chat {
@@ -194,8 +254,64 @@ export interface Chat {
   updated_at: string;
 }
 
+/** One file attached to an unsent draft, as the workspace keeps it. */
+export interface ChatComposerDraftAttachment {
+  artifact_id: string;
+  kind: "image" | "video";
+  origin: "uploaded" | "generated" | "edited";
+}
+
+/** One Reference mentioned in an unsent draft, and the text that names it. */
+export interface ChatComposerDraftMention {
+  reference_subject_id: string;
+  mention_slug: string;
+}
+
+/** The one-click edit template applied to an unsent draft. */
+export interface ChatComposerDraftTemplate {
+  name: string;
+  settings: Record<string, unknown>;
+}
+
+/** Everything an unsent message would be sent with, as the workspace stores it. */
+export interface ChatComposerDraftInput {
+  text: string;
+  prompt_source: ComposerPromptSource | null;
+  mode: RoutingMode;
+  output_count: number;
+  attachments: ChatComposerDraftAttachment[];
+  mentions: ChatComposerDraftMention[];
+  template_settings: ChatComposerDraftTemplate | null;
+}
+
+/** A chat's stored draft. Revision 0 means it has none. */
+export interface ChatComposerDraft extends ChatComposerDraftInput {
+  chat_id: string;
+  revision: number;
+  updated_at: string | null;
+}
+
 export interface ChatDetail extends Chat {
   messages: Message[];
+  web_searches?: WebSearch[];
+}
+export interface ChatMessageWindow {
+  chat_id: string;
+  messages: Message[];
+  has_older: boolean;
+  has_newer: boolean;
+}
+export interface ChatTranscriptContext {
+  chat_id: string;
+  head_id: string | null;
+  has_prior_visual: boolean;
+  has_prior_image: boolean;
+  has_pending_response: boolean;
+}
+export interface ChatSearchPage {
+  chat_id: string;
+  searches: WebSearch[];
+  next_before: string | null;
 }
 export interface PromptHelperDetail extends ChatDetail {
   draft_prompt: string;
@@ -223,12 +339,6 @@ export interface Run {
   started_at: string | null;
   completed_at: string | null;
   duration_ms: number | null;
-}
-
-export interface TurnAccepted {
-  run: Run;
-  user_message: Message;
-  assistant_message: Message;
 }
 
 export interface TurnReferenceInput {
@@ -266,51 +376,6 @@ export interface TurnRoleOverrides {
   vision_profile_id?: string | null;
   workflow_revision_id?: string | null;
   workflow_selection?: TurnWorkflowSelectionInput | null;
-}
-
-export interface PriorTurnEditRequest {
-  preset_id?: string | null;
-  text: string;
-  idempotency_key: string;
-  source_run_id?: string | null;
-  source_snapshot_sha256?: string | null;
-  profile_id?: string | null;
-  vision_profile_id?: string | null;
-  mode?: RoutingMode | null;
-  parent_message_id?: string | null;
-  /** Omit to inherit source inputs; an empty array explicitly removes them. */
-  input_artifact_ids?: string[];
-  /** Omit to inherit source bindings; an empty array explicitly removes them. */
-  references?: TurnReferenceInput[];
-  prompt_source?: ComposerPromptSource | null;
-  settings?: Record<string, unknown>;
-  ordered_settings?: Record<string, Record<string, unknown>>;
-  role_overrides?: Partial<Record<EngineRole, TurnRoleOverrides>>;
-  /** Explicit changes to exact source steps; applied after role-wide choices. */
-  step_overrides?: Record<string, TurnRoleOverrides>;
-  output_count?: number | null;
-  workflow_revision_id?: string | null;
-  workflow_selection?: TurnWorkflowSelectionInput | null;
-  confirm_media?: boolean;
-}
-
-export interface PriorTurnEditConfiguration {
-  image_edit_strength?: Record<string, unknown> | null;
-  operation: string;
-  profile_engine?: string | null;
-  settings: Record<string, unknown>;
-  resolved_settings: Record<string, unknown>;
-  settings_role: string;
-  output_count: number;
-  profile_id: string | null;
-  vision_profile_id: string | null;
-  preset_id: string | null;
-  preset: Record<string, unknown> | null;
-  model_selection: Record<string, unknown>;
-  workflow_selection: WorkflowSelection;
-  workflow_revision_id: string | null;
-  workflow_schema: Record<string, unknown> | null;
-  profile_settings?: Record<string, unknown>;
 }
 
 export interface PriorTurnEditStepSource extends PriorTurnEditConfiguration {
@@ -377,6 +442,108 @@ export interface Job {
   // gained them, so the data was unreachable until the contract gate caught it.
   started_at: string | null;
   completed_at: string | null;
+}
+
+export interface QueueStep {
+  id: string;
+  ordinal: number;
+  label: string;
+  status: WorkStepStatus;
+  blocked_by: number;
+  progress: number | null;
+  progress_scope: "overall" | "stage" | null;
+  recorded_media_outputs: number | null;
+}
+
+export interface QueuePlanSteps {
+  plan_id: string;
+  items: QueueStep[];
+  total: number;
+  next_offset: number | null;
+  observed_at: string;
+}
+
+export interface QueueLaneCounts {
+  generation: number;
+  transfer: number;
+  install: number;
+  utility: number;
+}
+
+export type GenerationQueueAction = "pause_after_current" | "resume";
+export interface GenerationQueuePolicy {
+  lane: "generation";
+  dispatch_state: "open" | "draining" | "paused";
+  revision: number;
+  running_jobs: number;
+  allowed_actions: GenerationQueueAction[];
+}
+
+export type TransferQueueAction = "pause_after_current" | "resume";
+export interface TransferQueuePolicy {
+  lane: "transfer";
+  dispatch_state: "open" | "draining" | "paused";
+  revision: number;
+  running_jobs: number;
+  allowed_actions: TransferQueueAction[];
+}
+
+export type UtilityQueueAction = "pause_after_current" | "resume";
+export interface UtilityQueuePolicy {
+  lane: "utility";
+  dispatch_state: "open" | "draining" | "paused";
+  revision: number;
+  running_jobs: number;
+  allowed_actions: UtilityQueueAction[];
+}
+
+export interface QueueControlCommand {
+  expected_revision: number;
+  idempotency_key: string;
+}
+
+export interface QueueControlResult {
+  owner_id: string;
+  control_state: "eligible" | "held";
+  control_revision: number;
+  eligible_since: string | null;
+}
+
+export interface QueueActivityItem {
+  owner_type: "work_plan" | "job";
+  owner_id: string;
+  label: string;
+  lane: "generation" | "transfer" | "install" | "utility";
+  status: "running" | "queued" | "paused" | "blocked";
+  chat_id: string | null;
+  chat_title: string | null;
+  created_at: string;
+  updated_at: string;
+  step_count: number;
+  completed_steps: number;
+  blocked_steps: number;
+  active_jobs: number;
+  running_jobs: number;
+  queued_jobs: number;
+  paused_jobs: number;
+  progress: number | null;
+  control_state: "eligible" | "held" | null;
+  control_revision: number | null;
+  allowed_actions: ("hold" | "release")[];
+}
+
+export interface QueueActivityPage {
+  items: QueueActivityItem[];
+  total: number;
+  lane_counts: QueueLaneCounts;
+  next_cursor: string | null;
+  observed_at: string;
+}
+
+export interface JobActivity {
+  active: Job[];
+  active_count: number;
+  recent_issues: Job[];
 }
 
 export interface ProgressV2 {
@@ -511,6 +678,15 @@ export interface ToolCapabilityProbe {
   error: string | null;
 }
 
+export interface ModelProfileModelUpdate {
+  expected_install_id: string;
+  download_job_id: string;
+}
+
+export interface UseCaseSuggestionOut {
+  suggestion: string;
+}
+
 export interface ModelProfile {
   id: string;
   model_install_id: string | null;
@@ -554,40 +730,15 @@ export interface GenerationPresetBundle {
   settings: Record<string, unknown>;
 }
 
-export interface WorkerStatus {
-  name: "chat" | "media";
-  state: "stopped" | "starting" | "ready" | "exited";
-  managed: boolean;
-  running: boolean;
-  pid: number | null;
-  profile_id: string | null;
-  command: string[];
-  exit_code: number | null;
-  estimated_memory_bytes: number | null;
-  startup_duration_ms?: number | null;
-  current_memory_bytes: number | null;
-  peak_memory_bytes: number | null;
-  active_jobs: number;
-  queued_jobs: number;
-  progress_age_seconds?: number | null;
-  failure_detail?: string | null;
-  failure_code?:
-    | "oom_vram"
-    | "oom_host"
-    | "port_in_use"
-    | "model_incompatible"
-    | "executable_missing"
-    | "startup_timeout"
-    | "crashed"
-    | "unknown"
-    | null;
-  failure_remedy?: string | null;
-  stderr_tail?: string | null;
-  log_path?: string | null;
-}
-
 export interface WorkerSettings {
   worker_startup_seconds: number;
+}
+
+export interface KeepAwakeStatus {
+  enabled: boolean;
+  supported: boolean;
+  active: boolean;
+  running_jobs: number;
 }
 
 export interface WorkerResetResult {
@@ -621,14 +772,19 @@ export interface RuntimeStatus {
   security_status?: "checksum-pinned" | "blocked";
   security_message?: string;
   message: string;
+  installed_release?: string | null;
 }
 
 export type SetupReadinessCode =
   | "activation_ready"
   | "activation_required"
   | "activation_stale"
+  | "custom_node_containment_unavailable"
   | "generation_verification_failed"
   | "generation_verification_required"
+  | "generation_verification_paused"
+  | "generation_verification_pausing"
+  | "generation_verification_queued"
   | "generation_verification_running"
   | "generation_verified"
   | "install_failed"
@@ -642,6 +798,7 @@ export type SetupReadinessCode =
   | "runtime_failed"
   | "runtime_installing"
   | "runtime_missing"
+  | "runtime_other_version"
   | "runtime_ready"
   | "runtime_unsupported"
   | "worker_failed"
@@ -710,6 +867,61 @@ export interface BackupInfo {
   media_size_bytes: number;
 }
 
+/** One empty chat, described by why it would or would not be offered, never by
+ * what anybody wrote in it. */
+export interface EmptyChatEntry {
+  id: string;
+  classification: "strict_blank" | "configured_blank" | "inconsistent";
+  created_at: string;
+  updated_at: string;
+  age_hours: number;
+  reasons: string[];
+  deletable: boolean;
+}
+
+export interface EmptyChatPage {
+  entries: EmptyChatEntry[];
+  next_cursor: string | null;
+  counts: Record<string, number>;
+  evaluated_at: string;
+}
+
+/** Why a chosen chat no longer belongs to a cleanup it was chosen for. */
+export interface EmptyChatConflict {
+  chat_id: string;
+  reason:
+    | "missing"
+    | "out_of_scope"
+    | "not_empty"
+    | "too_young"
+    | "archived_excluded"
+    | "inconsistent"
+    | "filtered_out";
+}
+
+/** A chosen set of empty chats bound to a digest and a short deadline. */
+export interface EmptyChatPreview {
+  preview_id: string;
+  digest: string;
+  expires_at: string;
+  strict_count: number;
+  configured_count: number;
+  conflicts: EmptyChatConflict[];
+}
+
+/** What one cleanup deleted, or the earlier result a retry returned. */
+export interface EmptyChatDeletion {
+  operation_id: string;
+  deleted_ids: string[];
+  deleted_at: string;
+  replayed: boolean;
+}
+
+export interface CatalogInstallMatches {
+  remote_ids: string[];
+  workflow_template_ids: string[];
+}
+
 export interface ModelInstall {
   id: string;
   source_id: string | null;
@@ -733,6 +945,7 @@ export interface ModelInstall {
 }
 
 export type InstalledAssetKind =
+  | "background_removal"
   | "checkpoint"
   | "clip_vision"
   | "controlnet"
@@ -755,9 +968,11 @@ export interface ModelAssetInstall {
   manifest_json: Record<string, unknown>;
   active: boolean;
   use_case: string;
+  use_case_derived?: boolean;
   auto_apply: boolean;
   default_model_strength: number;
   default_clip_strength: number;
+  typed_trigger_words: string[];
   verified_at: string | null;
   created_at: string;
   updated_at: string;
@@ -903,6 +1118,26 @@ export interface CatalogPage {
   stale?: boolean;
 }
 
+export interface LoraSuggestion extends CatalogModel {
+  use_case?: string;
+  use_case_derived?: boolean;
+}
+
+/** Well-rated general-audience LoRAs for the model family a workflow runs. */
+export interface LoraSuggestions {
+  family: string | null;
+  gap: "family_unknown" | "family_unsupported" | null;
+  items: LoraSuggestion[];
+  next_cursor: string | null;
+  stale: boolean;
+}
+
+/** A discovered workflow's graph, to be reviewed the way an imported file is. */
+export interface WorkflowCatalogGraph {
+  version_id: string;
+  ui_graph: Record<string, unknown>;
+}
+
 export interface CatalogDetail {
   model: CatalogModel;
   revision: string;
@@ -963,6 +1198,13 @@ export interface CatalogInstallPlan {
   failure_reason: string | null;
 }
 
+export interface CatalogHardwareAlternative {
+  selected_files: string[];
+  download_bytes: number;
+  download_size_complete: boolean;
+  hardware_fit: HardwareFitAdvice;
+}
+
 export interface CatalogPreflight {
   remote_id: string;
   source_remote_id: string | null;
@@ -980,9 +1222,12 @@ export interface CatalogPreflight {
   workflow_template_id: string | null;
   workflow_template_sha256: string | null;
   download_bytes: number;
+  download_size_complete?: boolean;
   available_disk_bytes: number;
   estimated_ram_bytes: number | null;
   estimated_vram_bytes: number | null;
+  hardware_fit?: HardwareFitAdvice | null;
+  hardware_alternatives?: CatalogHardwareAlternative[];
   can_install: boolean;
   /** The choices behind a filename this version could not settle. Present
    * only for names that are genuinely ambiguous, so a list of one never
@@ -994,7 +1239,13 @@ export interface CatalogPreflight {
   checks: CatalogPreflightCheck[];
 }
 
-export type BoundWorkflowAssetKind = "checkpoint" | "embedding" | "lora" | "upscaler" | "vae";
+export type BoundWorkflowAssetKind =
+  | "background_removal"
+  | "checkpoint"
+  | "embedding"
+  | "lora"
+  | "upscaler"
+  | "vae";
 export type WorkflowAssetKind = BoundWorkflowAssetKind | "configuration";
 
 /** One missing workflow file bound to an exact plan artifact. */
@@ -1082,7 +1333,160 @@ export interface WorkflowRevision {
   input_schema_json: Record<string, unknown>;
   dependencies_json: Record<string, unknown>;
   trusted: boolean;
+  dependency_contract_sha256?: string | null;
   created_at: string;
+}
+
+export interface WorkflowActivationSelection {
+  slot_name: string;
+  requirement_key: string;
+  local_kind: WorkflowDependencyResourceKind;
+  local_id: string;
+  recorded_resource_identity_sha256: string | null;
+  mount: Record<string, unknown>;
+}
+
+export interface WorkflowActivationChoice {
+  name: string;
+  selection: WorkflowActivationSelection;
+}
+
+export interface WorkflowActivationSlotChoices {
+  name: string;
+  resource_kind: WorkflowDependencyResourceKind;
+  required: boolean;
+  satisfaction: "all_of" | "any_of";
+  requirement_keys: string[];
+  choices: WorkflowActivationChoice[];
+}
+
+export interface WorkflowActivationPreparation {
+  workflow_revision_id: string;
+  workflow_artifact_sha256: string;
+  dependency_contract_sha256: string;
+  state: "prepared" | "needs_attention";
+  selections: WorkflowActivationSelection[] | null;
+  slots: WorkflowActivationSlotChoices[];
+  issues: { code: "missing_required_dependency" | "ambiguous_dependency_binding"; slot_name: string }[];
+}
+
+export interface WorkflowActivationRequest {
+  workflow_artifact_sha256: string;
+  dependency_contract_sha256: string;
+  selections: WorkflowActivationSelection[];
+}
+
+export interface WorkflowActivation {
+  id: string;
+  workflow_revision_id: string;
+  dependency_contract_sha256: string;
+  binding_sha256: string;
+  launch_sha256: string;
+  state: "ready";
+  is_active: true;
+}
+
+export interface WorkflowSummary {
+  id: string;
+  family_id?: string | null;
+  name: string;
+  operation: string;
+  description: string;
+  current_revision_id: string | null;
+  revision_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowRevisionChoice {
+  revision_id: string;
+  workflow_id: string;
+  workflow_name: string;
+  operation: string;
+  version: number;
+}
+
+/** One workflow-authored LoRA's verified file, by its portable name and content digest. */
+export interface WorkflowLoraAssetBinding {
+  dependency_slot: string;
+  requirement_key: string;
+  resource_identity_sha256: string;
+  runtime_reference: string;
+  sha256: string;
+}
+
+/** One LoRA a workflow revision applies, as far as its evidence goes. */
+export interface WorkflowLoraControlSlot {
+  slot_id: string;
+  position: number;
+  loader_type: string;
+  loader_contract: string | null;
+  loader_authority_sha256: string | null;
+  editability: "editable" | "required_locked" | "detected_read_only";
+  read_only_reason: string | null;
+  dependency_required: boolean | null;
+  observed_runtime_reference: string | null;
+  asset_binding: WorkflowLoraAssetBinding | null;
+  default_enabled: boolean | null;
+  default_model_strength: number | null;
+  default_clip_strength: number | null;
+  strength_mode: "separate" | "coupled" | "model_only" | "unknown";
+  editable_fields: Array<"enabled" | "model_strength" | "clip_strength">;
+}
+
+/** The strength range a workflow LoRA edit may use. */
+export interface WorkflowLoraStrengthBounds {
+  minimum: number;
+  maximum: number;
+}
+
+/** The exact workflow revision and activation an edit to its LoRAs must name. */
+export interface WorkflowLoraOverrideTargetWitness {
+  workflow_family_id: string | null;
+  workflow_definition_id: string;
+  workflow_variant_key: string | null;
+  workflow_revision_id: string;
+  slot_contract_version: 1;
+  revision_scope_sha256: string;
+  api_graph_sha256: string;
+  dependency_contract_sha256: string;
+  activation_binding_sha256: string;
+  activation_witness_sha256: string;
+}
+
+/** The LoRAs one exact workflow revision applies, and what may change them. */
+export interface WorkflowLoraControls {
+  version: 1;
+  override_contract_version: 1;
+  strength_bounds: WorkflowLoraStrengthBounds;
+  override_target: WorkflowLoraOverrideTargetWitness | null;
+  revision_scope_sha256: string;
+  api_graph_sha256: string;
+  dependency_contract_sha256: string;
+  activation_binding_sha256: string | null;
+  ordering_authority: "presentation_only";
+  evidence_gaps: Array<
+    | "dependency_contract_unavailable"
+    | "dependency_contract_invalid"
+    | "active_activation_unavailable"
+    | "active_activation_invalid"
+    | "ui_graph_provenance_unavailable"
+    | "core_runtime_evidence_unavailable"
+    | "core_graph_binding_unavailable"
+    | "package_binding_evidence_unavailable"
+    | "package_graph_binding_unavailable"
+  >;
+  /** The one model family the workflow runs, or null when that is not known. */
+  base_model_family: string | null;
+  accepts_added_loras: boolean;
+  slots: WorkflowLoraControlSlot[];
+}
+
+export interface WorkflowRevisionSchema {
+  revision_id: string;
+  workflow_id: string;
+  operation: string;
+  input_schema_json: Record<string, unknown>;
 }
 
 export interface Workflow {
@@ -1093,6 +1497,74 @@ export interface Workflow {
   description: string;
   current_revision_id: string | null;
   revisions: WorkflowRevision[];
+}
+
+/** The shapes a workflow can be asked for, and what it says they mean.
+ *
+ * The ids ARE the ratios. Which of them a given revision offers is decided by
+ * the server from the workflow's own bounds and multiples, so this list is the
+ * vocabulary, never the menu.
+ */
+export type OutputRatioPresetId = "1:1" | "3:4" | "2:3" | "9:16" | "4:3" | "3:2" | "16:9";
+
+/** The operations a size can be proven for: a picture, or a MiniMax H3 video. */
+export type WorkflowOutputGeometryOperation = "text_to_image" | "text_to_video" | "image_to_video";
+
+export interface WorkflowOutputGeometryBinding {
+  key: "width" | "height";
+  node_id: string;
+  input_name: "width" | "height";
+  default: number;
+  minimum: number;
+  maximum: number;
+  multiple_of: number;
+}
+
+/** What one revision can actually produce, proved from its stored graph.
+ *
+ * `available` false means this revision has no proof that a declared width and
+ * height reach its output at all, and the reason is deliberately one value: the
+ * graph may be somebody's own, and capability discovery must not become a way to
+ * read it.
+ *
+ * Narrower than the payload on purpose. The server also sends the latent,
+ * sampler, decode and save node ids and the full capability declaration; those
+ * describe the inside of somebody's graph, and nothing in the browser has a use
+ * for them. Leaving them undeclared keeps them out of the browser's vocabulary
+ * rather than inviting a future control to render them.
+ */
+export interface WorkflowOutputGeometryCapability {
+  version: 1;
+  available: boolean;
+  reason: "unsupported_workflow_geometry" | null;
+  revision_id: string | null;
+  workflow_id: string | null;
+  artifact_sha256: string | null;
+  operation: WorkflowOutputGeometryOperation | null;
+  engine: "comfyui" | null;
+  size_modes: ("exact" | "preset")[];
+  preset_ids: OutputRatioPresetId[];
+  width: WorkflowOutputGeometryBinding | null;
+  height: WorkflowOutputGeometryBinding | null;
+  graph_binding_verified: boolean;
+  request_authorized: false;
+}
+
+/** The exact pixels one request resolves to. Preview evidence, never authority. */
+export interface WorkflowOutputGeometryResolution {
+  version: 1;
+  workflow_id: string;
+  revision_id: string;
+  artifact_sha256: string;
+  operation: WorkflowOutputGeometryOperation;
+  engine: "comfyui";
+  mode: "image" | "video";
+  size_mode: "exact" | "preset";
+  preset_id: OutputRatioPresetId | null;
+  width: number;
+  height: number;
+  graph_binding_verified: true;
+  request_authorized: false;
 }
 
 export interface WorkflowEditorSession {
@@ -1193,6 +1665,12 @@ export interface SystemInfo {
   devices: DeviceInfo[];
 }
 
+/** The third-party software a release includes; both null when not running from a release. */
+export interface ThirdPartyNotices {
+  text: string | null;
+  license_folder: string | null;
+}
+
 export interface ApplicationInfo {
   version: string;
   data_directory: string;
@@ -1208,9 +1686,11 @@ export interface ApplicationInfo {
 
 export interface WebSettings {
   allow_url_fetch: boolean;
+  allow_search: boolean;
+  allow_search_without_asking: boolean;
 }
 
-export type CredentialProvider = "huggingface" | "civitai";
+export type CredentialProvider = "huggingface" | "civitai" | "crw";
 
 export interface CredentialStatus {
   provider: CredentialProvider;
@@ -1454,6 +1934,39 @@ export type WorkflowSelectionMode =
   | "revision"
   | "legacy";
 
+export interface WorkflowInstallProgress {
+  id: string;
+  workflow_revision_id: string;
+  status: "ready" | "queued" | "invalidated" | "completed" | "expired";
+  phase: "ready" | "downloading" | "paused" | "verifying" | "needs_attention" | "completed" | "invalidated" | "expired";
+  total_downloads: number;
+  completed_downloads: number;
+  failed_downloads: number;
+  cancelled_downloads: number;
+  paused_downloads: number;
+  pending_downloads: number;
+  unavailable_downloads: number;
+  attention_code:
+    | "download-acceptance-unavailable"
+    | "download-acceptance-changed"
+    | "download-result-unavailable"
+    | "download-result-changed"
+    | "download-plan-changed"
+    | "workflow-download-failed"
+    | "workflow-dependencies-need-selection"
+    | "download-results-need-binding"
+    | "workflow-install-offer-changed"
+    | "workflow-review-required"
+    | "workflow-completion-unavailable"
+    | "workflow-runtime-plan-unavailable"
+    | "workflow-runtime-plan-changed"
+    | "workflow-extension-review-required"
+    | "workflow-media-restore-failed"
+    | "workflow-install-cancelled"
+    | null;
+  retry_job_id: string | null;
+}
+
 export interface WorkflowFamilyVariant {
   id: string;
   variant_key: string;
@@ -1466,6 +1979,9 @@ export interface WorkflowFamilyVariant {
   trusted: boolean;
   readiness: WorkflowVariantReadiness;
   readiness_reason: string | null;
+  setup_resolution?: "reviewed_download_available" | "attention_required" | null;
+  install_offer?: WorkflowInstallOffer | null;
+  install_progress?: WorkflowInstallProgress | null;
 }
 
 export interface WorkflowFamilyPreference {
@@ -1481,6 +1997,11 @@ export interface WorkflowFamilyPreference {
  * authored as one, which is worth saying out loud rather than hiding: those
  * resolve to their original profile and behave exactly as they did.
  */
+export interface WorkflowFamilyDependencySummary {
+  dependency_count: number;
+  names: string[];
+}
+
 export interface WorkflowFamily {
   id: string;
   name: string;
@@ -1492,7 +2013,12 @@ export interface WorkflowFamily {
   archived: boolean;
   compatibility: boolean;
   variants: WorkflowFamilyVariant[];
+  supported_selector_capabilities?: WorkflowSelectorCapability[] | null;
+  variant_count?: number | null;
+  ready_variant_count?: number | null;
+  best_readiness?: WorkflowVariantReadiness | null;
   preferences: WorkflowFamilyPreference[];
+  dependency_summary?: WorkflowFamilyDependencySummary | null;
   created_at: string;
   updated_at: string;
 }
@@ -1604,13 +2130,18 @@ export interface WorkflowResourceConsumers {
   consumers: WorkflowResourceConsumer[];
 }
 
-export type StudioToolKind = "instruct" | "brush" | "eraser" | "rect" | "lasso" | "enhance" | "extend";
+export type StudioToolKind =
+  | "instruct" | "brush" | "eraser" | "rect" | "lasso" | "bucket" | "wand" | "enhance" | "extend"
+  | "text" | "remove" | "relight" | "isolate" | "background" | "subject" | "transform" | "perspective" | "crop"
+  | "resize" | "adjust" | "blur" | "paint" | "caption" | "canvas";
 
 export interface StudioToolCapability {
   kind: StudioToolKind;
   workflow_class: string;
   available: boolean;
   reason: string | null;
+  workflow_revision_id: string | null;
+  adapter_asset_id: string | null;
 }
 
 export interface StudioCapabilityReport {
@@ -1837,8 +2368,9 @@ export interface PromptBatch {
   prompt_template_revision_id: string;
   schema_version: number;
   contract_sha256: string;
-  codec_version: 2;
+  codec_version: 2 | 3;
   requested_count: number;
+  unfilled_ordinals: number[];
   selection_seed: number;
   plan_sha256: string;
   state: "draft" | "queued";
@@ -1869,4 +2401,37 @@ export interface ReferenceDeletionImpact {
   name: string;
   asset_count: number;
   exclusive_artifact_ids: string[];
+}
+
+export interface WebSearchResult {
+  url: string;
+  title: string;
+  snippet: string;
+}
+
+export interface WebSearch {
+  run_id: string;
+  assistant_message_id: string;
+  job_id: string | null;
+  revision: number | null;
+  state: "awaiting_approval" | "scheduled" | "approved" | "declined" | "cancelled" | "dispatching" | "complete" | "failed" | "uncertain";
+  query: string;
+  provider: "CRW";
+  provider_endpoint: string;
+  dispatch_after: string | null;
+  results: WebSearchResult[];
+  result_count: number;
+  truncated: boolean;
+  error_code: "search_provider_invalid" | "search_query_invalid" | "search_credentials_refused"
+    | "search_redirect_refused" | "search_rate_limited" | "search_unavailable" | "search_timeout"
+    | "search_response_invalid" | "search_response_too_large" | "search_dispatch_uncertain"
+    | "search_permission_revoked" | "search_provider_changed" | "search_work_unavailable" | null;
+}
+
+export interface WebSearchConfiguration {
+  installation_enabled: boolean;
+  configured: boolean;
+  provider: "CRW";
+  provider_endpoint: string | null;
+  error_code: "search_not_configured" | "search_provider_invalid" | "search_credentials_invalid" | null;
 }

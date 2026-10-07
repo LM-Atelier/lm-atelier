@@ -35,6 +35,7 @@ function draft(): PromptBatch {
     schema_version: authority.schemaVersion,
     contract_sha256: authority.contractSha256,
     codec_version: 2,
+    unfilled_ordinals: [],
     requested_count: authority.itemCount,
     selection_seed: authority.selectionSeed,
     plan_sha256: "b".repeat(64),
@@ -123,4 +124,47 @@ describe("promptDirectQueue admission", () => {
     expect(promptCountMaximum(0)).toBe(1);
     expect(promptCountMaximum(Number.NaN)).toBe(1);
   });
+});
+
+
+function partialDraft() {
+  const source = draft();
+  return {
+    ...source, codec_version: 3 as const, requested_count: 3, unfilled_ordinals: [2],
+    items: [source.items[0], { ...source.items[1], id: "filled-third", ordinal: 3 }],
+  };
+}
+
+describe("partial prompt batch admission", () => {
+  it("keeps the original count and sparse ordinals through creation and queueing", async () => {
+    const bound = { ...authority, itemCount: 3 };
+    const created = await admitCreatedPromptBatch(partialDraft(), bound);
+    expect(created).toMatchObject({ requested_count: 3, unfilled_ordinals: [2] });
+    const response = {
+      ...queued(), ...partialDraft(), state: "queued", plan_version: 2,
+      queue_idempotency_key: authority.queueIdempotencyKey, work_plan_id: "work-plan-one",
+      queued_at: stamp,
+      items: partialDraft().items.map((item) => ({
+        ...item, work_step_id: `step-${item.ordinal}`, run_id: `run-${item.ordinal}`,
+        media_seed: 100 + item.ordinal,
+      })),
+    };
+    await expect(admitQueuedPromptBatch(response, bound, created)).resolves.toMatchObject({
+      codec_version: 3, requested_count: 3, unfilled_ordinals: [2],
+    });
+  });
+
+  it.each(["empty", "overlap", "bool", "duplicate", "renumber", "order", "legacy"])(
+    "refuses a partial receipt with %s missing-item authority", async (defect) => {
+      const malformed = partialDraft();
+      if (defect === "empty") malformed.unfilled_ordinals = [];
+      if (defect === "overlap") malformed.unfilled_ordinals = [1, 2];
+      if (defect === "bool") Object.assign(malformed, { unfilled_ordinals: [true] });
+      if (defect === "duplicate") malformed.unfilled_ordinals = [2, 2];
+      if (defect === "renumber") malformed.items[1].ordinal = 2;
+      if (defect === "order") malformed.items.reverse();
+      if (defect === "legacy") Object.assign(malformed, { codec_version: 2 });
+      await expect(admitCreatedPromptBatch(malformed, { ...authority, itemCount: 3 })).rejects.toThrow();
+    },
+  );
 });

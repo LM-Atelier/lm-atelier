@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from typing import Any
+
 import pytest
 
 from local_lm.schemas import EngineCapabilities, SettingField
@@ -109,6 +112,80 @@ def test_nested_custom_setting_values_have_a_depth_bound() -> None:
 
     with pytest.raises(ValueError, match="nested too deeply"):
         validate_settings({"custom": nested}, [field])
+
+
+def test_a_number_nothing_can_represent_is_refused_whichever_way_it_is_written() -> None:
+    """The question is whether it can be used as a number, not how large it is.
+
+    A JSON number has no size limit written down and a float does, so a large
+    enough one cannot be converted at all. The two spellings have to answer the
+    same, because they are the same number: a browser writes ten to the four
+    hundredth with an exponent and a person may write it out, and Python reads
+    one as a float that is not finite and the other as an integer.
+    """
+    field = SettingField(key="custom", label="Custom", type="number", default=0, scope="workflow")
+
+    for unusable in (10**400, -(10**400), float("inf"), float("-inf"), float("nan")):
+        with pytest.raises(ValueError, match="must be finite"):
+            validate_settings({"custom": unusable}, [field])
+
+
+def test_a_large_but_usable_number_is_left_alone() -> None:
+    """The refusal above must not reach a number the product can actually use.
+
+    A workflow may declare a control whose range is far wider than anything the
+    engine offers, and the value chosen inside it is ordinary. Refusing the
+    declaration because the bound is large would make a working workflow
+    unusable, which is worse than the crash this rule exists to prevent.
+    """
+    field = SettingField(key="custom", label="Custom", type="number", default=0, scope="workflow")
+
+    for usable in (10**20, -(10**20), 1e20, 2**53, 2**53 + 1, 1.797e308):
+        validate_settings({"custom": usable}, [field])
+
+
+def test_the_same_number_written_two_ways_answers_the_same() -> None:
+    """A browser writes a bound without an exponent, and Python then reads an int.
+
+    `JSON.stringify` renders ten to the twentieth as a hundred thousand million
+    million million with no exponent, so a schema that left here as a float
+    comes back as a whole number. Judging the two differently would change
+    whether a workflow is accepted without the workflow changing at all.
+    """
+    exponent: dict[str, Any] = {
+        "type": "object",
+        "properties": {"custom": {"type": "number", "maximum": 1e20}},
+    }
+    written_out = json.loads(
+        '{"type":"object","properties":{"custom":'
+        '{"type":"number","maximum":100000000000000000000}}}'
+    )
+
+    assert written_out["properties"]["custom"]["maximum"] == 1e20
+    assert isinstance(written_out["properties"]["custom"]["maximum"], int)
+    assert isinstance(exponent["properties"]["custom"]["maximum"], float)
+
+    workflow_settings(IMAGE_SETTINGS, exponent)
+    workflow_settings(IMAGE_SETTINGS, written_out)
+
+
+def test_a_bound_no_engine_setting_could_hold_is_refused_before_it_is_compared() -> None:
+    """Where the old hole was widest, and hardest to see.
+
+    A workflow may narrow an engine setting's range. Comparing its bound against
+    the engine's own converts both to a float, and a whole number of more than
+    three hundred digits cannot become one - so the comparison raised from code
+    that had already accepted the value. The seed control took that path with a
+    `maximum` present but null, which is what skipped the two checks that would
+    otherwise have refused it first.
+    """
+    schema = {
+        "type": "object",
+        "properties": {"seed": {"type": "integer", "minimum": 10**400, "maximum": None}},
+    }
+
+    with pytest.raises(ValueError, match="must be finite"):
+        workflow_settings(IMAGE_SETTINGS, schema)
 
 
 def test_workflow_custom_controls_have_a_property_bound() -> None:
@@ -229,6 +306,50 @@ def test_a_workflow_that_declared_nothing_is_left_alone() -> None:
         by_key = {field.key: field for field in workflow_settings(VIDEO_SETTINGS, schema)}
         assert by_key["frames"].available is True, schema
         assert by_key["frames"].unavailable_reason is None, schema
+
+
+def test_a_workflow_that_takes_loras_is_offered_them_without_declaring_them() -> None:
+    """The panel and the run have to answer one question the same way.
+
+    A revision can provide a LoRA insertion point and declare no setting for
+    it. The run reads the insertion point, so a stack arriving through a prompt
+    is applied; the panel reads only the schema, so it offered no way to choose
+    one by hand. The caller passes what the run decides, and the control
+    follows it.
+    """
+
+    schemas: tuple[dict[str, Any] | None, ...] = (None, {}, {"properties": {}})
+    for schema in schemas:
+        offered = workflow_settings(IMAGE_SETTINGS, schema, accepts_added_loras=True)
+        loras = [field for field in offered if field.key == "loras"]
+        assert len(loras) == 1, schema
+        assert loras[0].available is True, schema
+        assert not [
+            field for field in workflow_settings(IMAGE_SETTINGS, schema) if field.key == "loras"
+        ], schema
+
+
+def test_a_declared_lora_setting_is_not_replaced_by_the_offered_one() -> None:
+    """A workflow that described this setting itself is obeyed, and gets one."""
+
+    declared = {
+        "properties": {
+            "loras": {
+                "type": "array",
+                "title": "Adapters",
+                "description": "The ones this graph was built around.",
+                "default": [],
+                "maxItems": 4,
+            },
+        }
+    }
+    offered = workflow_settings(IMAGE_SETTINGS, declared, accepts_added_loras=True)
+    loras = [field for field in offered if field.key == "loras"]
+    assert len(loras) == 1
+    # The workflow's own words survive, which is how we know the offered
+    # setting is a fallback rather than an override.
+    assert loras[0].label == "Adapters"
+    assert loras[0].help == "The ones this graph was built around."
 
 
 def test_workflow_read_only_controls_drop_obsolete_overrides() -> None:
@@ -458,6 +579,33 @@ def test_workflow_schema_cannot_weaken_engine_fields_or_claim_runtime_keys() -> 
         workflow_settings(
             IMAGE_SETTINGS,
             {"properties": {"prompt": {"type": "string", "default": "override"}}},
+        )
+    with pytest.raises(
+        ValueError,
+        match="reserved setting key workflow_lora_overrides",
+    ):
+        workflow_settings(
+            IMAGE_SETTINGS,
+            {"properties": {"workflow_lora_overrides": {"type": "object", "default": {}}}},
+        )
+
+
+def test_capability_schema_cannot_claim_workflow_lora_transport_key() -> None:
+    field = SettingField(
+        key="WORKFLOW_LORA_OVERRIDES",
+        label="Forged workflow LoRA overrides",
+        type="object",
+        default={},
+        scope="request",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="reserved setting key WORKFLOW_LORA_OVERRIDES",
+    ):
+        capability_settings_for_role(
+            _media_capabilities(image=[field], video=[]),
+            "image",
         )
 
 

@@ -2,7 +2,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "./api";
 import { generationIdentityFromProvenance } from "./generationIdentity";
-import type { ChatDetail, GenerationIdentity, Message } from "./types";
+import type {
+  ChatDetail,
+  GenerationIdentity,
+  Message,
+  StudioLocalEditDetails,
+  StudioLocalEditOperation,
+  TurnAccepted,
+} from "./types";
+import type { StudioReplay } from "./studioReplay";
 
 const STUDIO_SESSION_KEY = "local-lm-studio-session";
 
@@ -18,6 +26,12 @@ export type StudioMaskUpload = {
   blob: Blob;
   featherPx: number;
   invert: boolean;
+  /** Placed back over the source after a whole-picture edit, rather than
+   * handed to the workflow's own mask input. */
+  apply?: "blend";
+  /** How many pictures after the source the workflow only reads, so the
+   * result is placed back into the source alone. */
+  references?: number;
 };
 
 type StudioApply = {
@@ -29,6 +43,18 @@ type StudioApply = {
   /** The workflow a recipe recorded, so applying one reproduces its run
    * rather than running its words against whatever is current. */
   workflowRevisionId?: string;
+  /** A picture sent after the source, such as the light map the relight tool
+   * draws: as bytes, or as the artifact of one the library already holds. */
+  secondPicture?: Blob | string;
+  /** Pictures already in the library sent after the source, as an edit made
+   * again sends the ones it was given the first time. */
+  alsoGiven?: string[];
+  /** How many results to ask for. Each comes back as its own answer, the
+   * server counting the seed on from one to the next, so they sit beside one
+   * another as alternatives. */
+  results?: number;
+  /** Said as an enlargement, whatever factor goes with it. */
+  upscale?: boolean;
 };
 
 export type StudioStep = {
@@ -36,6 +62,9 @@ export type StudioStep = {
   artifactId: string;
   /** The instruction that produced this result; empty for the source. */
   instruction: string;
+  /** The picture this result was made from: the first one its turn was given.
+   * Null for the source, and for a turn that recorded no picture. */
+  beforeArtifactId: string | null;
   isSource: boolean;
   generationIdentity: GenerationIdentity | null;
 };
@@ -79,21 +108,38 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
   const sessionId = current?.id ?? null;
 
   const open = useMutation({
-    mutationFn: () => api.openStudioSession(sourceArtifactId!, sourceChatId),
-    onSuccess: (session) => {
-      const opened = { id: session.id, source: sourceArtifactId! };
-      setBinding(opened);
-      localStorage.setItem(STUDIO_SESSION_KEY, JSON.stringify(opened));
-      client.setQueryData(["studio-session", session.id], session);
-    },
+    mutationFn: ({ source, chat }: { source: string; chat: string | null }) =>
+      api.openStudioSession(source, chat),
   });
+  const openSession = open.mutate;
 
   // Opening an image is the studio's entry: find-or-create runs once per
-  // source, and reopening the same image resumes its history.
+  // source, and reopening the same image resumes its history. A late response
+  // cannot replace the binding after another picture opens or Studio closes.
   useEffect(() => {
-    if (sourceArtifactId && !open.isPending) open.mutate();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceArtifactId, sourceChatId]);
+    if (!sourceArtifactId) return;
+    let active = true;
+    openSession({ source: sourceArtifactId, chat: sourceChatId }, {
+      onSuccess: (session) => {
+        if (!active) return;
+        const opened = { id: session.id, source: sourceArtifactId };
+        setBinding(opened);
+        localStorage.setItem(STUDIO_SESSION_KEY, JSON.stringify(opened));
+        client.setQueryData(["studio-session", session.id], session);
+      },
+    });
+    return () => { active = false; };
+  }, [sourceArtifactId, sourceChatId, openSession, client]);
+
+  const stop = useMutation({
+    mutationFn: (id: string) => api.cancelChat(id),
+    // Read again at once, so the stopped edit leaves the studio without
+    // waiting for the next check.
+    onSettled: (_job, _error, id) => void client.invalidateQueries({ queryKey: ["studio-session", id] }),
+  });
+  // Refused because the work had already ended by the time the press
+  // arrived: the session read shows that, so it is not an error to report.
+  const stopError = (stop.error as { status?: number } | null)?.status === 409 ? null : stop.error;
 
   const session = useQuery({
     queryKey: ["studio-session", sessionId],
@@ -109,6 +155,10 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
       mask,
       settings,
       workflowRevisionId,
+      secondPicture,
+      alsoGiven,
+      results,
+      upscale,
     }: StudioApply) => {
       // Refused rather than raced. Between switching pictures and the new
       // session opening there is no session for what is on screen, and the
@@ -123,18 +173,79 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
         ...settings,
         ...(mask ? { mask: await uploadMask(mask) } : {}),
       };
-      return api.sendTurn(
-        sessionId,
-        instruction,
-        "image",
-        [artifactId],
-        turnSettings,
-        undefined,
-        undefined,
-        workflowRevisionId,
-      );
+      // Unlike a selection, this is content the workflow reads as a picture, so
+      // it goes in the inputs, after the source it belongs to. A picture the
+      // person chose keeps its own name and type; a drawn one is a PNG; one
+      // the library already holds is named, not uploaded again.
+      const second = typeof secondPicture === "string"
+        ? { id: secondPicture }
+        : secondPicture
+          ? await api.upload(
+              secondPicture instanceof File
+                ? secondPicture
+                : new File([secondPicture], "studio-light-map.png", { type: "image/png" }),
+            )
+          : null;
+      const inputs = second ? [artifactId, second.id] : [artifactId, ...(alsoGiven ?? [])];
+      // One result is the request as it always was, with no count in it.
+      if (upscale) {
+        return api.sendTurn(sessionId, instruction, "image", inputs, turnSettings, undefined, undefined, workflowRevisionId,
+          [], results && results > 1 ? results : undefined, undefined, undefined, undefined, true);
+      }
+      return results && results > 1
+        ? api.sendTurn(sessionId, instruction, "image", inputs, turnSettings, undefined, undefined, workflowRevisionId, [], results)
+        : api.sendTurn(sessionId, instruction, "image", inputs, turnSettings, undefined, undefined, workflowRevisionId);
     },
     onSuccess: () => void client.invalidateQueries({ queryKey: ["studio-session", sessionId] }),
+  });
+
+  // Turning, flipping, cropping or resizing needs no model: the server makes
+  // the picture and answers with the session it now belongs to.
+  const localEdit = useMutation({
+    mutationFn: async ({ operation, artifactId, details }: { operation: StudioLocalEditOperation; artifactId: string; details?: StudioLocalEditDetails }) => {
+      if (!sessionId) {
+        throw new Error("This picture is still opening. Try that again in a moment.");
+      }
+      // A marked area uploads first, as a selection, and the edit names it.
+      const { blur, pixelate, paint, caption, subject, ...rest } = details ?? {};
+      const selection = blur?.selection ?? pixelate?.selection ?? paint?.selection;
+      const marked = selection
+        ? await api.upload(new File([selection], "studio-selection.png", { type: "image/png" }))
+        : null;
+      return api.studioLocalEdit(sessionId, {
+        source_artifact_id: artifactId,
+        operation,
+        ...rest,
+        ...(blur && marked ? { blur: { mask_artifact_id: marked.id, radius: blur.radius } } : {}),
+        ...(pixelate && marked
+          ? { pixelate: { mask_artifact_id: marked.id, block: pixelate.block } }
+          : {}),
+        ...(paint && marked
+          ? { paint: { mask_artifact_id: marked.id, color: paint.color, opacity: paint.opacity } }
+          : {}),
+        ...(caption
+          ? {
+              caption: {
+                overlay_artifact_id: (
+                  await api.upload(new File([caption.words], "studio-words.png", { type: "image/png" }))
+                ).id,
+              },
+            }
+          : {}),
+        ...(subject
+          ? {
+              subject: {
+                overlay_artifact_id: (
+                  await api.upload(new File([subject.placed], "studio-subject.png", { type: "image/png" }))
+                ).id,
+              },
+            }
+          : {}),
+      });
+    },
+    // Filed under the session that answered, which is not necessarily the one
+    // on screen if another picture opened while this one was being turned.
+    onSuccess: (updated) => client.setQueryData(["studio-session", updated.id], updated),
   });
 
   return {
@@ -142,8 +253,22 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
     session: session.data ?? null,
     steps: session.data ? studioSteps(session.data, sourceArtifactId) : [],
     previewArtifactId: session.data ? studioPreviewArtifactId(session.data) : null,
-    busy: open.isPending || apply.isPending || hasPendingWork(session.data),
-    error: open.error ?? session.error ?? apply.error,
+    busy: open.isPending || apply.isPending || localEdit.isPending || hasPendingWork(session.data),
+    error: open.error ?? session.error ?? apply.error ?? localEdit.error ?? stopError,
+    /** Stop the edit the session is running; the picture on screen stays as it was. */
+    stop: () => {
+      if (sessionId) stop.mutate(sessionId);
+    },
+    stopping: stop.isPending,
+    /** Rotate, flip, crop or resize a picture in this session; `onDone` runs once the step exists,
+     * and `onFailed` when it was refused, so a caller waiting on it can stop. */
+    localEdit: (
+      operation: StudioLocalEditOperation,
+      artifactId: string,
+      onDone?: () => void,
+      details?: StudioLocalEditDetails,
+      onFailed?: () => void,
+    ) => localEdit.mutate({ operation, artifactId, details }, { onSuccess: () => onDone?.(), onError: () => onFailed?.() }),
     /** `onAccepted` runs only once the turn has been taken.
      *
      * The surface clears the instruction and the selection there rather than
@@ -156,13 +281,38 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
       mask?: StudioMaskUpload,
       settings?: Record<string, unknown>,
       workflowRevisionId?: string,
-      onAccepted?: () => void,
+      onAccepted?: (accepted: TurnAccepted) => void,
+      secondPicture?: Blob | string,
+      /** Runs when the turn is refused, so a caller waiting on it can stop. */
+      onRefused?: () => void,
+      results?: number,
+      upscale?: boolean,
     ) =>
       apply.mutate(
-        { instruction, artifactId, mask, settings, workflowRevisionId },
+        { instruction, artifactId, mask, settings, workflowRevisionId, secondPicture, results, upscale },
+        { onSuccess: onAccepted, onError: onRefused },
+      ),
+    /** The same edit again on the same pictures, as Try another sends it. */
+    again: (replay: StudioReplay, onAccepted?: (accepted: TurnAccepted) => void) =>
+      apply.mutate(
+        {
+          instruction: replay.words,
+          artifactId: replay.inputs[0],
+          alsoGiven: replay.inputs.slice(1),
+          settings: replay.settings,
+          workflowRevisionId: replay.workflowRevisionId,
+          upscale: replay.upscale,
+        },
         { onSuccess: onAccepted },
       ),
   };
+}
+
+/** Every picture the turn that made a result was given, the one it changed first. */
+export function studioTurnPictures(session: ChatDetail | null | undefined, resultMessageId: string): string[] {
+  const result = session?.messages.find((message) => message.id === resultMessageId);
+  const turn = session && result ? producingTurn(session.messages, result) : null;
+  return (turn?.parts ?? []).flatMap((part) => (part.type === "image" && part.artifact_id ? [part.artifact_id] : []));
 }
 
 export const uploadMaskForTest = uploadMask;
@@ -174,6 +324,8 @@ async function uploadMask(mask: StudioMaskUpload) {
     artifact_id: artifact.id,
     feather_px: mask.featherPx,
     invert: mask.invert,
+    ...(mask.apply ? { apply: mask.apply } : {}),
+    ...(mask.references ? { references: mask.references } : {}),
   };
 }
 
@@ -212,6 +364,7 @@ export function studioSteps(
       messageId: "source",
       artifactId: sourceArtifactId,
       instruction: "",
+      beforeArtifactId: null,
       isSource: true,
       generationIdentity: null,
     });
@@ -223,10 +376,14 @@ export function studioSteps(
     );
     if (!image?.artifact_id) continue;
     const metadata = message.parts.find((part) => part.type === "generation_metadata");
+    const turn = producingTurn(session.messages, message);
     steps.push({
       messageId: message.id,
       artifactId: image.artifact_id,
-      instruction: instructionFor(session.messages, message),
+      instruction: turn?.parts.find((part) => part.type === "text" && part.text)?.text ?? "",
+      // Every studio edit sends the picture it changes first; a light map or
+      // a subject's picture only ever follows it.
+      beforeArtifactId: turn?.parts.find((part) => part.type === "image" && part.artifact_id)?.artifact_id ?? null,
       isSource: false,
       generationIdentity: generationIdentityFromProvenance(metadata?.metadata_json.provenance),
     });
@@ -234,12 +391,11 @@ export function studioSteps(
   return steps;
 }
 
-function instructionFor(messages: Message[], result: Message): string {
+/** The request a result answers: the nearest user turn before it. */
+function producingTurn(messages: Message[], result: Message): Message | null {
   const index = messages.findIndex((message) => message.id === result.id);
   for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-    const message = messages[cursor];
-    if (message.role !== "user") continue;
-    return message.parts.find((part) => part.type === "text" && part.text)?.text ?? "";
+    if (messages[cursor].role === "user") return messages[cursor];
   }
-  return "";
+  return null;
 }

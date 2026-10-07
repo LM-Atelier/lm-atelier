@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-import asyncio
 import copy
 import hashlib
 import json
+from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from recovery_requests import permanently_delete_chat
+from run_waits import wait_for_terminal_status
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from workflow_fixtures import seed_workflow_trust
@@ -35,6 +37,7 @@ from local_lm.models import (
     WorkPlan,
     WorkStep,
 )
+from local_lm.profile_service import AUTO_PROFILE_ID
 from local_lm.prompt_library import PromptLibraryError, create_prompt_template
 from local_lm.prompt_model_invocation import (
     PromptModelInvocationError,
@@ -82,14 +85,15 @@ def _create_payload(
 
 
 async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
-    for _ in range(300):
+    async def read() -> dict[str, Any]:
         response = await client.get(f"/api/runs/{run_id}")
         assert response.status_code == 200
-        run = response.json()
-        if run["status"] in {"complete", "failed", "cancelled"}:
-            return run
-        await asyncio.sleep(0.01)
-    raise AssertionError("run did not finish")
+        run: dict[str, Any] = response.json()
+        return run
+
+    return cast(
+        dict[str, Any], await wait_for_terminal_status(read, what=f"run {run_id}", expected=None)
+    )
 
 
 def _composer_source(batch: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
@@ -302,8 +306,18 @@ async def test_selected_prompt_batch_queues_one_atomic_exact_media_plan(
                 session.execute(statement)
                 session.commit()
 
-        deleted = await client.delete(f"/api/chats/{chat['id']}")
-        assert deleted.status_code == 204, deleted.text
+        stopped = await client.post(f"/api/work-plans/{plan_id}/cancel")
+        assert stopped.status_code == 200, stopped.text
+
+        async def read_stopped_plan() -> dict[str, Any]:
+            response = await client.get(f"/api/work-plans/{plan_id}")
+            assert response.status_code == 200, response.text
+            return cast(dict[str, Any], response.json())
+
+        await wait_for_terminal_status(
+            read_stopped_plan, what="the stopped prompt batch", expected="cancelled"
+        )
+        await permanently_delete_chat(client, chat["id"])
         with SessionLocal() as session:
             assert session.get(PromptExpansionBatch, batch["id"]) is None
             assert (
@@ -1307,11 +1321,20 @@ def _ready_chat_model(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> tuple[st
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("partial", [False, True])
 async def test_model_guided_prompt_batch_invokes_once_and_replays_before_readiness(
     app: FastAPI,
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
+    partial: bool,
 ) -> None:
+    from local_lm.prompt_model_values import (
+        PromptModelValues,
+        PromptModelValuesResult,
+        parse_prompt_model_values_result,
+        prompt_model_values_result_sha256,
+    )
+
     _profile_id, install_id = _ready_chat_model(app, monkeypatch)
     calls = 0
 
@@ -1319,7 +1342,8 @@ async def test_model_guided_prompt_batch_invokes_once_and_replays_before_readine
         nonlocal calls
         calls += 1
         items = data.items
-        values = parse_prompt_model_values(
+        parse_values = parse_prompt_model_values_result if partial else parse_prompt_model_values
+        values = parse_values(
             {
                 "version": 1,
                 "batch_values": {},
@@ -1329,13 +1353,20 @@ async def test_model_guided_prompt_batch_invokes_once_and_replays_before_readine
                         "values": {"subject": f"model subject {item.ordinal}"},
                     }
                     for item in items
+                    if not partial or item.ordinal != 2
                 ],
             },
             contract=contract,
         )
+        if partial:
+            assert isinstance(values, PromptModelValuesResult)
+            values_sha256 = prompt_model_values_result_sha256(values, contract=contract)
+        else:
+            assert isinstance(values, PromptModelValues)
+            values_sha256 = prompt_model_values_sha256(values, contract=contract)
         return PromptModelInvocationResult(
             values=values,
-            values_sha256=prompt_model_values_sha256(values, contract=contract),
+            values_sha256=values_sha256,
             attempts=(),
         )
 
@@ -1365,7 +1396,7 @@ async def test_model_guided_prompt_batch_invokes_once_and_replays_before_readine
         "idempotency_key": "model-success-preview",
         "template_revision_id": revision["id"],
         "contract_sha256": revision["contract_sha256"],
-        "item_count": 2,
+        "item_count": 3 if partial else 2,
         "selection_seed": 9,
         "inputs": {},
     }
@@ -1373,6 +1404,13 @@ async def test_model_guided_prompt_batch_invokes_once_and_replays_before_readine
     assert first.status_code == 201
     assert first.json()["replayed"] is False
     assert len(first.json()["items"]) == 2
+    assert first.json()["requested_count"] == (3 if partial else 2)
+    assert first.json()["codec_version"] == (3 if partial else 2)
+    assert first.json()["unfilled_ordinals"] == ([2] if partial else [])
+    assert [item["ordinal"] for item in first.json()["items"]] == ([1, 3] if partial else [1, 2])
+    reread = await client.get(f"/api/prompt-batches/{first.json()['id']}")
+    assert reread.status_code == 200
+    assert reread.json()["unfilled_ordinals"] == ([2] if partial else [])
     assert calls == 1
 
     monkeypatch.setattr(app.state.services.processes, "statuses", lambda: [])
@@ -2300,7 +2338,7 @@ def _installed_chat_profile(app: FastAPI) -> str:
         )
         session.add(profile)
         session.commit()
-        return cast(str, profile.id)
+        return profile.id
 
 
 def _stopped_workers(
@@ -2514,7 +2552,7 @@ async def test_the_auto_profile_sentinel_is_not_treated_as_a_loadable_profile(
     _fill_slots_with(monkeypatch)
 
     chat = (await client.post("/api/chats", json={"title": "Auto profile"})).json()
-    _select_chat_profile(chat["id"], api_module.AUTO_PROFILE_ID)
+    _select_chat_profile(chat["id"], AUTO_PROFILE_ID)
 
     refused = await _model_slot_batch(client, chat["id"], "auto-sentinel")
 
@@ -2621,14 +2659,14 @@ async def test_model_slot_failure_names_the_stage_without_persisting_partial_wor
     code: str,
     detail: str,
 ) -> None:
-    from local_lm.adapters.base import ChatEvent
+    from local_lm.adapters.base import ChatEvent, ChatRequest
     from local_lm.prompt_expansion import PromptExpansionError
     from local_lm.prompt_model_values import PromptModelValuesError
 
     _ready_chat_model(app, monkeypatch)
     calls = 0
 
-    async def stream(_request):
+    async def stream(_request: ChatRequest) -> AsyncIterator[ChatEvent]:
         nonlocal calls
         calls += 1
         values = {
@@ -2657,7 +2695,7 @@ async def test_model_slot_failure_names_the_stage_without_persisting_partial_wor
 
     monkeypatch.setattr(app.state.services.engines.chat, "stream", stream)
 
-    def refuse(*_args, **_kwargs):
+    def refuse(*_args: object, **_kwargs: object) -> None:
         if failure == "contract_values":
             raise PromptModelValuesError("constructed-value-detail")
         raise PromptExpansionError("constructed-render-detail")
@@ -2805,3 +2843,112 @@ async def test_auto_prior_edit_keeps_only_a_compatible_accepted_recipe(
             assert inherited["submitted_sha256"] != witness["submitted_sha256"]
         current = await client.get(f"/api/prompt-batches/{batch['id']}")
         assert current.json()["plan_version"] == witness["queued_plan_version"]
+
+
+@pytest.mark.asyncio
+async def test_partial_prompt_batch_queues_only_supplied_original_ordinals(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_lm.prompt_model_values import (
+        parse_prompt_model_values_result,
+        prompt_model_values_result_sha256,
+    )
+
+    _ready_chat_model(app, monkeypatch)
+    calls = 0
+
+    async def invoke(_adapter: object, *, contract: Any, data: Any) -> PromptModelInvocationResult:
+        nonlocal calls
+        calls += 1
+        assert len(data.items) == 3
+        values = parse_prompt_model_values_result(
+            {
+                "version": 1,
+                "batch_values": {},
+                "items": [
+                    {"ordinal": 1, "values": {"subject": "a blue bridge"}},
+                    {"ordinal": 3, "values": {"subject": "a green tree"}},
+                ],
+            },
+            contract=contract,
+        )
+        return PromptModelInvocationResult(
+            values=values,
+            values_sha256=prompt_model_values_result_sha256(values, contract=contract),
+            attempts=(),
+        )
+
+    monkeypatch.setattr(api_module, "invoke_prompt_model_values", invoke)
+    chat = (await client.post("/api/chats", json={"title": "Partial batch queue"})).json()
+    template = (
+        await client.post(
+            "/api/prompt-templates",
+            json=_create_payload(
+                key="partial-queue-template",
+                name="Partial queue template",
+                contract=_model_slot_contract(),
+            ),
+        )
+    ).json()
+    revision = template["revision"]
+    created = await client.post(
+        f"/api/chats/{chat['id']}/prompt-batches",
+        json={
+            "idempotency_key": "partial-queue-create",
+            "template_revision_id": revision["id"],
+            "contract_sha256": revision["contract_sha256"],
+            "item_count": 3,
+            "selection_seed": 8,
+            "inputs": {},
+        },
+    )
+    assert created.status_code == 201
+    batch = created.json()
+    assert batch["requested_count"] == 3 and batch["unfilled_ordinals"] == [2]
+    assert [item["ordinal"] for item in batch["items"]] == [1, 3]
+    with SessionLocal() as session:
+        assert session.query(PromptExpansionItem).count() == 2
+        assert session.query(Run).count() == session.query(Job).count() == 0
+    missing = await client.patch(
+        f"/api/prompt-batches/{batch['id']}/items/2",
+        json={
+            "expected_review_version": 1,
+            "expected_plan_version": 1,
+            "reviewed_prompt": "an absent draft",
+            "selected": True,
+        },
+    )
+    assert missing.status_code == 404
+    payload = {
+        "idempotency_key": "partial-queue",
+        "expected_plan_version": batch["plan_version"],
+        "expected_plan_sha256": batch["plan_sha256"],
+    }
+    async with app.state.services.scheduler.lease("primary"):
+        response = await client.post(f"/api/prompt-batches/{batch['id']}/queue", json=payload)
+        assert response.status_code == 202, response.text
+        queued = response.json()
+        assert queued["requested_count"] == 3 and queued["unfilled_ordinals"] == [2]
+        assert [item["ordinal"] for item in queued["items"]] == [1, 3]
+        plan = (await client.get(f"/api/work-plans/{queued['work_plan_id']}")).json()
+        assert plan["summary_json"]["output_count"] == 2
+        assert [step["prompt"] for step in plan["steps"]] == [
+            item["reviewed_prompt"] for item in batch["items"]
+        ]
+        with SessionLocal() as session:
+            runs = list(
+                session.scalars(select(Run).where(Run.work_plan_id == queued["work_plan_id"])).all()
+            )
+            assert len(runs) == 2
+            assert sorted(run.provenance_json["prompt_source"]["item_ordinal"] for run in runs) == [
+                1,
+                3,
+            ]
+            assert session.query(PromptExpansionItem).count() == 2
+        replay = await client.post(f"/api/prompt-batches/{batch['id']}/queue", json=payload)
+        assert replay.status_code == 202
+        assert replay.json()["replayed"] is True
+        assert replay.json()["work_plan_id"] == queued["work_plan_id"]
+        assert calls == 1

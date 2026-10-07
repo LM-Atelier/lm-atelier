@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import base64
-from collections.abc import AsyncIterator
+import shutil
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
@@ -27,7 +29,7 @@ ONE_PIXEL_PNG = base64.b64decode(
 
 
 @pytest.fixture
-def vision_store(tmp_path: Path) -> tuple[Settings, ArtifactStore, Session]:
+def vision_store(tmp_path: Path) -> Iterator[tuple[Settings, ArtifactStore, Session]]:
     settings = Settings(data_dir=tmp_path / "data")
     settings.prepare()
     engine = create_engine(f"sqlite:///{tmp_path / 'vision.sqlite3'}")
@@ -176,6 +178,12 @@ class _ObservationAdapter:
             roles=["chat"],
             operations=["text"],
             input_modalities=["text", "image"],
+            formats=[],
+            devices=[],
+            streaming=True,
+            tool_calling=False,
+            settings=[],
+            healthy=True,
         )
 
     async def count_tokens(self, messages: list[dict[str, object]]) -> int:
@@ -190,6 +198,9 @@ class _ObservationAdapter:
 
     async def cancel(self, run_id: str) -> None:
         del run_id
+
+    async def close(self) -> None:
+        pass
 
 
 async def test_bridge_observation_is_query_specific_and_bounded(
@@ -244,7 +255,7 @@ async def test_accepted_video_sampling_uses_original_count_and_dimension(
     path = settings.data_dir / "neutral-video.mp4"
     path.write_bytes(b"neutral local video fixture")
     monkeypatch.setattr(store, "verified_path", lambda _artifact: path)
-    monkeypatch.setattr(vision.shutil, "which", lambda _name: str(path))
+    monkeypatch.setattr(shutil, "which", lambda _name: str(path))
     monkeypatch.setattr(
         service,
         "_probe_video",
@@ -257,7 +268,7 @@ async def test_accepted_video_sampling_uses_original_count_and_dimension(
         commands.append(args)
         return process
 
-    monkeypatch.setattr(vision.asyncio, "create_subprocess_exec", start)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", start)
     monkeypatch.setattr(
         vision, "_communicate_bounded", AsyncMock(return_value=(ONE_PIXEL_PNG, b""))
     )

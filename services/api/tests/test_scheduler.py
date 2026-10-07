@@ -1,18 +1,30 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import time as _real_time
+from collections.abc import Callable
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
+import pytest
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 
 from local_lm import scheduler as scheduler_module
 from local_lm.config import Settings
-from local_lm.db import SessionLocal, configure_database, init_db
+from local_lm.db import (
+    SessionLocal,
+    configure_database,
+    database_is_contended,
+    init_db,
+)
 from local_lm.domain import JobStatus, utcnow
-from local_lm.models import Chat, Job, WorkPlan, WorkStep, WorkStepDependency
-from local_lm.scheduler import _ELIGIBILITY_SHARE_SECONDS, ResourceScheduler
+from local_lm.models import Chat, Job, Message, Run, WorkPlan, WorkStep, WorkStepDependency
+from local_lm.scheduler import _ELIGIBILITY_SHARE_SECONDS, JobClaim, ResourceScheduler
 
 
 class _FrozenClock:
@@ -87,11 +99,28 @@ def test_image_edit_checks_never_age_ahead_of_foreground_work(settings: Settings
     init_db()
     now = utcnow()
     with SessionLocal() as session:
+        chat = Chat()
+        session.add(chat)
+        session.flush()
+        user = Message(chat_id=chat.id, role="user")
+        assistant = Message(chat_id=chat.id, role="assistant")
+        session.add_all([user, assistant])
+        session.flush()
+        source = Run(
+            chat_id=chat.id,
+            user_message_id=user.id,
+            assistant_message_id=assistant.id,
+            operation="image_edit",
+            status="complete",
+        )
+        session.add(source)
+        session.flush()
         session.add_all(
             [
                 Job(
                     id="job_background_check",
                     kind="edit_verify",
+                    payload_json={"source_run_id": source.id},
                     status=JobStatus.QUEUED.value,
                     queue_group="primary",
                     queue_priority=10_000,
@@ -112,6 +141,140 @@ def test_image_edit_checks_never_age_ahead_of_foreground_work(settings: Settings
         ordered = ResourceScheduler._eligible_jobs(session, "primary", now)
 
     assert [job.id for job in ordered] == ["job_foreground", "job_background_check"]
+
+
+def _real_sqlite_error(tmp_path: Path, *, contended: bool) -> OperationalError:
+    """Produce a genuine sqlite3 failure of the requested kind, and wrap it.
+
+    Genuine on both sides on purpose. A constructed error with an error code
+    assigned by hand would only prove that the test and the predicate agree
+    about an attribute the test set, which is no evidence about what SQLite
+    does. A busy timeout of a tenth of a second keeps the contended case fast.
+    """
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    database = tmp_path / "contended.sqlite3"
+    holder = sqlite3.connect(database, timeout=5)
+    try:
+        holder.execute("PRAGMA journal_mode=WAL")
+        holder.execute("CREATE TABLE waiting (id INTEGER PRIMARY KEY)")
+        holder.commit()
+        if contended:
+            holder.execute("BEGIN IMMEDIATE")
+            holder.execute("INSERT INTO waiting (id) VALUES (1)")
+        other = sqlite3.connect(database, timeout=0.1)
+        try:
+            if contended:
+                other.execute("BEGIN IMMEDIATE")
+                other.execute("INSERT INTO waiting (id) VALUES (2)")
+            else:
+                other.execute("SELECT missing FROM waiting")
+        except sqlite3.OperationalError as error:
+            return OperationalError("statement", {}, error)
+        finally:
+            other.close()
+        raise AssertionError("sqlite did not fail as this helper requires")
+    finally:
+        holder.rollback()
+        holder.close()
+
+
+def test_a_held_database_is_told_apart_from_a_broken_one(tmp_path: Path) -> None:
+    """The difference is SQLite's own code, not the message."""
+
+    contended = _real_sqlite_error(tmp_path / "busy", contended=True)
+    broken = _real_sqlite_error(tmp_path / "broken", contended=False)
+    assert database_is_contended(contended) is True
+    assert database_is_contended(broken) is False
+
+
+def _one_queued_job(settings: Settings) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id="job_waiting",
+                kind="image",
+                status=JobStatus.QUEUED.value,
+                queue_group="primary",
+                queue_ticket="ticket-a",
+                enqueued_at=utcnow(),
+            )
+        )
+        session.commit()
+
+
+async def _claim(scheduler: ResourceScheduler) -> Any:
+    return await asyncio.wait_for(
+        scheduler._acquire_job(
+            "job_waiting",
+            resource="primary",
+            group="primary",
+            priority=0,
+            capacity=1,
+            local_lock=asyncio.Semaphore(1),
+        ),
+        timeout=PATIENCE_SECONDS,
+    )
+
+
+async def test_a_queued_job_waits_out_a_held_database_rather_than_failing(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """A sweep holding the writer must not end the jobs that are queued behind it.
+
+    The startup retention sweep holds SQLite's writer for most of every batch,
+    batch after batch. A job that is only waiting its turn writes its queue
+    bookkeeping on its first pass, and a read a few lines later flushes it, so
+    the wait is where the lock lands. Waiting longer is the answer; failing the
+    job is not, and the queue loop already knows how to wait.
+    """
+
+    _one_queued_job(settings)
+    scheduler = ResourceScheduler(session_factory=SessionLocal)
+    original = scheduler._eligible_job_ids
+    refusals: list[int] = []
+
+    def contended_once(*args: Any, **kwargs: Any) -> Any:
+        if not refusals:
+            refusals.append(1)
+            raise _real_sqlite_error(tmp_path / "busy", contended=True)
+        return original(*args, **kwargs)
+
+    scheduler._eligible_job_ids = contended_once  # type: ignore[method-assign]
+
+    claim = await _claim(scheduler)
+
+    assert refusals == [1], "the contended pass has to have happened"
+    assert claim.token
+    with SessionLocal() as session:
+        job = session.get(Job, "job_waiting")
+        assert job is not None
+        assert job.status == JobStatus.RUNNING.value
+
+
+async def test_a_database_error_that_is_not_contention_still_reaches_the_caller(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """Waiting is right for a held database and wrong for a broken one.
+
+    Without this the repair above could be a bare except that swallows every
+    database failure, and a queue would wait forever on damage nobody reports.
+    """
+
+    _one_queued_job(settings)
+    scheduler = ResourceScheduler(session_factory=SessionLocal)
+    broken = _real_sqlite_error(tmp_path / "broken", contended=False)
+
+    def always_broken(*args: Any, **kwargs: Any) -> Any:
+        raise broken
+
+    scheduler._eligible_job_ids = always_broken  # type: ignore[method-assign]
+
+    with pytest.raises(OperationalError):
+        await _claim(scheduler)
 
 
 def test_peek_next_eligible_job_does_not_claim_or_change_it(settings: Settings) -> None:
@@ -742,7 +905,7 @@ def test_the_claim_path_scans_fresh_rather_than_trusting_the_share(
 
     monkeypatch.setattr(ResourceScheduler, "_eligible_jobs", staticmethod(probe))
 
-    async def drive() -> str:
+    async def drive() -> JobClaim:
         return await scheduler._acquire_job(
             "claimfresh_000",
             resource="gpu",
@@ -772,12 +935,12 @@ def _acquire_one_pass(
     monkeypatch: Any,
     job_id: str,
     capacity: int,
-) -> str | None:
-    """Drive `_acquire_job` through exactly one pass; return the token, or None.
+) -> JobClaim | None:
+    """Drive `_acquire_job` through exactly one pass; return the claim, or None.
 
     `_expire_foreign_claims` runs at the top of every pass, so counting it bounds
     the loop deterministically, with no timer and no dependence on how fast the
-    runner is. A pass that claims returns its token before the second pass
+    runner is. A pass that claims returns its claim before the second pass
     begins, so None means the pass declined to claim.
     """
 
@@ -795,7 +958,7 @@ def _acquire_one_pass(
     monkeypatch.setattr(ResourceScheduler, "_expire_foreign_claims", stop_after_one)
     monkeypatch.setattr(ResourceScheduler, "_publish_job", _no_publish)
 
-    async def drive() -> str:
+    async def drive() -> JobClaim:
         return await scheduler._acquire_job(
             job_id,
             resource="gpu",
@@ -947,4 +1110,177 @@ def test_a_job_overtaken_during_the_share_window_is_not_claimed(
         job = session.get(Job, "overtaken_000")
         assert job is not None
         assert job.status == JobStatus.QUEUED.value
+        assert job.claim_owner is None
+
+
+async def test_a_failed_release_still_lets_the_next_job_take_its_turn(
+    settings: Settings,
+) -> None:
+    """A release that cannot be written must not hold the group's only slot.
+
+    The slot is in this process's memory and the release is a database write.
+    When a long writer holds the database past the busy timeout, that write
+    fails; if the slot went with it, every later job in the group would wait on
+    a lock nothing will ever free, and only a restart would clear it.
+    """
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    now = utcnow()
+    with SessionLocal() as session:
+        for index in (1, 2):
+            session.add(
+                Job(
+                    id=f"job_release_{index}",
+                    status=JobStatus.QUEUED.value,
+                    queue_group="primary",
+                    queue_ticket=f"ticket-release-{index}",
+                    enqueued_at=now,
+                )
+            )
+        session.commit()
+
+    scheduler = ResourceScheduler(session_factory=SessionLocal)
+
+    async def refusing_release(job_id: str, token: str, group: str) -> None:
+        raise RuntimeError("database is locked")
+
+    scheduler._release_job = refusing_release  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError):
+        async with scheduler.job_lease(
+            "job_release_1", resource="media_compute", group="primary", capacity=1
+        ):
+            pass
+
+    second = asyncio.create_task(
+        scheduler._acquire_job(
+            "job_release_2",
+            resource="media_compute",
+            group="primary",
+            priority=0,
+            capacity=1,
+            local_lock=scheduler._lock("primary", 1),
+        )
+    )
+    try:
+        claim = await asyncio.wait_for(second, timeout=PATIENCE_SECONDS)
+        assert claim.token
+    finally:
+        if not second.done():
+            second.cancel()
+            await asyncio.gather(second, return_exceptions=True)
+
+
+async def test_a_failed_heartbeat_still_releases_the_slot_and_the_claim(
+    settings: Settings,
+) -> None:
+    """The heartbeat writes too, so it fails the same way a release does.
+
+    Waiting for it on the way out used to raise before the release ran, which
+    left the claim owned and the slot held: the same stall, reached through the
+    other write.
+    """
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    now = utcnow()
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id="job_heartbeat_failure",
+                status=JobStatus.QUEUED.value,
+                queue_group="primary",
+                queue_ticket="ticket-heartbeat",
+                enqueued_at=now,
+            )
+        )
+        session.commit()
+
+    scheduler = ResourceScheduler(session_factory=SessionLocal)
+
+    async def failing_heartbeat(
+        job_id: str, token: str, *, on_claim_lost: Callable[[], None] | None = None
+    ) -> None:
+        raise RuntimeError("database is locked")
+
+    scheduler._heartbeat = failing_heartbeat  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError):
+        async with scheduler.job_lease(
+            "job_heartbeat_failure", resource="media_compute", group="primary", capacity=1
+        ):
+            await asyncio.sleep(0)
+
+    assert not scheduler._lock("primary", 1).locked()
+    with SessionLocal() as session:
+        job = session.get(Job, "job_heartbeat_failure")
+        assert job is not None
+        assert job.claim_owner is None
+
+
+async def test_an_abandoned_claim_survives_a_failed_expiry_write(settings: Settings) -> None:
+    """Forgetting the token before its row is cleared would strand it for good.
+
+    The expiry pass skips this dispatcher's own claims, so the abandoned set is
+    the only thing that brings one back. If a failed clearing write dropped the
+    token anyway, the row would keep its claim and no later pass would look at
+    it again.
+    """
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    now = utcnow()
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id="job_expiry_failure",
+                status=JobStatus.QUEUED.value,
+                queue_group="primary",
+                queue_ticket="ticket-expiry",
+                enqueued_at=now,
+            )
+        )
+        session.commit()
+
+    scheduler = ResourceScheduler(session_factory=SessionLocal)
+
+    async def refusing_release(job_id: str, token: str, group: str) -> None:
+        raise RuntimeError("database is locked")
+
+    scheduler._release_job = refusing_release  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        async with scheduler.job_lease(
+            "job_expiry_failure", resource="media_compute", group="primary", capacity=1
+        ):
+            pass
+
+    refusals = {"left": 1}
+    real_commit = Session.commit
+
+    def refusing_commit(self: Session) -> None:
+        if refusals["left"]:
+            refusals["left"] -= 1
+            raise RuntimeError("database is locked")
+        real_commit(self)
+
+    Session.commit = refusing_commit  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError):
+            scheduler._expire_foreign_claims("primary")
+    finally:
+        Session.commit = real_commit  # type: ignore[method-assign]
+
+    with SessionLocal() as session:
+        job = session.get(Job, "job_expiry_failure")
+        assert job is not None
+        assert job.claim_owner is not None
+
+    assert scheduler._expire_foreign_claims("primary") == ["job_expiry_failure"]
+    with SessionLocal() as session:
+        job = session.get(Job, "job_expiry_failure")
+        assert job is not None
         assert job.claim_owner is None

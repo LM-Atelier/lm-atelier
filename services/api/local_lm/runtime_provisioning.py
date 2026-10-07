@@ -17,6 +17,9 @@ import time
 import zipfile
 from collections.abc import Callable, Mapping, MutableMapping
 from contextlib import suppress
+from copy import deepcopy
+from dataclasses import asdict
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, cast
 from urllib.parse import urlparse
@@ -29,6 +32,7 @@ from .filesystem_links import is_link_or_reparse
 from .network import shared_tls_context
 from .progress import reduce_progress
 from .runtime_config import persist_runtime_values
+from .runtime_provisioning_plans import RuntimeProvisioningPlan
 from .schemas import ProgressV2, RuntimeStatus
 from .subprocess_env import subprocess_environment
 
@@ -37,6 +41,12 @@ logger = logging.getLogger(__name__)
 RuntimeName = Literal["llama.cpp", "vllm", "comfyui"]
 RUNTIME_NAMES: tuple[RuntimeName, ...] = ("llama.cpp", "vllm", "comfyui")
 _MANAGED_MARKER = ".lm-atelier-runtime.json"
+_RELEASE_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
+_ENGINE_LABELS: dict[RuntimeName, str] = {
+    "llama.cpp": "llama.cpp",
+    "vllm": "vLLM",
+    "comfyui": "ComfyUI",
+}
 _RUNTIME_PROBE_SENTINEL = "LM_ATELIER_RUNTIME_PROBE:"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_RUNTIME_FILES = 250_000
@@ -58,6 +68,24 @@ class RuntimeProvisioningError(RuntimeError):
 
 class RuntimeVerificationCancelled(RuntimeError):
     pass
+
+
+async def _runtime_worker[T](operation: Callable[[], T]) -> T:
+    task = asyncio.create_task(asyncio.to_thread(operation))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # A cancelled await cannot stop a thread. Keep its lock until it exits.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        with suppress(Exception):
+            task.result()
+        raise
 
 
 def default_engine_manifest_path() -> Path:
@@ -257,23 +285,182 @@ class RuntimeProvisioner:
         task.add_done_callback(consume_result)
         return self._states[engine]
 
-    async def ensure(self, engine: RuntimeName) -> RuntimeStatus:
+    async def ensure(
+        self,
+        engine: RuntimeName,
+        *,
+        require_claim: Callable[[], None] | None = None,
+    ) -> RuntimeStatus:
+        def check_claim() -> None:
+            if require_claim is not None:
+                require_claim()
+
+        check_claim()
         current = self.status(engine)
         if current.state == "installing" and self._restore_task is not None:
             await asyncio.shield(self._restore_task)
+            check_claim()
             current = self.status(engine)
         if current.state == "ready":
             return current
         existing = self._tasks.get(engine)
         if existing and existing is not asyncio.current_task():
-            return await existing
-        return await self.provision(engine)
+            result = await asyncio.shield(existing)
+            check_claim()
+            return result
+        if require_claim is None:
+            return await self.provision(engine)
+        return await self.provision(engine, require_claim=require_claim)
 
-    async def provision(self, engine: RuntimeName) -> RuntimeStatus:
-        definition = self._definition(engine)
+    def _provisioning_inputs(self, engine: RuntimeName) -> dict[str, Any]:
+        definition = deepcopy(self._definition(engine))
+        _ready, paths = self._configured_paths(engine)
+        return {
+            "engine": engine,
+            "platform": self._platform_keys[engine],
+            "definition": {
+                key: value for key, value in definition.items() if key != "runtime_assets"
+            },
+            "asset": deepcopy(self._asset(engine, definition)),
+            "configured_paths": [str(path.expanduser().absolute()) for path in paths],
+            "runtime_root": str(self.runtime_root.absolute()),
+            "archive_root": str(self.archive_root.absolute()),
+            "allowed_download_hosts": sorted(self.allowed_download_hosts),
+        }
+
+    def preflight(self, engine: RuntimeName) -> RuntimeProvisioningPlan:
+        """Describe reuse or installation without starting downloads or changing configuration."""
+        return self._preflight_snapshot(engine)[0]
+
+    def _preflight_snapshot(
+        self, engine: RuntimeName
+    ) -> tuple[
+        RuntimeProvisioningPlan, dict[str, Any], RuntimeStatus | None, dict[str, Any] | None
+    ]:
+        inputs = self._provisioning_inputs(engine)
+        asset = cast(dict[str, Any] | None, inputs["asset"])
+        definition = {
+            **inputs["definition"],
+            "runtime_assets": {inputs["platform"]: asset},
+        }
+        configured = self._configured_status(engine, definition)
+        if configured is None:
+            if self._security_blocked(definition, asset):
+                raise RuntimeProvisioningError(self._security_message(definition, asset))
+            if asset is None:
+                raise RuntimeProvisioningError("Automatic setup is not available for this machine.")
+        operation: Literal["reuse_configured", "reuse_managed", "install_managed"] = (
+            "reuse_managed"
+            if configured and configured.managed
+            else "reuse_configured"
+            if configured
+            else "install_managed"
+        )
+        files: dict[str, str] = {}
+        try:
+            for raw in inputs["configured_paths"]:
+                path = Path(raw)
+                if path.is_dir() and engine == "comfyui":
+                    path = path / "main.py"
+                if path.is_file():
+                    files[str(path)] = self._sha256_file(path)
+        except OSError:
+            raise RuntimeProvisioningError(
+                "The configured runtime could not be inspected."
+            ) from None
+        if inputs != self._provisioning_inputs(engine):
+            raise RuntimeProvisioningError("The runtime setup changed during its preview.")
+        download_bytes = 0
+        required_free_bytes = 0
+        if configured is None and asset is not None:
+            download_bytes = int(asset["size_bytes"]) + sum(
+                int(overlay["size_bytes"]) for overlay in self._security_overlays(asset)
+            )
+            required_free_bytes = int(asset.get("required_free_bytes", asset["size_bytes"] * 2))
+        plan = RuntimeProvisioningPlan(
+            engine=engine,
+            operation=operation,
+            release=str(definition["pinned_release"]) if operation != "reuse_configured" else None,
+            license=str(definition["license"]),
+            download_bytes=download_bytes,
+            required_free_bytes=required_free_bytes,
+            inputs_sha256=self._json_sha256(inputs),
+            plan_sha256=self._json_sha256(
+                {"inputs": inputs, "operation": operation, "files": files}
+            ),
+        )
+        return plan, definition, configured, asset
+
+    def _require_provisioning_plan(
+        self, engine: RuntimeName, expected: RuntimeProvisioningPlan | None
+    ) -> None:
+        if expected is not None and self.preflight(engine) != expected:
+            raise RuntimeProvisioningError("The approved runtime setup changed. Preview it again.")
+
+    def _require_provisioning_inputs(
+        self, engine: RuntimeName, expected: RuntimeProvisioningPlan | None
+    ) -> None:
+        if (
+            expected is not None
+            and self._json_sha256(self._provisioning_inputs(engine)) != expected.inputs_sha256
+        ):
+            raise RuntimeProvisioningError("The approved runtime setup changed. Preview it again.")
+
+    async def provision(
+        self,
+        engine: RuntimeName,
+        *,
+        expected_plan: RuntimeProvisioningPlan | None = None,
+        require_claim: Callable[[], None] | None = None,
+    ) -> RuntimeStatus:
+        def require_current_claim() -> None:
+            if require_claim is not None:
+                require_claim()
+
         async with self._locks[engine]:
-            configured = self._configured_status(engine, definition)
+            require_current_claim()
+            if expected_plan is not None:
+                from .runtime_provisioning_recovery import recover_approved_runtime
+
+                recovered = await _runtime_worker(
+                    partial(recover_approved_runtime, self, engine, expected_plan)
+                )
+                if recovered is not None:
+                    if (
+                        self._json_sha256(self._provisioning_inputs(engine))
+                        != recovered.current_inputs_sha256
+                    ):
+                        raise RuntimeProvisioningError(
+                            "The approved runtime setup changed. Preview it again."
+                        )
+                    require_current_claim()
+                    self._apply_configuration(engine, recovered.installed, persist=True)
+                    status = self._status(
+                        engine,
+                        recovered.definition,
+                        state="ready",
+                        supported=True,
+                        managed=True,
+                        progress=1,
+                        message="Ready.",
+                        asset=recovered.asset,
+                    )
+                    self._states[engine] = status
+                    return status
+                current, definition, configured, asset = await _runtime_worker(
+                    partial(self._preflight_snapshot, engine)
+                )
+                if current != expected_plan:
+                    raise RuntimeProvisioningError(
+                        "The approved runtime setup changed. Preview it again."
+                    )
+                self._require_provisioning_inputs(engine, expected_plan)
+            else:
+                definition = deepcopy(self._definition(engine))
+                configured = self._configured_status(engine, definition)
+                asset = self._asset(engine, definition)
             if configured:
+                require_current_claim()
                 self._states[engine] = configured
                 return configured
             if self._security_blocked(definition):
@@ -286,7 +473,6 @@ class RuntimeProvisioner:
                 )
                 self._states[engine] = status
                 raise RuntimeProvisioningError(status.message)
-            asset = self._asset(engine, definition)
             if self._security_blocked(definition, asset):
                 status = self._status(
                     engine,
@@ -308,6 +494,7 @@ class RuntimeProvisioner:
                 )
                 self._states[engine] = status
                 raise RuntimeProvisioningError(status.message)
+            require_current_claim()
             self._states[engine] = self._status(
                 engine,
                 definition,
@@ -320,18 +507,31 @@ class RuntimeProvisioner:
             try:
                 self._check_disk_space(asset)
                 archive = await self._download(engine, definition, asset)
-                overlays = [
-                    (overlay, await self._download(engine, definition, overlay))
-                    for overlay in self._security_overlays(asset)
-                ]
-                installed = await asyncio.to_thread(
-                    self._install_archive,
-                    engine,
-                    definition,
-                    asset,
-                    archive,
-                    overlays,
-                )
+                if expected_plan is not None:
+                    await _runtime_worker(
+                        partial(self._require_provisioning_plan, engine, expected_plan)
+                    )
+                overlays = []
+                for overlay in self._security_overlays(asset):
+                    overlay_archive = await self._download(engine, definition, overlay)
+                    if expected_plan is not None:
+                        await _runtime_worker(
+                            partial(self._require_provisioning_plan, engine, expected_plan)
+                        )
+                    overlays.append((overlay, overlay_archive))
+
+                def install() -> dict[str, Path]:
+                    self._require_provisioning_plan(engine, expected_plan)
+                    require_current_claim()
+                    return self._install_archive(
+                        engine, definition, asset, archive, overlays, approved_plan=expected_plan
+                    )
+
+                installed = await _runtime_worker(install)
+                # Installation creates the planned files, so only its immutable
+                # inputs must still match before the resulting configuration is saved.
+                self._require_provisioning_inputs(engine, expected_plan)
+                require_current_claim()
                 self._apply_configuration(engine, installed, persist=True)
                 configured_status = self._status(
                     engine,
@@ -349,6 +549,7 @@ class RuntimeProvisioner:
                 self._states[engine] = configured_status
                 return configured_status
             except asyncio.CancelledError:
+                require_current_claim()
                 self._states[engine] = self._status(
                     engine,
                     definition,
@@ -360,6 +561,7 @@ class RuntimeProvisioner:
                 )
                 raise
             except Exception as exc:
+                require_current_claim()
                 detail = str(exc).strip() or f"{engine} setup failed"
                 self._states[engine] = self._status(
                     engine,
@@ -414,7 +616,7 @@ class RuntimeProvisioner:
         if archive.is_file():
             if (
                 archive.stat().st_size == expected_size
-                and await asyncio.to_thread(self._sha256_file, archive) == expected_hash
+                and await _runtime_worker(lambda: self._sha256_file(archive)) == expected_hash
             ):
                 return archive
             archive.unlink()
@@ -470,7 +672,7 @@ class RuntimeProvisioner:
                 f"The runtime download stopped at {downloaded} of {expected_size} bytes; "
                 "retry to resume."
             )
-        actual_hash = await asyncio.to_thread(self._sha256_file, partial)
+        actual_hash = await _runtime_worker(lambda: self._sha256_file(partial))
         if actual_hash != expected_hash:
             partial.unlink(missing_ok=True)
             raise RuntimeProvisioningError("The runtime archive failed SHA-256 verification.")
@@ -503,6 +705,8 @@ class RuntimeProvisioner:
         asset: dict[str, Any],
         archive: Path,
         overlays: list[tuple[dict[str, Any], Path]],
+        *,
+        approved_plan: RuntimeProvisioningPlan | None = None,
     ) -> dict[str, Path]:
         release = self._safe_component(str(definition["pinned_release"]))
         parent = self.runtime_root / self._safe_component(engine)
@@ -581,6 +785,12 @@ class RuntimeProvisioner:
                 "runtime_contract_sha256": self._runtime_contract_sha256(asset),
                 "files": file_hashes,
             }
+            if approved_plan is not None:
+                self._require_provisioning_plan(engine, approved_plan)
+                marker["approved_setup"] = {
+                    "plan": asdict(approved_plan),
+                    "configured_paths": self._provisioning_inputs(engine)["configured_paths"],
+                }
             (staging / _MANAGED_MARKER).write_text(
                 json.dumps(marker, indent=2) + "\n",
                 encoding="utf-8",
@@ -964,7 +1174,7 @@ class RuntimeProvisioner:
                 continue
             ready, paths = self._configured_paths(engine)
             configured_managed = ready and any(
-                self._is_inside_runtime_root(path.expanduser()) for path in paths
+                self._is_managed_location(engine, definition, path.expanduser()) for path in paths
             )
             final = self._installation_path(engine, definition)
             if not configured_managed and not self._managed_marker_owned(final, engine, definition):
@@ -991,15 +1201,7 @@ class RuntimeProvisioner:
                     cancel_requested=self._restore_cancel.is_set,
                 )
                 if not matched:
-                    self._states[engine] = self._status(
-                        engine,
-                        definition,
-                        state="missing",
-                        supported=True,
-                        size_bytes=int(asset["size_bytes"]),
-                        message="Managed runtime verification failed; reinstall it to repair.",
-                        asset=asset,
-                    )
+                    self._states[engine] = self._unverified_status(engine, definition, asset)
                     logger.warning(
                         "Managed %s runtime failed startup integrity verification",
                         engine,
@@ -1023,16 +1225,83 @@ class RuntimeProvisioner:
             except RuntimeVerificationCancelled:
                 return
             except (OSError, RuntimeProvisioningError):
-                self._states[engine] = self._status(
-                    engine,
-                    definition,
-                    state="missing",
-                    supported=True,
-                    size_bytes=int(asset["size_bytes"]),
-                    message="Managed runtime verification failed; reinstall it to repair.",
-                    asset=asset,
-                )
+                self._states[engine] = self._unverified_status(engine, definition, asset)
                 logger.warning("Ignored incomplete managed %s runtime at %s", engine, final)
+
+    def _unverified_status(
+        self,
+        engine: RuntimeName,
+        definition: dict[str, Any],
+        asset: dict[str, Any],
+    ) -> RuntimeStatus:
+        """What to say when this build's pinned runtime did not verify at startup.
+
+        Usually the pinned install is damaged. But the configuration may still
+        point at another version's managed install, which launches as before;
+        calling that "missing" would be untrue, so it is named instead, and
+        installing the pinned release remains the offered action.
+        """
+        other = self._configured_other_release(engine, definition)
+        if other is None:
+            message = "Managed runtime verification failed; reinstall it to repair."
+        else:
+            message = (
+                f"{_ENGINE_LABELS[engine]} {other}, installed by another version of LM Atelier,"
+                f" is still in use. This version uses {definition['pinned_release']}."
+                " Install it to switch."
+            )
+        status = self._status(
+            engine,
+            definition,
+            state="missing",
+            supported=True,
+            size_bytes=int(asset["size_bytes"]),
+            message=message,
+            asset=asset,
+        )
+        return status.model_copy(update={"installed_release": other})
+
+    def _configured_other_release(
+        self,
+        engine: RuntimeName,
+        definition: Mapping[str, Any],
+    ) -> str | None:
+        """The release of another build's managed install that the configuration uses.
+
+        Every configured path must sit inside one release folder of this
+        engine, other than the pinned one, whose own marker names that same
+        release. Anything less certain is not given a name.
+        """
+        ready, paths = self._configured_paths(engine)
+        if not ready or not paths:
+            return None
+        root = self.runtime_root.resolve()
+        try:
+            relative = paths[0].expanduser().resolve().relative_to(root)
+        except (OSError, ValueError):
+            return None
+        if len(relative.parts) < 2 or not _RELEASE_LABEL.fullmatch(relative.parts[1]):
+            return None
+        release = relative.parts[1]
+        folder = root / self._safe_component(engine) / release
+        if release == definition["pinned_release"] or not all(
+            self._is_inside(path.expanduser(), folder) for path in paths
+        ):
+            return None
+        marker_path = folder / _MANAGED_MARKER
+        if marker_path.is_symlink():
+            return None
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if (
+            not isinstance(marker, dict)
+            or marker.get("engine") != engine
+            or marker.get("release") != release
+        ):
+            return None
+        return release
 
     def _cleanup_completed_archives(self) -> None:
         for engine in RUNTIME_NAMES:
@@ -1112,7 +1381,9 @@ class RuntimeProvisioner:
         ready, paths = self._configured_paths(engine)
         if not ready:
             return None
-        managed = any(self._is_inside_runtime_root(item.expanduser()) for item in paths)
+        managed = any(
+            self._is_managed_location(engine, definition, item.expanduser()) for item in paths
+        )
         asset: dict[str, Any] | None = None
         if managed:
             asset = self._asset(engine, definition)
@@ -1157,6 +1428,33 @@ class RuntimeProvisioner:
             )
             paths = [item for item in (executable, directory) if item]
         return ready, paths
+
+    def _is_managed_location(
+        self,
+        engine: RuntimeName,
+        definition: Mapping[str, Any],
+        path: Path,
+    ) -> bool:
+        """Whether a configured path is somewhere this application installs runtimes.
+
+        That is the pinned release's folder, or a release folder under the
+        runtimes folder that holds a managed marker or is still being staged.
+        A runtime someone placed anywhere else, including elsewhere under the
+        runtimes folder, is an ordinary configured runtime: where its folder
+        happens to be says nothing about who installed it.
+        """
+        root = self.runtime_root.resolve()
+        try:
+            relative = path.resolve().relative_to(root)
+        except (OSError, ValueError):
+            return False
+        if self._is_inside(path, self._installation_path(engine, definition)):
+            return True
+        if len(relative.parts) < 2:
+            return True
+        release = root / relative.parts[0] / relative.parts[1]
+        marker = release / _MANAGED_MARKER
+        return relative.parts[1].startswith(".") or marker.is_symlink() or marker.exists()
 
     def _asset(
         self,
@@ -1383,10 +1681,16 @@ class RuntimeProvisioner:
             self._ensure_inside(root, site_packages.resolve())
             if not site_packages.is_dir():
                 raise RuntimeProvisioningError("The runtime dependency inventory is missing.")
+            # is_dir follows a directory link, so a junction named like a
+            # distribution would count as installed. Skip the link first.
             identities = sorted(
                 candidate.name
                 for candidate in site_packages.iterdir()
-                if candidate.is_dir() and candidate.name.endswith(".dist-info")
+                if candidate.name.endswith(".dist-info")
+                and not is_link_or_reparse(
+                    candidate, missing="assume_link", unreadable="assume_link"
+                )
+                and candidate.is_dir()
             )
             canonical = ("\n".join(identities) + "\n").encode("utf-8")
             if (
@@ -1711,9 +2015,6 @@ class RuntimeProvisioner:
             / self._safe_component(engine)
             / self._safe_component(str(definition["pinned_release"]))
         )
-
-    def _is_inside_runtime_root(self, path: Path) -> bool:
-        return self._is_inside(path, self.runtime_root)
 
     @staticmethod
     def _is_inside(path: Path, root: Path) -> bool:

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
+from fractions import Fraction
 from typing import Any, cast
 
 import pytest
 
+from local_lm import workflow_output_geometry
 from local_lm.model_planner import workflow_artifact_contract
 from local_lm.workflow_output_geometry import (
     WORKFLOW_OUTPUT_GEOMETRY_UNAVAILABLE,
@@ -134,7 +136,8 @@ def test_proof_binds_exact_revision_graph_and_schema_limits() -> None:
 
     payload = workflow_output_geometry_payload(result)
     assert payload["available"] is True
-    assert payload["size_modes"] == ["exact"]
+    assert payload["size_modes"] == ["exact", "preset"]
+    assert payload["preset_ids"] == ["16:9", "1:1", "2:3", "3:2", "3:4", "4:3", "9:16"]
     assert payload["width"] == {
         "key": "width",
         "node_id": "latent",
@@ -147,6 +150,38 @@ def test_proof_binds_exact_revision_graph_and_schema_limits() -> None:
     assert payload["request_authorized"] is False
 
 
+@pytest.mark.parametrize(
+    "damage", ["none", "node", "input", "parameter", "duplicate", "unbound", "constraint"]
+)
+def test_geometry_proof_validates_generated_settings_bindings(damage: str) -> None:
+    arguments = _arguments()
+    schema = cast(dict[str, Any], arguments["input_schema"])
+    binding = {"parameter": "width", "node_id": "latent", "input_name": "width"}
+    marker: dict[str, Any] = {"version": 1, "bindings": [binding]}
+    if damage == "node":
+        binding["node_id"] = "sampler"
+    elif damage == "input":
+        binding["input_name"] = "height"
+    elif damage == "parameter":
+        binding["parameter"] = "missing_width"
+    elif damage == "duplicate":
+        marker["bindings"].append(dict(binding))
+    elif damage == "unbound":
+        marker["bindings"] = []
+        marker["unbound_parameters"] = ["width"]
+    elif damage == "constraint":
+        marker["maximum_width"] = 512
+    schema["x-lm-atelier-graph-settings"] = marker
+    _rehash(arguments)
+
+    result = _prove(arguments)
+
+    assert result.available is (damage == "none")
+    if result.proof is not None:
+        assert result.proof.width.maximum == 2048
+        assert result.proof.width.node_id == "latent"
+
+
 def test_proof_is_sealed_frozen_and_detached() -> None:
     arguments = _arguments()
     result = _prove(arguments)
@@ -154,7 +189,7 @@ def test_proof_is_sealed_frozen_and_detached() -> None:
     with pytest.raises(WorkflowOutputGeometryError):
         WorkflowOutputGeometryProof(object())
     with pytest.raises(FrozenInstanceError):
-        result.proof.revision_id = "other"  # type: ignore[misc]
+        result.proof.revision_id = "other"
 
     cast_graph = arguments["api_graph"]
     assert isinstance(cast_graph, dict)
@@ -188,7 +223,7 @@ def test_artifact_drift_fails_closed() -> None:
     arguments = _arguments()
     graph = arguments["api_graph"]
     assert isinstance(graph, dict)
-    graph["latent"]["inputs"]["width"] = 512  # type: ignore[index]
+    graph["latent"]["inputs"]["width"] = 512
 
     assert _prove(arguments).available is False
 
@@ -299,7 +334,7 @@ def test_split_dimension_bindings_and_lone_outpaint_node_fail_closed() -> None:
     split = _arguments()
     split_graph = split["api_graph"]
     assert isinstance(split_graph, dict)
-    split_graph["latent"]["inputs"]["height"] = 768  # type: ignore[index]
+    split_graph["latent"]["inputs"]["height"] = 768
     split_graph["unrelated"] = {
         "class_type": "EmptyLatentImage",
         "inputs": {"width": 1024, "height": "${height}"},
@@ -351,7 +386,7 @@ def test_nan_and_boolean_dimensions_fail_closed() -> None:
         arguments = deepcopy(_arguments())
         schema = arguments["input_schema"]
         assert isinstance(schema, dict)
-        schema["properties"]["width"]["default"] = invalid  # type: ignore[index]
+        schema["properties"]["width"]["default"] = invalid
         arguments["artifact_sha256"] = "a" * 64
         assert _prove(arguments).available is False
 
@@ -498,6 +533,7 @@ def test_resolution_binds_the_exact_revision_and_grants_no_authority() -> None:
         "engine": "comfyui",
         "mode": "image",
         "size_mode": "exact",
+        "preset_id": None,
         "width": 1024,
         "height": 768,
         "graph_binding_verified": True,
@@ -592,7 +628,7 @@ def test_stored_artifact_drift_resolves_nothing_for_a_valid_request() -> None:
     arguments = _arguments()
     schema = arguments["input_schema"]
     assert isinstance(schema, dict)
-    width = schema["properties"]["width"]  # type: ignore[index]
+    width = schema["properties"]["width"]
     width["maximum"] = 4096
 
     assert resolve_workflow_output_geometry(_prove(arguments), _request()) is None
@@ -609,3 +645,263 @@ def test_a_result_that_is_not_this_verifier_own_is_refused() -> None:
         resolve_workflow_output_geometry(cast(Any, {"available": True}), _request())
     with pytest.raises(WorkflowOutputGeometryError):
         workflow_output_geometry_resolution_payload(cast(Any, {"width": 1024}))
+
+
+PRESET_IDS = ("1:1", "3:4", "2:3", "9:16", "4:3", "3:2", "16:9")
+
+
+def _preset(preset_id: str) -> dict[str, object]:
+    return {"mode": "image", "size_mode": "preset", "preset_id": preset_id}
+
+
+def _limits(width: dict[str, int], height: dict[str, int]) -> dict[str, object]:
+    arguments = _arguments()
+    schema = cast(dict[str, Any], arguments["input_schema"])
+    properties = cast(dict[str, Any], schema["properties"])
+    properties["width"].update(width)
+    properties["height"].update(height)
+    _rehash(arguments)
+    return arguments
+
+
+def _legal_pairs(preset_id: str, arguments: dict[str, object]) -> list[tuple[int, int]]:
+    """Every pair of this exact ratio the schema itself permits.
+
+    Enumerated straight from the schema rather than from the module's own
+    arithmetic, so a test of which pair was chosen cannot agree with the code
+    by sharing its reasoning.
+    """
+
+    schema = cast(dict[str, Any], arguments["input_schema"])
+    properties = cast(dict[str, Any], schema["properties"])
+    width = properties["width"]
+    height = properties["height"]
+    across, down = (int(part) for part in preset_id.split(":"))
+    pairs: list[tuple[int, int]] = []
+    for count in range(1, width["maximum"] // across + 1):
+        candidate = (across * count, down * count)
+        if (
+            width["minimum"] <= candidate[0] <= width["maximum"]
+            and height["minimum"] <= candidate[1] <= height["maximum"]
+            and candidate[0] % width["multipleOf"] == 0
+            and candidate[1] % height["multipleOf"] == 0
+        ):
+            pairs.append(candidate)
+    return pairs
+
+
+@pytest.mark.parametrize("preset_id", PRESET_IDS)
+def test_a_ratio_preset_resolves_to_the_ratio_its_id_names(preset_id: str) -> None:
+    result = _prove()
+
+    resolution = resolve_workflow_output_geometry(result, _preset(preset_id))
+
+    assert resolution is not None
+    geometry = resolution.geometry
+    across, down = (int(part) for part in preset_id.split(":"))
+    assert Fraction(geometry.width, geometry.height) == Fraction(across, down)
+    assert geometry.preset_id == preset_id
+    assert geometry.size_mode == "preset"
+    assert geometry.width % 64 == 0 and geometry.height % 64 == 0
+    assert 128 <= geometry.width <= 2048
+    assert 128 <= geometry.height <= 2048
+    assert resolution.graph_binding_verified is True
+    assert resolution.request_authorized is False
+    assert geometry.request_authorized is False
+
+
+@pytest.mark.parametrize("preset_id", PRESET_IDS)
+def test_a_preset_costs_what_the_workflow_already_defaults_to(preset_id: str) -> None:
+    arguments = _arguments()
+
+    resolution = resolve_workflow_output_geometry(_prove(arguments), _preset(preset_id))
+
+    assert resolution is not None
+    pairs = _legal_pairs(preset_id, arguments)
+    assert (resolution.geometry.width, resolution.geometry.height) in pairs
+    default_area = 1024 * 768
+    closest = min(
+        (width * height for width, height in pairs),
+        key=lambda area: (abs(area - default_area), 0 if area >= default_area else 1),
+    )
+    assert resolution.geometry.width * resolution.geometry.height == closest
+
+
+def test_the_advertised_presets_are_exactly_the_ones_that_resolve() -> None:
+    every_limit = [
+        _arguments(),
+        _limits(
+            {"default": 1024, "minimum": 1024, "maximum": 1024},
+            {"default": 1024, "minimum": 1024, "maximum": 1024},
+        ),
+        _limits(
+            {"default": 512, "minimum": 64, "maximum": 512},
+            {"default": 512, "minimum": 64, "maximum": 2048},
+        ),
+        _limits(
+            {"default": 1000, "minimum": 1000, "maximum": 1000, "multipleOf": 1},
+            {"default": 999, "minimum": 999, "maximum": 999, "multipleOf": 1},
+        ),
+    ]
+    for arguments in every_limit:
+        result = _prove(arguments)
+        payload = workflow_output_geometry_payload(result)
+        resolvable = sorted(
+            preset_id
+            for preset_id in PRESET_IDS
+            if resolve_workflow_output_geometry(result, _preset(preset_id)) is not None
+        )
+        assert payload["preset_ids"] == resolvable
+        assert bool(resolvable) == ("preset" in cast(list[str], payload["size_modes"]))
+
+
+def test_a_locked_workflow_offers_only_the_one_ratio_it_can_hold() -> None:
+    arguments = _limits(
+        {"default": 1024, "minimum": 1024, "maximum": 1024},
+        {"default": 1024, "minimum": 1024, "maximum": 1024},
+    )
+
+    result = _prove(arguments)
+
+    payload = workflow_output_geometry_payload(result)
+    assert payload["preset_ids"] == ["1:1"]
+    square = resolve_workflow_output_geometry(result, _preset("1:1"))
+    assert square is not None
+    assert (square.geometry.width, square.geometry.height) == (1024, 1024)
+
+
+def test_a_narrow_workflow_drops_the_ratios_it_cannot_reach() -> None:
+    arguments = _limits(
+        {"default": 512, "minimum": 64, "maximum": 512},
+        {"default": 512, "minimum": 64, "maximum": 2048},
+    )
+
+    result = _prove(arguments)
+
+    assert workflow_output_geometry_payload(result)["preset_ids"] == [
+        "1:1",
+        "2:3",
+        "3:2",
+        "3:4",
+        "4:3",
+    ]
+    for preset_id in ("9:16", "16:9"):
+        assert resolve_workflow_output_geometry(result, _preset(preset_id)) is None
+
+
+def test_a_workflow_whose_bounds_express_no_ratio_offers_no_preset_mode() -> None:
+    arguments = _limits(
+        {"default": 1000, "minimum": 1000, "maximum": 1000, "multipleOf": 1},
+        {"default": 999, "minimum": 999, "maximum": 999, "multipleOf": 1},
+    )
+
+    result = _prove(arguments)
+
+    payload = workflow_output_geometry_payload(result)
+    assert payload["available"] is True
+    assert payload["size_modes"] == ["exact"]
+    assert payload["preset_ids"] == []
+    for preset_id in PRESET_IDS:
+        assert resolve_workflow_output_geometry(result, _preset(preset_id)) is None
+
+
+def test_both_size_modes_report_the_same_workflow_bounds() -> None:
+    result = _prove()
+    payload = workflow_output_geometry_payload(result)
+    capability = cast(dict[str, Any], payload["capability"])
+    exact, preset = cast(list[dict[str, Any]], capability["combinations"])
+
+    shared = (
+        "min_width",
+        "max_width",
+        "min_height",
+        "max_height",
+        "width_multiple",
+        "height_multiple",
+        "max_pixels",
+        "default_width",
+        "default_height",
+    )
+    assert [exact[key] for key in shared] == [preset[key] for key in shared]
+    assert exact["buckets"] == [[1024, 768]]
+    assert [1024, 768] in preset["buckets"]
+
+
+@pytest.mark.parametrize(
+    "request_value",
+    [
+        {"mode": "image", "size_mode": "preset", "preset_id": "5:4"},
+        {"mode": "image", "size_mode": "preset", "preset_id": "16:9", "width": 1024},
+        {"mode": "image", "size_mode": "preset"},
+        {"mode": "video", "size_mode": "preset", "preset_id": "16:9"},
+        {"mode": "image", "size_mode": "preset", "preset_id": "16-9"},
+        {"mode": "image", "size_mode": "preset", "preset_id": None},
+    ],
+)
+def test_malformed_preset_requests_resolve_to_nothing(request_value: object) -> None:
+    assert resolve_workflow_output_geometry(_prove(), request_value) is None
+
+
+def test_the_resolution_payload_names_the_preset_it_resolved() -> None:
+    result = _prove()
+
+    resolution = resolve_workflow_output_geometry(result, _preset("16:9"))
+
+    assert resolution is not None
+    payload = workflow_output_geometry_resolution_payload(resolution)
+    assert payload["size_mode"] == "preset"
+    assert payload["preset_id"] == "16:9"
+    assert (payload["width"], payload["height"]) == (1024, 576)
+    assert payload["request_authorized"] is False
+
+
+def test_a_refused_preset_derivation_keeps_the_workflows_own_sizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Presets are an addition to the capability, never a condition of it.
+
+    Declared together with the exact sizes, a derived bucket the validator
+    refuses raises an OutputGeometryError, which is a ValueError, which
+    prove_workflow_output_geometry catches - and the revision then reports no
+    output geometry at all. The width and height it could always produce would
+    disappear because a ratio could not be worked out, which is a defect in a
+    feature taking away something that predates it.
+
+    The forced bucket here is 7 by 7: the right ratio for 1:1 and not on the
+    workflow's multiple-of-64 grid, so the validator refuses it for a reason
+    that has nothing to do with the exact sizes.
+    """
+    monkeypatch.setattr(
+        workflow_output_geometry,
+        "_preset_dimensions",
+        lambda width, height, max_pixels: {"1:1": (7, 7)},
+    )
+
+    payload = workflow_output_geometry_payload(_prove())
+
+    assert payload["available"] is True
+    assert payload["size_modes"] == ["exact"]
+    assert payload["preset_ids"] == []
+    width = payload["width"]
+    assert isinstance(width, dict)
+    assert width["default"] == 1024
+    capability = payload["capability"]
+    assert isinstance(capability, dict)
+    assert capability["allowed_preset_ids"] == []
+
+
+def test_a_derivation_that_offers_nothing_is_not_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary no-ratios case takes the same road and stays available."""
+    monkeypatch.setattr(
+        workflow_output_geometry,
+        "_preset_dimensions",
+        lambda width, height, max_pixels: {},
+    )
+
+    payload = workflow_output_geometry_payload(_prove())
+
+    assert payload["available"] is True
+    assert payload["size_modes"] == ["exact"]
+    assert payload["preset_ids"] == []

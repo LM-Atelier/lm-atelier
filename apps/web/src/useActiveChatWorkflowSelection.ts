@@ -1,7 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { activeWorkflowCapability, workflowChoiceKind } from "./activeWorkflowCapability";
 import { api } from "./api";
-import { orderFamilies, servesCapability } from "./workflowFamilies";
+import { useWorkflowFamilyChoices } from "./useWorkflowFamilyChoices";
+import { useWorkflowSelectionSave } from "./useWorkflowSelectionSave";
+import type { WorkflowFamilyBrowseState } from "./useWorkflowFamilyChoices";
 import type {
   ChatWorkflowSelectionInput,
   RoutingMode,
@@ -12,12 +14,6 @@ import type {
   ComposerWorkflowCapability,
   WorkflowChoiceKind,
 } from "./activeWorkflowCapability";
-
-type SelectionMutation = {
-  chatId: string;
-  capability: ComposerWorkflowCapability;
-  selection: ChatWorkflowSelectionInput;
-};
 
 export type ActiveChatWorkflowSelectionState =
   | { kind: "unresolved"; capability: null }
@@ -38,6 +34,7 @@ export type ActiveChatWorkflowSelectionState =
       current: WorkflowSelection | undefined;
       currentFamilyId: string | null;
       families: WorkflowFamily[];
+      browse: WorkflowFamilyBrowseState;
       selectedFamilyMissing: boolean;
       saving: boolean;
       saveError: Error | null;
@@ -47,30 +44,21 @@ export type ActiveChatWorkflowSelectionState =
 export function useActiveChatWorkflowSelection(
   chatId: string,
   routingMode: RoutingMode,
+  operation?: string,
 ): ActiveChatWorkflowSelectionState {
-  const client = useQueryClient();
   const capability = activeWorkflowCapability(routingMode);
-  const families = useQuery({
-    queryKey: ["workflow-families", capability],
-    queryFn: () => api.workflowFamilies(capability!),
-    enabled: capability !== null,
-  });
   const selections = useQuery({
     queryKey: ["chat", chatId, "workflow-selections"],
     queryFn: () => api.chatWorkflowSelections(chatId),
     enabled: capability !== null,
   });
-  const choose = useMutation({
-    mutationFn: ({ chatId: selectedChatId, capability: selectedCapability, selection }:
-      SelectionMutation) => api.setChatWorkflowSelection(
-        selectedChatId,
-        selectedCapability,
-        selection,
-      ),
-    onSuccess: (_saved, variables) => client.invalidateQueries({
-      queryKey: ["chat", variables.chatId, "workflow-selections"],
-    }),
-  });
+  const current = selections.data?.find(
+    (selection) => selection.selector_capability === capability,
+  );
+  const currentFamilyId = current?.mode === "family" ? current.workflow_family_id : null;
+  const families = useWorkflowFamilyChoices(capability, currentFamilyId, operation);
+  const choose = useWorkflowSelectionSave(capability === null ? null
+    : { kind: "chat", id: chatId, capability });
 
   if (capability === null) return { kind: "unresolved", capability: null };
   if (families.isLoading || selections.isLoading) {
@@ -89,31 +77,19 @@ export function useActiveChatWorkflowSelection(
     };
   }
 
-  const current = selections.data?.find(
-    (selection) => selection.selector_capability === capability,
-  );
-  const available = (families.data ?? []).filter(
-    (family) => servesCapability(family, capability),
-  );
-  const ordered = orderFamilies(available, capability);
-  const currentFamilyId = current?.mode === "family"
-    ? current.workflow_family_id
-    : null;
-  const mutationMatchesCurrent = choose.variables?.chatId === chatId
-    && choose.variables.capability === capability;
-
   return {
     kind: "ready",
     capability,
     choiceKind: workflowChoiceKind(current),
     current,
     currentFamilyId,
-    families: ordered,
+    families: families.families,
+    browse: families.browse,
     selectedFamilyMissing: Boolean(
-      currentFamilyId && !ordered.some((family) => family.id === currentFamilyId),
+      currentFamilyId && !families.families.some((family) => family.id === currentFamilyId),
     ),
-    saving: mutationMatchesCurrent && choose.isPending,
-    saveError: mutationMatchesCurrent ? choose.error as Error | null : null,
-    choose: (selection) => choose.mutate({ chatId, capability, selection }),
+    saving: choose.saving,
+    saveError: choose.error,
+    choose: choose.choose,
   };
 }

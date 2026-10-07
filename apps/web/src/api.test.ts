@@ -195,6 +195,7 @@ it("uses the isolated no-media Prompt Library batch transport contract", async (
     schema_version: 1,
     contract_sha256: "b".repeat(64),
     codec_version: 2,
+    unfilled_ordinals: [],
     requested_count: 1,
     selection_seed: 17,
     plan_sha256: "c".repeat(64),
@@ -900,6 +901,62 @@ it("uses the recovery and unsuccessful-job action contracts", async () => {
     ["/api/backups/backup%20one.sqlite3/restore", "POST"],
     ["/api/backups/backup%20one.sqlite3", "DELETE"],
   ]);
+});
+
+it("keeps an encrypted backup's passphrase out of the address, and sends the file to check as it is", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ url: "/api/artifacts/backup-1/content" }), { status: 201 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ artifact_count: 0 }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const file = new File([new Uint8Array([1, 2, 3])], "workspace.lm-atelier.encrypted");
+
+  const { api } = await import("./api");
+  await api.createEncryptedBackup(true, "pässphrase");
+  await api.checkEncryptedBackup(file, "pässphrase");
+
+  const [[createUrl, create], [checkUrl, check]] = fetchMock.mock.calls.slice(1);
+  expect([createUrl, create?.method]).toEqual(["/api/backups/encrypted", "POST"]);
+  expect(JSON.parse(String(create?.body))).toEqual({ passphrase: "pässphrase", include_media: true });
+  expect(new Headers(create?.headers).get("content-type")).toBe("application/json");
+  expect([checkUrl, check?.method]).toEqual(["/api/backups/encrypted/check", "POST"]);
+  expect(check?.body).toBe(file);
+  const headers = new Headers(check?.headers);
+  expect(headers.get("content-type")).toBe("application/octet-stream");
+  // Base64 of the passphrase's UTF-8 bytes, since a header carries only Latin-1.
+  expect(headers.get("x-archive-passphrase")).toBe("cMOkc3NwaHJhc2U=");
+  expect(headers.get("x-local-lm-csrf")).toBe("csrf");
+});
+
+it("checks a trim with a read of the stored video's preview, and queues one with the checked start", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ keeps_whole_video: false }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ keeps_whole_video: false }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ id: "job-trim" }), { status: 202 }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  const controller = new AbortController();
+  await api.videoTrimPreview("sha256:clip/one", 1.43, 2, true, controller.signal);
+  await api.videoTrimPreview("sha256:clip/one", 0, 0.5, false);
+  const body = { start_seconds: 1.43, end_seconds: 2, keep_audio: true, shown_start_seconds: 1 };
+  await expect(api.trimVideo("sha256:clip/one", body)).resolves.toEqual({ id: "job-trim" });
+
+  const [[withSound, withSoundInit], [silent, silentInit], [trim, trimInit]] = fetchMock.mock.calls.slice(1);
+  expect(withSound).toBe(
+    "/api/artifacts/sha256%3Aclip%2Fone/video-trim-preview?start_seconds=1.43&end_seconds=2&keep_audio=true",
+  );
+  expect(withSoundInit?.method).toBeUndefined();
+  expect(withSoundInit?.signal).toBe(controller.signal);
+  expect(silent).toBe(
+    "/api/artifacts/sha256%3Aclip%2Fone/video-trim-preview?start_seconds=0&end_seconds=0.5&keep_audio=false",
+  );
+  expect(silentInit?.method).toBeUndefined();
+  expect([trim, trimInit?.method]).toEqual(["/api/artifacts/sha256%3Aclip%2Fone/video-trims", "POST"]);
+  expect(JSON.parse(String(trimInit?.body))).toEqual(body);
+  expect(new Headers(trimInit?.headers).get("content-type")).toBe("application/json");
+  expect(new Headers(trimInit?.headers).get("x-local-lm-csrf")).toBe("csrf");
 });
 
 it("requests transactional profile cleanup when deleting an installed model", async () => {
@@ -1666,4 +1723,78 @@ it("transports branch pagination and explicit activation with a guarded head", a
   expect(fetchMock.mock.calls[2][0]).toBe("/api/chats/chat%2Fone/edited-branches/plan%2Fone/activate");
   expect(JSON.parse(fetchMock.mock.calls[2][1]?.body as string)).toEqual({ expected_active_head_message_id: null });
   expect(fetchMock.mock.calls[2][1]?.method).toBe("POST");
+});
+
+
+it("prepares and activates an exact workflow revision through the bound API routes", async () => {
+  const preparation = {
+    workflow_revision_id: "revision/a", workflow_artifact_sha256: "a".repeat(64),
+    dependency_contract_sha256: "b".repeat(64), state: "prepared", selections: [], slots: [], issues: [],
+  };
+  const activation = {
+    id: "activation", workflow_revision_id: "revision/a", dependency_contract_sha256: "b".repeat(64),
+    binding_sha256: "c".repeat(64), launch_sha256: "d".repeat(64), state: "ready", is_active: true,
+  };
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify(preparation), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify(activation), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const { api } = await import("./api");
+  const controller = new AbortController();
+  await expect(api.prepareWorkflowActivation("workflow/a", "revision/a", controller.signal)).resolves.toEqual(preparation);
+  const payload = {
+    workflow_artifact_sha256: preparation.workflow_artifact_sha256,
+    dependency_contract_sha256: preparation.dependency_contract_sha256, selections: [],
+  };
+  await expect(api.activateWorkflowRevision("workflow/a", "revision/a", payload, controller.signal)).resolves.toEqual(activation);
+  expect(fetchMock.mock.calls[1][0]).toBe("/api/workflows/workflow%2Fa/revisions/revision%2Fa/activation/prepare");
+  expect(fetchMock.mock.calls[1][1]?.method).toBeUndefined();
+  expect(fetchMock.mock.calls[1][1]?.signal).toBe(controller.signal);
+  expect(fetchMock.mock.calls[2][0]).toBe("/api/workflows/workflow%2Fa/revisions/revision%2Fa/activation");
+  expect(fetchMock.mock.calls[2][1]?.method).toBe("POST");
+  expect(JSON.parse(fetchMock.mock.calls[2][1]?.body as string)).toEqual(payload);
+  expect(fetchMock.mock.calls[2][1]?.signal).toBe(controller.signal);
+});
+
+it("keeps a comparison refusal's reasons with the error and escapes its id in every route", async () => {
+  const refusals = [{ code: "arm-profile-unavailable", arm_ordinal: 1, setting: null, alternative: null, message: "Not available." }];
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200, headers: { "content-type": "application/json" } }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ detail: "A choice cannot run.", code: "generation-experiment-refused", refusals }),
+      { status: 422, headers: { "content-type": "application/json" } }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ id: "gexp/1" }), { status: 202, headers: { "content-type": "application/json" } }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api, ApiError } = await import("./api");
+  const request = { name: "A and B", operation: "text_to_image" } as never;
+  const failure = await api.createGenerationExperiment(request).then(() => null, (error: unknown) => error);
+  expect(failure).toBeInstanceOf(ApiError);
+  expect((failure as InstanceType<typeof ApiError>).code).toBe("generation-experiment-refused");
+  expect((failure as InstanceType<typeof ApiError>).payload?.refusals).toEqual(refusals);
+  expect(fetchMock.mock.calls[1][0]).toBe("/api/generation-experiments");
+  expect(JSON.parse(fetchMock.mock.calls[1][1]?.body as string)).toEqual(request);
+
+  const start = { idempotency_key: "key-1", snapshot_sha256: "b".repeat(64), confirm_expensive: false };
+  await api.startGenerationExperiment("gexp/1", start);
+  expect(fetchMock.mock.calls[2][0]).toBe("/api/generation-experiments/gexp%2F1/start");
+  expect(fetchMock.mock.calls[2][1]?.method).toBe("POST");
+  expect(JSON.parse(fetchMock.mock.calls[2][1]?.body as string)).toEqual(start);
+});
+
+it("sends a record file as its own bytes and every other body as JSON", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  const content = new Uint8Array([80, 75, 3, 4]).buffer;
+  await api.checkGenerationRecord(content);
+  await api.editSearch("job_1", 1, "words");
+
+  expect(fetchMock.mock.calls[1][1]?.body).toBe(content);
+  expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get("content-type")).toBe("application/octet-stream");
+  expect(new Headers(fetchMock.mock.calls[2][1]?.headers).get("content-type")).toBe("application/json");
 });

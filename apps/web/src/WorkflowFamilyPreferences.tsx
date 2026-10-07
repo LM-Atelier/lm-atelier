@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { WorkflowFamilyMetadata } from "./WorkflowFamilyMetadata";
@@ -32,18 +33,29 @@ const OPERATIONS: Record<UserSelectableWorkflowCapability, string[]> = {
  * rather than a second thing to remember to unset.
  */
 export function WorkflowFamilyPreferences({ family }: { family: WorkflowFamily }) {
+  return <FamilyPreferences key={family.id} family={family} />;
+}
+
+function FamilyPreferences({ family }: { family: WorkflowFamily }) {
   const client = useQueryClient();
+  const toggles = useRef<Partial<Record<UserSelectableWorkflowCapability, HTMLInputElement | null>>>({});
+  const defaultButtons = useRef<Partial<Record<UserSelectableWorkflowCapability, HTMLButtonElement | null>>>({});
   const save = useMutation({
     mutationFn: ({
       capability,
       preference,
     }: {
-      capability: WorkflowSelectorCapability;
+      capability: UserSelectableWorkflowCapability;
       preference: { enabled: boolean; is_default: boolean; sort_order: number };
     }) => api.setWorkflowFamilyPreference(family.id, capability, preference),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ["workflow-families"] });
-      void client.invalidateQueries({ queryKey: ["workflow-family", family.id] });
+    onSuccess: async (_updated, { capability, preference }) => {
+      if (preference.is_default && document.activeElement === defaultButtons.current[capability]) {
+        toggles.current[capability]?.focus();
+      }
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ["workflow-families"] }),
+        client.invalidateQueries({ queryKey: ["workflow-family", family.id] }),
+      ]);
     },
   });
 
@@ -67,7 +79,7 @@ export function WorkflowFamilyPreferences({ family }: { family: WorkflowFamily }
         <ErrorCallout message={refusal ?? (save.error as Error).message} />
       )}
       <ul>
-        {CAPABILITIES.filter(({ key }) => family.variants.some(
+        {CAPABILITIES.filter(({ key }) => family.supported_selector_capabilities?.includes(key) ?? family.variants.some(
           (variant) => OPERATIONS[key].includes(variant.operation),
         )).map(({ key, label }) => {
           const preference = known(key);
@@ -79,10 +91,12 @@ export function WorkflowFamilyPreferences({ family }: { family: WorkflowFamily }
                   {preference.is_default && <small>Used when nobody chooses</small>}
                 </span>
                 <input
+                  ref={(element) => { toggles.current[key] = element; }}
                   type="checkbox"
                   checked={preference.enabled}
-                  disabled={save.isPending}
-                  onChange={(event) =>
+                  aria-disabled={save.isPending}
+                  onChange={(event) => {
+                    if (save.isPending) return;
                     save.mutate({
                       capability: key,
                       preference: {
@@ -93,18 +107,22 @@ export function WorkflowFamilyPreferences({ family }: { family: WorkflowFamily }
                         is_default: event.target.checked && preference.is_default,
                         sort_order: preference.sort_order,
                       },
-                    })}
+                    });
+                  }}
                 />
               </label>
               {preference.enabled && !preference.is_default && (
                 <button
+                  ref={(element) => { defaultButtons.current[key] = element; }}
                   className="secondary compact-button"
-                  disabled={save.isPending}
-                  onClick={() =>
+                  aria-disabled={save.isPending}
+                  onClick={() => {
+                    if (save.isPending) return;
                     save.mutate({
                       capability: key,
                       preference: { enabled: true, is_default: true, sort_order: preference.sort_order },
-                    })}
+                    });
+                  }}
                 >
                   Make this the default
                 </button>

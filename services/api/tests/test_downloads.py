@@ -3,15 +3,20 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import struct
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
+import httpx
 import pytest
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import select
 
 from local_lm.adapters.base import ChatEvent, ChatRequest, MediaRequest
+from local_lm.adapters.comfyui import ComfyUIAdapter
 from local_lm.auxiliary_assets import workflow_lora_extension
 from local_lm.comfy_templates import (
     ComfyModelDependency,
@@ -45,6 +50,7 @@ from local_lm.models import (
     WorkflowPreference,
     WorkflowRevision,
 )
+from local_lm.progress import update_job_progress
 from local_lm.scheduler import ResourceScheduler
 from local_lm.schemas import CatalogFileSource, DownloadRequest
 
@@ -148,7 +154,8 @@ def test_official_workflow_staging_honors_declared_safe_component_contracts() ->
         ("vae.safetensors", "vae", "vae"),
         ("lightning.safetensors", "lora", "loras"),
     ]
-    plan = SimpleNamespace(
+    plan = Mock(
+        spec_set=["family", "role", "artifacts_json", "runtime_contract_json"],
         family=None,
         role="image",
         artifacts_json=[
@@ -180,7 +187,7 @@ def test_official_workflow_staging_honors_declared_safe_component_contracts() ->
     )
     hashes = {path: str(index) * 64 for index, (path, _kind, _target) in enumerate(contracts, 1)}
 
-    DownloadManager._validate_staged_plan(plan, inspection, hashes)  # type: ignore[arg-type]
+    DownloadManager._validate_staged_plan(plan, inspection, hashes)
 
     mismatched = ModelManifestInspection(
         architecture=None,
@@ -196,9 +203,10 @@ def test_official_workflow_staging_honors_declared_safe_component_contracts() ->
         metadata_files=(),
     )
     with pytest.raises(ValueError, match="contract changed"):
-        DownloadManager._validate_staged_plan(plan, mismatched, hashes)  # type: ignore[arg-type]
+        DownloadManager._validate_staged_plan(plan, mismatched, hashes)
 
-    standalone = SimpleNamespace(
+    standalone = Mock(
+        spec_set=["family", "role", "artifacts_json", "runtime_contract_json"],
         family=None,
         role="image",
         artifacts_json=[
@@ -216,8 +224,63 @@ def test_official_workflow_staging_honors_declared_safe_component_contracts() ->
         },
     )
     with pytest.raises(ValueError, match="unsupported"):
-        DownloadManager._validate_staged_plan(  # type: ignore[arg-type]
+        DownloadManager._validate_staged_plan(
             standalone,
+            inspection,
+            hashes,
+        )
+
+
+def test_background_removal_staging_requires_explicit_workflow_ownership() -> None:
+    artifact = {
+        "path": "birefnet.safetensors",
+        "kind": "background_removal",
+        "target_folder": "background_removal",
+        "required": True,
+    }
+    inspection = ModelManifestInspection(
+        architecture=None,
+        family=None,
+        components=(
+            InspectedComponent(
+                path="birefnet.safetensors",
+                kind="unknown_safetensors",
+                target_folder="checkpoints",
+            ),
+        ),
+        metadata_files=(),
+    )
+    hashes = {"birefnet.safetensors": "4" * 64}
+    workflow_asset = InstallPlan(
+        family=None,
+        role="image",
+        artifacts_json=[artifact],
+        runtime_contract_json={
+            "auxiliary_kind": None,
+            "workflow_asset_kind": "background_removal",
+            "workflow_template_id": None,
+        },
+    )
+
+    DownloadManager._validate_staged_plan(
+        workflow_asset,
+        inspection,
+        hashes,
+    )
+
+    template_only = InstallPlan(
+        family=None,
+        role="image",
+        artifacts_json=[artifact],
+        runtime_contract_json={
+            "auxiliary_kind": None,
+            "workflow_asset_kind": None,
+            "workflow_template_id": "utility-looking-template",
+        },
+    )
+    with pytest.raises(ValueError, match="no primary generation model"):
+        DownloadManager._validate_staged_plan(
+            template_only,
             inspection,
             hashes,
         )
@@ -264,20 +327,18 @@ async def test_planned_chat_activation_requires_completion_and_records_evidence(
             ]
 
         async def load_chat(
-            self,
-            profile: ModelProfile,
-            _install: ModelInstall,
+            self, profile: ModelProfile, _install: ModelInstall, **_kwargs: object
         ) -> None:
             self.loaded.append(profile.id)
 
-        async def stop(self, name: str) -> None:
+        async def stop(self, name: str, **_kwargs: object) -> None:
             self.stopped.append(name)
 
     processes = FakeProcesses()
 
-    def active_adapter() -> FakeChatAdapter:
+    def active_adapter() -> Mock:
         assert processes.loaded
-        return FakeChatAdapter()
+        return Mock(spec_set=["capabilities", "count_tokens", "stream"], wraps=FakeChatAdapter())
 
     manager = DownloadManager(
         settings,
@@ -371,13 +432,11 @@ async def test_failed_chat_probe_restores_the_previous_profile(
             ]
 
         async def load_chat(
-            self,
-            profile: ModelProfile,
-            _install: ModelInstall,
+            self, profile: ModelProfile, _install: ModelInstall, **_kwargs: object
         ) -> None:
             self.loaded.append(profile.id)
 
-        async def stop(self, _name: str) -> None:
+        async def stop(self, _name: str, **_kwargs: object) -> None:
             raise AssertionError("a working prior profile should be restored")
 
     processes = RestoringProcesses()
@@ -465,6 +524,7 @@ async def test_unknown_gguf_plan_installs_and_activates_with_one_request(
                 "filename": "weights.bin.gguf",
                 "size": len(content),
                 "sha256": digest,
+                "metadata": {"description": "Accepted chat description"},
             }
         ],
         inspection=inspection,
@@ -476,7 +536,7 @@ async def test_unknown_gguf_plan_installs_and_activates_with_one_request(
             install_plan_id=plan.id,
             remote_id=plan.remote_id,
             revision=plan.revision,
-            role=plan.role,  # type: ignore[arg-type]
+            role=plan.role,
             engine=plan.engine,
             allow_patterns=["weights.bin.gguf"],
             expected_sha256={"weights.bin.gguf": digest},
@@ -512,13 +572,11 @@ async def test_unknown_gguf_plan_installs_and_activates_with_one_request(
             return [SimpleNamespace(name="chat", running=False, profile_id=None)]
 
         async def load_chat(
-            self,
-            _profile: ModelProfile,
-            _install: ModelInstall,
+            self, _profile: ModelProfile, _install: ModelInstall, **_kwargs: object
         ) -> None:
             return None
 
-        async def stop(self, _name: str) -> None:
+        async def stop(self, _name: str, **_kwargs: object) -> None:
             return None
 
     manager = DownloadManager(
@@ -559,6 +617,8 @@ async def test_unknown_gguf_plan_installs_and_activates_with_one_request(
         assert completed.status == JobStatus.COMPLETE.value, completed.error
         assert len(installs) == 1
         assert installs[0].active is True
+        assert installs[0].manifest_json["provider_description"] == "Accepted chat description"
+        assert installs[0].manifest_json.get("instruction_edit_capability") == "unknown"
         assert session.query(ModelProfile).count() == 1
         assert session.query(ModelComponentManifest).count() == 1
         assert session.query(ModelCapabilityEvidence).count() == 1
@@ -666,13 +726,11 @@ async def test_chat_plan_downloads_a_pinned_projector_from_a_companion_repo(
             return [SimpleNamespace(name="chat", running=False, profile_id=None)]
 
         async def load_chat(
-            self,
-            _profile: ModelProfile,
-            _install: ModelInstall,
+            self, _profile: ModelProfile, _install: ModelInstall, **_kwargs: object
         ) -> None:
             return None
 
-        async def stop(self, _name: str) -> None:
+        async def stop(self, _name: str, **_kwargs: object) -> None:
             return None
 
     def model_info(remote_id: str, **_kwargs: object) -> object:
@@ -745,6 +803,150 @@ async def test_chat_plan_downloads_a_pinned_projector_from_a_companion_repo(
         assert session.query(ModelCapabilityEvidence).one().evidence_key
 
 
+async def test_a_reused_component_is_reported_as_reused_while_the_next_one_downloads(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second file's transfer is told what was reused, and the reused file is
+    not counted twice while it is verified."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    model_content = gguf_bytes("qwen")
+    projector_content = gguf_bytes("clip")
+    model_digest = hashlib.sha256(model_content).hexdigest()
+    projector_digest = hashlib.sha256(projector_content).hexdigest()
+    model_name = "Neutral-Model-Q4_K_M.gguf"
+    projector_name = "mmproj-Neutral-Model-f16.gguf"
+    inspection = inspect_repository_metadata(
+        {model_name: model_content, projector_name: projector_content},
+        [model_name, projector_name],
+        role="chat",
+    )
+    resolved = resolve_install_plan(
+        remote_id="neutral/model",
+        revision="a" * 40,
+        role="chat",
+        engine="llama.cpp",
+        selected_files=[
+            {"filename": model_name, "size": len(model_content), "sha256": model_digest},
+            {
+                "filename": projector_name,
+                "size": len(projector_content),
+                "sha256": projector_digest,
+            },
+        ],
+        inspection=inspection,
+    )
+    with SessionLocal() as session:
+        plan = persist_install_plan(session, resolved)
+        session.commit()
+        request = DownloadRequest(
+            install_plan_id=plan.id,
+            remote_id=plan.remote_id,
+            revision=plan.revision,
+            role="chat",
+            engine=plan.engine,
+            allow_patterns=[model_name, projector_name],
+            expected_sha256={model_name: model_digest, projector_name: projector_digest},
+        )
+        session.add(
+            Job(
+                id="job_reused_then_downloaded",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.QUEUED.value,
+                payload_json=request.model_dump(mode="json"),
+            )
+        )
+        session.commit()
+    # The model's verified bytes sit in an earlier plan's staging, so they are reused.
+    earlier = settings.download_dir / f"plan-{'d' * 64}.partial"
+    earlier.mkdir(parents=True)
+    (earlier / model_name).write_bytes(model_content)
+
+    class ChatAdapter:
+        async def capabilities(self) -> object:
+            return SimpleNamespace(
+                healthy=True, version="llama", input_modalities=["text", "image"]
+            )
+
+        async def count_tokens(self, _messages: list[dict[str, Any]]) -> int:
+            return 3
+
+        async def stream(self, _request: ChatRequest):  # type: ignore[no-untyped-def]
+            yield ChatEvent(type="token", text="OK")
+            yield ChatEvent(type="complete")
+
+    class Processes:
+        runtimes = None
+
+        def statuses(self) -> list[object]:
+            return [SimpleNamespace(name="chat", running=False, profile_id=None)]
+
+        async def load_chat(
+            self, _profile: ModelProfile, _install: ModelInstall, **_kwargs: object
+        ) -> None:
+            return None
+
+        async def stop(self, _name: str, **_kwargs: object) -> None:
+            return None
+
+    info = SimpleNamespace(
+        siblings=[
+            SimpleNamespace(
+                rfilename=model_name, size=len(model_content), lfs={"sha256": model_digest}
+            ),
+            SimpleNamespace(
+                rfilename=projector_name,
+                size=len(projector_content),
+                lfs={"sha256": projector_digest},
+            ),
+        ],
+        sha="a" * 40,
+        pipeline_tag="image-text-to-text",
+        tags=["gguf"],
+        gated=False,
+    )
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        chat_adapter=ChatAdapter(),  # type: ignore[arg-type]
+        processes=Processes(),  # type: ignore[arg-type]
+    )
+    manager._api = SimpleNamespace(model_info=lambda *_args, **_kwargs: info)  # type: ignore[assignment]
+    transfers: list[dict[str, Any]] = []
+
+    async def download_file(**kwargs: Any) -> str:
+        transfers.append(kwargs)
+        target = kwargs["staging"] / kwargs["filename"]
+        target.write_bytes(projector_content)
+        return str(target)
+
+    import local_lm.downloads as downloads_module
+
+    written: list[dict[str, Any]] = []
+    record = update_job_progress
+
+    def recording(job: Job, **kwargs: Any) -> dict[str, Any]:
+        written.append(kwargs)
+        return record(job, **kwargs)
+
+    monkeypatch.setattr(downloads_module, "update_job_progress", recording)
+    monkeypatch.setattr(manager, "_download_file", download_file)
+    await manager._download("job_reused_then_downloaded")
+
+    with SessionLocal() as session:
+        job = session.get(Job, "job_reused_then_downloaded")
+        assert job and job.status == JobStatus.COMPLETE.value, job.error if job else None
+    assert [transfer["filename"] for transfer in transfers] == [projector_name]
+    (transfer,) = transfers
+    assert transfer["bytes_reused"] == len(model_content)
+    assert (transfer["file_index"], transfer["file_count"]) == (2, 2)
+    verifying = next(item for item in written if item["stage"] == f"verifying {model_name}")
+    assert verifying["completed_units"] == len(model_content)
+
+
 def test_companion_relocation_rejects_a_worker_path_outside_staging(
     tmp_path: Path,
 ) -> None:
@@ -804,7 +1006,10 @@ async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
                 "filename": "adapter.safetensors",
                 "size": len(content),
                 "sha256": digest,
-                "metadata": {"trained_words": ["provider ink"]},
+                "metadata": {
+                    "trained_words": ["provider ink"],
+                    "description": "Accepted watercolor description",
+                },
             }
         ],
         inspection=inspection,
@@ -843,10 +1048,12 @@ async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
         def statuses(self) -> list[object]:
             return [SimpleNamespace(name="media", running=False, profile_id=None)]
 
-        async def start_media(self, model_root: tuple[Path, dict[str, str]]) -> None:
+        async def start_media(
+            self, model_root: tuple[Path, dict[str, str]], **_kwargs: object
+        ) -> None:
             self.started.append(model_root)
 
-        async def stop(self, name: str) -> None:
+        async def stop(self, name: str, **_kwargs: object) -> None:
             self.stopped.append(name)
 
     class MediaAdapter:
@@ -897,8 +1104,13 @@ async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
         assert asset.active is True
         assert asset.verified_at is not None
         assert asset.kind == "lora"
+        assert asset.use_case == "provider ink"
+        assert getattr(asset, "use_case_derived", False) is True
+        assert asset.auto_apply is False
+        assert asset.manifest_json["use_case_metadata"] == {"trained_words": ["provider ink"]}
         assert asset.manifest_json["sha256"] == digest
         assert asset.manifest_json["comfy_name"] == "adapter.safetensors"
+        assert asset.manifest_json["provider_description"] == "Accepted watercolor description"
         assert asset.manifest_json["metadata"]["trigger_words"] == [
             "atelier ink",
             "provider ink",
@@ -910,9 +1122,11 @@ async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
     assert processes.stopped == ["media"]
 
 
+@pytest.mark.parametrize("instruction_capability", ["declared", "unknown", None])
 async def test_workflow_checkpoint_installs_as_an_inert_verified_asset(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
+    instruction_capability: str | None,
 ) -> None:
     settings.prepare()
     configure_database(settings)
@@ -953,12 +1167,15 @@ async def test_workflow_checkpoint_installs_as_an_inert_verified_asset(
             runtime_contract_json={
                 "auxiliary_kind": None,
                 "workflow_asset_kind": "checkpoint",
+                "instruction_edit_capability": instruction_capability,
                 "comfy_paths": {"checkpoints": "."},
                 "workflow_component_folders": {filename: "checkpoints"},
             },
             activation_probe_json={"kind": "workflow_asset", "required": False},
             status="planned",
         )
+        if instruction_capability is None:
+            plan.runtime_contract_json.pop("instruction_edit_capability")
         session.add(plan)
         request = DownloadRequest(
             install_plan_id=plan.id,
@@ -989,10 +1206,12 @@ async def test_workflow_checkpoint_installs_as_an_inert_verified_asset(
         def statuses(self) -> list[object]:
             return [SimpleNamespace(name="media", running=False, profile_id=None)]
 
-        async def start_media(self, model_root: tuple[Path, dict[str, str]]) -> None:
+        async def start_media(
+            self, model_root: tuple[Path, dict[str, str]], **_kwargs: object
+        ) -> None:
             self.started.append(model_root)
 
-        async def stop(self, name: str) -> None:
+        async def stop(self, name: str, **_kwargs: object) -> None:
             self.stopped.append(name)
 
     class MediaAdapter:
@@ -1017,6 +1236,18 @@ async def test_workflow_checkpoint_installs_as_an_inert_verified_asset(
         target.write_bytes(content)
         return str(target)
 
+    original_sources = manager._download_sources
+
+    async def changed_provider_metadata(
+        request: DownloadRequest, saved_plan: InstallPlan | None
+    ) -> Any:
+        siblings, sources, revision, metadata = await original_sources(request, saved_plan)
+        metadata["instruction_edit_capability"] = (
+            "unknown" if instruction_capability == "declared" else "declared"
+        )
+        return siblings, sources, revision, metadata
+
+    monkeypatch.setattr(manager, "_download_sources", changed_provider_metadata)
     monkeypatch.setattr(manager, "_download_file", download_file)
     await manager._download("job_workflow_checkpoint")
 
@@ -1030,6 +1261,9 @@ async def test_workflow_checkpoint_installs_as_an_inert_verified_asset(
         assert asset.kind == "checkpoint"
         assert asset.manifest_json["comfy_name"] == filename
         assert asset.manifest_json["workflow_asset_kind"] == "checkpoint"
+        assert asset.manifest_json.get("instruction_edit_capability") == (
+            "declared" if instruction_capability == "declared" else "unknown"
+        )
         assert session.query(ModelInstall).count() == 0
         assert stored_plan and stored_plan.status == "activated"
     assert processes.started[0][0].name.endswith(f"-asset-{plan_hash[:12]}")
@@ -1096,7 +1330,8 @@ def test_staged_model_family_must_match_the_immutable_plan() -> None:
         ["model.gguf"],
         role="chat",
     )
-    plan = SimpleNamespace(
+    plan = Mock(
+        spec_set=["family", "artifacts_json"],
         family="qwen",
         artifacts_json=[
             {
@@ -1109,7 +1344,7 @@ def test_staged_model_family_must_match_the_immutable_plan() -> None:
     )
 
     with pytest.raises(ValueError, match="family"):
-        DownloadManager._validate_staged_plan(  # type: ignore[arg-type]
+        DownloadManager._validate_staged_plan(
             plan,
             inspection,
             {"model.gguf": "a" * 64},
@@ -1243,6 +1478,7 @@ async def test_civitai_sources_come_only_from_the_immutable_plan(
     assert revision == "202"
     assert metadata == {
         "source_version_id": "202",
+        "instruction_edit_capability": "unknown",
         "tags": ["landscapes"],
         "base_model": ["Neutral base"],
     }
@@ -1646,9 +1882,7 @@ async def test_adaptive_checkpoint_activation_runs_a_small_bounded_generation(
     )
     graph = {"loader": {"class_type": "CheckpointLoaderSimple", "inputs": {}}}
 
-    await manager._probe_adaptive_checkpoint(  # type: ignore[arg-type]
-        SimpleNamespace(api_graph=graph)
-    )
+    await manager._probe_adaptive_checkpoint(Mock(spec_set=["api_graph"], api_graph=graph))
 
     assert adapter.request
     assert adapter.request.workflow == graph
@@ -1667,6 +1901,56 @@ async def test_adaptive_checkpoint_activation_runs_a_small_bounded_generation(
     assert adapter.timeout_seconds == 300
 
 
+async def test_a_video_template_probe_fills_the_length_rate_and_codec_it_binds(
+    settings: Settings,
+) -> None:
+    """A video graph binds settings an image graph does not; the probe fills them from the
+    template's own defaults, so ComfyUI never receives one as an unfilled placeholder."""
+
+    adapter = FakeProbeAdapter()
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        media_adapter=adapter,  # type: ignore[arg-type]
+    )
+    graph = {
+        "source": {"class_type": "LoadImage", "inputs": {"image": "${input_image}"}},
+        "latent": {
+            "class_type": "ImageToVideoLatent",
+            "inputs": {"width": "${width}", "height": "${height}", "length": "${frames}"},
+        },
+        "video": {"class_type": "CreateVideo", "inputs": {"fps": "${fps}"}},
+        "save": {"class_type": "SaveVideo", "inputs": {"codec": "${codec}"}},
+    }
+    compiled = Mock(
+        spec_set=["api_graph", "input_schema", "template"],
+        api_graph=graph,
+        input_schema={
+            "properties": {
+                "input_image": {"type": "string"},
+                "width": {"type": "integer", "default": 768},
+                "height": {"type": "integer", "default": 512},
+                "frames": {"type": "integer", "default": 97},
+                "fps": {"type": "number", "default": 24},
+                "codec": {"type": "string", "default": "auto"},
+                "steps": {"type": "integer", "default": 30},
+            }
+        },
+        template=SimpleNamespace(operation="image_to_video"),
+    )
+
+    await manager._probe_adaptive_checkpoint(compiled)
+
+    assert adapter.request
+    parameters = adapter.request.parameters
+    assert adapter.request.operation == "image_to_video"
+    assert (parameters["frames"], parameters["fps"], parameters["codec"]) == (97, 24, "auto")
+    # The probe stays small: its own size and step count replace the template's.
+    assert (parameters["width"], parameters["height"], parameters["steps"]) == (256, 256, 1)
+    filled = ComfyUIAdapter._compile(graph, parameters)
+    assert "${" not in json.dumps({key: filled[key] for key in ("latent", "video", "save")})
+
+
 async def test_native_edit_activation_uses_ephemeral_inputs_for_each_loader(
     settings: Settings,
 ) -> None:
@@ -1680,7 +1964,8 @@ async def test_native_edit_activation_uses_ephemeral_inputs_for_each_loader(
         "first": {"class_type": "LoadImage", "inputs": {"image": "${input_image_0}"}},
         "second": {"class_type": "LoadImage", "inputs": {"image": "${input_image_1}"}},
     }
-    compiled = SimpleNamespace(
+    compiled = Mock(
+        spec_set=["api_graph", "input_schema", "template"],
         api_graph=graph,
         input_schema={
             "properties": {
@@ -1691,7 +1976,7 @@ async def test_native_edit_activation_uses_ephemeral_inputs_for_each_loader(
         template=SimpleNamespace(operation="image_to_image"),
     )
 
-    await manager._probe_adaptive_checkpoint(compiled)  # type: ignore[arg-type]
+    await manager._probe_adaptive_checkpoint(compiled)
 
     assert adapter.request
     assert adapter.request.operation == "image_to_image"
@@ -1708,7 +1993,7 @@ async def test_workflow_refresh_adds_an_image_edit_contract_for_existing_install
     settings.prepare()
     configure_database(settings)
     init_db()
-    object_info = {"LoadImage": {"input": {}}, "VAEEncode": {"input": {}}}
+    object_info: dict[str, object] = {"LoadImage": {"input": {}}, "VAEEncode": {"input": {}}}
 
     class MediaAdapter:
         async def object_info(self) -> dict[str, object]:
@@ -1832,7 +2117,7 @@ async def test_media_activation_waits_for_the_shared_compute_lease(
     started = asyncio.Event()
 
     class FakeProcesses:
-        async def start_media(self, _model_paths: object = None) -> None:
+        async def start_media(self, _model_paths: object = None, **_kwargs: object) -> None:
             started.set()
 
     class FakeMediaAdapter:
@@ -1842,7 +2127,8 @@ async def test_media_activation_waits_for_the_shared_compute_lease(
         async def validate_workflow(self, _graph: dict[str, object]) -> list[str]:
             return []
 
-    compiled = SimpleNamespace(
+    compiled = Mock(
+        spec_set=["template", "ui_graph", "api_graph", "input_schema"],
         template=SimpleNamespace(
             id="lease-image",
             operation="text_to_image",
@@ -1898,7 +2184,7 @@ async def test_media_activation_waits_for_the_shared_compute_lease(
 
     async with scheduler.lease("primary"):
         activation = asyncio.create_task(
-            manager._activate_comfy_install(  # type: ignore[arg-type]
+            manager._activate_comfy_install(
                 job_id="job_lease_image",
                 install_id="model_lease_image",
                 destination=destination,
@@ -1910,7 +2196,7 @@ async def test_media_activation_waits_for_the_shared_compute_lease(
         await asyncio.sleep(0.03)
         assert started.is_set() is False
 
-    result = await asyncio.wait_for(activation, timeout=2)
+    result = await asyncio.wait_for(activation, timeout=PATIENCE_SECONDS)
     assert result
     assert started.is_set() is True
     with SessionLocal() as session:
@@ -1928,7 +2214,7 @@ async def test_planned_media_activation_requires_output_and_records_evidence(
     class Processes:
         runtimes = None
 
-        async def start_media(self, _model_paths: object = None) -> None:
+        async def start_media(self, _model_paths: object = None, **_kwargs: object) -> None:
             return None
 
     class MediaAdapter:
@@ -1958,7 +2244,8 @@ async def test_planned_media_activation_requires_output_and_records_evidence(
         "signals": [{"kind": "native-low-step", "steps": 4}],
         "native_optimized": True,
     }
-    compiled = SimpleNamespace(
+    compiled = Mock(
+        spec_set=["template", "ui_graph", "api_graph", "input_schema"],
         template=SimpleNamespace(
             id="planned-image",
             operation="text_to_image",
@@ -2016,7 +2303,7 @@ async def test_planned_media_activation_requires_output_and_records_evidence(
         workflow_template_sha256="a" * 64,
     )
 
-    result = await manager._activate_comfy_install(  # type: ignore[arg-type]
+    result = await manager._activate_comfy_install(
         job_id="job_planned_image",
         install_id="model_planned_image",
         destination=destination,
@@ -2049,7 +2336,8 @@ async def test_adaptive_activation_failure_is_removed_before_retry(
     settings.prepare()
     configure_database(settings)
     init_db()
-    compiled = SimpleNamespace(
+    compiled = Mock(
+        spec_set=["template", "ui_graph", "api_graph", "input_schema"],
         template=SimpleNamespace(
             id="adaptive-image",
             operation="text_to_image",
@@ -2064,7 +2352,7 @@ async def test_adaptive_activation_failure_is_removed_before_retry(
     )
 
     class FakeProcesses:
-        async def start_media(self, _model_paths: object = None) -> None:
+        async def start_media(self, _model_paths: object = None, **_kwargs: object) -> None:
             return None
 
     class FakeMediaAdapter:
@@ -2089,7 +2377,7 @@ async def test_adaptive_activation_failure_is_removed_before_retry(
     )
     manager._api = SimpleNamespace(model_info=lambda *_args, **_kwargs: info)  # type: ignore[assignment]
 
-    async def prepare(_request: DownloadRequest) -> object:
+    async def prepare(_request: DownloadRequest, **_kwargs: object) -> object:
         return compiled
 
     async def download_file(**kwargs: Any) -> str:
@@ -2165,6 +2453,232 @@ async def test_adaptive_activation_failure_is_removed_before_retry(
     assert (destination / "model.safetensors").read_bytes() == b"safe"
 
 
+async def test_an_install_failure_without_a_message_still_says_what_failed(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An HTTP client's timeout carries no message; the failed job names it and the log
+    keeps its traceback, instead of an empty reason and no line at all."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    compiled = Mock(
+        spec_set=["template", "ui_graph", "api_graph", "input_schema"],
+        template=SimpleNamespace(
+            id="adaptive-image",
+            operation="text_to_image",
+            runtime_adaptive=True,
+            selected_files=["model.safetensors"],
+            component_folders={"model.safetensors": "checkpoints"},
+            sha256="a" * 64,
+        ),
+        ui_graph={},
+        api_graph={"loader": {"class_type": "CheckpointLoaderSimple", "inputs": {}}},
+        input_schema={},
+    )
+
+    class FakeProcesses:
+        async def start_media(self, _model_paths: object = None, **_kwargs: object) -> None:
+            return None
+
+    class FakeMediaAdapter:
+        async def object_info(self) -> dict[str, object]:
+            return {}
+
+        async def validate_workflow(self, _graph: dict[str, object]) -> list[str]:
+            return []
+
+    broker = EventBroker()
+    manager = DownloadManager(
+        settings,
+        broker,
+        media_adapter=FakeMediaAdapter(),  # type: ignore[arg-type]
+        processes=FakeProcesses(),  # type: ignore[arg-type]
+    )
+    info = SimpleNamespace(
+        siblings=[SimpleNamespace(rfilename="model.safetensors", size=4, lfs=None)],
+        sha="b" * 40,
+        pipeline_tag="text-to-image",
+        tags=[],
+        gated=False,
+    )
+    manager._api = SimpleNamespace(model_info=lambda *_args, **_kwargs: info)  # type: ignore[assignment]
+
+    async def prepare(_request: DownloadRequest, **_kwargs: object) -> object:
+        return compiled
+
+    async def download_file(**kwargs: Any) -> str:
+        target = kwargs["staging"] / kwargs["filename"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"safe")
+        return str(target)
+
+    async def probe(_compiled: object) -> None:
+        raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(manager, "_prepare_comfy_template", prepare)
+    monkeypatch.setattr(manager, "_download_file", download_file)
+    monkeypatch.setattr(manager, "_probe_adaptive_checkpoint", probe)
+    monkeypatch.setattr(manager, "_validate_standard_checkpoint_safetensors", lambda _path: None)
+    monkeypatch.setattr(manager.comfy_templates, "compile", lambda *_args, **_kwargs: compiled)
+    request = DownloadRequest(
+        remote_id="owner/adaptive",
+        revision="main",
+        role="image",
+        engine="comfyui",
+        allow_patterns=["model.safetensors"],
+        comfy_paths={"checkpoints": "."},
+        workflow_template_id="adaptive-image",
+        workflow_template_sha256="a" * 64,
+    )
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id="job_silent_failure",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.QUEUED.value,
+                payload_json=request.model_dump(mode="json"),
+            )
+        )
+        session.commit()
+
+    with caplog.at_level(logging.ERROR, logger="local_lm.downloads"):
+        await manager._download("job_silent_failure")
+
+    with SessionLocal() as session:
+        failed = session.get(Job, "job_silent_failure")
+        assert failed and failed.status == JobStatus.FAILED.value
+        assert failed.error == "ReadTimeout (no further detail)"
+    event = next(event for event in broker.since(0) if event.type == "download.failed")
+    assert event.payload["error"] == "ReadTimeout (no further detail)"
+    logged = [record for record in caplog.records if "job_silent_failure" in record.getMessage()]
+    assert any(
+        record.exc_info and isinstance(record.exc_info[1], httpx.ReadTimeout) for record in logged
+    )
+
+
+async def test_a_planned_install_failure_without_a_message_names_it_on_the_plan(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The plan and the job's result carry the same named reason as the job itself."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+
+    class FakeProcesses:
+        def statuses(self) -> list[object]:
+            return [SimpleNamespace(name="media", running=False)]
+
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        processes=FakeProcesses(),  # type: ignore[arg-type]
+    )
+
+    async def prepare(_request: DownloadRequest, **_kwargs: object) -> object:
+        raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(manager, "_prepare_comfy_template", prepare)
+    with SessionLocal() as session:
+        session.add(
+            InstallPlan(
+                id="plan_silent_failure",
+                remote_id="owner/adaptive",
+                revision="main",
+                role="image",
+                engine="comfyui",
+                plan_hash="c" * 64,
+                resolver_version="test",
+                compatibility="supported",
+            )
+        )
+        request = DownloadRequest(
+            remote_id="owner/adaptive",
+            revision="main",
+            role="image",
+            engine="comfyui",
+            allow_patterns=["model.safetensors"],
+            comfy_paths={"checkpoints": "."},
+            workflow_template_id="adaptive-image",
+            workflow_template_sha256="a" * 64,
+            install_plan_id="plan_silent_failure",
+        )
+        session.add(
+            Job(
+                id="job_planned_silent_failure",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.QUEUED.value,
+                payload_json=request.model_dump(mode="json"),
+            )
+        )
+        session.commit()
+
+    await manager._download("job_planned_silent_failure")
+
+    with SessionLocal() as session:
+        plan = session.get(InstallPlan, "plan_silent_failure")
+        failed = session.get(Job, "job_planned_silent_failure")
+        assert plan and failed
+        assert (plan.status, plan.failure_reason) == ("failed", "ReadTimeout (no further detail)")
+        assert failed.result_json["failure_reason"] == "ReadTimeout (no further detail)"
+
+
+async def test_a_reactivation_failure_without_a_message_still_says_what_failed(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe's own time limit raises a bare TimeoutError; re-activation names it too."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    broker = EventBroker()
+    manager = DownloadManager(settings, broker)
+
+    def measure(_destination: Path) -> tuple[dict[str, str], dict[str, object]]:
+        raise TimeoutError
+
+    monkeypatch.setattr(manager, "measured_install_identity", measure)
+    with SessionLocal() as session:
+        session.add(
+            ModelInstall(
+                id="model_silent_reactivation",
+                name="Silent",
+                role="chat",
+                engine="llama.cpp",
+                local_path=str(settings.model_dir / "silent"),
+                manifest_json={"files": ["silent.gguf"]},
+                active=False,
+            )
+        )
+        session.add(
+            Job(
+                id="job_silent_reactivation",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.QUEUED.value,
+                payload_json={"install_id": "model_silent_reactivation"},
+            )
+        )
+        session.commit()
+
+    await manager._reactivate_claimed("job_silent_reactivation")
+
+    with SessionLocal() as session:
+        failed = session.get(Job, "job_silent_reactivation")
+        assert failed and failed.status == JobStatus.FAILED.value
+        assert failed.error == "TimeoutError (no further detail)"
+        assert failed.result_json == {
+            "failure_code": "activation_probe_timeout",
+            "failure_reason": "TimeoutError (no further detail)",
+        }
+    event = next(event for event in broker.since(0) if event.type == "model.activation_failed")
+    assert event.payload["error"] == "TimeoutError (no further detail)"
+
+
 async def test_cancel_removes_provisional_install_and_abandoned_partial(
     settings: Settings,
 ) -> None:
@@ -2208,7 +2722,7 @@ async def test_cancel_removes_provisional_install_and_abandoned_partial(
         assert cancellation.done() is False
         assert destination.exists()
 
-    assert await asyncio.wait_for(cancellation, timeout=2) is True
+    assert await asyncio.wait_for(cancellation, timeout=PATIENCE_SECONDS) is True
 
     with SessionLocal() as session:
         job = session.get(Job, "job_cancel_provisional")
@@ -2431,12 +2945,11 @@ async def test_a_slow_large_transfer_still_reports_its_speed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Transfer rate needs byte samples closer together than five seconds.
+    """A slow transfer on a large install still shows its speed.
 
-    The monitor used to write one only when overall progress advanced a tenth
-    of a percent. On a 40 GB install that is 40 MB of movement, which on a
-    normal connection takes far longer than the rate window - so the speed the
-    user was promised never appeared.
+    The monitor used to write a sample only when overall progress advanced a
+    tenth of a percent. On a 40 GB install that is 40 MB of movement, which on
+    a normal connection took so long that no speed ever appeared.
     """
     settings.prepare()
     configure_database(settings)
@@ -2501,3 +3014,285 @@ async def test_a_slow_large_transfer_still_reports_its_speed(
     assert progress["unit"] == "bytes"
     assert progress["completed_units"] > 0
     assert progress["rate_bytes_per_second"], "a moving transfer must report its speed"
+
+
+async def _monitor_samples(
+    manager: DownloadManager,
+    monkeypatch: pytest.MonkeyPatch,
+    staging: Path,
+    counters: list[int],
+    clock: list[float] | None = None,
+    **monitor: Any,
+) -> dict[str, Any]:
+    """Run the transfer monitor over a scripted worker counter: one second per sample,
+    or the given clock, whose first reading is the monitor's start."""
+
+    seconds = iter(clock if clock is not None else range(10_000))
+    monkeypatch.setattr("local_lm.downloads._TRANSFER_SAMPLE_SECONDS", 0.001)
+    monkeypatch.setattr(
+        "local_lm.downloads.time",
+        SimpleNamespace(perf_counter=lambda: float(next(seconds))),
+        raising=False,
+    )
+    stop = asyncio.Event()
+    remaining = list(counters)
+
+    def written_bytes(_pid: int) -> int:
+        if len(remaining) == 1:
+            stop.set()
+            return remaining[0]
+        return remaining.pop(0)
+
+    monkeypatch.setattr(DownloadManager, "_process_tree_write_bytes", staticmethod(written_bytes))
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id=monitor["job_id"],
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.RUNNING.value,
+                phase="downloading",
+                payload_json={},
+            )
+        )
+        session.commit()
+    await asyncio.wait_for(
+        manager._monitor_transfer(
+            filename="model.safetensors",
+            staging=staging,
+            process=SimpleNamespace(pid=1234),  # type: ignore[arg-type]
+            stop=stop,
+            **monitor,
+        ),
+        timeout=30,
+    )
+    with SessionLocal() as session:
+        job = session.get(Job, monitor["job_id"])
+        assert job is not None
+        return dict(job.progress_json)
+
+
+async def test_a_transfer_arriving_in_blocks_reports_its_speed_across_the_window(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A worker writes in blocks seconds apart, with only small unrelated writes
+    between them; the speed shown is the transfer's, not the last second's trickle."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    block = 8 * 1024**2
+    # The worker's write counter when the monitor starts, then once a second.
+    counters = [0, 1024, 2048, block, block + 1024, block + 2048, 2 * block, 2 * block + 1024]
+
+    progress = await _monitor_samples(
+        DownloadManager(settings, EventBroker()),
+        monkeypatch,
+        staging,
+        counters,
+        job_id="job_block_transfer",
+        file_size=64 * block,
+        completed_bytes=0,
+        total_size=64 * block,
+    )
+
+    assert progress["completed_units"] == 2 * block + 1024
+    # Seven seconds after the start, twice the block has arrived.
+    assert progress["rate_bytes_per_second"] == pytest.approx((2 * block + 1024) / 7)
+    remaining = 64 * block - (2 * block + 1024)
+    assert progress["eta_seconds"] == round(remaining / ((2 * block + 1024) / 7))
+
+
+async def test_transfer_samples_keep_the_reused_bytes_and_the_files_place(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Every sample of the second file's transfer still says what was reused and where it is."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    reused = 4096
+
+    progress = await _monitor_samples(
+        DownloadManager(settings, EventBroker()),
+        monkeypatch,
+        staging,
+        [0, 1024, 2048],
+        job_id="job_reused_transfer",
+        file_size=8192,
+        completed_bytes=reused,
+        total_size=reused + 8192,
+        bytes_reused=reused,
+        file_index=2,
+        file_count=2,
+    )
+
+    assert progress["completed_units"] == reused + 2048
+    assert progress["bytes_reused"] == reused
+    assert (progress["file_index"], progress["file_count"]) == (2, 2)
+    assert progress["overall_progress"] == pytest.approx((reused + 2048) / (reused + 8192))
+    # The reused bytes were never transferred, so they do not count toward the speed.
+    assert progress["rate_bytes_per_second"] == pytest.approx(2048 / 2)
+
+
+async def test_the_transfer_rate_follows_the_last_half_minute_not_the_whole_transfer(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A transfer that started fast and then slowed down shows its present speed."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    mib = 1024**2
+    # A fast first ten seconds, a stall, then ten MiB in the last half minute.
+    progress = await _monitor_samples(
+        DownloadManager(settings, EventBroker()),
+        monkeypatch,
+        staging,
+        [0, 100 * mib, 100 * mib + 1, 100 * mib + 2, 110 * mib],
+        clock=[0.0, 10.0, 20.0, 40.0, 50.0],
+        job_id="job_slowed_transfer",
+        file_size=1000 * mib,
+        completed_bytes=0,
+        total_size=1000 * mib,
+    )
+
+    # The newest sample at least thirty seconds old is the one taken at twenty seconds.
+    assert progress["rate_bytes_per_second"] == pytest.approx((10 * mib - 1) / 30)
+
+
+async def test_bytes_already_on_disk_do_not_count_toward_the_transfer_rate(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A retry starts over a partial file; only what this attempt moves is speed."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    partial = 64 * 1024
+    (staging / "model.safetensors.incomplete").write_bytes(bytes(partial))
+
+    progress = await _monitor_samples(
+        DownloadManager(settings, EventBroker()),
+        monkeypatch,
+        staging,
+        [0, 1024, 2048],
+        job_id="job_resumed_transfer",
+        file_size=1024 * 1024,
+        completed_bytes=0,
+        total_size=1024 * 1024,
+    )
+
+    assert progress["completed_units"] == partial + 2048
+    assert progress["rate_bytes_per_second"] == pytest.approx(2048 / 2)
+
+
+async def test_a_component_batch_reports_its_speed_across_the_window(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Several components downloading together measure their speed the same way."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    manager = DownloadManager(settings, EventBroker())
+    seconds = iter(range(10_000))
+    monkeypatch.setattr(
+        "local_lm.downloads.time",
+        SimpleNamespace(perf_counter=lambda: float(next(seconds))),
+        raising=False,
+    )
+    block = 8 * 1024**2
+    remaining = [0, 1024, block, block + 1024]
+    stop = asyncio.Event()
+
+    def written_bytes(_pid: int) -> int:
+        if len(remaining) == 1:
+            stop.set()
+            return remaining[0]
+        return remaining.pop(0)
+
+    monkeypatch.setattr(DownloadManager, "_process_tree_write_bytes", staticmethod(written_bytes))
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id="job_component_batch",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.RUNNING.value,
+                phase="downloading",
+                payload_json={},
+            )
+        )
+        session.commit()
+    await asyncio.wait_for(
+        manager._monitor_component_batch(
+            job_id="job_component_batch",
+            process=SimpleNamespace(pid=1234),  # type: ignore[arg-type]
+            completed_bytes=4096,
+            total_size=4096 + 64 * block,
+            batch_size=64 * block,
+            bytes_reused=4096,
+            file_count=3,
+            stop=stop,
+        ),
+        timeout=30,
+    )
+    with SessionLocal() as session:
+        job = session.get(Job, "job_component_batch")
+        assert job is not None
+        progress = dict(job.progress_json)
+
+    assert progress["bytes_reused"] == 4096
+    assert progress["completed_units"] == 4096 + block + 1024
+    assert progress["rate_bytes_per_second"] == pytest.approx((block + 1024) / 3)
+
+
+async def test_the_transfer_is_told_what_was_reused_and_where_its_file_is(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reused bytes and the file's place travel from the download call to the monitor."""
+
+    manager = DownloadManager(settings, EventBroker())
+    monkeypatch.setattr(
+        "local_lm.downloads.subprocess.Popen",
+        lambda command, **_kwargs: FakeCompletedWorker(command),
+    )
+    watched: list[dict[str, Any]] = []
+
+    async def monitor(**kwargs: Any) -> None:
+        watched.append(kwargs)
+
+    monkeypatch.setattr(manager, "_monitor_transfer", monitor)
+    await manager._download_file(
+        job_id="job_forwarded",
+        remote_id="owner/model",
+        filename="model.gguf",
+        revision="a" * 40,
+        staging=Path("C:/staging"),
+        file_size=1024,
+        completed_bytes=4096,
+        total_size=5120,
+        bytes_reused=4096,
+        file_index=2,
+        file_count=2,
+    )
+
+    (call,) = watched
+    assert (call["bytes_reused"], call["file_index"], call["file_count"]) == (4096, 2, 2)

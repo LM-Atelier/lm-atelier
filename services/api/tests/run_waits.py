@@ -28,6 +28,11 @@ Deliberately not general: this is for polling a record towards a terminal
 status. The suite's many narrow `Event.wait` timeouts wait on another coroutine
 in the same process and have four orders of magnitude of margin; they are not
 this shape and are not changed.
+
+`wait_until` is the same wait for a state that is not one terminal status - a
+plan's steps reaching an exact list, text that has started to stream, a set of
+jobs that have all started. It keeps the same patience for the same reason,
+and its failure says what it last saw and how long it waited.
 """
 
 from __future__ import annotations
@@ -86,3 +91,39 @@ async def wait_for_terminal_status(
     raise AssertionError(
         f"{what} was still {last!r} after {waited:.2f}s, giving up at {PATIENCE_SECONDS:g}s"
     )
+
+
+#: How much of the last value seen a timeout reports; a plan or a job list can
+#: be long, and the failure only needs enough to tell load from a wrong state.
+SEEN_CHARACTERS = 300
+
+
+async def wait_until[T](
+    read: Callable[[], Awaitable[T]],
+    satisfied: Callable[[T], bool],
+    *,
+    what: str,
+    interval: float = INTERVAL_SECONDS,
+) -> T:
+    """Poll `read` until `satisfied` holds for what it returns, and return that.
+
+    The caller then asserts on exactly the value that ended the wait, so a wait
+    that gives up still fails on the assertion the test always made. `interval`
+    lets a caller keep the pace an existing test was written against.
+    """
+
+    started = time.monotonic()
+    deadline = started + PATIENCE_SECONDS
+    value = await read()
+    while not satisfied(value):
+        if time.monotonic() >= deadline:
+            waited = time.monotonic() - started
+            seen = repr(value)
+            if len(seen) > SEEN_CHARACTERS:
+                seen = seen[:SEEN_CHARACTERS] + "..."
+            raise AssertionError(
+                f"{what} was still {seen} after {waited:.2f}s, giving up at {PATIENCE_SECONDS:g}s"
+            )
+        await asyncio.sleep(interval)
+        value = await read()
+    return value

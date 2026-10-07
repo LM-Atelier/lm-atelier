@@ -44,6 +44,7 @@ async def test_edit_keeps_accepted_model_configuration_until_explicitly_reselect
     chat = (await client.post("/api/chats", json={"title": "Inherited model configuration"})).json()
     original_load = {"context_length": 4096, "gpu_layers": 9}
     later_load = {"context_length": 32768, "gpu_layers": 1}
+    profile: ModelProfile | None
     with SessionLocal() as session:
         install = ModelInstall(
             id="model-edit-configuration",
@@ -165,7 +166,9 @@ async def test_edit_keeps_accepted_model_configuration_until_explicitly_reselect
         monkeypatch.setattr(orchestrator.processes, "statuses", Mock(return_value=[]))
         monkeypatch.setattr(orchestrator.processes, "load_chat", loader)
         assert await orchestrator._ensure_chat_worker(second.json()["run"]["id"]) is loaded
-        assert loader.await_args.args[0].load_settings_json == expected_load
+        awaited = loader.await_args
+        assert awaited is not None
+        assert awaited.args[0].load_settings_json == expected_load
         with SessionLocal() as session:
             live_profile = session.get(ModelProfile, "profile-edit-configuration")
             assert live_profile is not None and live_profile.load_settings_json == later_load

@@ -12,16 +12,20 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+from collections import deque
 from collections.abc import Callable, Mapping
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal
 
 import psutil
 from huggingface_hub import HfApi
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from .adapters.base import ChatAdapter, ChatRequest, MediaRequest
@@ -31,10 +35,14 @@ from .auxiliary_assets import (
     validate_lora_workflow_contract,
 )
 from .capability_evidence import ACTIVATION_ARTIFACT_KEY, record_capability_evidence
+from .chat_recovery_visibility import visible_chat
+from .civitai_delivery import ALLOWED_DOWNLOAD_HOSTS
+from .comfy_registry_paths import registry_wheel_environment_root
 from .comfy_templates import (
     COMFY_TEMPLATE_COMPILER_VERSION,
     ComfyTemplateRegistry,
     CompiledComfyTemplate,
+    compile_authored_workflow,
     derive_image_to_image,
 )
 from .config import Settings
@@ -44,14 +52,19 @@ from .filesystem_links import (
     UNSAFE_ENTRY_KINDS,
     AnchoredDirectory,
     AnchoredDirectoryError,
+    AnchoredDirectoryNotFound,
     AnchoredEntryKind,
+    WalkedEntry,
     is_link_or_reparse,
     list_entries,
     open_child_directory,
+    open_entry,
     publish_opened_file,
     remove_directory_entry,
     remove_entry,
+    remove_tree,
     take_regular_file,
+    walk_entries,
 )
 from .gguf import (
     GGUFSelectionError,
@@ -60,6 +73,14 @@ from .gguf import (
     validate_gguf_selection,
 )
 from .install_plan_types import InstallPlanFailureCode
+from .lora_use_cases import derive_lora_use_case
+from .matting_workflows import (
+    built_in_matting_graph,
+    built_in_matting_sha256,
+    declare_matting,
+    runtime_lists_model_file,
+)
+from .model_edit_capability import instruction_edit_capability
 from .model_manifests import (
     COMFY_MODEL_ASSET_KINDS,
     COMFY_MODEL_FOLDERS,
@@ -85,6 +106,8 @@ from .models import (
     ModelProfile,
     ModelSource,
     WorkflowDefinition,
+    WorkflowInstallOffer,
+    WorkflowInstallOfferDownload,
     WorkflowRevision,
 )
 from .outpaint_workflows import (
@@ -99,16 +122,27 @@ from .profile_service import (
 )
 from .profile_use_cases import normalize_provider_use_case_metadata
 from .progress import completed_progress, update_job_progress
-from .scheduler import ResourceScheduler
+from .provider_descriptions import installed_provider_description
+from .revision_dependency_contract import persist_dependency_contract
+from .scheduler import JobClaim, ResourceScheduler
 from .schemas import DownloadRequest
 from .subprocess_env import subprocess_environment
 from .upscale_workflows import (
-    UPSCALE_SCHEMA_KIND,
     UPSCALE_SETTING_KEY,
     upscale_capability,
+    upscale_setting_schema,
+)
+from .workflow_completion_jobs import (
+    complete_workflow_job,
+    fail_workflow_completion,
+    recover_workflow_completion_jobs,
+    workflow_completion_job,
+    workflow_download_can_cancel,
 )
 from .workflow_edit_calibration import validate_workflow_edit_calibration
+from .workflow_install_progress import completion_attention_code
 from .workflow_ownership import ensure_workflow_family_ownership
+from .workflow_recovery_visibility import visible_workflow_family
 
 if TYPE_CHECKING:
     from .adapters.comfyui import ComfyUIAdapter
@@ -116,19 +150,18 @@ if TYPE_CHECKING:
 
 _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _CIVITAI_ID = re.compile(r"^[1-9][0-9]{0,11}$")
-# civitai.com issues the redirect, b2 serves smaller files, and anything of
-# any size comes from their Cloudflare R2 delivery domain. Without the last of
-# these every large model refused with "untrusted host" at the second hop.
-_CIVITAI_ALLOWED_DOWNLOAD_HOSTS = (
-    "civitai.com",
-    "b2.civitai.com",
-    ".r2.cloudflarestorage.com",
-)
+# The delivery-host policy moved to civitai_delivery so the workflow graph
+# reader and this transfer path cannot drift apart on a security rule. The
+# reason for each host is recorded there.
+_CIVITAI_ALLOWED_DOWNLOAD_HOSTS = ALLOWED_DOWNLOAD_HOSTS
 _TRANSFER_ATTEMPTS = 3
-# How often a running transfer records a byte sample. Must stay comfortably
-# under the five-second window `progress._byte_rate` allows between samples,
-# or the displayed transfer rate silently disappears.
+# How often a running transfer records a byte sample.
 _TRANSFER_SAMPLE_SECONDS = 1.0
+# A transfer's rate is taken across this window rather than across one sample
+# gap: a worker's bytes arrive in write blocks seconds apart, and between blocks
+# only small unrelated writes move the counters, so a one-gap rate read as a few
+# hundred bytes a second while megabytes a second were arriving.
+_TRANSFER_RATE_WINDOW_SECONDS = 30.0
 _PROVISIONAL_INSTALL_KEY = "_provisional_install"
 _WORKFLOW_ASSET_KINDS = COMFY_MODEL_ASSET_KINDS | {"gguf_model"}
 logger = logging.getLogger(__name__)
@@ -146,6 +179,72 @@ def _path_is_link(path: Path) -> bool:
         missing="assume_regular",
         unreadable="assume_link",
     )
+
+
+#: How deep the empty-directory prune below an install descends.
+_PRUNE_DEPTH = 64
+
+
+def _remove_contained(parent: Path, name: str) -> bool:
+    """Remove one entry of `parent` through a held handle, never following a link.
+
+    A directory is removed with remove_tree, which never enters a link and
+    refuses a tree that holds one. A file is removed itself, and so is a link at
+    this level where that can be done without following it; a directory link on
+    Windows refuses instead. True when the entry is gone, including when it or
+    its parent was already absent. False when the removal refused, for any
+    reason: the entry stays where it is, for the caller to report.
+
+    Only the absence of `parent` or of `name` itself counts as removed. Something
+    that disappears inside the tree while it is removed stops remove_tree before
+    the entry goes, so that refusal is False like any other.
+    """
+
+    try:
+        anchor = AnchoredDirectory(parent)
+    except AnchoredDirectoryNotFound:
+        return True
+    except AnchoredDirectoryError:
+        return False
+    with anchor:
+        try:
+            kinds = {
+                entry.name: entry.kind for entry in list_entries(anchor, include_metadata=False)
+            }
+            kind = kinds.get(name)
+            if kind is None:
+                return True
+            if kind is AnchoredEntryKind.DIRECTORY:
+                remove_tree(anchor, name)
+            else:
+                remove_entry(anchor, name)
+        except AnchoredDirectoryError:
+            return False
+    return True
+
+
+def _prune_empty_directories(root: Path) -> None:
+    """Remove the empty directories below `root`, deepest first, through held parents.
+
+    A link is never entered, so no directory outside the tree is pruned, and a
+    directory that still holds anything, or cannot be removed, stays. `root`
+    itself is kept.
+    """
+
+    with suppress(AnchoredDirectoryError), AnchoredDirectory(root) as anchor:
+        _prune_below(anchor, 1)
+
+
+def _prune_below(directory: AnchoredDirectory, depth: int) -> None:
+    if depth > _PRUNE_DEPTH:
+        return
+    for entry in list_entries(directory, include_metadata=False):
+        if entry.kind is not AnchoredEntryKind.DIRECTORY:
+            continue
+        with suppress(AnchoredDirectoryError):
+            with open_child_directory(directory, entry.name) as child:
+                _prune_below(child, depth + 1)
+            remove_directory_entry(directory, entry.name)
 
 
 _NUMBERED_WORKFLOW_INPUT_IMAGE = re.compile(r"input_image_(?P<index>\d{1,2})\Z")
@@ -173,14 +272,109 @@ def _workflow_source_image_count(compiled: CompiledComfyTemplate) -> int:
     return count
 
 
+def _failure_reason(exc: BaseException) -> str:
+    """What a failed install or activation says about itself, never nothing.
+
+    Some exceptions, an HTTP client's timeouts among them, carry no message;
+    their type is then the only description there is.
+    """
+
+    message = str(exc).strip()
+    return message or f"{type(exc).__name__} (no further detail)"
+
+
+class _TransferRate:
+    """Bytes per second across the last stretch of samples, not the last gap."""
+
+    def __init__(self, transferred: int) -> None:
+        self._samples: deque[tuple[float, int]] = deque([(time.perf_counter(), transferred)])
+
+    def sample(self, transferred: int) -> float:
+        now = time.perf_counter()
+        self._samples.append((now, transferred))
+        while len(self._samples) > 2 and now - self._samples[1][0] >= _TRANSFER_RATE_WINDOW_SECONDS:
+            self._samples.popleft()
+        started, base = self._samples[0]
+        return (transferred - base) / (now - started) if now > started else 0.0
+
+
 def _template_workflow_name(template_id: str) -> str:
     return f"ComfyUI template \u00b7 {template_id}"
+
+
+def _matting_workflow_name(model_file: str) -> str:
+    return f"Remove background \u00b7 {model_file}"
 
 
 def download_worker_command() -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, "--download-worker"]
     return [sys.executable, "-m", "local_lm.download_worker"]
+
+
+def _digest_and_signature(handle: BinaryIO) -> tuple[str, list[int]]:
+    """Hash an open file and note the size and time it had while being read."""
+
+    digest = hashlib.sha256()
+    for block in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(block)
+    status = os.fstat(handle.fileno())
+    return digest.hexdigest(), [status.st_size, status.st_mtime_ns]
+
+
+def _measured_file(path: Path) -> tuple[str, list[int]]:
+    """Measure one file named outright rather than found by walking a tree."""
+
+    with path.open("rb") as handle:
+        return _digest_and_signature(handle)
+
+
+def _measured_entry(walked: WalkedEntry) -> tuple[str, list[int]] | None:
+    """Measure one walked file through the directory it was listed in.
+
+    Opened through its held parent rather than by pathname, so the bytes hashed
+    are the entry the walk classified and not whatever the name resolves to a
+    moment later. None means it is no longer there, which is not a failure: an
+    install can lose a file between the listing and the read, and the identity
+    then describes what remained. An entry that is still there but will not
+    open as a regular file raises instead, because leaving it out would describe
+    less than the install holds.
+    """
+
+    descriptor = open_entry(walked.parent, walked.entry.name)
+    if descriptor is None:
+        return None
+    with os.fdopen(descriptor, "rb") as handle:
+        return _digest_and_signature(handle)
+
+
+async def _finish_install_io[Result](operation: Callable[[], Result]) -> Result:
+    """Join disk work before cancellation releases the installation's lease."""
+    task = asyncio.create_task(asyncio.to_thread(operation))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        with suppress(Exception):
+            task.result()
+        raise
+
+
+@dataclass
+class _InstallationExecution:
+    task: asyncio.Task[Any] | None = None
+    displaced: bool = False
+
+    def stop_displaced(self) -> None:
+        self.displaced = True
+        if self.task is not None:
+            self.task.cancel()
 
 
 class DownloadManager:
@@ -203,6 +397,12 @@ class DownloadManager:
         self.comfy_templates = ComfyTemplateRegistry(settings)
         self._api = HfApi(token=settings.hf_token)
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._cancelling: set[str] = set()
+        self._restart_after_cancel: set[str] = set()
+        self._offer_recovery_task: asyncio.Task[None] | None = None
+        self._offer_tasks: dict[str, asyncio.Task[None]] = {}
+        self._offer_reruns: set[str] = set()
+        self._offers_closed = False
         self._workers: dict[str, subprocess.Popen[bytes]] = {}
 
     def _active_chat_adapter(self) -> ChatAdapter | None:
@@ -300,6 +500,17 @@ class DownloadManager:
         return request
 
     def create(self, session: Session, request: DownloadRequest) -> Job:
+        job = self.stage(session, request)
+        if job in session.new:
+            session.commit()
+            session.refresh(job)
+        if job.status != JobStatus.PAUSED.value:
+            self.start(job.id)
+        return job
+
+    def stage(self, session: Session, request: DownloadRequest) -> Job:
+        """Prepare a job in the caller's transaction without committing or starting it."""
+
         request = self.validated_request(session, request)
         serialized_request = request.model_dump(mode="json")
         active_statuses = {
@@ -316,8 +527,6 @@ class DownloadManager:
             .order_by(Job.created_at)
         ).all():
             if existing.payload_json == serialized_request:
-                if existing.status != JobStatus.PAUSED.value:
-                    self.start(existing.id)
                 return existing
         job = Job(
             kind=JobKind.DOWNLOAD.value,
@@ -336,9 +545,6 @@ class DownloadManager:
             indeterminate=True,
         )
         session.add(job)
-        session.commit()
-        session.refresh(job)
-        self.start(job.id)
         return job
 
     @staticmethod
@@ -421,7 +627,15 @@ class DownloadManager:
         metadata: dict[str, bytes] = {}
         for filename in filenames:
             relative = PurePosixPath(filename)
-            path = staging.joinpath(*relative.parts)
+            # open follows a link, so a staged name that points somewhere else
+            # would be read as model metadata. Refuse the name and each
+            # directory under staging before the read. The staging directory
+            # itself may sit under a link.
+            path = staging
+            for part in relative.parts:
+                path = path.joinpath(part)
+                if _path_is_link(path):
+                    raise ValueError("staged model file is a filesystem link")
             lowered = filename.casefold()
             if lowered.endswith(".json"):
                 with path.open("rb") as handle:
@@ -476,6 +690,7 @@ class DownloadManager:
         asset_kind = workflow_asset_kind or auxiliary_kind
         workflow_template_id = plan.runtime_contract_json.get("workflow_template_id")
         workflow_component_kinds = {
+            "background_removal",
             "checkpoint",
             "diffusion_model",
             "text_encoder",
@@ -608,8 +823,12 @@ class DownloadManager:
         filename: str,
         expected_sha256: str | None,
         expected_size: int | None,
+        job_id: str | None = None,
+        claim: JobClaim | None = None,
     ) -> tuple[Path, int] | None:
         """Reuse only bytes whose exact digest is already known and rechecked."""
+
+        from .db import SessionLocal
 
         if not expected_sha256:
             return None
@@ -621,22 +840,32 @@ class DownloadManager:
             size = candidate.stat().st_size
             if expected_size and size != expected_size:
                 if candidate == target:
-                    candidate.unlink(missing_ok=True)
+                    with SessionLocal() as session:
+                        if job_id is not None:
+                            self._current_install_job(session, job_id, claim)
+                        candidate.unlink(missing_ok=True)
                 continue
-            digest = await asyncio.to_thread(self._sha256_file, candidate)
+            digest = await _finish_install_io(partial(self._sha256_file, candidate))
             if digest != expected_sha256:
                 if candidate == target:
-                    candidate.unlink(missing_ok=True)
+                    with SessionLocal() as session:
+                        if job_id is not None:
+                            self._current_install_job(session, job_id, claim)
+                        candidate.unlink(missing_ok=True)
                 continue
             if candidate != target:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                temporary = target.with_name(f".{target.name}.reuse")
-                await asyncio.to_thread(shutil.copyfile, candidate, temporary)
-                copied_digest = await asyncio.to_thread(self._sha256_file, temporary)
+                suffix = claim.token if claim is not None else "reuse"
+                temporary = target.with_name(f".{target.name}.{suffix}")
+                await _finish_install_io(partial(shutil.copyfile, candidate, temporary))
+                copied_digest = await _finish_install_io(partial(self._sha256_file, temporary))
                 if copied_digest != expected_sha256:
                     temporary.unlink(missing_ok=True)
                     continue
-                os.replace(temporary, target)
+                with SessionLocal() as session:
+                    if job_id is not None:
+                        self._current_install_job(session, job_id, claim)
+                    os.replace(temporary, target)
             return target, size
         return None
 
@@ -662,6 +891,68 @@ class DownloadManager:
             details=details,
         )
 
+    def measured_install_identity(
+        self, local_path: Path
+    ) -> tuple[dict[str, str], dict[str, list[int]]]:
+        """Hash what this install actually holds, and note how it looked then.
+
+        A download arrives with an identity: every file was checked against the
+        digest its plan declared. A model put in place by hand arrives with
+        none, and evidence bound to nothing proves nothing, so the files are
+        measured here instead of trusted. The sizes and modification times are
+        kept beside the digests: a later read can tell in one stat each that a
+        file has moved on, and only then is the evidence it backed stale.
+
+        A folder holding anything that cannot be measured from inside it is
+        refused rather than measured in part. The runtime loads through a link
+        or a junction as readily as through a file, so an identity that leaves
+        one out lets the bytes behind it change while the evidence still holds.
+        """
+
+        if not local_path.is_dir():
+            digest, status = _measured_file(local_path)
+            return {local_path.name: digest}, {local_path.name: status}
+
+        digests: dict[str, str] = {}
+        signatures: dict[str, list[int]] = {}
+        unmeasured = 0
+        with AnchoredDirectory(local_path) as anchor:
+            for walked in walk_entries(anchor):
+                if walked.entry.kind is AnchoredEntryKind.DIRECTORY:
+                    continue
+                if walked.entry.kind is not AnchoredEntryKind.FILE:
+                    # A link, a junction, or a kind this platform will not name.
+                    # It is counted and not followed: on Windows a junction is
+                    # not a link to the predicates a recursive glob consults, so
+                    # measuring through one hashes files that are not in this
+                    # install and writes them down under names that read as
+                    # though they were.
+                    unmeasured += 1
+                    continue
+                try:
+                    measured = _measured_entry(walked)
+                except (AnchoredDirectoryError, OSError):
+                    # Listed as a file but refused on opening: unreadable, or
+                    # swapped for a link since the listing.
+                    unmeasured += 1
+                    continue
+                if measured is None:
+                    continue
+                digest, status = measured
+                name = "/".join(walked.parts)
+                digests[name] = digest
+                signatures[name] = status
+        if unmeasured:
+            items = "1 item" if unmeasured == 1 else f"{unmeasured} items"
+            raise ValueError(
+                f"{items} in the model folder could not be measured: links and junctions "
+                "are not followed, and every file has to open for reading. Put the model's "
+                "own files in the folder and activate it again."
+            )
+        # Sorted so the same install measures to the same document twice, which
+        # a reader comparing two manifests by eye has every right to expect.
+        return dict(sorted(digests.items())), dict(sorted(signatures.items()))
+
     def reactivate(self, session: Session, install: ModelInstall) -> Job:
         """Queue a bounded re-probe of an already installed model.
 
@@ -673,12 +964,20 @@ class DownloadManager:
 
         if install.engine not in {"llama.cpp", "comfyui"}:
             raise ValueError("this model's engine cannot be re-activated automatically")
-        if not str(install.manifest_json.get("remote_id") or ""):
-            raise ValueError("this model was imported without an installation manifest")
-        if install.engine == "comfyui" and not str(
-            install.manifest_json.get("workflow_template_id") or ""
-        ):
-            raise ValueError("this model has no declared workflow to re-activate")
+        if install.engine == "comfyui":
+            # Only the media probe needs to know where the model came from: it
+            # rebuilds the declared workflow, and the template is resolved
+            # against that origin. The chat probe starts the installed runtime
+            # against the files already on disk and reads neither, so requiring
+            # a download's manifest of it left a model that was imported by hand
+            # unable to gather evidence, and a model without evidence can never
+            # be verified for use.
+            if not str(install.manifest_json.get("workflow_template_id") or ""):
+                raise ValueError("this model has no declared workflow to re-activate")
+            if not str(install.manifest_json.get("remote_id") or ""):
+                raise ValueError(
+                    "this model was imported without the manifest its workflow is rebuilt from"
+                )
         for existing in session.scalars(
             select(Job)
             .where(
@@ -722,15 +1021,66 @@ class DownloadManager:
 
         task.add_done_callback(discard)
 
+    @staticmethod
+    def _current_install_job(
+        session: Session,
+        job_id: str,
+        claim: JobClaim | None,
+        *,
+        require_running: bool = True,
+    ) -> Job | None:
+        """Reserve the writer before checking the identity that authorizes a write."""
+        if claim is not None:
+            session.execute(text("UPDATE jobs SET status = status WHERE 0"))
+        job = session.get(Job, job_id, populate_existing=True)
+        if claim is not None and (
+            job is None
+            or job.claim_owner != claim.token
+            or job.attempt != claim.attempt
+            or (require_running and job.status != JobStatus.RUNNING.value)
+        ):
+            raise asyncio.CancelledError
+        return job
+
+    @staticmethod
+    def _install_claim_retained(job_id: str, claim: JobClaim | None) -> bool:
+        if claim is None:
+            return True
+        from .db import SessionLocal
+
+        with SessionLocal() as session:
+            job = session.get(Job, job_id)
+            return (
+                job is not None and job.claim_owner == claim.token and job.attempt == claim.attempt
+            )
+
+    @classmethod
+    def _require_install_claim(cls, job_id: str, claim: JobClaim | None) -> None:
+        if not cls._install_claim_retained(job_id, claim):
+            raise asyncio.CancelledError
+
     async def _reactivate(self, job_id: str) -> None:
         """Re-run the bounded activation probe against the current runtime."""
+
+        execution = _InstallationExecution(asyncio.current_task())
+
+        async with self.scheduler.job_lease(
+            job_id,
+            resource="primary_compute",
+            group="primary",
+            on_claim_lost=execution.stop_displaced,
+        ) as claim:
+            await self._reactivate_claimed(job_id, claim=claim)
+
+    async def _reactivate_claimed(self, job_id: str, *, claim: JobClaim | None = None) -> None:
+        """Keep identity measurement, probing and result writes under one claim."""
 
         from .db import SessionLocal
 
         install_id = ""
         try:
             with SessionLocal() as session:
-                job = session.get(Job, job_id)
+                job = self._current_install_job(session, job_id, claim)
                 if not job:
                     return
                 install_id = str(job.payload_json.get("install_id") or "")
@@ -757,6 +1107,24 @@ class DownloadManager:
                 for key, value in (manifest.get("expected_sha256") or {}).items()
                 if isinstance(key, str) and isinstance(value, str)
             }
+            if not component_hashes or manifest.get("file_signatures"):
+                # An install that declares no identity is measured before it is
+                # proved, and the measurement is written down, so the evidence
+                # this probe records names the exact bytes it ran against. It is
+                # measured again every time it is proved again, because the
+                # first measurement describes the first files: a model replaced
+                # in place and then activated has to be able to earn evidence
+                # for what it is now, and only this code writes these
+                # signatures, so a declared download is never measured here.
+                component_hashes, signatures = self.measured_install_identity(destination)
+                manifest["expected_sha256"] = component_hashes
+                manifest["file_signatures"] = signatures
+                with SessionLocal() as session:
+                    self._current_install_job(session, job_id, claim)
+                    measured = session.get(ModelInstall, install_id)
+                    if measured:
+                        measured.manifest_json = dict(manifest)
+                        session.commit()
             default_settings = {
                 str(key): value
                 for key, value in (manifest.get("default_settings") or {}).items()
@@ -768,6 +1136,8 @@ class DownloadManager:
                     install_id=install_id,
                     default_settings=default_settings,
                     component_hashes=component_hashes,
+                    primary_lease_held=True,
+                    claim=claim,
                 )
                 if proven is None:
                     raise RuntimeError("the chat activation probe did not complete")
@@ -776,6 +1146,7 @@ class DownloadManager:
                     job_id=job_id,
                     install_id=install_id,
                     role=role,
+                    claim=claim,
                     destination=destination,
                     manifest=manifest,
                     component_hashes=component_hashes,
@@ -783,7 +1154,7 @@ class DownloadManager:
                 )
 
             with SessionLocal() as session:
-                job = session.get(Job, job_id)
+                job = self._current_install_job(session, job_id, claim)
                 if job:
                     job.status = JobStatus.COMPLETE.value
                     job.completed_at = utcnow()
@@ -798,15 +1169,16 @@ class DownloadManager:
             await self.events.publish("model.activated", job_id, {"install_id": install_id})
         except Exception as exc:  # noqa: BLE001 - surfaced on the job for the user
             logger.exception("Model re-activation failed for %s", install_id or job_id)
+            reason = _failure_reason(exc)
             with SessionLocal() as session:
-                job = session.get(Job, job_id)
+                job = self._current_install_job(session, job_id, claim)
                 if job:
                     job.status = JobStatus.FAILED.value
-                    job.error = str(exc)
+                    job.error = reason
                     job.completed_at = utcnow()
                     job.result_json = {
                         "failure_code": self._stable_failure_code(exc),
-                        "failure_reason": str(exc)[:1_000],
+                        "failure_reason": reason[:1_000],
                     }
                     update_job_progress(
                         job,
@@ -816,7 +1188,7 @@ class DownloadManager:
                     )
                     session.commit()
             await self.scheduler.publish_job(job_id)
-            await self.events.publish("model.activation_failed", job_id, {"error": str(exc)})
+            await self.events.publish("model.activation_failed", job_id, {"error": reason})
 
     async def _reactivate_media(
         self,
@@ -828,6 +1200,7 @@ class DownloadManager:
         manifest: dict[str, Any],
         component_hashes: dict[str, str],
         default_settings: dict[str, Any],
+        claim: JobClaim | None = None,
     ) -> None:
         """Recompile the declared workflow and prove it still produces output."""
 
@@ -886,11 +1259,16 @@ class DownloadManager:
             compiled=compiled,
             default_settings=default_settings,
             prove_capability=True,
+            primary_lease_held=True,
+            claim=claim,
         )
         if activated is None:
             raise RuntimeError("the media activation probe did not complete")
 
     def start(self, job_id: str) -> None:
+        if job_id in self._cancelling:
+            self._restart_after_cancel.add(job_id)
+            return
         if job_id in self._tasks and not self._tasks[job_id].done():
             return
         task = asyncio.create_task(self._download(job_id), name=f"download-{job_id}")
@@ -904,11 +1282,18 @@ class DownloadManager:
 
     def recover_interrupted(self) -> None:
         from .db import SessionLocal
+        from .workflow_package_activation import media_worker_stopped
 
         with SessionLocal() as session:
+            cancellations = recover_workflow_completion_jobs(
+                session,
+                media_worker_stopped=self.processes is not None
+                and media_worker_stopped(self.processes),
+            )
             jobs = session.scalars(
                 select(Job).where(
-                    Job.kind == JobKind.DOWNLOAD.value,
+                    Job.kind.in_((JobKind.DOWNLOAD.value, JobKind.ACTIVATE.value)),
+                    Job.id.not_in([job_id for _offer_id, job_id in cancellations]),
                     Job.status.in_(
                         [
                             JobStatus.INTERRUPTED.value,
@@ -929,20 +1314,42 @@ class DownloadManager:
                 update_job_progress(
                     job,
                     stage="resuming",
-                    queue_resource=job.queue_resource or "network_transfer",
+                    queue_resource=job.queue_resource
+                    or (
+                        "primary_compute"
+                        if job.kind == JobKind.ACTIVATE.value
+                        else "network_transfer"
+                    ),
                     indeterminate=True,
                 )
             session.commit()
-            job_ids = [job.id for job in jobs]
-        for job_id in job_ids:
-            self.start(job_id)
+            recovered = [(job.id, job.kind) for job in jobs]
+        for job_id, kind in recovered:
+            if kind == JobKind.ACTIVATE.value:
+                self.start_activation(job_id)
+            else:
+                self.start(job_id)
+        if self._offer_recovery_task is None or self._offer_recovery_task.done():
+            self._offer_recovery_task = asyncio.create_task(
+                self._recover_workflow_installations(cancellations),
+                name="workflow-install-recovery",
+            )
 
-    async def cancel(self, job_id: str) -> bool:
+    async def _recover_workflow_installations(self, cancellations: list[tuple[str, str]]) -> None:
+        for offer_id, job_id in cancellations:
+            await self.cancel(job_id, cancelled_offer_id=offer_id)
+        await self.reconcile_workflow_install_offers()
+
+    async def cancel(self, job_id: str, *, cancelled_offer_id: str | None = None) -> bool:
         from .db import SessionLocal
 
         with SessionLocal() as session:
+            if cancelled_offer_id is not None:
+                session.execute(text("UPDATE workflow_install_offers SET status = status WHERE 0"))
+                if not workflow_download_can_cancel(session, cancelled_offer_id, job_id):
+                    return False
             job = session.get(Job, job_id)
-            if not job or job.kind != JobKind.DOWNLOAD.value:
+            if not job or job.kind not in {JobKind.DOWNLOAD.value, JobKind.ACTIVATE.value}:
                 return False
             if job.status in {
                 JobStatus.COMPLETE.value,
@@ -950,6 +1357,7 @@ class DownloadManager:
                 JobStatus.CANCELLED.value,
             }:
                 return False
+            activation = job.kind == JobKind.ACTIVATE.value
             job.status = JobStatus.CANCELLED.value
             job.completed_at = utcnow()
             plan_id = (
@@ -970,10 +1378,23 @@ class DownloadManager:
                 indeterminate=True,
             )
             session.commit()
-        await self._stop_task(job_id)
-        await self._cleanup_provisional_install_serialized(job_id)
-        self._discard_partial(job_id)
-        await self.events.publish("download.cancelled", job_id)
+        self._cancelling.add(job_id)
+        try:
+            await self._stop_task(job_id)
+            if not activation:
+                await self._cleanup_provisional_install_serialized(job_id)
+                self._discard_partial(job_id)
+            else:
+                await self.scheduler.publish_job(job_id)
+            await self.events.publish(
+                "model.activation_cancelled" if activation else "download.cancelled", job_id
+            )
+        finally:
+            self._cancelling.discard(job_id)
+            if job_id in self._restart_after_cancel:
+                self._restart_after_cancel.discard(job_id)
+                if not self._offers_closed:
+                    self.start(job_id)
         return True
 
     async def pause(self, job_id: str) -> bool:
@@ -1037,6 +1458,15 @@ class DownloadManager:
     async def close(self) -> None:
         from .db import SessionLocal
 
+        self._offers_closed = True
+        self._offer_reruns.clear()
+        offer_tasks = list(self._offer_tasks.values())
+        for task in offer_tasks:
+            task.cancel()
+        await asyncio.gather(*offer_tasks, return_exceptions=True)
+        if self._offer_recovery_task is not None:
+            self._offer_recovery_task.cancel()
+            await asyncio.gather(self._offer_recovery_task, return_exceptions=True)
         await asyncio.gather(
             *(self._stop_task(job_id) for job_id in list(self._tasks)),
             return_exceptions=True,
@@ -1044,7 +1474,7 @@ class DownloadManager:
         with SessionLocal() as session:
             jobs = session.scalars(
                 select(Job).where(
-                    Job.kind == JobKind.DOWNLOAD.value,
+                    Job.kind.in_((JobKind.DOWNLOAD.value, JobKind.ACTIVATE.value)),
                     Job.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
                 )
             ).all()
@@ -1093,29 +1523,46 @@ class DownloadManager:
                 job_id.startswith("plan-") and job_id.removeprefix("plan-") in active_plan_hashes
             ):
                 continue
-            reclaimed_bytes += self._path_size(candidate)
-            if candidate.is_dir() and not _path_is_link(candidate):
-                shutil.rmtree(candidate)
-            else:
-                candidate.unlink(missing_ok=True)
+            size = self._path_size(candidate)
+            if not _remove_contained(self.settings.download_dir, candidate.name):
+                logger.warning(
+                    "Left partial download %s in place: it could not be removed safely", candidate
+                )
+                continue
+            reclaimed_bytes += size
             removed_count += 1
         quarantine_parent = self.settings.download_dir / ".discarded-installs"
         if quarantine_parent.is_dir() and not _path_is_link(quarantine_parent):
             for candidate in quarantine_parent.iterdir():
                 if any(candidate.name.startswith(f"{job_id}-") for job_id in active_ids):
                     continue
-                if not _path_is_link(candidate):
-                    reclaimed_bytes += self._path_size(candidate)
-                if candidate.is_dir() and not _path_is_link(candidate):
-                    shutil.rmtree(candidate)
-                else:
-                    candidate.unlink(missing_ok=True)
+                size = self._path_size(candidate)
+                if not _remove_contained(quarantine_parent, candidate.name):
+                    logger.warning(
+                        "Left discarded install %s in place: it could not be removed safely",
+                        candidate,
+                    )
+                    continue
+                reclaimed_bytes += size
                 removed_count += 1
             with suppress(OSError):
                 quarantine_parent.rmdir()
         return removed_count, reclaimed_bytes
 
     async def _download(self, job_id: str) -> None:
+        execution = _InstallationExecution(asyncio.current_task())
+
+        async with self.scheduler.job_lease(
+            job_id,
+            resource="network_transfer",
+            group="network",
+            priority=-10,
+            capacity=self.settings.max_concurrent_downloads,
+            on_claim_lost=execution.stop_displaced,
+        ) as claim:
+            await self._download_claimed(job_id, claim=claim)
+
+    async def _download_claimed(self, job_id: str, *, claim: JobClaim) -> None:
         from .db import SessionLocal
 
         provisional_install_id: str | None = None
@@ -1125,474 +1572,367 @@ class DownloadManager:
         retained_staging: Path | None = None
         previous_media_running: bool | None = None
         try:
-            async with self.scheduler.job_lease(
-                job_id,
-                resource="network_transfer",
-                group="network",
-                priority=-10,
-                capacity=self.settings.max_concurrent_downloads,
-            ):
+            with SessionLocal() as session:
+                job = self._current_install_job(session, job_id, claim)
+                if not job:
+                    return
+                request = DownloadRequest.model_validate(job.payload_json)
+                plan = (
+                    session.get(InstallPlan, request.install_plan_id)
+                    if request.install_plan_id
+                    else None
+                )
+                if request.install_plan_id and not plan:
+                    raise ValueError("install plan not found; run the install check again")
+                if plan:
+                    plan.status = "downloading"
+                    plan.failure_code = None
+                    plan.failure_reason = None
+                job.completed_at = None
+                job.error = None
+                update_job_progress(
+                    job,
+                    stage="inspecting",
+                    queue_resource="network_transfer",
+                    indeterminate=True,
+                )
+                session.commit()
+            await self.scheduler.publish_job(job_id)
+            await self.events.publish("download.started", job_id, {"remote_id": request.remote_id})
+            if request.workflow_template_id:
+                if request.install_plan_id and self.processes:
+                    previous_media_running = next(
+                        status for status in self.processes.statuses() if status.name == "media"
+                    ).running
+                await self._cleanup_provisional_install_serialized(job_id, claim=claim)
                 with SessionLocal() as session:
-                    job = session.get(Job, job_id)
-                    if not job:
-                        return
-                    request = DownloadRequest.model_validate(job.payload_json)
-                    plan = (
-                        session.get(InstallPlan, request.install_plan_id)
-                        if request.install_plan_id
-                        else None
-                    )
-                    if request.install_plan_id and not plan:
-                        raise ValueError("install plan not found; run the install check again")
-                    if plan:
-                        plan.status = "downloading"
-                        plan.failure_code = None
-                        plan.failure_reason = None
-                    job.completed_at = None
-                    job.error = None
-                    update_job_progress(
-                        job,
-                        stage="inspecting",
-                        queue_resource="network_transfer",
-                        indeterminate=True,
-                    )
-                    session.commit()
-                await self.scheduler.publish_job(job_id)
-                await self.events.publish(
-                    "download.started", job_id, {"remote_id": request.remote_id}
-                )
-                if request.workflow_template_id:
-                    if request.install_plan_id and self.processes:
-                        previous_media_running = next(
-                            status for status in self.processes.statuses() if status.name == "media"
-                        ).running
-                    await self._cleanup_provisional_install_serialized(job_id)
-                    with SessionLocal() as session:
-                        job = session.get(Job, job_id)
-                        if job:
-                            update_job_progress(
-                                job,
-                                stage="preparing media runtime",
-                                queue_resource=job.queue_resource,
-                                indeterminate=True,
-                            )
-                            session.commit()
-                    await self.scheduler.publish_job(job_id)
-                    async with self.scheduler.lease("primary"):
-                        compiled_template = await self._prepare_comfy_template(request)
-                else:
-                    compiled_template = None
-
-                download_provider = str(plan.provider) if plan else "huggingface"
-                (
-                    siblings,
-                    file_download_sources,
-                    revision,
-                    source_metadata,
-                ) = await self._download_sources(request, plan)
-                filenames = self._select_files(request, siblings)
-                if not filenames:
-                    raise ValueError("no files matched the requested model selection")
-                if any(not self._safe_relative_filename(filename) for filename in filenames):
-                    raise ValueError("model selection contains an unsafe file path")
-                resolved_sha256 = self._resolved_sha256(request, siblings, filenames)
-                total_size = sum(
-                    int(getattr(sibling, "size", 0) or 0)
-                    for sibling in siblings
-                    if sibling.rfilename in filenames
-                )
-                file_sizes = {
-                    str(sibling.rfilename): int(getattr(sibling, "size", 0) or 0)
-                    for sibling in siblings
-                    if sibling.rfilename in filenames
-                }
-                free_bytes = shutil.disk_usage(self.settings.model_dir).free
-                if total_size and free_bytes < int(total_size * 1.1):
-                    raise OSError(
-                        f"insufficient disk space: need about {total_size:,} bytes, "
-                        f"have {free_bytes:,}"
-                    )
-
-                staging_key = (
-                    f"plan-{plan.plan_hash}" if request.install_plan_id and plan else job_id
-                )
-                staging = self.settings.download_dir / f"{staging_key}.partial"
-                retained_staging = staging if request.install_plan_id else None
-                destination = self.settings.model_dir / self._install_directory_name(
-                    request.remote_id,
-                    revision,
-                )
-                if request.workflow_asset_kind and plan:
-                    destination = destination.with_name(
-                        f"{destination.name}-asset-{plan.plan_hash[:12]}"
-                    )
-                staging.mkdir(parents=True, exist_ok=True)
-                reused_by_file: dict[str, tuple[Path, int]] = {}
-                for filename in filenames:
-                    with SessionLocal() as session:
-                        candidates = self._verified_reuse_candidates(
-                            session,
-                            staging=staging,
-                            filename=filename,
-                            expected_sha256=resolved_sha256.get(filename),
+                    job = self._current_install_job(session, job_id, claim)
+                    if job:
+                        update_job_progress(
+                            job,
+                            stage="preparing media runtime",
+                            queue_resource=job.queue_resource,
+                            indeterminate=True,
                         )
-                    # Digesting and copying a multi-gigabyte component must not
-                    # retain a SQLite read transaction for the duration.
-                    reused = await self._reuse_verified_file(
-                        candidates=candidates,
+                        session.commit()
+                await self.scheduler.publish_job(job_id)
+                async with self.scheduler.lease("primary"):
+                    compiled_template = await self._prepare_comfy_template(
+                        request, job_id=job_id, claim=claim
+                    )
+            else:
+                compiled_template = None
+
+            download_provider = str(plan.provider) if plan else "huggingface"
+            (
+                siblings,
+                file_download_sources,
+                revision,
+                source_metadata,
+            ) = await self._download_sources(request, plan)
+            provider_description = installed_provider_description(
+                plan.runtime_contract_json if plan else None, source_metadata
+            )
+            filenames = self._select_files(request, siblings)
+            if not filenames:
+                raise ValueError("no files matched the requested model selection")
+            if any(not self._safe_relative_filename(filename) for filename in filenames):
+                raise ValueError("model selection contains an unsafe file path")
+            resolved_sha256 = self._resolved_sha256(request, siblings, filenames)
+            total_size = sum(
+                int(getattr(sibling, "size", 0) or 0)
+                for sibling in siblings
+                if sibling.rfilename in filenames
+            )
+            file_sizes = {
+                str(sibling.rfilename): int(getattr(sibling, "size", 0) or 0)
+                for sibling in siblings
+                if sibling.rfilename in filenames
+            }
+            free_bytes = shutil.disk_usage(self.settings.model_dir).free
+            if total_size and free_bytes < int(total_size * 1.1):
+                raise OSError(
+                    f"insufficient disk space: need about {total_size:,} bytes, have {free_bytes:,}"
+                )
+
+            staging_key = f"plan-{plan.plan_hash}" if request.install_plan_id and plan else job_id
+            staging = self.settings.download_dir / f"{staging_key}.partial"
+            retained_staging = staging if request.install_plan_id else None
+            destination = self.settings.model_dir / self._install_directory_name(
+                request.remote_id,
+                revision,
+            )
+            if request.workflow_asset_kind and plan:
+                destination = destination.with_name(
+                    f"{destination.name}-asset-{plan.plan_hash[:12]}"
+                )
+            self._require_install_claim(job_id, claim)
+            staging.mkdir(parents=True, exist_ok=True)
+            reused_by_file: dict[str, tuple[Path, int]] = {}
+            for filename in filenames:
+                with SessionLocal() as session:
+                    self._current_install_job(session, job_id, claim)
+                    candidates = self._verified_reuse_candidates(
+                        session,
                         staging=staging,
                         filename=filename,
                         expected_sha256=resolved_sha256.get(filename),
-                        expected_size=file_sizes.get(filename) or None,
                     )
-                    if reused:
-                        reused_by_file[filename] = reused
-                reused_bytes = sum(size for _, size in reused_by_file.values())
-                completed_bytes = reused_bytes
-                missing_files = [
-                    filename for filename in filenames if filename not in reused_by_file
-                ]
-                parallel_paths: dict[str, str] = {}
-                batch_sources = {file_download_sources[filename] for filename in missing_files}
-                can_batch_sources = len(batch_sources) == 1 and all(
-                    file_download_sources[filename].provider == "huggingface"
-                    and file_download_sources[filename].filename == filename
-                    for filename in missing_files
+                # Digesting and copying a multi-gigabyte component must not
+                # retain a SQLite read transaction for the duration.
+                reused = await self._reuse_verified_file(
+                    job_id=job_id,
+                    claim=claim,
+                    candidates=candidates,
+                    staging=staging,
+                    filename=filename,
+                    expected_sha256=resolved_sha256.get(filename),
+                    expected_size=file_sizes.get(filename) or None,
                 )
-                if request.install_plan_id and len(missing_files) > 1 and can_batch_sources:
-                    batch_size = sum(file_sizes.get(filename, 0) for filename in missing_files)
-                    batch_source = next(iter(batch_sources))
-                    with SessionLocal() as session:
-                        job = session.get(Job, job_id)
-                        if not job or job.status == JobStatus.CANCELLED.value:
-                            return
-                        update_job_progress(
-                            job,
-                            stage=f"downloading {len(missing_files)} components",
-                            completed_units=completed_bytes if total_size else None,
-                            total_units=total_size or None,
-                            unit="bytes" if total_size else None,
-                            bytes_reused=reused_bytes,
-                            file_count=len(filenames),
-                            queue_resource=job.queue_resource,
-                            indeterminate=not bool(total_size),
+                if reused:
+                    reused_by_file[filename] = reused
+            reused_bytes = sum(size for _, size in reused_by_file.values())
+            completed_bytes = reused_bytes
+            missing_files = [filename for filename in filenames if filename not in reused_by_file]
+            parallel_paths: dict[str, str] = {}
+            batch_sources = {file_download_sources[filename] for filename in missing_files}
+            can_batch_sources = len(batch_sources) == 1 and all(
+                file_download_sources[filename].provider == "huggingface"
+                and file_download_sources[filename].filename == filename
+                for filename in missing_files
+            )
+            if request.install_plan_id and len(missing_files) > 1 and can_batch_sources:
+                batch_size = sum(file_sizes.get(filename, 0) for filename in missing_files)
+                batch_source = next(iter(batch_sources))
+                with SessionLocal() as session:
+                    job = self._current_install_job(session, job_id, claim)
+                    if not job or job.status == JobStatus.CANCELLED.value:
+                        return
+                    update_job_progress(
+                        job,
+                        stage=f"downloading {len(missing_files)} components",
+                        completed_units=completed_bytes if total_size else None,
+                        total_units=total_size or None,
+                        unit="bytes" if total_size else None,
+                        bytes_reused=reused_bytes,
+                        file_count=len(filenames),
+                        queue_resource=job.queue_resource,
+                        indeterminate=not bool(total_size),
+                    )
+                    session.commit()
+                await self.scheduler.publish_job(job_id)
+                parallel_paths = await self._download_files_parallel(
+                    job_id=job_id,
+                    claim=claim,
+                    remote_id=batch_source.remote_id,
+                    filenames=missing_files,
+                    revision=batch_source.revision,
+                    staging=staging,
+                    completed_bytes=completed_bytes,
+                    total_size=total_size or None,
+                    batch_size=batch_size,
+                    bytes_reused=reused_bytes,
+                )
+            for index, filename in enumerate(filenames):
+                expected_hash = resolved_sha256.get(filename)
+                reused = reused_by_file.get(filename)
+                with SessionLocal() as session:
+                    job = self._current_install_job(session, job_id, claim)
+                    if not job or job.status == JobStatus.CANCELLED.value:
+                        return
+                    stage = (
+                        f"reusing verified {filename}"
+                        if reused
+                        else (
+                            f"verifying downloaded {filename}"
+                            if filename in parallel_paths
+                            else f"downloading {filename}"
                         )
-                        session.commit()
-                    await self.scheduler.publish_job(job_id)
-                    parallel_paths = await self._download_files_parallel(
+                    )
+                    update_job_progress(
+                        job,
+                        stage=stage,
+                        completed_units=completed_bytes,
+                        total_units=total_size or None,
+                        unit="bytes" if total_size else None,
+                        # These bytes are the whole install, not this file, so
+                        # the fraction they produce is overall progress. Said
+                        # explicitly because `stage_progress` is derived from
+                        # the same units and would otherwise be the only
+                        # number present, labelled as if it described the one
+                        # file named in the stage.
+                        overall_progress=(completed_bytes / total_size if total_size else None),
+                        bytes_reused=reused_bytes,
+                        file_index=index + 1,
+                        file_count=len(filenames),
+                        queue_resource=job.queue_resource,
+                        indeterminate=not bool(total_size),
+                    )
+                    session.commit()
+                await self.scheduler.publish_job(job_id)
+                if reused:
+                    reused_path, reused_size = reused
+                    downloaded_path = str(reused_path)
+                    actual_hash = expected_hash
+                elif filename in parallel_paths:
+                    downloaded_path = parallel_paths[filename]
+                    actual_hash = None
+                else:
+                    file_source = file_download_sources[filename]
+                    downloaded_path = await self._download_file(
                         job_id=job_id,
-                        remote_id=batch_source.remote_id,
-                        filenames=missing_files,
-                        revision=batch_source.revision,
+                        claim=claim,
+                        provider=file_source.provider,
+                        remote_id=file_source.remote_id,
+                        filename=file_source.filename,
+                        revision=file_source.revision,
+                        source_file_id=file_source.source_file_id,
+                        expected_sha256=expected_hash,
                         staging=staging,
+                        file_size=file_sizes.get(filename) or None,
                         completed_bytes=completed_bytes,
                         total_size=total_size or None,
-                        batch_size=batch_size,
                         bytes_reused=reused_bytes,
+                        file_index=index + 1,
+                        file_count=len(filenames),
                     )
-                for index, filename in enumerate(filenames):
-                    expected_hash = resolved_sha256.get(filename)
-                    reused = reused_by_file.get(filename)
-                    with SessionLocal() as session:
-                        job = session.get(Job, job_id)
-                        if not job or job.status == JobStatus.CANCELLED.value:
-                            return
-                        stage = (
-                            f"reusing verified {filename}"
-                            if reused
-                            else (
-                                f"verifying downloaded {filename}"
-                                if filename in parallel_paths
-                                else f"downloading {filename}"
-                            )
-                        )
-                        update_job_progress(
-                            job,
-                            stage=stage,
-                            completed_units=completed_bytes,
-                            total_units=total_size or None,
-                            unit="bytes" if total_size else None,
-                            # These bytes are the whole install, not this file, so
-                            # the fraction they produce is overall progress. Said
-                            # explicitly because `stage_progress` is derived from
-                            # the same units and would otherwise be the only
-                            # number present, labelled as if it described the one
-                            # file named in the stage.
-                            overall_progress=(completed_bytes / total_size if total_size else None),
-                            bytes_reused=reused_bytes,
-                            file_index=index + 1,
-                            file_count=len(filenames),
-                            queue_resource=job.queue_resource,
-                            indeterminate=not bool(total_size),
-                        )
-                        session.commit()
-                    await self.scheduler.publish_job(job_id)
-                    if reused:
-                        reused_path, reused_size = reused
-                        downloaded_path = str(reused_path)
-                        actual_hash = expected_hash
-                    elif filename in parallel_paths:
-                        downloaded_path = parallel_paths[filename]
-                        actual_hash = None
-                    else:
-                        file_source = file_download_sources[filename]
-                        downloaded_path = await self._download_file(
-                            job_id=job_id,
-                            provider=file_source.provider,
-                            remote_id=file_source.remote_id,
-                            filename=file_source.filename,
-                            revision=file_source.revision,
-                            source_file_id=file_source.source_file_id,
-                            expected_sha256=expected_hash,
+                    self._require_install_claim(job_id, claim)
+                    if file_source.filename != filename:
+                        downloaded_path = self._relocate_companion_download(
                             staging=staging,
-                            file_size=file_sizes.get(filename) or None,
-                            completed_bytes=completed_bytes,
-                            total_size=total_size or None,
+                            source_filename=file_source.filename,
+                            destination_filename=filename,
+                            downloaded_path=downloaded_path,
                         )
-                        if file_source.filename != filename:
-                            downloaded_path = self._relocate_companion_download(
-                                staging=staging,
-                                source_filename=file_source.filename,
-                                destination_filename=filename,
-                                downloaded_path=downloaded_path,
-                            )
-                        actual_hash = None
-                    if expected_hash or request.install_plan_id:
-                        with SessionLocal() as session:
-                            job = session.get(Job, job_id)
-                            if job:
-                                update_job_progress(
-                                    job,
-                                    stage=f"verifying {filename}",
-                                    completed_units=completed_bytes + file_sizes.get(filename, 0),
-                                    total_units=total_size or None,
-                                    unit="bytes" if total_size else None,
-                                    bytes_reused=reused_bytes,
-                                    file_index=index + 1,
-                                    file_count=len(filenames),
-                                    queue_resource="disk",
-                                    indeterminate=True,
-                                )
-                                session.commit()
-                        await self.scheduler.publish_job(job_id)
-                        if actual_hash is None:
-                            async with self.scheduler.lease("disk"):
-                                actual_hash = await asyncio.to_thread(
-                                    self._sha256_file, Path(downloaded_path)
-                                )
-                        if expected_hash and actual_hash != expected_hash:
-                            raise ValueError(f"SHA-256 mismatch for {filename}")
-                        resolved_sha256[filename] = actual_hash
+                    actual_hash = None
+                if expected_hash or request.install_plan_id:
                     with SessionLocal() as session:
-                        job = session.get(Job, job_id)
-                        if not job or job.status == JobStatus.CANCELLED.value:
-                            return
-                        if not reused:
-                            completed_bytes += file_sizes.get(filename, 0)
-                        update_job_progress(
-                            job,
-                            stage=f"downloaded {filename}",
-                            completed_units=completed_bytes if total_size else index + 1,
-                            total_units=total_size if total_size else len(filenames),
-                            unit="bytes" if total_size else "files",
-                            bytes_reused=reused_bytes,
-                            file_index=index + 1,
-                            file_count=len(filenames),
-                            queue_resource=job.queue_resource,
-                        )
-                        session.commit()
-                    await self.scheduler.publish_job(job_id)
-                    await self.events.publish(
-                        "download.progress",
-                        job_id,
-                        {
-                            "progress": (
-                                completed_bytes / total_size
-                                if total_size
-                                else (index + 1) / len(filenames)
-                            ),
-                            "downloaded_bytes": completed_bytes if total_size else None,
-                            "total_bytes": total_size or None,
-                            "bytes_reused": reused_bytes,
-                            "filename": filename,
-                        },
-                    )
-
-                # Inspected whenever the staged files are here, not only under an
-                # install plan. The component manifest is what gives an install a
-                # content identity, and #294 gated its *write* on the inspection
-                # while the inspection itself was still gated on the plan - so
-                # plan-less installs still recorded nothing.
-                inspection = self._inspect_staged_component_manifest(
-                    staging, filenames, request, compiled_template, plan
-                )
-                if request.install_plan_id:
-                    if not inspection:
-                        raise ValueError("downloaded model metadata could not be inspected")
-                    self._validate_staged_plan(plan, inspection, resolved_sha256)
-
-                if compiled_template and compiled_template.template.runtime_adaptive:
-                    with SessionLocal() as session:
-                        job = session.get(Job, job_id)
+                        job = self._current_install_job(session, job_id, claim)
                         if job:
                             update_job_progress(
                                 job,
-                                stage="validating checkpoint structure",
-                                completed_units=completed_bytes if total_size else None,
+                                stage=f"verifying {filename}",
+                                completed_units=completed_bytes
+                                + (0 if reused else file_sizes.get(filename, 0)),
                                 total_units=total_size or None,
                                 unit="bytes" if total_size else None,
+                                bytes_reused=reused_bytes,
+                                file_index=index + 1,
+                                file_count=len(filenames),
                                 queue_resource="disk",
                                 indeterminate=True,
                             )
                             session.commit()
                     await self.scheduler.publish_job(job_id)
-                    selected = PurePosixPath(compiled_template.template.selected_files[0])
-                    checkpoint_path = staging.joinpath(*selected.parts)
-                    async with self.scheduler.lease("disk"):
-                        await asyncio.to_thread(
-                            self._validate_standard_checkpoint_safetensors,
-                            checkpoint_path,
-                        )
-
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                if compiled_template or request.install_plan_id:
-                    provisional_path = destination
-                    provisional_files = list(filenames)
-                async with self.scheduler.lease("disk"):
-                    self._activate_staging(staging, destination)
-                    installed_size = self._contained_tree_size(destination)
-                template_defaults = (
-                    self._template_defaults(compiled_template) if compiled_template else {}
+                    if actual_hash is None:
+                        async with self.scheduler.lease("disk"):
+                            actual_hash = await _finish_install_io(
+                                partial(self._sha256_file, Path(downloaded_path))
+                            )
+                    if expected_hash and actual_hash != expected_hash:
+                        raise ValueError(f"SHA-256 mismatch for {filename}")
+                    resolved_sha256[filename] = actual_hash
+                with SessionLocal() as session:
+                    job = self._current_install_job(session, job_id, claim)
+                    if not job or job.status == JobStatus.CANCELLED.value:
+                        return
+                    if not reused:
+                        completed_bytes += file_sizes.get(filename, 0)
+                    update_job_progress(
+                        job,
+                        stage=f"downloaded {filename}",
+                        completed_units=completed_bytes if total_size else index + 1,
+                        total_units=total_size if total_size else len(filenames),
+                        unit="bytes" if total_size else "files",
+                        bytes_reused=reused_bytes,
+                        file_index=index + 1,
+                        file_count=len(filenames),
+                        queue_resource=job.queue_resource,
+                    )
+                    session.commit()
+                await self.scheduler.publish_job(job_id)
+                await self.events.publish(
+                    "download.progress",
+                    job_id,
+                    {
+                        "progress": (
+                            completed_bytes / total_size
+                            if total_size
+                            else (index + 1) / len(filenames)
+                        ),
+                        "downloaded_bytes": completed_bytes if total_size else None,
+                        "total_bytes": total_size or None,
+                        "bytes_reused": reused_bytes,
+                        "filename": filename,
+                    },
                 )
-                default_settings = {**template_defaults, **request.default_settings}
 
-                asset_kind = request.workflow_asset_kind or request.auxiliary_kind
-                if asset_kind:
-                    if not inspection or len(inspection.components) != 1:
-                        raise ValueError(
-                            "a model asset install must contain one verified component"
-                        )
-                    component = inspection.components[0]
-                    planned_trigger_words = self._planned_trigger_words(plan)
-                    with SessionLocal() as session:
-                        model_source = session.scalar(
-                            select(ModelSource).where(
-                                ModelSource.provider == download_provider,
-                                ModelSource.remote_id == request.remote_id,
-                                ModelSource.revision == revision,
-                            )
-                        )
-                        if not model_source:
-                            model_source = ModelSource(
-                                provider=download_provider,
-                                remote_id=request.remote_id,
-                                revision=revision,
-                                metadata_json=source_metadata,
-                            )
-                            session.add(model_source)
-                            session.flush()
-                        asset = ModelAssetInstall(
-                            id=new_id("asset"),
-                            source_id=model_source.id,
-                            name=request.remote_id.rsplit("/", 1)[-1],
-                            kind=asset_kind,
-                            family=component.family or inspection.family,
-                            local_path=str(destination),
-                            size_bytes=installed_size,
-                            manifest_json={
-                                "remote_id": request.remote_id,
-                                "revision": revision,
-                                "files": filenames,
-                                "expected_sha256": resolved_sha256,
-                                "sha256": resolved_sha256[component.path],
-                                "comfy_name": component.path,
-                                "metadata": {
-                                    **component.metadata,
-                                    "trigger_words": self._normalized_trigger_words(
-                                        component.metadata.get("trigger_words"),
-                                        planned_trigger_words,
-                                    ),
-                                },
-                                "comfy_paths": request.comfy_paths,
-                                "workflow_asset_kind": request.workflow_asset_kind,
-                                "content_rating": request.content_rating,
-                            },
-                            active=False,
-                        )
-                        session.add(asset)
-                        session.flush()
-                        provisional_asset_id = asset.id
-                        job = session.get(Job, job_id)
-                        if not job:
-                            return
+            # Inspected whenever the staged files are here, not only under an
+            # install plan. The component manifest is what gives an install a
+            # content identity, and #294 gated its *write* on the inspection
+            # while the inspection itself was still gated on the plan - so
+            # plan-less installs still recorded nothing.
+            inspection = self._inspect_staged_component_manifest(
+                staging, filenames, request, compiled_template, plan
+            )
+            if request.install_plan_id:
+                if not inspection:
+                    raise ValueError("downloaded model metadata could not be inspected")
+                self._validate_staged_plan(plan, inspection, resolved_sha256)
+
+            if compiled_template and compiled_template.template.runtime_adaptive:
+                with SessionLocal() as session:
+                    job = self._current_install_job(session, job_id, claim)
+                    if job:
                         update_job_progress(
                             job,
-                            stage=(
-                                "validating workflow asset"
-                                if request.workflow_asset_kind
-                                else "validating auxiliary asset"
-                            ),
+                            stage="validating checkpoint structure",
                             completed_units=completed_bytes if total_size else None,
                             total_units=total_size or None,
                             unit="bytes" if total_size else None,
-                            queue_resource="primary_compute",
+                            queue_resource="disk",
                             indeterminate=True,
                         )
-                        job.result_json = {
-                            "_provisional_model_asset": {
-                                "model_asset_id": asset.id,
-                                "local_path": str(destination),
-                            }
-                        }
                         session.commit()
-
-                    if not self.processes or not self.media_adapter:
-                        raise RuntimeError("automatic ComfyUI asset activation is unavailable")
-                    previous_media_running = next(
-                        status for status in self.processes.statuses() if status.name == "media"
-                    ).running
-                    async with self.scheduler.lease("primary"):
-                        await self.processes.start_media((destination, request.comfy_paths))
-                        self.media_adapter.invalidate_object_info_cache()
-                        object_info = await self.media_adapter.object_info()
-                        if asset_kind == "lora" and "LoraLoader" not in object_info:
-                            raise RuntimeError(
-                                "The active ComfyUI runtime does not provide the core LoRA loader."
-                            )
-                        if not previous_media_running:
-                            await self.processes.stop("media")
-
-                    with SessionLocal() as session:
-                        activated_asset = session.get(ModelAssetInstall, provisional_asset_id)
-                        job = session.get(Job, job_id)
-                        if not activated_asset or not job:
-                            return
-                        activated_asset.active = True
-                        activated_asset.verified_at = utcnow()
-                        job.status = JobStatus.COMPLETE.value
-                        job.completed_at = utcnow()
-                        job.result_json = {"model_asset_id": activated_asset.id}
-                        completed_progress(job)
-                        if request.install_plan_id:
-                            completed_plan = session.get(InstallPlan, request.install_plan_id)
-                            if completed_plan:
-                                completed_plan.status = "activated"
-                                completed_plan.failure_code = None
-                                completed_plan.failure_reason = None
-                        session.commit()
-                        asset_id = activated_asset.id
-                    provisional_asset_id = None
-                    provisional_path = None
-                    provisional_files = []
-                    await self.scheduler.publish_job(job_id)
-                    await self.events.publish(
-                        "download.completed",
-                        job_id,
-                        {"model_asset_id": asset_id},
+                await self.scheduler.publish_job(job_id)
+                selected = PurePosixPath(compiled_template.template.selected_files[0])
+                checkpoint_path = staging.joinpath(*selected.parts)
+                async with self.scheduler.lease("disk"):
+                    await _finish_install_io(
+                        partial(self._validate_standard_checkpoint_safetensors, checkpoint_path)
                     )
-                    return
 
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if compiled_template or request.install_plan_id:
+                provisional_path = destination
+                provisional_files = list(filenames)
+            async with self.scheduler.lease("disk"):
                 with SessionLocal() as session:
+                    self._current_install_job(session, job_id, claim)
+                    self._activate_staging(staging, destination)
+                    installed_size = self._contained_tree_size(destination)
+            template_defaults = (
+                self._template_defaults(compiled_template) if compiled_template else {}
+            )
+            default_settings = {**template_defaults, **request.default_settings}
+            edit_capability = instruction_edit_capability(
+                plan.runtime_contract_json if plan is not None else source_metadata
+            )
+
+            asset_kind = request.workflow_asset_kind or request.auxiliary_kind
+            if asset_kind:
+                if not inspection or len(inspection.components) != 1:
+                    raise ValueError("a model asset install must contain one verified component")
+                component = inspection.components[0]
+                planned_trigger_words = self._planned_trigger_words(plan)
+                use_case_metadata = normalize_provider_use_case_metadata(
+                    plan.runtime_contract_json.get("use_case_metadata")
+                    if plan is not None
+                    else source_metadata
+                )
+                use_case = derive_lora_use_case(use_case_metadata) if asset_kind == "lora" else ""
+                with SessionLocal() as session:
+                    self._current_install_job(session, job_id, claim)
                     model_source = session.scalar(
                         select(ModelSource).where(
                             ModelSource.provider == download_provider,
@@ -1609,199 +1949,327 @@ class DownloadManager:
                         )
                         session.add(model_source)
                         session.flush()
-                    install = ModelInstall(
-                        id=new_id("model"),
+                    asset = ModelAssetInstall(
+                        id=new_id("asset"),
                         source_id=model_source.id,
                         name=request.remote_id.rsplit("/", 1)[-1],
-                        role=request.role,
-                        engine=request.engine,
+                        kind=asset_kind,
+                        family=component.family or inspection.family,
                         local_path=str(destination),
                         size_bytes=installed_size,
-                        compatibility=CompatibilityLevel.LIKELY.value,
+                        use_case=use_case,
+                        use_case_derived=bool(use_case),
                         manifest_json={
                             "remote_id": request.remote_id,
-                            "source_remote_id": request.source_remote_id,
+                            "provider_description": provider_description,
                             "revision": revision,
                             "files": filenames,
                             "expected_sha256": resolved_sha256,
-                            "file_sources": {
-                                name: source.model_dump(mode="json")
-                                for name, source in request.file_sources.items()
+                            "sha256": resolved_sha256[component.path],
+                            "comfy_name": component.path,
+                            "metadata": {
+                                **component.metadata,
+                                "trigger_words": self._normalized_trigger_words(
+                                    component.metadata.get("trigger_words"),
+                                    planned_trigger_words,
+                                ),
                             },
-                            "recipe_id": request.recipe_id,
-                            "recipe_version": request.recipe_version,
                             "comfy_paths": request.comfy_paths,
-                            "workflow_path": request.workflow_path,
-                            "workflow_template_id": request.workflow_template_id,
-                            "workflow_template_sha256": request.workflow_template_sha256,
+                            "workflow_asset_kind": request.workflow_asset_kind,
+                            "instruction_edit_capability": edit_capability,
                             "content_rating": request.content_rating,
-                            "default_settings": default_settings,
-                            "family": inspection.family if inspection else None,
-                            "trigger_words": self._planned_trigger_words(plan),
-                            "use_case_metadata": normalize_provider_use_case_metadata(
-                                source_metadata
+                            **(
+                                {"use_case_metadata": use_case_metadata}
+                                if asset_kind == "lora"
+                                else {}
                             ),
                         },
-                        active=compiled_template is None and not request.install_plan_id,
+                        active=False,
                     )
-                    session.add(install)
+                    session.add(asset)
                     session.flush()
-                    # Record the component manifest whenever inspection produced
-                    # one, not only under an install plan. The manifest is what
-                    # gives an install a content identity, so gating it on the
-                    # plan left plan-less installs unresolvable by content.
-                    if inspection:
-                        for component in inspection.components:
-                            session.add(
-                                ModelComponentManifest(
-                                    model_install_id=install.id,
-                                    kind=component.kind,
-                                    relative_path=component.path,
-                                    target_folder=component.target_folder,
-                                    sha256=resolved_sha256.get(component.path),
-                                    size_bytes=file_sizes.get(component.path),
-                                    required=True,
-                                    metadata_json=component.metadata,
-                                )
-                            )
-                    provisional_install_id = (
-                        install.id if compiled_template or request.install_plan_id else None
-                    )
-                    profile = None
-                    workflow_revision_id = None
-                    superseded_install_ids: list[str] = []
-                    if not compiled_template and not request.install_plan_id:
-                        profile = ensure_profile_for_install(
-                            session,
-                            install,
-                            default_settings=default_settings,
-                        )
+                    provisional_asset_id = asset.id
                     job = session.get(Job, job_id)
                     if not job:
                         return
                     update_job_progress(
                         job,
-                        stage="validating runtime" if compiled_template else "activating",
+                        stage=(
+                            "validating workflow asset"
+                            if request.workflow_asset_kind
+                            else "validating auxiliary asset"
+                        ),
                         completed_units=completed_bytes if total_size else None,
                         total_units=total_size or None,
                         unit="bytes" if total_size else None,
-                        queue_resource="primary_compute" if compiled_template else "disk",
+                        queue_resource="primary_compute",
                         indeterminate=True,
                     )
-                    if profile and not request.install_plan_id:
-                        job.result_json = {
-                            "model_install_id": install.id,
-                            "profile_id": profile.id,
-                            "workflow_revision_id": None,
-                            "superseded_model_install_ids": [],
+                    job.result_json = {
+                        "_provisional_model_asset": {
+                            "model_asset_id": asset.id,
+                            "local_path": str(destination),
                         }
-                    elif provisional_install_id:
-                        job.result_json = {
-                            _PROVISIONAL_INSTALL_KEY: {
-                                "model_install_id": provisional_install_id,
-                                "local_path": str(destination),
-                                "files": filenames,
-                            }
-                        }
+                    }
                     session.commit()
-                    install_id = install.id
-                    profile_id = profile.id if profile else None
 
-                if compiled_template:
-                    media_activation = await self._activate_comfy_install(
-                        job_id=job_id,
-                        install_id=install_id,
-                        destination=destination,
-                        request=request,
-                        compiled=compiled_template,
-                        default_settings=default_settings,
+                if not self.processes or not self.media_adapter:
+                    raise RuntimeError("automatic ComfyUI asset activation is unavailable")
+                previous_media_running = next(
+                    status for status in self.processes.statuses() if status.name == "media"
+                ).running
+                async with self.scheduler.lease("primary"):
+                    self._require_install_claim(job_id, claim)
+                    await self._start_install_media(
+                        (destination, request.comfy_paths), job_id=job_id, claim=claim
                     )
-                    if not media_activation:
-                        return
-                    compiled_template, profile_id, workflow_revision_id, superseded_install_ids = (
-                        media_activation
-                    )
-                    provisional_install_id = None
-                    provisional_path = None
-                    provisional_files = []
-                elif request.install_plan_id:
-                    chat_activation = await self._activate_chat_install(
-                        job_id=job_id,
-                        install_id=install_id,
-                        default_settings=default_settings,
-                        component_hashes=resolved_sha256,
-                    )
-                    if not chat_activation:
-                        return
-                    profile_id = chat_activation
-                    provisional_install_id = None
-                    provisional_path = None
-                    provisional_files = []
+                    self.media_adapter.invalidate_object_info_cache()
+                    object_info = await self.media_adapter.object_info()
+                    if asset_kind == "lora" and "LoraLoader" not in object_info:
+                        raise RuntimeError(
+                            "The active ComfyUI runtime does not provide the core LoRA loader."
+                        )
+                    if not previous_media_running:
+                        self._require_install_claim(job_id, claim)
+                        await self._stop_install_worker("media", job_id=job_id, claim=claim)
 
                 with SessionLocal() as session:
+                    self._current_install_job(session, job_id, claim)
+                    activated_asset = session.get(ModelAssetInstall, provisional_asset_id)
                     job = session.get(Job, job_id)
-                    if not job:
+                    if not activated_asset or not job:
                         return
+                    activated_asset.active = True
+                    activated_asset.verified_at = utcnow()
+                    job.status = JobStatus.COMPLETE.value
+                    job.completed_at = utcnow()
+                    job.result_json = {"model_asset_id": activated_asset.id}
+                    completed_progress(job)
                     if request.install_plan_id:
                         completed_plan = session.get(InstallPlan, request.install_plan_id)
                         if completed_plan:
                             completed_plan.status = "activated"
                             completed_plan.failure_code = None
                             completed_plan.failure_reason = None
-                    job.status = JobStatus.COMPLETE.value
-                    job.completed_at = utcnow()
-                    completed_progress(job)
                     session.commit()
+                    asset_id = activated_asset.id
+                provisional_asset_id = None
+                provisional_path = None
+                provisional_files = []
+                if asset_kind == "background_removal":
+                    self._install_matting_workflow(
+                        asset_id, object_info, job_id=job_id, claim=claim
+                    )
                 await self.scheduler.publish_job(job_id)
                 await self.events.publish(
                     "download.completed",
                     job_id,
-                    {"model_install_id": install_id, "profile_id": profile_id},
+                    {"model_asset_id": asset_id},
                 )
-        except asyncio.CancelledError:
-            if provisional_asset_id:
-                with SessionLocal() as session:
-                    if stale_asset := session.get(ModelAssetInstall, provisional_asset_id):
-                        session.delete(stale_asset)
-                        session.commit()
-            if retained_staging and provisional_path:
-                self._retain_verified_staging(
-                    provisional_path,
-                    retained_staging,
-                    provisional_files,
+                return
+
+            with SessionLocal() as session:
+                self._current_install_job(session, job_id, claim)
+                model_source = session.scalar(
+                    select(ModelSource).where(
+                        ModelSource.provider == download_provider,
+                        ModelSource.remote_id == request.remote_id,
+                        ModelSource.revision == revision,
+                    )
                 )
-            await self._cleanup_provisional_install_serialized(
+                if not model_source:
+                    model_source = ModelSource(
+                        provider=download_provider,
+                        remote_id=request.remote_id,
+                        revision=revision,
+                        metadata_json=source_metadata,
+                    )
+                    session.add(model_source)
+                    session.flush()
+                install = ModelInstall(
+                    id=new_id("model"),
+                    source_id=model_source.id,
+                    name=request.remote_id.rsplit("/", 1)[-1],
+                    role=request.role,
+                    engine=request.engine,
+                    local_path=str(destination),
+                    size_bytes=installed_size,
+                    compatibility=CompatibilityLevel.LIKELY.value,
+                    manifest_json={
+                        "remote_id": request.remote_id,
+                        "source_remote_id": request.source_remote_id,
+                        "revision": revision,
+                        "files": filenames,
+                        "expected_sha256": resolved_sha256,
+                        "file_sources": {
+                            name: source.model_dump(mode="json")
+                            for name, source in request.file_sources.items()
+                        },
+                        "recipe_id": request.recipe_id,
+                        "recipe_version": request.recipe_version,
+                        "comfy_paths": request.comfy_paths,
+                        "workflow_path": request.workflow_path,
+                        "workflow_template_id": request.workflow_template_id,
+                        "workflow_template_sha256": request.workflow_template_sha256,
+                        "content_rating": request.content_rating,
+                        "default_settings": default_settings,
+                        "family": inspection.family if inspection else None,
+                        "trigger_words": self._planned_trigger_words(plan),
+                        "use_case_metadata": normalize_provider_use_case_metadata(source_metadata),
+                        "provider_description": provider_description,
+                        "instruction_edit_capability": edit_capability,
+                    },
+                    active=compiled_template is None and not request.install_plan_id,
+                )
+                session.add(install)
+                session.flush()
+                # Record the component manifest whenever inspection produced
+                # one, not only under an install plan. The manifest is what
+                # gives an install a content identity, so gating it on the
+                # plan left plan-less installs unresolvable by content.
+                if inspection:
+                    for component in inspection.components:
+                        session.add(
+                            ModelComponentManifest(
+                                model_install_id=install.id,
+                                kind=component.kind,
+                                relative_path=component.path,
+                                target_folder=component.target_folder,
+                                sha256=resolved_sha256.get(component.path),
+                                size_bytes=file_sizes.get(component.path),
+                                required=True,
+                                metadata_json=component.metadata,
+                            )
+                        )
+                provisional_install_id = (
+                    install.id if compiled_template or request.install_plan_id else None
+                )
+                profile = None
+                workflow_revision_id = None
+                superseded_install_ids: list[str] = []
+                if not compiled_template and not request.install_plan_id:
+                    profile = ensure_profile_for_install(
+                        session,
+                        install,
+                        default_settings=default_settings,
+                    )
+                job = session.get(Job, job_id)
+                if not job:
+                    return
+                update_job_progress(
+                    job,
+                    stage="validating runtime" if compiled_template else "activating",
+                    completed_units=completed_bytes if total_size else None,
+                    total_units=total_size or None,
+                    unit="bytes" if total_size else None,
+                    queue_resource="primary_compute" if compiled_template else "disk",
+                    indeterminate=True,
+                )
+                if profile and not request.install_plan_id:
+                    job.result_json = {
+                        "model_install_id": install.id,
+                        "profile_id": profile.id,
+                        "workflow_revision_id": None,
+                        "superseded_model_install_ids": [],
+                    }
+                elif provisional_install_id:
+                    job.result_json = {
+                        _PROVISIONAL_INSTALL_KEY: {
+                            "model_install_id": provisional_install_id,
+                            "local_path": str(destination),
+                            "files": filenames,
+                        }
+                    }
+                session.commit()
+                install_id = install.id
+                profile_id = profile.id if profile else None
+
+            if compiled_template:
+                media_activation = await self._activate_comfy_install(
+                    job_id=job_id,
+                    install_id=install_id,
+                    destination=destination,
+                    request=request,
+                    compiled=compiled_template,
+                    default_settings=default_settings,
+                    claim=claim,
+                )
+                if not media_activation:
+                    return
+                compiled_template, profile_id, workflow_revision_id, superseded_install_ids = (
+                    media_activation
+                )
+                provisional_install_id = None
+                provisional_path = None
+                provisional_files = []
+            elif request.install_plan_id:
+                chat_activation = await self._activate_chat_install(
+                    job_id=job_id,
+                    install_id=install_id,
+                    default_settings=default_settings,
+                    component_hashes=resolved_sha256,
+                    claim=claim,
+                )
+                if not chat_activation:
+                    return
+                profile_id = chat_activation
+                provisional_install_id = None
+                provisional_path = None
+                provisional_files = []
+
+            with SessionLocal() as session:
+                job = self._current_install_job(session, job_id, claim)
+                if not job:
+                    return
+                if request.install_plan_id:
+                    completed_plan = session.get(InstallPlan, request.install_plan_id)
+                    if completed_plan:
+                        completed_plan.status = "activated"
+                        completed_plan.failure_code = None
+                        completed_plan.failure_reason = None
+                job.status = JobStatus.COMPLETE.value
+                job.completed_at = utcnow()
+                completed_progress(job)
+                session.commit()
+            await self.scheduler.publish_job(job_id)
+            await self.events.publish(
+                "download.completed",
                 job_id,
+                {"model_install_id": install_id, "profile_id": profile_id},
+            )
+        except asyncio.CancelledError:
+            if not self._install_claim_retained(job_id, claim):
+                raise
+            await self._retire_failed_install(
+                job_id,
+                claim=claim,
+                provisional_asset_id=provisional_asset_id,
                 provisional_install_id=provisional_install_id,
                 provisional_path=provisional_path,
                 provisional_files=provisional_files,
+                retained_staging=retained_staging,
+                previous_media_running=previous_media_running,
             )
-            await self._restore_media_worker(previous_media_running)
             raise
         except Exception as exc:
+            self._require_install_claim(job_id, claim)
             try:
-                if provisional_asset_id:
-                    with SessionLocal() as session:
-                        if stale_asset := session.get(ModelAssetInstall, provisional_asset_id):
-                            session.delete(stale_asset)
-                            session.commit()
-                if retained_staging and provisional_path:
-                    self._retain_verified_staging(
-                        provisional_path,
-                        retained_staging,
-                        provisional_files,
-                    )
-                await self._cleanup_provisional_install_serialized(
+                await self._retire_failed_install(
                     job_id,
+                    claim=claim,
+                    provisional_asset_id=provisional_asset_id,
                     provisional_install_id=provisional_install_id,
                     provisional_path=provisional_path,
                     provisional_files=provisional_files,
+                    retained_staging=retained_staging,
+                    previous_media_running=previous_media_running,
                 )
-                await self._restore_media_worker(previous_media_running)
             except Exception:
                 logger.exception("Could not safely clean failed model install %s", job_id)
+            logger.error("Model install %s failed", job_id, exc_info=exc)
+            reason = _failure_reason(exc)
             with SessionLocal() as session:
-                job = session.get(Job, job_id)
+                job = self._current_install_job(session, job_id, claim)
                 if job:
                     request = DownloadRequest.model_validate(job.payload_json)
                     if request.install_plan_id:
@@ -1810,13 +2278,13 @@ class DownloadManager:
                         if failed_plan:
                             failed_plan.status = "failed"
                             failed_plan.failure_code = failure_code
-                            failed_plan.failure_reason = str(exc)[:1_000]
+                            failed_plan.failure_reason = reason[:1_000]
                         job.result_json = {
                             "failure_code": failure_code,
-                            "failure_reason": str(exc)[:1_000],
+                            "failure_reason": reason[:1_000],
                         }
                     job.status = JobStatus.FAILED.value
-                    job.error = str(exc)
+                    job.error = reason
                     job.completed_at = utcnow()
                     update_job_progress(
                         job,
@@ -1826,15 +2294,437 @@ class DownloadManager:
                     )
                     session.commit()
             await self.scheduler.publish_job(job_id)
-            await self.events.publish("download.failed", job_id, {"error": str(exc)})
+            await self.events.publish("download.failed", job_id, {"error": reason})
 
-    async def _restore_media_worker(self, was_running: bool | None) -> None:
+        finally:
+            if self._install_claim_retained(job_id, claim):
+                await self.reconcile_workflow_install_offers(job_id)
+
+    async def _retire_failed_install(
+        self,
+        job_id: str,
+        *,
+        claim: JobClaim,
+        provisional_asset_id: str | None,
+        provisional_install_id: str | None,
+        provisional_path: Path | None,
+        provisional_files: list[str],
+        retained_staging: Path | None,
+        previous_media_running: bool | None,
+    ) -> None:
+        """Clean the failed attempt only while its claim is still retained."""
+        from .db import SessionLocal
+
+        if provisional_asset_id:
+            with SessionLocal() as session:
+                self._current_install_job(session, job_id, claim, require_running=False)
+                if stale_asset := session.get(ModelAssetInstall, provisional_asset_id):
+                    session.delete(stale_asset)
+                    session.commit()
+        if retained_staging and provisional_path:
+            with SessionLocal() as session:
+                self._current_install_job(session, job_id, claim, require_running=False)
+                self._retain_verified_staging(provisional_path, retained_staging, provisional_files)
+        await self._cleanup_provisional_install_serialized(
+            job_id,
+            claim=claim,
+            provisional_install_id=provisional_install_id,
+            provisional_path=provisional_path,
+            provisional_files=provisional_files,
+        )
+        self._require_install_claim(job_id, claim)
+        await self._restore_media_worker(previous_media_running, job_id=job_id, claim=claim)
+
+    def start_workflow_installation(self, offer_id: str) -> None:
+        """Schedule committed source work, including installations with no downloads."""
+        if self._offers_closed:
+            return
+        previous = self._offer_tasks.get(offer_id)
+        if previous is not None and not previous.done():
+            self._offer_reruns.add(offer_id)
+            return
+        task = asyncio.create_task(
+            self.reconcile_workflow_install_offers(only_offer_id=offer_id),
+            name=f"workflow-install-{offer_id}",
+        )
+        self._offer_tasks[offer_id] = task
+
+        def finished(completed: asyncio.Task[None]) -> None:
+            if self._offer_tasks.get(offer_id) is completed:
+                del self._offer_tasks[offer_id]
+            if offer_id in self._offer_reruns:
+                self._offer_reruns.discard(offer_id)
+                self.start_workflow_installation(offer_id)
+
+        task.add_done_callback(finished)
+
+    async def reconcile_workflow_install_offers(
+        self,
+        job_id: str | None = None,
+        *,
+        workflow_revision_id: str | None = None,
+        only_offer_id: str | None = None,
+    ) -> None:
+        """Try the workflow step after a download reaches its durable result."""
+
+        from .db import SessionLocal
+        from .workflow_legacy_completion import prepare_legacy_completion
+        from .workflow_source_completion import prepare_source_completion
+
+        def pending_identity(
+            session: Session, offer: WorkflowInstallOffer | None
+        ) -> tuple[str | None, int, str | None] | None:
+            if offer is None or offer.status != "queued":
+                return None
+            job = session.get(Job, offer.completion_job_id) if offer.completion_job_id else None
+            if job is not None and (
+                job.claim_owner is not None or job.status not in {"queued", "paused"}
+            ):
+                return None
+            return (
+                offer.completion_job_id,
+                job.attempt if job is not None else 0,
+                job.queue_ticket if job is not None else None,
+            )
+
+        with SessionLocal() as session:
+            statement = select(WorkflowInstallOffer.id).where(
+                WorkflowInstallOffer.status == "queued"
+            )
+            if only_offer_id is not None:
+                statement = statement.where(WorkflowInstallOffer.id == only_offer_id)
+            if workflow_revision_id is not None:
+                statement = statement.where(
+                    WorkflowInstallOffer.workflow_revision_id == workflow_revision_id
+                )
+            if job_id is not None:
+                statement = statement.join(
+                    WorkflowInstallOfferDownload,
+                    WorkflowInstallOfferDownload.offer_id == WorkflowInstallOffer.id,
+                ).where(WorkflowInstallOfferDownload.job_id == job_id)
+            offers = list(session.scalars(statement.distinct()))
+        if not offers:
+            return
+        for offer_id in offers:
+            source = False
+            claimed = False
+            claim: JobClaim | None = None
+            execution = _InstallationExecution()
+
+            preflight_identity: tuple[str | None, int, str | None] | None = None
+            try:
+                with SessionLocal() as session:
+                    offer = session.get(WorkflowInstallOffer, offer_id)
+                    source = offer is not None and offer.source_plan_id is not None
+                    preflight_identity = pending_identity(session, offer)
+                preflight = asyncio.create_task(
+                    asyncio.to_thread(
+                        prepare_source_completion if source else prepare_legacy_completion, offer_id
+                    )
+                )
+                try:
+                    completion_id = await asyncio.shield(preflight)
+                except asyncio.CancelledError:
+                    # Cancellation cannot stop a database thread. Join it before
+                    # shutdown finishes, without claiming the work it prepared.
+                    while not preflight.done():
+                        try:
+                            await asyncio.shield(preflight)
+                        except asyncio.CancelledError:
+                            continue
+                        except Exception:
+                            break
+                    with suppress(Exception):
+                        preflight.result()
+                    raise
+                if completion_id is None:
+                    continue
+                async with self.scheduler.job_lease(
+                    completion_id,
+                    resource="media_compute",
+                    group="primary",
+                    on_claim_lost=execution.stop_displaced,
+                ) as claim:
+                    claimed = True
+                    completion = asyncio.create_task(
+                        self._dispatch_workflow_completion(offer_id, claim=claim)
+                    )
+                    execution.task = completion
+                    try:
+                        activation_id = await asyncio.shield(completion)
+                    except asyncio.CancelledError:
+                        # File checks and the transaction keep their lease until
+                        # the thread exits, even when shutdown cancels its caller.
+                        while not completion.done():
+                            try:
+                                await asyncio.shield(completion)
+                            except asyncio.CancelledError:
+                                continue
+                            except Exception:
+                                break
+                        raise
+                if activation_id is not None and not execution.displaced:
+                    await self.events.publish("workflow.install.completed", offer_id, {})
+            except asyncio.CancelledError:
+                caller = asyncio.current_task()
+                if not execution.displaced or caller is None or caller.cancelling():
+                    raise
+            except (ValueError, OSError, SQLAlchemyError) as exc:
+                code = completion_attention_code(getattr(exc, "code", None))
+                report = False
+                if claimed and claim is not None and not execution.displaced:
+                    with SessionLocal() as session:
+                        offer = session.get(WorkflowInstallOffer, offer_id)
+                        job = session.get(Job, completion_id)
+                        report = (
+                            offer is not None
+                            and offer.status == "queued"
+                            and offer.completion_job_id == completion_id
+                            and offer.completion_error_code == code
+                            and job is not None
+                            and job.status in {JobStatus.FAILED.value, JobStatus.PAUSED.value}
+                            and job.claim_owner is None
+                            and job.attempt == claim.attempt
+                        )
+                if not claimed:
+                    with SessionLocal() as session:
+                        session.execute(
+                            text("UPDATE workflow_install_offers SET status = status WHERE 0")
+                        )
+                        offer = session.get(WorkflowInstallOffer, offer_id)
+                        current_identity = pending_identity(session, offer)
+                        same_request = preflight_identity is not None and (
+                            current_identity == preflight_identity
+                            or (
+                                preflight_identity == (None, 0, None)
+                                and current_identity is not None
+                                and current_identity[1:] == (0, None)
+                            )
+                        )
+                        if offer is not None and same_request:
+                            offer.completion_error_code = code
+                            if code == "workflow-download-failed":
+                                with suppress(ValueError):
+                                    fail_workflow_completion(session, offer, code, queued=True)
+                            session.commit()
+                            report = True
+                if report:
+                    await self.events.publish(
+                        "workflow.install.attention", offer_id, {"code": code}
+                    )
+            finally:
+                if claimed and claim is not None and not execution.displaced:
+                    with SessionLocal() as session:
+                        offer = session.get(WorkflowInstallOffer, offer_id)
+                        job = (
+                            session.get(Job, offer.completion_job_id)
+                            if offer is not None and offer.completion_job_id is not None
+                            else None
+                        )
+                        retry_waiting = (
+                            offer is not None
+                            and offer.status == "queued"
+                            and job is not None
+                            and job.status == JobStatus.QUEUED.value
+                            and job.attempt == claim.attempt
+                            and job.claim_owner is None
+                            and job.started_at is None
+                        )
+                    if retry_waiting:
+                        self.start_workflow_installation(offer_id)
+
+    async def _dispatch_workflow_completion(self, offer_id: str, *, claim: JobClaim) -> str | None:
+        from .db import SessionLocal
+        from .workflow_legacy_completion import RESOLVABLE_COMPLETION_CODES
+        from .workflow_package_activation import media_worker_stopped
+        from .workflow_source_completion import complete_workflow_source
+        from .workflow_source_extensions import quarantine_workflow_source_extensions
+
+        with SessionLocal() as session:
+            offer = session.get(WorkflowInstallOffer, offer_id)
+            source = offer is not None and offer.source_plan_id is not None
+        try:
+            if not source:
+                return await _finish_install_io(
+                    partial(self._complete_workflow_install_offer, offer_id, claim=claim)
+                )
+            return await complete_workflow_source(
+                self.settings, self.processes, self.media_adapter, offer_id, claim=claim
+            )
+        except (ValueError, OSError, SQLAlchemyError) as exc:
+            # The compilation transaction has rolled back before recording attention.
+            report = False
+            owns_claim = False
+            with SessionLocal() as session:
+                session.execute(text("UPDATE workflow_install_offers SET status = status WHERE 0"))
+                offer = session.get(WorkflowInstallOffer, offer_id)
+                if (
+                    offer is not None
+                    and offer.status == "queued"
+                    and offer.completion_job_id is not None
+                ):
+                    job = session.get(Job, offer.completion_job_id)
+                    owns_claim = (
+                        job is not None
+                        and job.claim_owner == claim.token
+                        and job.attempt == claim.attempt
+                    )
+                    if owns_claim and job is not None and job.status == JobStatus.RUNNING.value:
+                        report = True
+                        offer.completion_error_code = completion_attention_code(
+                            getattr(exc, "code", None)
+                        )
+                        with suppress(ValueError):
+                            fail_workflow_completion(session, offer, offer.completion_error_code)
+                            if (
+                                not source
+                                and offer.completion_error_code in RESOLVABLE_COMPLETION_CODES
+                            ):
+                                job.status = JobStatus.PAUSED.value
+                                job.completed_at = None
+                session.commit()
+            if source and owns_claim and self.processes is not None:
+                await _finish_install_io(
+                    partial(
+                        quarantine_workflow_source_extensions,
+                        SessionLocal,
+                        offer_id,
+                        media_worker_stopped=media_worker_stopped(self.processes),
+                        claim=claim,
+                    )
+                )
+            if report:
+                with SessionLocal() as session:
+                    offer = session.get(WorkflowInstallOffer, offer_id)
+                    job = (
+                        session.get(Job, offer.completion_job_id)
+                        if offer is not None and offer.completion_job_id is not None
+                        else None
+                    )
+                    report = (
+                        offer is not None
+                        and offer.status == "queued"
+                        and offer.completion_error_code
+                        == completion_attention_code(getattr(exc, "code", None))
+                        and job is not None
+                        and job.status in {JobStatus.FAILED.value, JobStatus.PAUSED.value}
+                        and job.claim_owner == claim.token
+                        and job.attempt == claim.attempt
+                    )
+                if report:
+                    raise
+            return None
+
+    def _complete_workflow_install_offer(self, offer_id: str, *, claim: JobClaim) -> str | None:
+        from .db import SessionLocal
+        from .workflow_activations import materialize_comfy_runtime_dependency
+        from .workflow_offer_completion import complete_workflow_install_offer
+
+        provisioner = self.processes.runtimes if self.processes else None
+        with SessionLocal() as session:
+            # The writer reservation fences cancellation and claim replacement
+            # through activation and the durable completion result.
+            session.execute(text("UPDATE workflow_install_offers SET status = status WHERE 0"))
+            offer = session.get(WorkflowInstallOffer, offer_id)
+            if offer is None or offer.status != "queued":
+                return None
+            job = workflow_completion_job(session, offer)
+            if (
+                job.status != JobStatus.RUNNING.value
+                or job.claim_owner != claim.token
+                or job.attempt != claim.attempt
+            ):
+                return None
+            activation_id = complete_workflow_install_offer(
+                session,
+                offer_id,
+                runtime_materializer=(
+                    lambda requirement, selection: materialize_comfy_runtime_dependency(
+                        provisioner,
+                        requirement,
+                        selection,
+                    )
+                )
+                if provisioner is not None
+                else None,
+                custom_node_root=self.settings.custom_node_dir,
+                registry_environment_root=registry_wheel_environment_root(
+                    self.settings.registry_dir
+                ),
+            )
+            offer = session.get(WorkflowInstallOffer, offer_id)
+            if offer is not None and offer.status in {"queued", "completed"}:
+                offer.completion_error_code = None
+                if activation_id is not None:
+                    complete_workflow_job(session, offer, claim.attempt, activation_id)
+                else:
+                    job.status = JobStatus.QUEUED.value
+                    update_job_progress(
+                        job, stage="Waiting for workflow dependencies", indeterminate=True
+                    )
+            session.commit()
+            return activation_id
+
+    async def _restore_media_worker(
+        self, was_running: bool | None, *, job_id: str | None = None, claim: JobClaim | None = None
+    ) -> None:
         if was_running is None or not self.processes:
             return
+        if job_id is not None:
+            self._require_install_claim(job_id, claim)
         if was_running:
-            await self.processes.start_media()
+            await self._start_install_media(job_id=job_id, claim=claim)
         else:
-            await self.processes.stop("media")
+            await self._stop_install_worker("media", job_id=job_id, claim=claim)
+
+    async def _start_install_media(
+        self,
+        provisional_model_paths: tuple[Path, dict[str, str]] | None = None,
+        *,
+        job_id: str | None,
+        claim: JobClaim | None,
+    ) -> None:
+        if self.processes is None:
+            return
+        checks: dict[str, Any] = {}
+        if job_id is not None and claim is not None:
+            self._require_install_claim(job_id, claim)
+            checks["before_replace"] = partial(self._require_install_claim, job_id, claim)
+        if provisional_model_paths is None:
+            await self.processes.start_media(**checks)
+        else:
+            await self.processes.start_media(provisional_model_paths, **checks)
+
+    async def _stop_install_worker(
+        self, name: str, *, job_id: str | None, claim: JobClaim | None
+    ) -> None:
+        if self.processes is None:
+            return
+        if job_id is None or claim is None:
+            await self.processes.stop(name)
+            return
+        self._require_install_claim(job_id, claim)
+        await self.processes.stop(
+            name, before_stop=partial(self._require_install_claim, job_id, claim)
+        )
+
+    async def _load_install_chat(
+        self,
+        profile: ModelProfile,
+        install: ModelInstall,
+        *,
+        job_id: str,
+        claim: JobClaim | None,
+    ) -> None:
+        if self.processes is None:
+            return
+        if claim is None:
+            await self.processes.load_chat(profile, install)
+            return
+        self._require_install_claim(job_id, claim)
+        await self.processes.load_chat(
+            profile, install, before_replace=partial(self._require_install_claim, job_id, claim)
+        )
 
     async def _activate_chat_install(
         self,
@@ -1843,6 +2733,8 @@ class DownloadManager:
         install_id: str,
         default_settings: dict[str, Any],
         component_hashes: dict[str, str],
+        primary_lease_held: bool = False,
+        claim: JobClaim | None = None,
     ) -> str | None:
         """Prove a downloaded GGUF can launch and complete one bounded turn."""
 
@@ -1850,10 +2742,11 @@ class DownloadManager:
             raise RuntimeError("automatic chat activation is unavailable")
         from .db import SessionLocal
 
-        async with self.scheduler.lease("primary"):
+        async with nullcontext() if primary_lease_held else self.scheduler.lease("primary"):
             previous = next(item for item in self.processes.statuses() if item.name == "chat")
             previous_profile_id = previous.profile_id if previous.running else None
             with SessionLocal() as session:
+                self._current_install_job(session, job_id, claim)
                 install = session.get(ModelInstall, install_id)
                 job = session.get(Job, job_id)
                 if not install or not job:
@@ -1883,7 +2776,8 @@ class DownloadManager:
             text_seen = False
             runtime_build = "unknown"
             try:
-                await self.processes.load_chat(profile, install)
+                self._require_install_claim(job_id, claim)
+                await self._load_install_chat(profile, install, job_id=job_id, claim=claim)
                 chat_adapter = self._active_chat_adapter()
                 if not chat_adapter:
                     raise RuntimeError("automatic chat activation is unavailable")
@@ -1944,25 +2838,30 @@ class DownloadManager:
                 if not completion_seen or not text_seen:
                     raise RuntimeError("chat worker did not complete the bounded probe")
             finally:
-                if previous_profile_id:
-                    with SessionLocal() as session:
-                        previous_profile = session.get(ModelProfile, previous_profile_id)
-                        previous_install = (
-                            session.get(ModelInstall, previous_profile.model_install_id)
-                            if previous_profile and previous_profile.model_install_id
-                            else None
-                        )
+                if self._install_claim_retained(job_id, claim):
+                    if previous_profile_id:
+                        with SessionLocal() as session:
+                            previous_profile = session.get(ModelProfile, previous_profile_id)
+                            previous_install = (
+                                session.get(ModelInstall, previous_profile.model_install_id)
+                                if previous_profile and previous_profile.model_install_id
+                                else None
+                            )
+                            if previous_profile and previous_install:
+                                session.expunge(previous_profile)
+                                session.expunge(previous_install)
+                        self._require_install_claim(job_id, claim)
                         if previous_profile and previous_install:
-                            session.expunge(previous_profile)
-                            session.expunge(previous_install)
-                    if previous_profile and previous_install:
-                        await self.processes.load_chat(previous_profile, previous_install)
+                            await self._load_install_chat(
+                                previous_profile, previous_install, job_id=job_id, claim=claim
+                            )
+                        else:
+                            await self._stop_install_worker("chat", job_id=job_id, claim=claim)
                     else:
-                        await self.processes.stop("chat")
-                else:
-                    await self.processes.stop("chat")
+                        await self._stop_install_worker("chat", job_id=job_id, claim=claim)
 
             with SessionLocal() as session:
+                self._current_install_job(session, job_id, claim)
                 activated = session.get(ModelInstall, install_id)
                 job = session.get(Job, job_id)
                 if not activated or not job:
@@ -2006,7 +2905,7 @@ class DownloadManager:
                 return profile.id
 
     async def _prepare_comfy_template(
-        self, request: DownloadRequest
+        self, request: DownloadRequest, *, job_id: str | None = None, claim: JobClaim | None = None
     ) -> CompiledComfyTemplate | None:
         if not request.workflow_template_id:
             return None
@@ -2017,7 +2916,9 @@ class DownloadManager:
         except Exception:
             if not self.processes:
                 raise
-            await self.processes.start_media()
+            if job_id is not None:
+                self._require_install_claim(job_id, claim)
+            await self._start_install_media(job_id=job_id, claim=claim)
             invalidate = getattr(self.media_adapter, "invalidate_object_info_cache", None)
             if callable(invalidate):
                 invalidate()
@@ -2056,7 +2957,7 @@ class DownloadManager:
             if source_count:
                 self.settings.state_dir.mkdir(parents=True, exist_ok=True)
                 probe_path = self.settings.state_dir / f"{new_id('activation-probe')}.png"
-                await asyncio.to_thread(probe_path.write_bytes, _ACTIVATION_PROBE_PNG)
+                await _finish_install_io(partial(probe_path.write_bytes, _ACTIVATION_PROBE_PNG))
             await self.media_adapter.probe_workflow(
                 MediaRequest(
                     run_id=new_id("activation-probe"),
@@ -2065,7 +2966,12 @@ class DownloadManager:
                     negative_prompt="",
                     input_paths=[probe_path] * source_count if probe_path else [],
                     workflow=compiled.api_graph,
+                    # The template's own values first: a setting only some graphs
+                    # bind, such as a video's length, rate and codec, would
+                    # otherwise reach ComfyUI as its unfilled placeholder and be
+                    # refused. The probe's small values then replace the costly ones.
                     parameters={
+                        **self._template_defaults(compiled),
                         "width": 256,
                         "height": 256,
                         "batch_size": 1,
@@ -2093,6 +2999,8 @@ class DownloadManager:
         compiled: CompiledComfyTemplate,
         default_settings: dict[str, Any],
         prove_capability: bool = False,
+        primary_lease_held: bool = False,
+        claim: JobClaim | None = None,
     ) -> tuple[CompiledComfyTemplate, str, str, list[str]] | None:
         """Restart, probe, and commit one media install under the compute lease.
 
@@ -2107,8 +3015,11 @@ class DownloadManager:
             raise RuntimeError("automatic ComfyUI activation is unavailable")
         from .db import SessionLocal
 
-        async with self.scheduler.lease("primary"):
-            await self.processes.start_media((destination, request.comfy_paths))
+        async with nullcontext() if primary_lease_held else self.scheduler.lease("primary"):
+            self._require_install_claim(job_id, claim)
+            await self._start_install_media(
+                (destination, request.comfy_paths), job_id=job_id, claim=claim
+            )
             invalidate = getattr(self.media_adapter, "invalidate_object_info_cache", None)
             if callable(invalidate):
                 invalidate()
@@ -2129,6 +3040,7 @@ class DownloadManager:
                 raise ValueError("; ".join(validation_errors))
             if compiled.template.runtime_adaptive or request.install_plan_id or prove_capability:
                 with SessionLocal() as session:
+                    self._current_install_job(session, job_id, claim)
                     job = session.get(Job, job_id)
                     if job:
                         update_job_progress(
@@ -2148,6 +3060,7 @@ class DownloadManager:
             if capabilities and not capabilities.healthy:
                 raise RuntimeError("ComfyUI did not pass its health check after the probe")
             with SessionLocal() as session:
+                self._current_install_job(session, job_id, claim)
                 activated_install = session.get(ModelInstall, install_id)
                 job = session.get(Job, job_id)
                 if not activated_install or not job:
@@ -2279,6 +3192,7 @@ class DownloadManager:
                             WorkflowDefinition.name
                             == _template_workflow_name(compiled.template.id),
                             WorkflowDefinition.operation == compiled.template.operation,
+                            visible_workflow_family(WorkflowDefinition.family_id),
                         )
                     )
                     revision = self._ensure_template_workflow(session, compiled, install)
@@ -2291,6 +3205,7 @@ class DownloadManager:
                                 WorkflowDefinition.name
                                 == _template_workflow_name(image_edit.template.id),
                                 WorkflowDefinition.operation == image_edit.template.operation,
+                                visible_workflow_family(WorkflowDefinition.family_id),
                             )
                         )
                         edit_revision = self._ensure_template_workflow(
@@ -2305,8 +3220,73 @@ class DownloadManager:
                         "Could not refresh ComfyUI workflow for model %s",
                         install.id,
                     )
+            # A background-removal model installed before the built-in existed
+            # gets it here, as does one whose install could not compile it.
+            assets = session.scalars(
+                select(ModelAssetInstall)
+                .where(
+                    ModelAssetInstall.kind == "background_removal",
+                    ModelAssetInstall.active.is_(True),
+                )
+                .order_by(ModelAssetInstall.id)
+            ).all()
+            for asset in assets:
+                try:
+                    before = self._matting_revision_id(session, asset)
+                    revision = self._ensure_matting_workflow(session, asset, object_info)
+                    if revision.id != before:
+                        refreshed += 1
+                except (KeyError, TypeError, ValueError):
+                    logger.exception(
+                        "Could not refresh the background removal workflow for %s",
+                        asset.id,
+                    )
             session.commit()
         return refreshed
+
+    @staticmethod
+    def _matting_revision_id(session: Session, asset: ModelAssetInstall) -> str | None:
+        model_file = (asset.manifest_json or {}).get("comfy_name")
+        if not isinstance(model_file, str) or not model_file:
+            return None
+        return session.scalar(
+            select(WorkflowDefinition.current_revision_id).where(
+                WorkflowDefinition.name == _matting_workflow_name(model_file),
+                WorkflowDefinition.operation == "image_to_image",
+                visible_workflow_family(WorkflowDefinition.family_id),
+            )
+        )
+
+    def _install_matting_workflow(
+        self,
+        asset_id: str,
+        object_info: dict[str, Any],
+        *,
+        job_id: str | None = None,
+        claim: JobClaim | None = None,
+    ) -> None:
+        """Give a newly installed background-removal model the workflow that uses it.
+
+        Its own transaction, after the model's: the model is installed whether
+        or not this succeeds, and the next start tries again.
+        """
+        from .db import SessionLocal
+
+        with SessionLocal() as session:
+            if job_id is not None:
+                self._current_install_job(session, job_id, claim, require_running=False)
+            asset = session.get(ModelAssetInstall, asset_id)
+            if asset is None or not asset.active:
+                return
+            try:
+                self._ensure_matting_workflow(session, asset, object_info)
+            except (KeyError, TypeError, ValueError):
+                logger.exception(
+                    "Could not install the background removal workflow for %s",
+                    asset_id,
+                )
+                return
+            session.commit()
 
     @staticmethod
     def _deactivate_superseded_chat_installs(
@@ -2359,12 +3339,12 @@ class DownloadManager:
         if profile_ids:
             session.execute(
                 update(Chat)
-                .where(Chat.active_chat_profile_id.in_(profile_ids))
+                .where(Chat.active_chat_profile_id.in_(profile_ids), visible_chat(Chat.id))
                 .values(active_chat_profile_id=current_profile.id)
             )
             session.execute(
                 update(Chat)
-                .where(Chat.active_vision_profile_id.in_(profile_ids))
+                .where(Chat.active_vision_profile_id.in_(profile_ids), visible_chat(Chat.id))
                 .values(active_vision_profile_id=current_profile.id)
             )
         return sorted(superseded_ids)
@@ -2401,7 +3381,8 @@ class DownloadManager:
 
     @staticmethod
     def _template_defaults(compiled: CompiledComfyTemplate) -> dict[str, Any]:
-        properties = compiled.input_schema.get("properties")
+        input_schema = getattr(compiled, "input_schema", {})
+        properties = input_schema.get("properties") if isinstance(input_schema, dict) else None
         if not isinstance(properties, dict):
             return {}
         return {
@@ -2423,6 +3404,7 @@ class DownloadManager:
             select(WorkflowDefinition).where(
                 WorkflowDefinition.name == name,
                 WorkflowDefinition.operation == compiled.template.operation,
+                visible_workflow_family(WorkflowDefinition.family_id),
             )
         )
         if not definition:
@@ -2471,10 +3453,6 @@ class DownloadManager:
                     "default": [],
                     "maxItems": 8,
                 }
-        # A graph that can enlarge is offered as one that can be asked to. The
-        # setting is declared only where the graph carries an upscale node, so
-        # the studio's Enhance tool is offered exactly when something installed
-        # can honor it.
         if graph_can_outpaint(compiled.api_graph):
             properties = input_schema.setdefault("properties", {})
             if isinstance(properties, dict):
@@ -2488,15 +3466,9 @@ class DownloadManager:
         if upscale_capability(compiled.api_graph):
             properties = input_schema.setdefault("properties", {})
             if isinstance(properties, dict):
-                properties[UPSCALE_SETTING_KEY] = {
-                    "type": "number",
-                    "title": "Enlarge by",
-                    "description": "How much larger the result should be.",
-                    "x-lm-atelier-kind": UPSCALE_SCHEMA_KIND,
-                    "default": 2,
-                    "minimum": 1,
-                    "maximum": 8,
-                }
+                properties[UPSCALE_SETTING_KEY] = upscale_setting_schema(
+                    compiled.api_graph, input_schema
+                )
         # Both bindings are recorded. The install ids are what this machine uses
         # today; the components are what another machine can resolve, since a
         # local UUID means nothing after an export.
@@ -2540,6 +3512,116 @@ class DownloadManager:
         )
         session.add(revision)
         session.flush()
+        persist_dependency_contract(session, revision)
+        definition.current_revision_id = revision.id
+        ensure_workflow_family_ownership(session, definition, revision)
+        return revision
+
+    @staticmethod
+    def _ensure_matting_workflow(
+        session: Session,
+        asset: ModelAssetInstall,
+        object_info: dict[str, Any],
+    ) -> WorkflowRevision:
+        """Install the built-in matting workflow for one background-removal model.
+
+        One workflow per model file, found again by its name, and left alone
+        while the authored graph, the compiler and the model file are all
+        unchanged, so running this at every start costs a lookup.
+
+        The model is recorded as an asset, not declared as a model. A revision
+        that declares model components is bound to a model profile, and a
+        background-removal model has none, so declaring it would make the
+        workflow unrunnable. The provenance sits under its own key rather than
+        the catalog's template keys, which other code rightly reads as naming a
+        template it can rebuild.
+        """
+
+        manifest = asset.manifest_json if isinstance(asset.manifest_json, dict) else {}
+        model_file = manifest.get("comfy_name")
+        model_sha256 = manifest.get("sha256")
+        if not isinstance(model_file, str) or not model_file:
+            raise ValueError("the background-removal model has no file name")
+        name = _matting_workflow_name(model_file)
+        operation = "image_to_image"
+        definition = session.scalar(
+            select(WorkflowDefinition).where(
+                WorkflowDefinition.name == name,
+                WorkflowDefinition.operation == operation,
+                visible_workflow_family(WorkflowDefinition.family_id),
+            )
+        )
+        current = (
+            session.get(WorkflowRevision, definition.current_revision_id)
+            if definition and definition.current_revision_id
+            else None
+        )
+        built_in = {
+            "workflow": "background_removal",
+            "sha256": built_in_matting_sha256(),
+        }
+        if (
+            definition
+            and current
+            and current.dependencies_json.get("built_in") == built_in
+            and current.dependencies_json.get("compiler_version") == COMFY_TEMPLATE_COMPILER_VERSION
+            and current.dependencies_json.get("model_asset_ids") == [asset.id]
+            and current.dependencies_json.get("model_asset_sha256") == model_sha256
+        ):
+            ensure_workflow_family_ownership(session, definition, current)
+            return current
+        # Checked and compiled before anything is written, so a runtime that
+        # cannot run the graph leaves no half-made workflow behind it.
+        if not runtime_lists_model_file(object_info, model_file):
+            raise ValueError(f"the runtime does not list the background-removal model {model_file}")
+        ui_graph = built_in_matting_graph(model_file)
+        api_graph, compiled_schema = compile_authored_workflow(
+            ui_graph,
+            object_info,
+            operation=operation,
+        )
+        input_schema = declare_matting(compiled_schema)
+        validate_workflow_edit_calibration(input_schema)
+        dependencies = {
+            "built_in": built_in,
+            "compiler_version": COMFY_TEMPLATE_COMPILER_VERSION,
+            "model_asset_ids": [asset.id],
+            "model_asset_sha256": model_sha256,
+            "model_files": [],
+            "custom_nodes": [],
+            "extensions": {},
+        }
+        if not definition:
+            definition = WorkflowDefinition(
+                name=name,
+                operation=operation,
+                description=(
+                    "Built into LM Atelier: cuts the subject out of a picture "
+                    "onto a transparent background."
+                ),
+            )
+            session.add(definition)
+            session.flush()
+        revision = WorkflowRevision(
+            workflow_id=definition.id,
+            version=max((item.version for item in definition.revisions), default=0) + 1,
+            engine="comfyui",
+            ui_graph_json=ui_graph,
+            api_graph_json=api_graph,
+            input_schema_json=input_schema,
+            dependencies_json=dependencies,
+            artifact_sha256=workflow_artifact_contract(
+                operation=operation,
+                engine="comfyui",
+                api_graph=api_graph,
+                input_schema=input_schema,
+                dependencies=dependencies,
+            ),
+            trusted=True,
+        )
+        session.add(revision)
+        session.flush()
+        persist_dependency_contract(session, revision)
         definition.current_revision_id = revision.id
         ensure_workflow_family_ownership(session, definition, revision)
         return revision
@@ -2549,6 +3631,7 @@ class DownloadManager:
         job_id: str,
         *,
         provisional_install_id: str | None = None,
+        claim: JobClaim | None = None,
         provisional_path: Path | None = None,
         provisional_files: list[str] | None = None,
     ) -> bool:
@@ -2557,6 +3640,7 @@ class DownloadManager:
         async with self.scheduler.lease("primary"):
             return self._cleanup_provisional_install(
                 job_id,
+                claim=claim,
                 provisional_install_id=provisional_install_id,
                 provisional_path=provisional_path,
                 provisional_files=provisional_files,
@@ -2567,6 +3651,7 @@ class DownloadManager:
         job_id: str,
         *,
         provisional_install_id: str | None = None,
+        claim: JobClaim | None = None,
         provisional_path: Path | None = None,
         provisional_files: list[str] | None = None,
     ) -> bool:
@@ -2577,7 +3662,7 @@ class DownloadManager:
         quarantined_root: Path | None = None
         moves: list[tuple[Path, Path]] = []
         with SessionLocal() as session:
-            job = session.get(Job, job_id)
+            job = self._current_install_job(session, job_id, claim, require_running=False)
             marker = (
                 job.result_json.get(_PROVISIONAL_INSTALL_KEY)
                 if job and isinstance(job.result_json, dict)
@@ -2636,18 +3721,13 @@ class DownloadManager:
                 session.rollback()
                 self._restore_quarantined_files(moves)
                 raise
-        if quarantined_root:
-            try:
-                if quarantined_root.is_dir() and not _path_is_link(quarantined_root):
-                    shutil.rmtree(quarantined_root)
-                else:
-                    quarantined_root.unlink(missing_ok=True)
-            except OSError:
-                logger.warning(
-                    "Provisional install files remain safely quarantined at %s",
-                    quarantined_root,
-                    exc_info=True,
-                )
+        if quarantined_root and not _remove_contained(
+            quarantined_root.parent, quarantined_root.name
+        ):
+            logger.warning(
+                "Provisional install files remain safely quarantined at %s",
+                quarantined_root,
+            )
         return True
 
     def _quarantine_provisional_files(
@@ -2702,12 +3782,7 @@ class DownloadManager:
                 quarantined.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(candidate, quarantined)
                 moves.append((quarantined, candidate))
-            for directory in sorted(
-                (item for item in install_path.rglob("*") if item.is_dir()),
-                reverse=True,
-            ):
-                with suppress(OSError):
-                    directory.rmdir()
+            _prune_empty_directories(install_path)
             return moves, quarantine_root if moves else None
         except Exception:
             self._restore_quarantined_files(moves)
@@ -2726,10 +3801,10 @@ class DownloadManager:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
             return
         partial = self.settings.download_dir / f"{job_id}.partial"
-        if partial.is_dir() and not _path_is_link(partial):
-            shutil.rmtree(partial)
-        else:
-            partial.unlink(missing_ok=True)
+        if not _remove_contained(self.settings.download_dir, partial.name):
+            logger.warning(
+                "Left partial download %s in place: it could not be removed safely", partial
+            )
 
     async def _stop_task(self, job_id: str) -> None:
         """Stop the isolated transfer process before cancelling its controller task."""
@@ -2855,6 +3930,9 @@ class DownloadManager:
                     plan.runtime_contract_json.get("use_case_metadata")
                 ),
                 "source_version_id": plan.revision,
+                "instruction_edit_capability": instruction_edit_capability(
+                    plan.runtime_contract_json
+                ),
             },
         )
 
@@ -2948,6 +4026,7 @@ class DownloadManager:
         self,
         *,
         job_id: str,
+        claim: JobClaim | None = None,
         remote_id: str,
         filenames: list[str],
         revision: str,
@@ -2988,6 +4067,7 @@ class DownloadManager:
             monitor = asyncio.create_task(
                 self._monitor_component_batch(
                     job_id=job_id,
+                    claim=claim,
                     process=process,
                     completed_bytes=completed_bytes,
                     total_size=total_size,
@@ -3028,7 +4108,7 @@ class DownloadManager:
                 detail = stderr.decode(errors="replace").strip()
                 raise RuntimeError(detail[-2_000:] or "Hub download worker failed")
             with SessionLocal() as session:
-                job = session.get(Job, job_id)
+                job = self._current_install_job(session, job_id, claim)
                 if job:
                     update_job_progress(
                         job,
@@ -3049,6 +4129,7 @@ class DownloadManager:
         self,
         *,
         job_id: str,
+        claim: JobClaim | None = None,
         process: subprocess.Popen[bytes],
         completed_bytes: int,
         total_size: int | None,
@@ -3062,6 +4143,7 @@ class DownloadManager:
         initial_write_bytes = self._process_tree_write_bytes(process.pid)
         maximum_transferred = 0
         last_reported = -1
+        rate = _TransferRate(completed_bytes)
         while not stop.is_set():
             current_write_bytes = self._process_tree_write_bytes(process.pid)
             if current_write_bytes is not None and initial_write_bytes is not None:
@@ -3070,9 +4152,10 @@ class DownloadManager:
                     min(batch_size, max(0, current_write_bytes - initial_write_bytes)),
                 )
             reported = completed_bytes + maximum_transferred
+            measured_rate = rate.sample(reported)
             if total_size and reported != last_reported:
                 with SessionLocal() as session:
-                    job = session.get(Job, job_id)
+                    job = self._current_install_job(session, job_id, claim)
                     if not job or job.status == JobStatus.CANCELLED.value:
                         return
                     update_job_progress(
@@ -3084,6 +4167,7 @@ class DownloadManager:
                         bytes_reused=bytes_reused,
                         file_count=file_count,
                         queue_resource=job.queue_resource,
+                        measured_rate=measured_rate,
                     )
                     session.commit()
                 await self.scheduler.publish_job(job_id)
@@ -3097,6 +4181,7 @@ class DownloadManager:
         self,
         *,
         job_id: str,
+        claim: JobClaim | None = None,
         provider: Literal["huggingface", "civitai"] = "huggingface",
         remote_id: str,
         filename: str,
@@ -3107,6 +4192,9 @@ class DownloadManager:
         file_size: int | None = None,
         completed_bytes: int = 0,
         total_size: int | None = None,
+        bytes_reused: int = 0,
+        file_index: int | None = None,
+        file_count: int | None = None,
     ) -> str:
         from .db import SessionLocal
 
@@ -3114,6 +4202,7 @@ class DownloadManager:
             try:
                 return await self._download_file_once(
                     job_id=job_id,
+                    claim=claim,
                     provider=provider,
                     remote_id=remote_id,
                     filename=filename,
@@ -3124,16 +4213,22 @@ class DownloadManager:
                     file_size=file_size,
                     completed_bytes=completed_bytes,
                     total_size=total_size,
+                    bytes_reused=bytes_reused,
+                    file_index=file_index,
+                    file_count=file_count,
                 )
             except RuntimeError:
                 if attempt >= _TRANSFER_ATTEMPTS:
                     raise
                 with SessionLocal() as session:
-                    job = session.get(Job, job_id)
+                    job = self._current_install_job(session, job_id, claim)
                     if job:
                         update_job_progress(
                             job,
                             stage=f"retrying {filename} ({attempt + 1}/{_TRANSFER_ATTEMPTS})",
+                            bytes_reused=bytes_reused,
+                            file_index=file_index,
+                            file_count=file_count,
                             queue_resource=job.queue_resource,
                             indeterminate=True,
                         )
@@ -3155,6 +4250,7 @@ class DownloadManager:
         self,
         *,
         job_id: str,
+        claim: JobClaim | None = None,
         provider: Literal["huggingface", "civitai"] = "huggingface",
         remote_id: str,
         filename: str,
@@ -3165,6 +4261,9 @@ class DownloadManager:
         file_size: int | None = None,
         completed_bytes: int = 0,
         total_size: int | None = None,
+        bytes_reused: int = 0,
+        file_index: int | None = None,
+        file_count: int | None = None,
     ) -> str:
         """Run a blocking transfer in a process that pause/cancel can terminate."""
         if provider == "civitai":
@@ -3224,12 +4323,16 @@ class DownloadManager:
             monitor = asyncio.create_task(
                 self._monitor_transfer(
                     job_id=job_id,
+                    claim=claim,
                     filename=filename,
                     staging=staging,
                     process=process,
                     file_size=file_size,
                     completed_bytes=completed_bytes,
                     total_size=total_size,
+                    bytes_reused=bytes_reused,
+                    file_index=file_index,
+                    file_count=file_count,
                     stop=monitor_stop,
                 )
             )
@@ -3262,6 +4365,7 @@ class DownloadManager:
         self,
         *,
         job_id: str,
+        claim: JobClaim | None = None,
         filename: str,
         staging: Path,
         process: subprocess.Popen[bytes],
@@ -3269,12 +4373,17 @@ class DownloadManager:
         completed_bytes: int,
         total_size: int | None,
         stop: asyncio.Event,
+        bytes_reused: int = 0,
+        file_index: int | None = None,
+        file_count: int | None = None,
     ) -> None:
         from .db import SessionLocal
 
         initial_current_bytes = self._staged_current_file_bytes(staging, completed_bytes, file_size)
         initial_write_bytes = self._process_tree_write_bytes(process.pid)
         maximum_transferred = initial_current_bytes
+        # Bytes already on disk when the attempt starts were not transferred by it.
+        rate = _TransferRate(completed_bytes + initial_current_bytes)
         last_reported = -1.0
         last_written_bytes = -1
         while not stop.is_set():
@@ -3291,16 +4400,17 @@ class DownloadManager:
             if file_size:
                 maximum_transferred = min(maximum_transferred, file_size)
             transferred_bytes = completed_bytes + maximum_transferred
+            measured_rate = rate.sample(transferred_bytes)
             progress = min(transferred_bytes / total_size, 1.0) if total_size else 0.0
             # Record a sample whenever bytes actually moved, not only when the
-            # overall fraction advances a tenth of a percent. Transfer rate is
-            # derived from the gap between consecutive byte samples and is
-            # discarded when that gap exceeds five seconds, so on a large
-            # install the old threshold (0.1% of tens of gigabytes) meant the
-            # samples were always too far apart and no speed was ever shown.
+            # overall fraction advances a tenth of a percent: on a large install
+            # that threshold (0.1% of tens of gigabytes) left the samples so far
+            # apart that no speed was ever shown. The speed written with each
+            # sample is measured across the transfer's recent window, not taken
+            # from the gap since the previous write.
             if last_reported < 0 or transferred_bytes > last_written_bytes:
                 with SessionLocal() as session:
-                    job = session.get(Job, job_id)
+                    job = self._current_install_job(session, job_id, claim)
                     if not job or job.status != JobStatus.RUNNING.value:
                         return
                     update_job_progress(
@@ -3309,7 +4419,12 @@ class DownloadManager:
                         completed_units=transferred_bytes,
                         total_units=total_size,
                         unit="bytes",
+                        overall_progress=progress if total_size else None,
+                        bytes_reused=bytes_reused,
+                        file_index=file_index,
+                        file_count=file_count,
                         queue_resource=job.queue_resource,
+                        measured_rate=measured_rate,
                     )
                     session.commit()
                 await self.scheduler.publish_job(job_id)
@@ -3493,9 +4608,28 @@ class DownloadManager:
 
     @staticmethod
     def _path_size(path: Path) -> int:
+        """Bytes in a file, or in the files of a tree, never counted through a link.
+
+        A link counts nothing, at the top or anywhere below it, and neither does
+        a tree the contained walk refuses: these figures report what removing
+        the entry reclaims, and a link's target is not reclaimed.
+        """
+
+        if _path_is_link(path):
+            return 0
         if path.is_file():
             return path.stat().st_size
-        return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+        if not path.is_dir():
+            return 0
+        try:
+            with AnchoredDirectory(path) as anchor:
+                return sum(
+                    walked.entry.size_bytes or 0
+                    for walked in walk_entries(anchor)
+                    if walked.entry.kind is AnchoredEntryKind.FILE
+                )
+        except AnchoredDirectoryError:
+            return 0
 
     @staticmethod
     def _relocate_companion_download(

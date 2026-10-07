@@ -139,6 +139,10 @@ export function SetupWizard({
     if (role.next_action === "install_runtime") return "Install runtime";
     if (role.next_action === "retry_runtime") return "Retry runtime";
     if (role.next_action === "restart_worker") return "Restart worker";
+    // The model library IS where a profile is made, so the fall-through below
+    // sends this to the right place - but it arrives labelled "Choose a model",
+    // which asks for the one thing already done and hides the one thing left.
+    if (role.next_action === "create_profile") return "Create profile";
     if (["repair_workflow", "review_workflow"].includes(role.next_action ?? "")) {
       return "Review workflows";
     }

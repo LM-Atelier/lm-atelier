@@ -10,6 +10,14 @@ reported in source-image coordinates so a percentage means one thing.
 
 Nothing here reads pixels. It validates and normalizes the declaration; the
 adapter resizes deterministically from these recorded terms.
+
+A selection is applied in one of two ways. Ordinarily the workflow receives it
+through its declared mask input. A blend selection never reaches the workflow:
+the workflow edits the whole picture, and the result is composited back into
+the source through the selection afterwards, so a workflow with no mask input
+can still change only part of a picture. The source is the turn's first
+picture; a blend selection may say that the pictures after it are references,
+which the workflow reads and the result is never placed back into.
 """
 
 from __future__ import annotations
@@ -23,6 +31,7 @@ _ARTIFACT_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 MAX_FEATHER_PX = 128
 MASK_SETTING_KEY = "mask"
 MASK_SCHEMA_KIND = "mask"
+MASK_APPLY_BLEND = "blend"
 
 
 class MaskContractError(ValueError):
@@ -38,13 +47,24 @@ class MaskSelection:
     artifact_id: str
     feather_px: int
     invert: bool
+    #: Composited back after a whole-picture edit instead of handed to the
+    #: workflow's mask input.
+    blend: bool = False
+    #: How many of the turn's pictures, after the one being edited, the
+    #: workflow only reads. Only a blend selection names any.
+    references: int = 0
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        record: dict[str, Any] = {
             "artifact_id": self.artifact_id,
             "feather_px": self.feather_px,
             "invert": self.invert,
         }
+        if self.blend:
+            record["apply"] = MASK_APPLY_BLEND
+        if self.references:
+            record["references"] = self.references
+        return record
 
 
 @dataclass(frozen=True)
@@ -108,18 +128,53 @@ def workflow_accepts_mask(input_schema: dict[str, Any] | None) -> bool:
 def parse_mask_setting(
     settings: dict[str, Any],
     input_schema: dict[str, Any] | None,
+    *,
+    operation: str | None = None,
+    source_count: int = 0,
 ) -> MaskSelection | None:
-    """Validate the turn's mask setting against what the workflow accepts."""
+    """Validate the turn's mask setting against what the workflow accepts.
+
+    A blend selection needs no mask input, but it does need exactly one
+    picture being edited: that picture is what the result is placed back
+    into, and with none or several there is nothing unambiguous to keep. It
+    is the first; any pictures the selection names as references come after
+    it and are only read by the workflow.
+    """
     raw = settings.get(MASK_SETTING_KEY)
     if raw is None:
         return None
-    if not workflow_accepts_mask(input_schema):
+    blend = isinstance(raw, dict) and raw.get("apply") == MASK_APPLY_BLEND
+    references = raw.get("references", 0) if isinstance(raw, dict) else 0
+    if blend:
+        if isinstance(references, bool) or not isinstance(references, int) or references < 0:
+            raise MaskContractError(
+                "mask-references-invalid",
+                "A selection's references must be a whole number of pictures.",
+            )
+        if operation != "image_to_image" or source_count - references != 1:
+            raise MaskContractError(
+                "mask-blend-needs-one-source",
+                "A selection can be blended back only into the one picture being edited.",
+            )
+    elif not workflow_accepts_mask(input_schema):
         raise MaskContractError(
             "workflow-has-no-mask-input",
             "This workflow cannot apply a selection; choose one that supports inpainting.",
         )
     if not isinstance(raw, dict):
         raise MaskContractError("mask-setting-invalid", "The mask setting must be an object.")
+    if "apply" in raw and not blend:
+        raise MaskContractError(
+            "mask-apply-invalid",
+            'A selection\'s apply setting must be "blend" or left out.',
+        )
+    if "references" in raw and not blend:
+        # A workflow's own mask input is given one picture's selection; there
+        # is no picture to leave out of it.
+        raise MaskContractError(
+            "mask-references-invalid",
+            "Only a selection blended back after the edit can name references.",
+        )
     artifact_id = raw.get("artifact_id")
     if not isinstance(artifact_id, str) or not _ARTIFACT_ID.fullmatch(artifact_id):
         raise MaskContractError(
@@ -136,7 +191,13 @@ def parse_mask_setting(
     invert = raw.get("invert", False)
     if not isinstance(invert, bool):
         raise MaskContractError("mask-invert-invalid", "Mask inversion must be true or false.")
-    return MaskSelection(artifact_id=artifact_id, feather_px=feather, invert=invert)
+    return MaskSelection(
+        artifact_id=artifact_id,
+        feather_px=feather,
+        invert=invert,
+        blend=blend,
+        references=references if blend else 0,
+    )
 
 
 def mask_geometry(

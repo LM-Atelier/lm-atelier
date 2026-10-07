@@ -4,9 +4,11 @@ import asyncio
 import base64
 import io
 import json
+import shutil
+import sys
 import threading
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -18,13 +20,15 @@ import pytest
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
 from PIL import Image
-from run_waits import wait_for_terminal_status
+from recovery_requests import permanently_delete_chat
+from run_waits import PATIENCE_SECONDS, wait_for_terminal_status, wait_until
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from workflow_fixtures import seed_workflow_trust
 
 import local_lm.api as api_module
+import local_lm.model_quarantine as model_quarantine
 from local_lm import __version__
 from local_lm.adapters.base import ChatEvent, ChatRequest, GeneratedAsset, MediaEvent, MediaRequest
 from local_lm.adapters.mock import MockChatAdapter, MockMediaAdapter
@@ -63,7 +67,7 @@ from local_lm.models import (
 from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.progress import apply_engine_progress, reduce_progress, update_job_progress
 from local_lm.runtime_provisioning import RuntimeProvisioner
-from local_lm.scheduler import ResourceScheduler
+from local_lm.scheduler import JobClaim, ResourceScheduler
 from local_lm.schemas import (
     ChatCreate,
     DownloadRequest,
@@ -80,7 +84,9 @@ ONE_PIXEL_PNG = base64.b64decode(
 )
 
 
-async def wait_for_assistant(client: AsyncClient, chat_id: str, expected_type: str) -> dict:  # type: ignore[type-arg]
+async def wait_for_assistant(
+    client: AsyncClient, chat_id: str, expected_type: str
+) -> dict[str, Any]:
     async def read() -> dict[str, Any] | None:
         response = await client.get(f"/api/chats/{chat_id}")
         assert response.status_code == 200
@@ -91,10 +97,24 @@ async def wait_for_assistant(client: AsyncClient, chat_id: str, expected_type: s
 
     assistant = await wait_for_terminal_status(read, what=f"the assistant run in chat {chat_id}")
     assert any(part["type"] == expected_type for part in assistant["parts"])
-    return cast(dict, assistant)
+    return cast(dict[str, Any], assistant)
 
 
-async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignore[type-arg]
+async def wait_for_step_statuses(
+    client: AsyncClient, plan_id: str, expected: list[str]
+) -> dict[str, Any]:
+    async def read() -> dict[str, Any]:
+        plan: dict[str, Any] = (await client.get(f"/api/work-plans/{plan_id}")).json()
+        return plan
+
+    return await wait_until(
+        read,
+        lambda plan: [step["status"] for step in plan["steps"]] == expected,
+        what=f"the steps of work plan {plan_id}",
+    )
+
+
+async def wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
     async def read() -> dict[str, Any]:
         response = await client.get(f"/api/runs/{run_id}")
         assert response.status_code == 200
@@ -106,7 +126,7 @@ async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignor
     assert isinstance(run["duration_ms"], int)
     assert run["duration_ms"] >= 0
     assert run["provenance_json"]["timings"]["duration_ms"] == run["duration_ms"]
-    return cast(dict, run)
+    return cast(dict[str, Any], run)
 
 
 def extend_capability_role(
@@ -154,9 +174,16 @@ def create_managed_model(
         session.commit()
 
 
-def project_manifest(archive_bytes: bytes) -> dict:  # type: ignore[type-arg]
+def project_manifest(archive_bytes: bytes) -> dict[str, Any]:
     with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
-        return json.loads(archive.read("manifest.json"))
+        return cast(dict[str, Any], json.loads(archive.read("manifest.json")))
+
+
+def _all_present[T](rows: list[T | None]) -> list[T]:
+    """Every row, having checked that none of them is missing."""
+    present = [row for row in rows if row is not None]
+    assert len(present) == len(rows)
+    return present
 
 
 def rewrite_project_archive(
@@ -287,6 +314,8 @@ def test_new_chats_enable_edit_review_without_changing_legacy_defaults() -> None
 
 
 async def test_project_and_chat_management_contract(client: AsyncClient) -> None:
+    from recovery_requests import permanently_delete_chat, permanently_delete_project
+
     project = (await client.post("/api/projects", json={"name": "Research Lab"})).json()
     chat = (
         await client.post("/api/chats", json={"title": "Model notes", "project_id": project["id"]})
@@ -309,9 +338,9 @@ async def test_project_and_chat_management_contract(client: AsyncClient) -> None
 
     restored = await client.patch(f"/api/chats/{chat['id']}", json={"archived": False})
     assert restored.status_code == 200
-    assert (await client.delete(f"/api/projects/{project['id']}")).status_code == 204
+    await permanently_delete_project(client, project["id"])
     assert (await client.get(f"/api/chats/{chat['id']}")).json()["project_id"] is None
-    assert (await client.delete(f"/api/chats/{chat['id']}")).status_code == 204
+    await permanently_delete_chat(client, chat["id"])
     assert (await client.get(f"/api/chats/{chat['id']}")).status_code == 404
 
 
@@ -384,8 +413,8 @@ async def test_project_chat_text_and_inline_image_flow(client: AsyncClient) -> N
 
 
 async def test_replaced_generation_previews_survive_until_retention_cleanup(
-    client: AsyncClient, monkeypatch, settings: Settings
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, settings: Settings
+) -> None:
     first_processed = asyncio.Event()
     allow_second = asyncio.Event()
     second_processed = asyncio.Event()
@@ -429,7 +458,7 @@ async def test_replaced_generation_previews_survive_until_retention_cleanup(
             for part in assistant["parts"]
             if part["type"] == "image" and part["metadata_json"].get("preview")
         )
-        return preview["artifact_id"]
+        return cast(str, preview["artifact_id"])
 
     monkeypatch.setattr(MockMediaAdapter, "generate", staged_generate)
     chat = (await client.post("/api/chats", json={"title": "Preview retention"})).json()
@@ -439,12 +468,12 @@ async def test_replaced_generation_previews_survive_until_retention_cleanup(
     )
     assert turn.status_code == 202
 
-    await asyncio.wait_for(first_processed.wait(), timeout=5)
+    await asyncio.wait_for(first_processed.wait(), timeout=PATIENCE_SECONDS)
     first_id = await current_preview_id(chat["id"])
     assert (await client.get(f"/api/artifacts/{first_id}/content")).status_code == 200
 
     allow_second.set()
-    await asyncio.wait_for(second_processed.wait(), timeout=5)
+    await asyncio.wait_for(second_processed.wait(), timeout=PATIENCE_SECONDS)
     second_id = await current_preview_id(chat["id"])
     assert second_id != first_id
     assert (await client.get(f"/api/artifacts/{first_id}/content")).status_code == 200
@@ -1059,6 +1088,36 @@ async def test_project_v3_import_rejects_malformed_dependencies_and_object_abuse
     non_finite = json.loads(json.dumps(baseline))
     non_finite["project"]["description"] = float("nan")
 
+    # A whole number too large to survive a JSON round trip, in the one place an
+    # archive's contents are stored verbatim. Nothing between the zip and the
+    # row used to read it, so it landed and every later reader met it instead.
+    unrepresentable_number = json.loads(json.dumps(baseline))
+    unrepresentable_number["dependencies"]["workflows"] = [
+        {
+            "source_id": "workflow_huge",
+            "name": "Huge number",
+            "operation": "text_to_image",
+            "description": "",
+            "current_revision_source_id": "wfrev_huge",
+            "revisions": [
+                {
+                    "source_id": "wfrev_huge",
+                    "source_version": 1,
+                    "engine": "mock",
+                    "engine_version": None,
+                    "ui_graph": {},
+                    "api_graph": {},
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"seed": {"type": "integer", "minimum": 10**400}},
+                    },
+                    "dependencies": {},
+                    "trusted": True,
+                }
+            ],
+        }
+    ]
+
     cases = [
         (missing_profile, None, "incompatible role"),
         (extra_dependency_field, None, "invalid portable dependencies"),
@@ -1066,6 +1125,7 @@ async def test_project_v3_import_rejects_malformed_dependencies_and_object_abuse
         (invalid_workflow_head, None, "invalid current workflow revision"),
         (deeply_nested, None, "nested too deeply"),
         (non_finite, None, "invalid numeric value"),
+        (unrepresentable_number, None, "numbers must be finite"),
         (baseline, {"undeclared/payload.exe": b"MZ"}, "not declared"),
     ]
     project_count = len((await client.get("/api/projects")).json())
@@ -1500,6 +1560,20 @@ async def test_worker_management_reports_missing_local_binaries(client: AsyncCli
         "logs/chat-worker.log",
         "logs/media-worker.log",
     }
+    by_name = {item["name"]: item for item in workers.json()}
+    assert by_name["chat"]["custom_node_containment"] is None
+    assert by_name["media"]["custom_node_containment"] == {
+        "level": "unavailable",
+        "platform": sys.platform,
+        "profile_version": 1,
+        "backend": "none",
+        "backend_version": "0",
+        "profile_sha256": None,
+        "file_denial_provable": False,
+        "connect_denial_provable": False,
+        "authorizes_execution": False,
+        "offline_badge": False,
+    }
     media = await client.post("/api/workers/media/start")
     assert media.status_code == 422
 
@@ -1676,7 +1750,7 @@ async def test_model_deletion_rechecks_pending_generation_inside_compute_lease(
             )
             session.commit()
 
-    response = await asyncio.wait_for(deletion, timeout=2)
+    response = await asyncio.wait_for(deletion, timeout=PATIENCE_SECONDS)
     assert response.status_code == 409
     assert "active or queued job" in response.json()["detail"]
     with SessionLocal() as session:
@@ -1728,7 +1802,7 @@ async def test_engine_api_isolates_media_settings_by_role(client: AsyncClient) -
 
 
 async def test_random_media_seed_is_resolved_and_persisted(
-    client: AsyncClient, monkeypatch
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("local_lm.orchestrator.secrets.randbelow", lambda _upper: 8675309)
     chat = (await client.post("/api/chats", json={"title": "Seed provenance"})).json()
@@ -1863,7 +1937,7 @@ async def test_turn_idempotency_never_bypasses_chat_existence(
     assert missing.json()["detail"] == "chat not found"
 
     deleted = (await client.post("/api/chats", json={"title": "Deleted"})).json()
-    assert (await client.delete(f"/api/chats/{deleted['id']}")).status_code == 204
+    await permanently_delete_chat(client, deleted["id"])
     replay_to_deleted = await client.post(
         f"/api/chats/{deleted['id']}/turns",
         json=payload,
@@ -1875,8 +1949,8 @@ async def test_turn_idempotency_never_bypasses_chat_existence(
 async def test_concurrent_orchestrators_converge_before_expensive_turn_planning(
     app: FastAPI,
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Concurrent claim"})).json()
     services = app.state.services
     first: ConversationOrchestrator = services.orchestrator
@@ -1918,7 +1992,7 @@ async def test_concurrent_orchestrators_converge_before_expensive_turn_planning(
 
     with SessionLocal() as first_session, SessionLocal() as second_session:
         first_task = asyncio.create_task(first.create_turn(first_session, chat["id"], request))
-        await asyncio.wait_for(planner_started.wait(), timeout=2)
+        await asyncio.wait_for(planner_started.wait(), timeout=PATIENCE_SECONDS)
         second_task = asyncio.create_task(second.create_turn(second_session, chat["id"], request))
         await asyncio.sleep(0.05)
         assert plan_calls == 1
@@ -2081,8 +2155,9 @@ async def test_media_variations_create_ordered_independent_output_slots(
             assert keyed.pop(accepted["run"]["id"]) == "four-media-outputs"
             assert all(key is None for key in keyed.values())
             assistant_ids = plan["summary_json"]["assistant_message_ids"]
-            messages = [session.get(Message, message_id) for message_id in assistant_ids]
-            assert all(message is not None for message in messages)
+            messages = _all_present(
+                [session.get(Message, message_id) for message_id in assistant_ids]
+            )
             assert messages[0].parent_id == accepted["user_message"]["id"]
             assert [message.parent_id for message in messages[1:]] == assistant_ids[:-1]
 
@@ -2112,7 +2187,7 @@ async def test_media_variations_create_ordered_independent_output_slots(
     completed = (await client.get(f"/api/work-plans/{plan['id']}")).json()
     assert completed["status"] == "complete"
     assert completed["summary_json"]["status_counts"] == {"complete": 4}
-    assert (await client.delete(f"/api/chats/{chat['id']}")).status_code == 204
+    await permanently_delete_chat(client, chat["id"])
     with SessionLocal() as session:
         assert session.get(WorkPlan, plan["id"]) is None
         assert not session.scalar(select(Job.id).where(Job.work_plan_id == plan["id"]))
@@ -2191,8 +2266,7 @@ async def test_ordered_text_image_video_text_plan_resolves_typed_outputs(
         steps = session.scalars(
             select(WorkStep).where(WorkStep.plan_id == plan_id).order_by(WorkStep.ordinal)
         ).all()
-        runs = [session.get(Run, step.run_id) for step in steps]
-        assert all(run is not None for run in runs)
+        runs = _all_present([session.get(Run, step.run_id) for step in steps])
         assert runs[0].settings_json["max_tokens"] == 64
         assert runs[1].settings_json["width"] == 512
         assert "frames" not in runs[1].settings_json
@@ -2224,6 +2298,7 @@ async def test_ordered_text_image_video_text_plan_resolves_typed_outputs(
             assert resolved_step.workflow_revision_id == resolved_run.workflow_revision_id
             workflow_witness = resolved_run.provenance_json.get("workflow")
             if resolved_run.workflow_revision_id:
+                assert workflow_witness is not None
                 assert workflow_witness["revision_id"] == resolved_run.workflow_revision_id
                 assert workflow_witness["definition_id"]
                 assert workflow_witness["definition_name"]
@@ -2250,8 +2325,8 @@ async def test_ordered_text_image_video_text_plan_resolves_typed_outputs(
 
 async def test_ordered_plan_blocks_dependents_and_resumes_after_retry(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original_stream = MockChatAdapter.stream
 
     async def fail_first_step(
@@ -2275,17 +2350,7 @@ async def test_ordered_plan_blocks_dependents_and_resumes_after_retry(
     )
     assert response.status_code == 202
     plan_id = response.json()["run"]["work_plan_id"]
-    deadline = asyncio.get_running_loop().time() + 5
-    blocked_plan: dict = {}
-    while asyncio.get_running_loop().time() < deadline:
-        blocked_plan = (await client.get(f"/api/work-plans/{plan_id}")).json()
-        if [step["status"] for step in blocked_plan["steps"]] == [
-            "failed",
-            "blocked",
-            "blocked",
-        ]:
-            break
-        await asyncio.sleep(0.03)
+    blocked_plan = await wait_for_step_statuses(client, plan_id, ["failed", "blocked", "blocked"])
     assert [step["status"] for step in blocked_plan["steps"]] == [
         "failed",
         "blocked",
@@ -2322,8 +2387,12 @@ async def test_ordered_plan_blocks_dependents_and_resumes_after_retry(
 
 async def test_ordered_retry_preserves_completed_predecessor(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    choice = await client.put(
+        "/api/settings/generation-retries", json={"max_retries": 0, "expected_revision": 0}
+    )
+    assert choice.status_code == 200
     original_generate = MockMediaAdapter.generate
 
     async def fail_media_step(
@@ -2347,17 +2416,7 @@ async def test_ordered_retry_preserves_completed_predecessor(
         },
     )
     plan_id = response.json()["run"]["work_plan_id"]
-    deadline = asyncio.get_running_loop().time() + 5
-    failed_plan: dict = {}
-    while asyncio.get_running_loop().time() < deadline:
-        failed_plan = (await client.get(f"/api/work-plans/{plan_id}")).json()
-        if [step["status"] for step in failed_plan["steps"]] == [
-            "complete",
-            "failed",
-            "blocked",
-        ]:
-            break
-        await asyncio.sleep(0.03)
+    failed_plan = await wait_for_step_statuses(client, plan_id, ["complete", "failed", "blocked"])
     assert [step["status"] for step in failed_plan["steps"]] == [
         "complete",
         "failed",
@@ -2679,9 +2738,16 @@ async def test_activation_can_be_requeued_for_an_installed_model(
     assert again.json()["id"] == accepted.json()["id"]
 
 
-async def test_activation_is_refused_for_a_model_without_a_manifest(
+async def test_a_model_imported_by_hand_can_still_be_activated(
     client: AsyncClient,
 ) -> None:
+    """The chat probe runs the installed runtime against the files on disk.
+
+    Where those files came from decides nothing about whether they work here, and
+    a model that can never be activated can never gather the evidence it is only
+    allowed to be used with.
+    """
+
     with SessionLocal() as session:
         session.add(
             ModelInstall(
@@ -2696,10 +2762,49 @@ async def test_activation_is_refused_for_a_model_without_a_manifest(
         )
         session.commit()
 
-    refused = await client.post("/api/models/model_imported/activate")
+    accepted = await client.post("/api/models/model_imported/activate")
 
-    assert refused.status_code == 422
-    assert "manifest" in refused.json()["detail"]
+    assert accepted.status_code == 202, accepted.text
+    assert accepted.json()["kind"] == "activate"
+
+
+async def test_activation_is_refused_for_a_workflow_model_without_its_manifest(
+    client: AsyncClient,
+) -> None:
+    """The media probe rebuilds the declared workflow against the model's origin."""
+
+    with SessionLocal() as session:
+        session.add_all(
+            [
+                ModelInstall(
+                    id="model_no_workflow",
+                    name="Imported image model",
+                    role="image",
+                    engine="comfyui",
+                    local_path="C:/models/imported-image",
+                    manifest_json={"remote_id": "synthetic/image", "imported": True},
+                    active=True,
+                ),
+                ModelInstall(
+                    id="model_no_origin",
+                    name="Image model without an origin",
+                    role="image",
+                    engine="comfyui",
+                    local_path="C:/models/no-origin",
+                    manifest_json={"workflow_template_id": "synthetic_template"},
+                    active=True,
+                ),
+            ]
+        )
+        session.commit()
+
+    without_workflow = await client.post("/api/models/model_no_workflow/activate")
+    without_origin = await client.post("/api/models/model_no_origin/activate")
+
+    assert without_workflow.status_code == 422
+    assert "workflow" in without_workflow.json()["detail"]
+    assert without_origin.status_code == 422
+    assert "manifest" in without_origin.json()["detail"]
 
 
 async def test_activation_of_an_unknown_model_is_not_found(client: AsyncClient) -> None:
@@ -2747,16 +2852,15 @@ async def test_active_chat_run_can_be_cancelled_directly(client: AsyncClient) ->
     )
     assert turn.status_code == 202
     assistant_id = turn.json()["assistant_message"]["id"]
-    deadline = asyncio.get_running_loop().time() + 5
-    streamed_text = ""
-    while asyncio.get_running_loop().time() < deadline:
+
+    async def read_streamed_text() -> str:
         assistant = (await client.get(f"/api/messages/{assistant_id}")).json()
-        streamed_text = "".join(
-            part["text"] or "" for part in assistant["parts"] if part["type"] == "text"
-        )
-        if streamed_text:
-            break
-        await asyncio.sleep(0.01)
+        return "".join(part["text"] or "" for part in assistant["parts"] if part["type"] == "text")
+
+    # The run is cancelled while it streams, so keep the pace this was written at.
+    streamed_text = await wait_until(
+        read_streamed_text, bool, what=f"text streamed into {assistant_id}", interval=0.01
+    )
     assert streamed_text
 
     cancelled = await client.post(f"/api/chats/{chat['id']}/cancel")
@@ -2774,8 +2878,8 @@ async def test_active_chat_run_can_be_cancelled_directly(client: AsyncClient) ->
 
 
 async def test_failed_chat_run_preserves_streamed_text_and_reports_error(
-    client: AsyncClient, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def fail_after_delta(
         _adapter: MockChatAdapter, _request: ChatRequest
     ) -> AsyncIterator[ChatEvent]:
@@ -2790,13 +2894,13 @@ async def test_failed_chat_run_preserves_streamed_text_and_reports_error(
     )
     assert turn.status_code == 202
 
-    deadline = asyncio.get_running_loop().time() + 5
-    run = turn.json()["run"]
-    while asyncio.get_running_loop().time() < deadline:
-        run = (await client.get(f"/api/runs/{run['id']}")).json()
-        if run["status"] == "failed":
-            break
-        await asyncio.sleep(0.01)
+    run_id = turn.json()["run"]["id"]
+
+    async def read_run() -> dict[str, Any]:
+        run: dict[str, Any] = (await client.get(f"/api/runs/{run_id}")).json()
+        return run
+
+    run = await wait_for_terminal_status(read_run, what=f"run {run_id}", expected="failed")
     assert run["status"] == "failed"
     assert run["error"] == "Chat engine stream failed"
 
@@ -2870,8 +2974,8 @@ async def test_restart_recovery_preserves_partial_text_and_appends_error(
 async def test_restart_recovery_requeues_work_that_never_started(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Queued recovery"})).json()
     turn = (
         await client.post(
@@ -2917,8 +3021,8 @@ async def test_restart_recovery_requeues_work_that_never_started(
 async def test_restart_recovery_preserves_queued_transcript_order(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Ordered recovery"})).json()
     turns = []
     for index in range(3):
@@ -2964,8 +3068,8 @@ async def test_restart_recovery_preserves_queued_transcript_order(
 async def test_restart_recovery_preserves_media_output_order(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Media recovery"})).json()
     turn = (
         await client.post(
@@ -3020,8 +3124,8 @@ async def test_restart_recovery_preserves_media_output_order(
 async def test_restart_recovery_does_not_replay_completed_ordered_steps(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Ordered restart"})).json()
     turn = (
         await client.post(
@@ -3094,8 +3198,8 @@ async def test_restart_recovery_does_not_replay_completed_ordered_steps(
 async def test_retry_clears_stale_error_before_dispatch(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Clean retry"})).json()
     turn = (
         await client.post(
@@ -3374,8 +3478,8 @@ async def test_regenerating_older_response_preserves_later_history_and_revisions
 
 async def test_failed_regeneration_keeps_the_selected_response(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Failed revision"})).json()
     original = await client.post(
         f"/api/chats/{chat['id']}/turns",
@@ -3402,13 +3506,12 @@ async def test_failed_regeneration_keeps_the_selected_response(
     )
     assert regenerated.status_code == 202
     run_id = regenerated.json()["run"]["id"]
-    deadline = asyncio.get_running_loop().time() + 5
-    run = regenerated.json()["run"]
-    while asyncio.get_running_loop().time() < deadline:
-        run = (await client.get(f"/api/runs/{run_id}")).json()
-        if run["status"] == "failed":
-            break
-        await asyncio.sleep(0.03)
+
+    async def read_run() -> dict[str, Any]:
+        run: dict[str, Any] = (await client.get(f"/api/runs/{run_id}")).json()
+        return run
+
+    run = await wait_for_terminal_status(read_run, what=f"run {run_id}", expected="failed")
     assert run["status"] == "failed"
 
     after = (await client.get(f"/api/messages/{message_id}")).json()
@@ -3533,7 +3636,7 @@ async def test_long_chat_compacts_context_without_changing_the_transcript(
     assert updated.status_code == 200
     chat = (await client.post("/api/chats", json={"title": "Long context"})).json()
 
-    final_run: dict = {}
+    final_run: dict[str, Any] = {}
     for index in range(6):
         response = await client.post(
             f"/api/chats/{chat['id']}/turns",
@@ -3717,8 +3820,8 @@ async def test_text_turn_after_image_keeps_alternating_chat_context(
 
 async def test_vision_chat_receives_verified_local_image_bytes(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original_capabilities = MockChatAdapter.capabilities
     captured: list[ChatRequest] = []
 
@@ -3780,8 +3883,8 @@ async def test_vision_chat_receives_verified_local_image_bytes(
 
 async def test_text_only_chat_never_receives_attached_image_bytes(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: list[ChatRequest] = []
 
     async def capture_stream(
@@ -3829,8 +3932,8 @@ async def test_text_only_chat_never_receives_attached_image_bytes(
 
 async def test_vision_chat_reuses_the_newest_prior_generated_image(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original_capabilities = MockChatAdapter.capabilities
     captured: list[ChatRequest] = []
 
@@ -3889,8 +3992,8 @@ async def test_vision_chat_reuses_the_newest_prior_generated_image(
 
 async def test_vision_chat_uses_the_poster_for_a_prior_generated_video(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original_capabilities = MockChatAdapter.capabilities
     captured: list[ChatRequest] = []
 
@@ -4203,7 +4306,7 @@ async def test_chat_delete_can_remove_exclusive_generated_media(client: AsyncCli
         part["artifact_id"] for part in keep_message["parts"] if part["type"] == "image"
     )
 
-    assert (await client.delete(f"/api/chats/{keep_chat['id']}")).status_code == 204
+    await permanently_delete_chat(client, keep_chat["id"])
     assert (await client.get(f"/api/artifacts/{keep_artifact_id}")).status_code == 200
 
     delete_chat = (await client.post("/api/chats", json={"title": "Delete media"})).json()
@@ -4216,11 +4319,7 @@ async def test_chat_delete_can_remove_exclusive_generated_media(client: AsyncCli
         part["artifact_id"] for part in delete_message["parts"] if part["type"] == "image"
     )
 
-    deleted = await client.delete(
-        f"/api/chats/{delete_chat['id']}",
-        params={"delete_generated_media": True},
-    )
-    assert deleted.status_code == 204
+    await permanently_delete_chat(client, delete_chat["id"], delete_generated_media=True)
     assert (await client.get(f"/api/artifacts/{delete_artifact_id}")).status_code == 200
 
 
@@ -4248,19 +4347,15 @@ async def test_chat_delete_keeps_generated_media_referenced_by_another_chat(
     )
     assert attached.status_code == 202
 
-    deleted = await client.delete(
-        f"/api/chats/{source_chat['id']}",
-        params={"delete_generated_media": True},
-    )
-    assert deleted.status_code == 204
+    await permanently_delete_chat(client, source_chat["id"], delete_generated_media=True)
     assert (await client.get(f"/api/artifacts/{artifact_id}")).status_code == 200
 
 
-async def test_chat_delete_cancels_all_queued_runs_and_cleans_up_tasks(
+async def test_chat_purge_follows_explicit_cancellation_of_all_queued_runs(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     started: set[str] = set()
     finished: set[str] = set()
 
@@ -4290,21 +4385,24 @@ async def test_chat_delete_cancels_all_queued_runs_and_cleans_up_tasks(
     turns = [response.json() for response in turn_responses]
     run_ids = {turn["run"]["id"] for turn in turns}
     orchestrator: ConversationOrchestrator = app.state.services.orchestrator
-    deadline = asyncio.get_running_loop().time() + 5
-    job_ids: set[str] = set()
-    while asyncio.get_running_loop().time() < deadline:
+
+    async def read_job_ids() -> set[str]:
         jobs = (await client.get("/api/jobs")).json()
-        job_ids = {job["id"] for job in jobs if job["run_id"] in run_ids}
-        if len(job_ids) == 2 and started == job_ids:
-            break
-        await asyncio.sleep(0.01)
+        return {job["id"] for job in jobs if job["run_id"] in run_ids}
+
+    job_ids = await wait_until(
+        read_job_ids,
+        lambda ids: len(ids) == 2 and started == ids,
+        what="the two queued jobs starting",
+        interval=0.01,
+    )
     assert len(job_ids) == 2
     assert started == job_ids
     assert job_ids <= orchestrator._tasks.keys()
 
-    deleted = await client.delete(f"/api/chats/{chat['id']}")
-
-    assert deleted.status_code == 204
+    for job_id in sorted(job_ids):
+        stopped = await client.post(f"/api/jobs/{job_id}/cancel")
+        assert stopped.status_code == 200, stopped.text
     await asyncio.sleep(0)
     assert finished == job_ids
     assert not (job_ids & orchestrator._tasks.keys())
@@ -4312,15 +4410,20 @@ async def test_chat_delete_cancels_all_queued_runs_and_cleans_up_tasks(
         jobs = list(session.scalars(select(Job).where(Job.id.in_(job_ids))).all())
         assert len(jobs) == 2
         assert all(job.status == JobStatus.CANCELLED.value for job in jobs)
-        assert all(job.run_id is None for job in jobs)
+        assert {job.run_id for job in jobs} == run_ids
+        assert session.get(Chat, chat["id"]) is not None
+    await permanently_delete_chat(client, chat["id"])
+    with SessionLocal() as session:
+        assert not session.scalars(select(Job).where(Job.id.in_(job_ids))).all()
         assert not session.scalars(select(Run).where(Run.chat_id == chat["id"])).all()
+        assert session.get(Chat, chat["id"]) is None
 
 
-async def test_chat_delete_awaits_active_run_cleanup_before_database_deletion(
+async def test_chat_purge_waits_for_explicit_stop_to_finish_active_run_cleanup(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     stream_started = asyncio.Event()
     cancellation_started = asyncio.Event()
     allow_cleanup = asyncio.Event()
@@ -4352,23 +4455,23 @@ async def test_chat_delete_awaits_active_run_cleanup_before_database_deletion(
         json={"text": "Start a response", "mode": "text"},
     )
     assert turn.status_code == 202
-    await asyncio.wait_for(stream_started.wait(), timeout=5)
+    await asyncio.wait_for(stream_started.wait(), timeout=PATIENCE_SECONDS)
     jobs = (await client.get("/api/jobs")).json()
     job = next(item for item in jobs if item["run_id"] == turn.json()["run"]["id"])
     assert job["status"] == JobStatus.RUNNING.value
 
-    deletion = asyncio.create_task(client.delete(f"/api/chats/{chat['id']}"))
-    await asyncio.wait_for(cancellation_started.wait(), timeout=5)
+    stopping = asyncio.create_task(client.post(f"/api/chats/{chat['id']}/cancel"))
+    await asyncio.wait_for(cancellation_started.wait(), timeout=PATIENCE_SECONDS)
     await asyncio.sleep(0)
-    assert not deletion.done()
+    assert not stopping.done()
     with SessionLocal() as session:
         assert session.get(Chat, chat["id"]) is not None
         assert session.get(Run, turn.json()["run"]["id"]) is not None
 
     allow_cleanup.set()
-    deleted = await asyncio.wait_for(deletion, timeout=5)
+    stopped = await asyncio.wait_for(stopping, timeout=PATIENCE_SECONDS)
 
-    assert deleted.status_code == 204
+    assert stopped.status_code == 200, stopped.text
     assert cleanup_finished.is_set()
     orchestrator: ConversationOrchestrator = app.state.services.orchestrator
     await asyncio.sleep(0)
@@ -4377,7 +4480,12 @@ async def test_chat_delete_awaits_active_run_cleanup_before_database_deletion(
         remaining_job = session.get(Job, job["id"])
         assert remaining_job is not None
         assert remaining_job.status == JobStatus.CANCELLED.value
-        assert remaining_job.run_id is None
+        assert remaining_job.run_id == turn.json()["run"]["id"]
+        assert session.get(Run, turn.json()["run"]["id"]) is not None
+        assert session.get(Chat, chat["id"]) is not None
+    await permanently_delete_chat(client, chat["id"])
+    with SessionLocal() as session:
+        assert session.get(Job, job["id"]) is None
         assert session.get(Run, turn.json()["run"]["id"]) is None
         assert session.get(Chat, chat["id"]) is None
 
@@ -4452,7 +4560,7 @@ async def test_workflow_revisions_and_validation(client: AsyncClient) -> None:
 
 
 async def test_workflow_vram_requirement_uses_device_capacity(
-    client: AsyncClient, monkeypatch
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     memory = {
         "total": 16 * 1024**3,
@@ -4506,7 +4614,13 @@ async def test_workflow_vram_requirement_uses_device_capacity(
 async def test_workflow_validation_requires_trust_and_active_model_dependencies(
     client: AsyncClient,
     tmp_path: Path,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    async def object_info() -> dict[str, Any]:
+        return {"SaveImage": {"input": {}, "output": [], "output_node": True}}
+
+    monkeypatch.setattr(app.state.services.engines.media, "object_info", object_info, raising=False)
     inactive_path = tmp_path / "inactive-model.safetensors"
     inactive_path.write_bytes(b"inactive")
     with SessionLocal() as session:
@@ -4588,12 +4702,19 @@ async def test_project_pins_an_immutable_media_workflow_revision(client: AsyncCl
 
 async def test_a_project_pin_that_cannot_run_is_named_rather_than_replaced(
     client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pin is a lockfile, so a broken one is reported, not quietly swapped.
 
     Falling through to generic selection would produce output from a different
     graph than the project pinned, and the pin would stay broken and unmentioned.
     """
+
+    async def object_info() -> dict[str, Any]:
+        return {"SaveImage": {"input": {}, "output": [], "output_node": True}}
+
+    monkeypatch.setattr(app.state.services.engines.media, "object_info", object_info, raising=False)
     # Trusted and well-formed, but built for an engine this install does not run.
     other_engine = (
         await client.post(
@@ -4695,7 +4816,7 @@ async def _project_pin(client: AsyncClient, project_id: str) -> str | None:
     """Read a project's image pin back. There is no single-project GET."""
     projects = (await client.get("/api/projects")).json()
     match = next(item for item in projects if item["id"] == project_id)
-    return match["image_workflow_revision_id"]
+    return cast(str | None, match["image_workflow_revision_id"])
 
 
 async def _inherit_project_image_workflow(client: AsyncClient, chat_id: str) -> None:
@@ -5085,8 +5206,8 @@ async def test_pinned_workflow_schema_drives_generation_settings(client: AsyncCl
 
 async def test_workflow_seconds_resolve_before_video_dispatch(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: list[MediaRequest] = []
     original_generate = MockMediaAdapter.generate
 
@@ -5105,7 +5226,10 @@ async def test_workflow_seconds_resolve_before_video_dispatch(
             "name": "Measured video window",
             "operation": "text_to_video",
             "engine": "mock",
-            "api_graph": {"node": {"class_type": "Mock"}},
+            # The stub graph now has to USE the frame count it declares: a
+            # workflow that declares a length contract and never consumes it is
+            # refused at creation, because the duration control would do nothing.
+            "api_graph": {"node": {"class_type": "Mock", "inputs": {"length": "${frames}"}}},
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -5188,8 +5312,8 @@ async def test_workflow_seconds_resolve_before_video_dispatch(
 async def test_adapter_capability_settings_cover_profile_preset_scopes_and_turn_reuse(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     adapter_cache = SettingField(
         key="adapter_cache",
         label="Adapter cache",
@@ -5312,8 +5436,8 @@ async def test_adapter_capability_settings_cover_profile_preset_scopes_and_turn_
 async def test_media_capability_settings_stay_isolated_by_role(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     image_detail = SettingField(
         key="image_detail",
         label="Image detail",
@@ -5387,8 +5511,8 @@ async def test_media_capability_settings_stay_isolated_by_role(
 async def test_pinned_workflow_revision_keeps_dynamic_capability_constraints(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     adapter_strength = SettingField(
         key="adapter_strength",
         label="Adapter strength",
@@ -5493,8 +5617,8 @@ async def test_pinned_workflow_revision_keeps_dynamic_capability_constraints(
 async def test_idempotent_replay_survives_capability_outage_without_new_state(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Capability replay"})).json()
     request_payload = {
         "text": "Create one durable turn",
@@ -6467,7 +6591,7 @@ async def test_model_delete_finalization_runs_off_the_event_loop(
     (managed / "model.gguf").write_bytes(b"threaded")
     model_id = "model_delete_threaded_finalization"
     create_managed_model(model_id=model_id, path=managed, files=["model.gguf"])
-    original_finalize = api_module._finalize_model_quarantine
+    original_finalize = model_quarantine._finalize_model_quarantine
     observed_threads: list[int] = []
     event_loop_thread = threading.get_ident()
 
@@ -6559,7 +6683,7 @@ async def test_model_delete_finalization_failure_is_recoverable_after_commit(
         raise OSError("injected finalization failure")
 
     with monkeypatch.context() as patch:
-        patch.setattr(api_module.shutil, "rmtree", fail_rmtree)
+        patch.setattr(shutil, "rmtree", fail_rmtree)
         deleted = await client.delete(
             f"/api/models/{model_id}",
             params={"delete_profiles": True},
@@ -6577,7 +6701,7 @@ async def test_model_delete_finalization_failure_is_recoverable_after_commit(
     assert (quarantines[0] / "payload" / "model.gguf").read_bytes() == b"finalize"
 
     with SessionLocal() as session:
-        api_module.recover_model_delete_quarantines(
+        model_quarantine.recover_model_delete_quarantines(
             session,
             settings.model_dir.resolve(),
         )
@@ -6592,7 +6716,7 @@ def test_model_quarantine_rejects_nested_filesystem_links(
     outside.mkdir()
     sentinel = outside / "sentinel.gguf"
     sentinel.write_bytes(b"outside")
-    quarantine = api_module._new_model_quarantine(
+    quarantine = model_quarantine._new_model_quarantine(
         settings.model_dir.resolve(),
         "model_nested_link",
     )
@@ -6605,12 +6729,12 @@ def test_model_quarantine_rejects_nested_filesystem_links(
         pytest.skip("filesystem links are unavailable in this test environment")
 
     with pytest.raises(ValueError, match="filesystem link"):
-        api_module._safe_quarantine_file_path(
+        model_quarantine._safe_quarantine_file_path(
             quarantine,
             PurePosixPath("nested/model.gguf"),
         )
     with pytest.raises(OSError, match="link"):
-        api_module._finalize_model_quarantine(quarantine)
+        model_quarantine._finalize_model_quarantine(quarantine)
 
     assert sentinel.read_bytes() == b"outside"
     assert (quarantine / ".model-id").is_file()
@@ -6816,8 +6940,8 @@ async def test_catalog_generic_detail_rejects_invalid_item_before_inspection(
 
 
 async def test_catalog_preflight_blocks_gated_unsafe_weights(
-    client: AsyncClient, settings: Settings, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # The access check is `gated and not settings.hf_token`, and `hf_token` is
     # loaded from the operating system credential vault. Without this the test
     # passes in CI and fails on any machine where a Hugging Face credential has
@@ -6862,8 +6986,8 @@ async def test_catalog_preflight_blocks_gated_unsafe_weights(
 
 
 async def test_catalog_preflight_autoselects_smallest_gguf(
-    client: AsyncClient, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def inspect(
         _catalog: HuggingFaceCatalog,
         remote_id: str,
@@ -6878,7 +7002,7 @@ async def test_catalog_preflight_autoselects_smallest_gguf(
                 "compatibility": "likely",
                 "compatibility_reasons": ["GGUF artifact detected"],
             },
-            "revision": revision,
+            "revision": "a" * 40,
             "files": [
                 {"filename": "large.gguf", "size": 2048, "sha256": "b" * 64},
                 {"filename": "small.gguf", "size": 1024, "sha256": "a" * 64},
@@ -6896,6 +7020,7 @@ async def test_catalog_preflight_autoselects_smallest_gguf(
         },
     )
     assert response.status_code == 200
+    assert response.json()["revision"] == "a" * 40
     assert response.json()["can_install"] is True
     assert response.json()["selected_files"] == ["small.gguf"]
     assert response.json()["expected_sha256"] == {"small.gguf": "a" * 64}
@@ -6906,7 +7031,7 @@ async def test_catalog_preflight_autoselects_smallest_gguf(
         json={
             "install_plan_id": plan["id"],
             "remote_id": "owner/model",
-            "revision": "abc123",
+            "revision": response.json()["revision"],
             "role": "chat",
             "engine": "llama.cpp",
             "allow_patterns": ["large.gguf"],
@@ -6919,8 +7044,8 @@ async def test_catalog_preflight_autoselects_smallest_gguf(
 
 
 async def test_catalog_preflight_prefers_balanced_gguf_quantization(
-    client: AsyncClient, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def inspect(
         _catalog: HuggingFaceCatalog,
         remote_id: str,
@@ -6958,8 +7083,8 @@ async def test_catalog_preflight_prefers_balanced_gguf_quantization(
 
 
 async def test_catalog_preflight_selects_a_complete_split_gguf_set(
-    client: AsyncClient, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def inspect(
         _catalog: HuggingFaceCatalog,
         remote_id: str,
@@ -6975,7 +7100,7 @@ async def test_catalog_preflight_selects_a_complete_split_gguf_set(
                 "compatibility": "likely",
                 "compatibility_reasons": ["GGUF artifact detected"],
             },
-            "revision": revision,
+            "revision": "a" * 40,
             "files": [
                 {
                     "filename": "model-Q4_K_M-00002-of-00002.gguf",
@@ -7002,6 +7127,7 @@ async def test_catalog_preflight_selects_a_complete_split_gguf_set(
     )
 
     assert response.status_code == 200
+    assert response.json()["revision"] == "a" * 40
     payload = response.json()
     assert payload["can_install"] is True
     assert payload["selected_files"] == [
@@ -7083,8 +7209,8 @@ async def test_catalog_preflight_selects_a_complete_split_gguf_set(
 
 
 async def test_catalog_preflight_explains_an_incomplete_split_gguf_set(
-    client: AsyncClient, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def inspect(
         _catalog: HuggingFaceCatalog,
         remote_id: str,
@@ -7130,8 +7256,31 @@ async def test_catalog_preflight_explains_an_incomplete_split_gguf_set(
 
 
 async def test_catalog_preflight_autoselects_safe_media_checkpoint(
-    client: AsyncClient, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient,
+    settings: Settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from test_downloads import safetensors_bytes
+
+    settings.media_engine = "comfyui"
+    external_runtime = tmp_path / "external-comfy"
+    external_runtime.mkdir()
+    settings.comfy_executable = external_runtime / "python.exe"
+    settings.comfy_executable.write_bytes(b"external runtime")
+    settings.comfy_directory = external_runtime / "ComfyUI"
+    settings.comfy_directory.mkdir()
+    (settings.comfy_directory / "main.py").write_text("", encoding="utf-8")
+
+    header = safetensors_bytes(
+        [
+            "model.diffusion_model.input_blocks.0.weight",
+            "cond_stage_model.transformer.text_model.embeddings.token_embedding.weight",
+            "first_stage_model.decoder.conv.weight",
+        ]
+    )
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect_file_prefix", AsyncMock(return_value=header))
+
     async def inspect(
         _catalog: HuggingFaceCatalog,
         remote_id: str,
@@ -7146,7 +7295,7 @@ async def test_catalog_preflight_autoselects_safe_media_checkpoint(
                 "compatibility": "likely",
                 "compatibility_reasons": ["safetensors artifact detected"],
             },
-            "revision": revision,
+            "revision": "a" * 40,
             "files": [
                 {"filename": "model.safetensors", "size": 2048, "sha256": "a" * 64},
                 {"filename": "vae.safetensors", "size": 1024, "sha256": "b" * 64},
@@ -7164,7 +7313,8 @@ async def test_catalog_preflight_autoselects_safe_media_checkpoint(
         },
     )
     assert response.status_code == 200
-    assert response.json()["can_install"] is True
+    assert response.json()["revision"] == "a" * 40
+    assert response.json()["can_install"] is True, response.json()["install_plan"]["failure_reason"]
     assert response.json()["selected_files"] == ["model.safetensors"]
 
 
@@ -7172,8 +7322,8 @@ async def test_comfy_catalog_preflight_offers_a_provisional_adaptive_checkpoint(
     client: AsyncClient,
     settings: Settings,
     tmp_path: Path,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     settings.media_engine = "comfyui"
     external_runtime = tmp_path / "external-comfy"
     external_runtime.mkdir()
@@ -7295,8 +7445,8 @@ async def test_workflow_catalog_preserves_exact_variants_and_preflights_the_chos
     client: AsyncClient,
     settings: Settings,
     tmp_path: Path,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """One repository, several official workflows: the card and the preflight
     must both say which one - ranking silently answered with the
     alphabetically-first variant regardless of what the user picked."""
@@ -7446,8 +7596,8 @@ async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
     client: AsyncClient,
     settings: Settings,
     tmp_path: Path,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     settings.media_engine = "comfyui"
     external_runtime = tmp_path / "external-comfy"
     external_runtime.mkdir()
@@ -7636,7 +7786,7 @@ async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
     assert [item["path"] for item in named["install_plan"]["artifacts_json"]] == [
         "model.safetensors"
     ]
-    assert named["install_plan"]["resolver_version"] == "install-resolver-v9"
+    assert named["install_plan"]["resolver_version"] == "install-resolver-v10"
     runtime_contract = named["install_plan"]["runtime_contract_json"]
     assert runtime_contract["workflow_reference_kind"] == "checkpoint"
     assert runtime_contract["workflow_asset_kind"] == "checkpoint"
@@ -7679,8 +7829,8 @@ async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
 async def test_comfy_catalog_preflight_blocks_an_unreviewed_managed_runtime(
     client: AsyncClient,
     settings: Settings,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     settings.media_engine = "comfyui"
 
     async def inspect(
@@ -7782,7 +7932,10 @@ async def test_workflow_edit_calibration_is_validated_and_portable(
             "name": "Calibrated edit",
             "operation": "image_to_image",
             "engine": "mock",
-            "api_graph": {"node": {"class_type": "Mock"}},
+            # The stub graph has to USE the strength it declares: a workflow
+            # that declares an edit strength and never consumes it is refused,
+            # because the slider built from that declaration would do nothing.
+            "api_graph": {"node": {"class_type": "Mock", "inputs": {"denoise": "${strength}"}}},
             "input_schema": input_schema,
         },
     )
@@ -7799,7 +7952,7 @@ async def test_workflow_edit_calibration_is_validated_and_portable(
     assert imported.status_code == 201, imported.text
     assert imported.json()["revisions"][0]["input_schema_json"] == input_schema
 
-    invalid_schema = deepcopy(input_schema)
+    invalid_schema: dict[str, Any] = deepcopy(input_schema)
     invalid_schema["x-lm-atelier-edit-calibration"]["edit_strength"]["parameter"] = "missing"
     rejected_create = await client.post(
         "/api/workflows",
@@ -8222,7 +8375,7 @@ async def _stored_image(client: AsyncClient, shade: int, name: str) -> str:
         files={"file": (name, buffer.getvalue(), "image/png")},
     )
     assert response.status_code in (200, 201), response.text
-    return response.json()["id"]
+    return cast(str, response.json()["id"])
 
 
 @pytest.mark.anyio
@@ -8314,7 +8467,7 @@ async def test_an_image_outside_the_store_cannot_be_attached(client: AsyncClient
     assert refused.json()["code"] == "reference-asset-invalid"
 
 
-def _media_worker(payload: list[dict[str, object]]) -> dict[str, object]:
+def _media_worker(payload: list[dict[str, object]]) -> dict[str, Any]:
     return next(worker for worker in payload if worker["name"] == "media")
 
 
@@ -8653,6 +8806,7 @@ async def test_comfyui_pre_submission_events_are_not_engine_sourced(
             parameters={},
         )
     )
+    assert isinstance(stream, AsyncGenerator)
     try:
         first = await stream.__anext__()
     finally:
@@ -8810,7 +8964,7 @@ async def test_an_unreadable_progress_stamp_is_skipped_rather_than_guessed(
     silently degrading everything to None, which would pass a weaker assertion.
     """
 
-    broken_shapes = (
+    broken_shapes: tuple[dict[str, object], ...] = (
         {"engine_reported_at": "not a timestamp"},
         {"engine_reported_at": 12345},
         {"updated_at": datetime.now(UTC).isoformat()},
@@ -8857,7 +9011,7 @@ async def test_an_unreadable_progress_stamp_is_skipped_rather_than_guessed(
     )
 
 
-async def _one_pass_claim_capture(monkeypatch: pytest.MonkeyPatch, job_id: str):  # type: ignore[no-untyped-def]
+async def _one_pass_claim_capture(monkeypatch: pytest.MonkeyPatch, job_id: str) -> JobClaim:
     """Like _one_pass_real_claim, but returns the JobClaim the pass minted.
 
     The claim identity is exactly what the attempt-owner barriers are about:
@@ -9185,8 +9339,8 @@ async def test_real_adapter_backend_events_reach_the_writer_with_provenance(
     ]
 
     class _StubSocket:
-        def __aiter__(self):  # type: ignore[no-untyped-def]
-            async def _frames():  # type: ignore[no-untyped-def]
+        def __aiter__(self) -> AsyncIterator[str]:
+            async def _frames() -> AsyncIterator[str]:
                 for frame in frames:
                     yield frame
 
@@ -9218,7 +9372,9 @@ async def test_real_adapter_backend_events_reach_the_writer_with_provenance(
     async def _stub_parameters(self: object, request: object) -> dict[str, object]:
         return {}
 
-    async def _stub_collect(self: object, prompt_id: str, operation: str):  # type: ignore[no-untyped-def]
+    async def _stub_collect(  # type: ignore[no-untyped-def]
+        self: object, prompt_id: str, operation: str, cancel_event: object = None
+    ):
         return [
             GeneratedAsset(
                 content=b"seam payload",
@@ -9343,7 +9499,7 @@ async def test_a_backend_completion_alone_stamps_the_attempt(
         assert job.progress_json.get("engine_report_attempt") == job.attempt
 
 
-def _queued_media_job(session, ticket: str) -> str:
+def _queued_media_job(session: Session, ticket: str) -> str:
     job = Job(
         kind="image",
         status="queued",
@@ -9358,7 +9514,7 @@ def _queued_media_job(session, ticket: str) -> str:
     return job.id
 
 
-def _row_state(session, job_id: str) -> tuple:  # type: ignore[type-arg]
+def _row_state(session: Session, job_id: str) -> tuple[object, ...]:
     row = session.get(Job, job_id)
     assert row is not None
     return (
@@ -9620,7 +9776,7 @@ async def test_an_old_producer_cannot_complete_the_new_attempt(
     _simulate_claim_expiry(job_id)
     new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
 
-    seam = _TerminalSeam()
+    seam = cast(ConversationOrchestrator, _TerminalSeam())
     with SessionLocal() as session:
         run, assistant = _terminal_graph(session, job_id)
         session.commit()
@@ -9672,7 +9828,7 @@ async def test_an_old_producer_cannot_fail_the_new_attempt(
     _simulate_claim_expiry(job_id)
     new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
 
-    seam = _TerminalSeam()
+    seam = cast(ConversationOrchestrator, _TerminalSeam())
     with SessionLocal() as session:
         run, _assistant = _terminal_graph(session, job_id)
         session.commit()
@@ -9718,7 +9874,7 @@ async def test_terminal_transitions_accept_a_released_but_current_claim(
         row.claim_expires_at = None
         session.commit()
 
-    seam = _TerminalSeam()
+    seam = cast(ConversationOrchestrator, _TerminalSeam())
     with SessionLocal() as session:
         accepted = seam._claim_terminal_transition(session, job_id, claim, status="cancelled")
         assert accepted is True, "a released row refused its own claimant"
@@ -9747,7 +9903,7 @@ async def test_a_stale_stream_cannot_replace_the_new_attempts_text(
     _simulate_claim_expiry(job_id)
     new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
 
-    seam = _TerminalSeam()
+    seam = cast(ConversationOrchestrator, _TerminalSeam())
     with SessionLocal() as session:
         _run, assistant = _terminal_graph(session, job_id)
         session.commit()
@@ -9979,15 +10135,29 @@ async def test_a_stale_phase_write_neither_persists_nor_publishes(
         assert row.phase == "Live phase"
 
 
-def _queued_verification_job(session, ticket: str) -> str:  # type: ignore[no-untyped-def]
-    """An EDIT_VERIFY job whose payload cannot validate: the real verifier
-    reaches its first terminal funnel without any vision worker."""
-
+def _queued_verification_job(session: Session, ticket: str) -> str:
+    """A claimable EDIT_VERIFY job with an incomplete assessment payload."""
+    chat = Chat()
+    session.add(chat)
+    session.flush()
+    user = Message(chat_id=chat.id, role="user")
+    assistant = Message(chat_id=chat.id, role="assistant")
+    session.add_all([user, assistant])
+    session.flush()
+    source = Run(
+        chat_id=chat.id,
+        user_message_id=user.id,
+        assistant_message_id=assistant.id,
+        operation="image_edit",
+        status="complete",
+    )
+    session.add(source)
+    session.flush()
     job = Job(
         kind=JobKind.EDIT_VERIFY.value,
         status="queued",
         phase="queued",
-        payload_json={"not": "a verification payload"},
+        payload_json={"source_run_id": source.id},
         queue_group="primary",
         queue_resource="interactive_compute",
         queue_ticket=ticket,
@@ -10082,7 +10252,7 @@ async def test_a_live_stream_stops_speaking_the_moment_its_claim_is_lost(
 
     old_claim = await _one_pass_claim_capture(monkeypatch, job_id)
     execution = asyncio.create_task(orch._execute_chat(job_id, run_id, old_claim))
-    await asyncio.wait_for(first_heard.wait(), timeout=10)
+    await asyncio.wait_for(first_heard.wait(), timeout=PATIENCE_SECONDS)
     assert deltas == ["first "], "the first delta of a live claim was not heard"
     assert attempts == [old_claim.attempt], "the delta must name the attempt that spoke it"
 
@@ -10091,7 +10261,7 @@ async def test_a_live_stream_stops_speaking_the_moment_its_claim_is_lost(
     assert new_claim.attempt == old_claim.attempt + 1
 
     resume.set()
-    await asyncio.wait_for(execution, timeout=10)
+    await asyncio.wait_for(execution, timeout=PATIENCE_SECONDS)
 
     assert deltas == ["first "], "a delta was heard after the claim was lost"
     with SessionLocal() as session:
@@ -10165,7 +10335,7 @@ async def test_a_stale_execution_cannot_write_provenance_after_its_awaits(
 
 async def _claimed_text_job(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> tuple[str, str, object]:
+) -> tuple[str, str, JobClaim]:
     """A chat with one queued text turn whose job is claimed by one real
     scheduler pass; returns (chat id, job id, the minted claim)."""
 
@@ -10547,9 +10717,9 @@ async def test_the_retry_hook_binds_the_turn_under_a_current_claim(
         try:
             accepted = await orch._create_image_edit_verification_retry(
                 session,
-                payload,  # type: ignore[arg-type]
-                decision,  # type: ignore[arg-type]
-                claim=claim,  # type: ignore[arg-type]
+                payload,
+                decision,
+                claim=claim,
             )
         finally:
             event.remove(session, "after_commit", after_commit)
@@ -10618,9 +10788,9 @@ async def test_the_retry_hook_refuses_the_turn_under_a_lost_claim(
         with pytest.raises(ClaimLost):
             await orch._create_image_edit_verification_retry(
                 session,
-                payload,  # type: ignore[arg-type]
-                decision,  # type: ignore[arg-type]
-                claim=claim,  # type: ignore[arg-type]
+                payload,
+                decision,
+                claim=claim,
             )
         session.rollback()
 
@@ -10636,7 +10806,7 @@ async def test_the_retry_hook_refuses_the_turn_under_a_lost_claim(
 
 async def _claimed_media_job(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> tuple[str, str, object]:
+) -> tuple[str, str, JobClaim]:
     """A chat with one queued image turn whose job is claimed by one
     scheduler pass; returns (job id, run id, the minted claim)."""
 
@@ -10719,7 +10889,7 @@ async def test_a_refused_phase_during_the_start_ends_the_execution_before_infere
     monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
     job_id, run_id, claim = await _claimed_media_job(client, monkeypatch)
 
-    async def start_media(*args: object, **kwargs: object) -> None:
+    async def start_media(*args: object, **kwargs: Any) -> None:
         callback = kwargs.get("phase_callback")
         assert callback is not None
         await callback("Launching")
@@ -11073,12 +11243,13 @@ async def test_a_publication_failure_after_the_retry_commit_converges(
     monkeypatch.setattr(orch.events, "publish", failing_first_announcement)
     with SessionLocal() as session:
         runs_before = session.scalar(select(func.count()).select_from(Run))
+        assert runs_before is not None
         with pytest.raises(RuntimeError):
             await orch._create_image_edit_verification_retry(
                 session,
-                payload,  # type: ignore[arg-type]
-                decision,  # type: ignore[arg-type]
-                claim=claim,  # type: ignore[arg-type]
+                payload,
+                decision,
+                claim=claim,
                 source_record={"status": "complete"},
             )
         session.rollback()
@@ -11093,16 +11264,16 @@ async def test_a_publication_failure_after_the_retry_commit_converges(
         assert session.scalar(select(func.count()).select_from(Run)) == runs_before + 1
     assert started == [], "the failed announcement started the retry anyway"
 
-    converged, converged_started = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+    converged, converged_started = await orch._converge_on_bound_retry(payload)
     assert converged is not None and converged.run.id == bound_run_id
     assert converged_started, "the convergence reported no start it had made"
     assert started, "the bound retry was not started on convergence"
     with SessionLocal() as session:
         again = await orch._create_image_edit_verification_retry(
             session,
-            payload,  # type: ignore[arg-type]
-            decision,  # type: ignore[arg-type]
-            claim=claim,  # type: ignore[arg-type]
+            payload,
+            decision,
+            claim=claim,
         )
         assert again.run.id == bound_run_id, "a second retry was created for the same source"
         assert session.scalar(select(func.count()).select_from(Run)) == runs_before + 1
@@ -11141,15 +11312,15 @@ async def test_a_convergence_that_cannot_announce_reports_no_start(
         with pytest.raises(RuntimeError):
             await orch._create_image_edit_verification_retry(
                 session,
-                payload,  # type: ignore[arg-type]
-                decision,  # type: ignore[arg-type]
-                claim=claim,  # type: ignore[arg-type]
+                payload,
+                decision,
+                claim=claim,
                 source_record={"status": "complete"},
             )
         session.rollback()
     assert started == [], "the failed announcement started the retry anyway"
 
-    converged, converged_started = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+    converged, converged_started = await orch._converge_on_bound_retry(payload)
 
     assert converged is not None, "the durable binding was lost"
     assert converged_started is False, "the convergence reported a start it never made"
@@ -11192,9 +11363,9 @@ async def test_retry_convergence_keeps_a_durable_binding_when_materialization_fa
         with pytest.raises(RuntimeError):
             await orch._create_image_edit_verification_retry(
                 session,
-                payload,  # type: ignore[arg-type]
-                decision,  # type: ignore[arg-type]
-                claim=claim,  # type: ignore[arg-type]
+                payload,
+                decision,
+                claim=claim,
                 source_record={"status": "complete"},
             )
         session.rollback()
@@ -11212,7 +11383,7 @@ async def test_retry_convergence_keeps_a_durable_binding_when_materialization_fa
     reads = {"n": 0}
 
     def failing_first_materialization(self, statement, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if reads["n"] == 0:
+        if reads["n"] == 0 and statement.column_descriptions[0]["entity"] is WorkStep:
             reads["n"] += 1
             raise OperationalError("database is locked", {}, Exception("database is locked"))
         return real_scalars(self, statement, *args, **kwargs)
@@ -11220,7 +11391,7 @@ async def test_retry_convergence_keeps_a_durable_binding_when_materialization_fa
     # Patched for the rest of the control: only the first read fails, and an
     # undo here would also remove the start recorder above.
     monkeypatch.setattr(Session, "scalars", failing_first_materialization)
-    converged, _converged_started = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+    converged, _converged_started = await orch._converge_on_bound_retry(payload)
 
     assert reads["n"] == 1, "the second-stage read was never reached"
     assert converged is not None and converged.run.id == bound_run_id, (
@@ -11236,7 +11407,7 @@ async def test_retry_convergence_keeps_a_durable_binding_when_materialization_fa
 
     # The next pass, with the read healthy, still converges on the same retry.
     started.clear()
-    again, _again_started = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+    again, _again_started = await orch._converge_on_bound_retry(payload)
     assert again is not None and again.run.id == bound_run_id
     assert started, "the bound retry was not started on the later pass"
 
@@ -11326,8 +11497,8 @@ async def test_a_claim_lost_after_the_completion_stamp_persists_no_asset(
 
 
 async def test_a_queue_of_images_restores_the_chat_model_once_at_the_end(
-    client: AsyncClient, app: FastAPI, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The run's last image must still reach the handoff that puts chat back.
 
     Only the FIRST image of a run displaces chat, because every later one finds
@@ -11409,7 +11580,7 @@ async def test_a_queue_of_images_restores_the_chat_model_once_at_the_end(
         json={"text": "A grey mug on a table", "mode": "image"},
     )
     assert first.status_code == 202
-    await asyncio.wait_for(first_started.wait(), timeout=5)
+    await asyncio.wait_for(first_started.wait(), timeout=PATIENCE_SECONDS)
     second = await client.post(
         f"/api/chats/{chat['id']}/turns",
         json={"text": "A blue mug on a table", "mode": "image"},
@@ -11417,19 +11588,17 @@ async def test_a_queue_of_images_restores_the_chat_model_once_at_the_end(
     assert second.status_code == 202
     release_first.set()
 
-    deadline = asyncio.get_running_loop().time() + 10
-    while asyncio.get_running_loop().time() < deadline:
+    async def read_completed() -> list[dict[str, Any]]:
         messages = (await client.get(f"/api/chats/{chat['id']}")).json()["messages"]
-        done = [
+        return [
             message
             for message in messages
             if message["role"] == "assistant" and message["status"] == "complete"
         ]
-        if len(done) == 2:
-            break
-        await asyncio.sleep(0.03)
-    else:  # pragma: no cover - the queue did not drain
-        raise AssertionError("both queued images did not complete")
+
+    await wait_until(
+        read_completed, lambda done: len(done) == 2, what="both queued images completing"
+    )
 
     # The second entry is the whole point: it exists only because the dispatch
     # asked what the run still owed rather than what this job displaced.
@@ -11443,8 +11612,8 @@ async def test_a_queue_of_images_restores_the_chat_model_once_at_the_end(
 
 
 async def test_a_media_run_that_loses_its_claim_moves_no_worker_on_the_way_out(
-    client: AsyncClient, app: FastAPI, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A replaced attempt must not complete the handoff on a successor's behalf.
 
     The dispatch's outer finally runs even when the media execution raises
@@ -11515,7 +11684,7 @@ async def test_a_media_run_that_loses_its_claim_moves_no_worker_on_the_way_out(
     real_pending = orchestrator._pending_chat_restore
 
     def watched_pending(resume_chat_profile: str | None) -> str | None:
-        answer = real_pending(resume_chat_profile)
+        answer: str | None = real_pending(resume_chat_profile)
         decided.set()
         return answer
 
@@ -11549,9 +11718,9 @@ async def test_a_media_run_that_loses_its_claim_moves_no_worker_on_the_way_out(
         json={"text": "A grey mug on a table", "mode": "image"},
     )
     assert accepted.status_code == 202
-    await asyncio.wait_for(reclaimed.wait(), timeout=5)
+    await asyncio.wait_for(reclaimed.wait(), timeout=PATIENCE_SECONDS)
 
-    await asyncio.wait_for(decided.wait(), timeout=10)
+    await asyncio.wait_for(decided.wait(), timeout=PATIENCE_SECONDS)
     # Let the handoff run if the dispatch is going to run it, so an assertion of
     # absence is not just winning a race with it.
     await asyncio.sleep(0.2)

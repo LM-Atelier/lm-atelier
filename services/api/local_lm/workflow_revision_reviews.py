@@ -21,6 +21,8 @@ from .models import (
     WorkflowRevision,
     WorkflowRevisionReview,
 )
+from .revision_dependency_contract import declared_dependency_contract
+from .workflow_bindings import _matches_constraints, materialize_registry_package
 
 _MAX_ENTRIES = 100_000
 _MAX_DEPTH = 32
@@ -271,7 +273,14 @@ def _package_pin(install: CustomNodeInstall | ComfyRegistryInstall) -> dict[str,
         "version": install.package_version,
         "archive": install.archive_sha256,
         "manifest": install.manifest_sha256,
-        "security": _digest(install.review_json),
+        # Batch progress changes during activation without changing reviewed code.
+        "security": _digest(
+            {
+                key: value
+                for key, value in install.review_json.items()
+                if key != "activation_batch_v1"
+            }
+        ),
         "node_types": sorted(install.node_types_json),
         "wheel_closure": install.wheel_closure_sha256,
         "wheel_environment": install.wheel_environment_sha256,
@@ -283,6 +292,17 @@ def _package_pin(install: CustomNodeInstall | ComfyRegistryInstall) -> dict[str,
 def _declared(
     install: CustomNodeInstall | ComfyRegistryInstall, dependencies: dict[str, Any]
 ) -> bool:
+    contract = declared_dependency_contract(dependencies)
+    if contract is not None and isinstance(install, ComfyRegistryInstall):
+        registry_identity = materialize_registry_package(install).identity
+        return any(
+            slot.resource_kind == "registry_package"
+            and any(
+                _matches_constraints(requirement.constraints, registry_identity)
+                for requirement in slot.requirements
+            )
+            for slot in contract.slots
+        )
     key = "custom_nodes" if isinstance(install, CustomNodeInstall) else "registry_packages"
     values = dependencies.get(key, [])
     if not isinstance(values, list):

@@ -1,3 +1,5 @@
+import { mockWorkflowFamilyPages } from "./workflowFamilyReadFixtures";
+import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -6,7 +8,7 @@ import { api } from "./api";
 import type { Workflow, WorkflowFamily, WorkflowFamilyRemovalImpact, WorkflowDependencyImpact } from "./types";
 
 vi.mock("./api", () => ({ api: {
-  workflows: vi.fn(), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
+  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilyOperations: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
   updateWorkflowFamily: vi.fn(), setWorkflowFamilyPreference: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
@@ -36,8 +38,9 @@ function wrap(element: React.ReactNode) {
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  mockWorkflowReadsFromFixture(() => api.workflows());
   vi.mocked(api.workflows).mockResolvedValue([workflow("a"), workflow("b")]);
-  vi.mocked(api.workflowFamilies).mockResolvedValue([family("a"), family("b")]);
+  mockWorkflowFamilyPages([family("a"), family("b")]);
 
   vi.mocked(api.updateWorkflowFamily).mockResolvedValue({ ...family("b"), archived: true, enabled: false });
 });
@@ -57,7 +60,7 @@ function dependency(overrides: Partial<WorkflowDependencyImpact> = {}): Workflow
 }
 async function openDependencies() {
   fireEvent.click(await screen.findByText("Workflow a"));
-  fireEvent.click(screen.getByRole("button", { name: "Show dependencies" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Show dependencies" }));
   return screen.getByRole("region", { name: "Family dependencies" });
 }
 
@@ -72,7 +75,7 @@ describe("workflow family dependencies", () => {
     wrap(<WorkflowsView />);
     fireEvent.click(await screen.findByText("Workflow a"));
     expect(api.workflowFamilyRemovalImpact).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Show dependencies" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show dependencies" }));
     const region = screen.getByRole("region", { name: "Family dependencies" });
     await within(region).findByText("Neutral image model");
     for (const name of ["Model profiles", "Model files", "Model assets", "Custom nodes", "Registry packages", "Runtimes"]) {
@@ -129,8 +132,8 @@ describe("workflow family dependencies", () => {
     await openDependencies();
     await waitFor(() => expect(api.workflowFamilyRemovalImpact).toHaveBeenCalledWith("family-a"));
     fireEvent.click(screen.getByText("Workflow b"));
-    expect(screen.getByRole("button", { name: "Show dependencies" })).toHaveAttribute("aria-expanded", "false");
-    fireEvent.click(screen.getByRole("button", { name: "Show dependencies" }));
+    expect(await screen.findByRole("button", { name: "Show dependencies" })).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(await screen.findByRole("button", { name: "Show dependencies" }));
     await screen.findByText("Second family model");
     await act(async () => { finish?.({ ...impact("a"), dependencies: [dependency()] }); });
     expect(screen.queryByText("Neutral image model")).not.toBeInTheDocument();

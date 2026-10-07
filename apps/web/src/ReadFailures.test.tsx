@@ -7,7 +7,7 @@ import { api } from "./api";
 
 vi.mock("./api", () => ({
   api: {
-    jobs: vi.fn(),
+    jobActivity: vi.fn(),
     cancelJob: vi.fn(),
     pauseDownload: vi.fn(),
     resumeDownload: vi.fn(),
@@ -31,7 +31,7 @@ describe("a read that failed", () => {
   it("keeps the jobs panel rather than removing the only explanation", async () => {
     // Returning null took the status surface away at exactly the moment
     // something was wrong, leaving the workspace looking idle.
-    vi.mocked(api.jobs).mockRejectedValue(new Error("jobs could not be read"));
+    vi.mocked(api.jobActivity).mockRejectedValue(new Error("jobs could not be read"));
 
     wrap(<JobsPanel />);
 
@@ -39,7 +39,7 @@ describe("a read that failed", () => {
   });
 
   it("keeps image edit checks out of the ordinary jobs surface", async () => {
-    vi.mocked(api.jobs).mockResolvedValue([
+    vi.mocked(api.jobActivity).mockResolvedValue({ active: [
       {
         id: "check-running",
         kind: "edit_verify",
@@ -51,11 +51,11 @@ describe("a read that failed", () => {
         status: "failed",
         error: "assessment unavailable",
       },
-    ] as never);
+    ], active_count: 0, recent_issues: [] } as never);
 
     wrap(<JobsPanel />);
 
-    await waitFor(() => expect(api.jobs).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api.jobActivity).toHaveBeenCalledTimes(1));
     expect(screen.queryByLabelText("Jobs")).toBeNull();
   });
 

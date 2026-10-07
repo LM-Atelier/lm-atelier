@@ -1,3 +1,5 @@
+import { mockWorkflowFamilyPages } from "./workflowFamilyReadFixtures";
+import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -6,7 +8,7 @@ import { api } from "./api";
 import type { Workflow, WorkflowFamily, WorkflowFamilyRemovalImpact } from "./types";
 
 vi.mock("./api", () => ({ api: {
-  workflows: vi.fn(), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
+  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilyOperations: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
   updateWorkflowFamily: vi.fn(), setWorkflowFamilyPreference: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
@@ -36,8 +38,9 @@ function wrap(element: React.ReactNode) {
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  mockWorkflowReadsFromFixture(() => api.workflows());
   vi.mocked(api.workflows).mockResolvedValue([workflow("a"), workflow("b")]);
-  vi.mocked(api.workflowFamilies).mockResolvedValue([family("a"), family("b")]);
+  mockWorkflowFamilyPages([family("a"), family("b")]);
 
   vi.mocked(api.updateWorkflowFamily).mockResolvedValue({ ...family("b"), archived: true, enabled: false });
 });
@@ -55,7 +58,7 @@ describe("workflow family usage", () => {
     vi.mocked(api.workflowFamilyRemovalImpact).mockResolvedValue(impact("a"));
     wrap(<WorkflowsView />);
     fireEvent.click(await screen.findByText("Workflow a"));
-    const toggle = screen.getByRole("button", { name: "Show usage" });
+    const toggle = await screen.findByRole("button", { name: "Show usage" });
     expect(api.workflowFamilyRemovalImpact).not.toHaveBeenCalled();
     fireEvent.click(toggle);
     const region = screen.getByRole("region", { name: "Family usage" });
@@ -72,12 +75,14 @@ describe("workflow family usage", () => {
       .mockReturnValueOnce(new Promise(() => {}));
     wrap(<WorkflowsView />);
     fireEvent.click(await screen.findByText("Workflow a"));
-    fireEvent.click(screen.getByRole("button", { name: "Show usage" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show usage" }));
     await screen.findByText("Historical runs");
     fireEvent.click(screen.getByRole("button", { name: "Archive family" }));
     await waitFor(() => expect(api.workflowFamilyRemovalImpact).toHaveBeenCalledTimes(2));
     const dialog = screen.getByRole("dialog", { name: "Archive Family a?" });
-    expect(within(dialog).getByRole("button", { name: /^Archive(?: it)?$/ })).toBeDisabled();
+    const confirm = within(dialog).getByRole("button", { name: /^Archive(?: it)?$/ });
+    expect(confirm).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(confirm);
     expect(api.updateWorkflowFamily).not.toHaveBeenCalled();
   });
 
@@ -85,7 +90,7 @@ describe("workflow family usage", () => {
     vi.mocked(api.workflowFamilyRemovalImpact).mockReturnValue(new Promise(() => {}));
     wrap(<WorkflowsView />);
     fireEvent.click(await screen.findByText("Workflow a"));
-    fireEvent.click(screen.getByRole("button", { name: "Show usage" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show usage" }));
     expect(await screen.findByText("Loading usage…")).toBeInTheDocument();
     expect(screen.queryByText("Chat selections")).not.toBeInTheDocument();
   });
@@ -95,7 +100,7 @@ describe("workflow family usage", () => {
       .mockResolvedValueOnce(impact("a"));
     wrap(<WorkflowsView />);
     fireEvent.click(await screen.findByText("Workflow a"));
-    fireEvent.click(screen.getByRole("button", { name: "Show usage" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show usage" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Usage could not be read");
     fireEvent.click(screen.getByRole("button", { name: "Retry usage" }));
     await screen.findByText("Historical runs");
@@ -108,10 +113,10 @@ describe("workflow family usage", () => {
       ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve({ ...impact("b"), historical_run_count: 27 }));
     wrap(<WorkflowsView />);
     fireEvent.click(await screen.findByText("Workflow a"));
-    fireEvent.click(screen.getByRole("button", { name: "Show usage" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show usage" }));
     await waitFor(() => expect(api.workflowFamilyRemovalImpact).toHaveBeenCalledWith("family-a"));
     fireEvent.click(screen.getByText("Workflow b"));
-    fireEvent.click(screen.getByRole("button", { name: "Show usage" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show usage" }));
     await screen.findByText("27");
     await act(async () => finish?.({ ...impact("a"), historical_run_count: 99 }));
     expect(screen.queryByText("99")).not.toBeInTheDocument();

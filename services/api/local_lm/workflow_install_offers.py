@@ -5,7 +5,6 @@ import json
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -18,10 +17,12 @@ from .domain import new_id, utcnow
 from .model_planner import workflow_artifact_contract
 from .models import (
     InstallPlan,
+    Job,
     WorkflowDefinition,
     WorkflowDependencySlot,
     WorkflowFamily,
     WorkflowInstallOffer,
+    WorkflowInstallOfferDownload,
     WorkflowRevision,
 )
 from .schemas import DownloadRequest
@@ -46,40 +47,18 @@ from .workflow_dependencies import (
     workflow_dependency_contract_sha256,
     workflow_dependency_slot_sha256,
 )
-from .workflow_dependency_error_types import (
-    WorkflowAssetAliasErrorCode,
-    WorkflowDependencyErrorCode,
+from .workflow_install_offer_error_types import (
+    WorkflowInstallOfferErrorCode as WorkflowInstallOfferErrorCode,
 )
-from .workflow_graph_error_types import WorkflowGraphErrorCode
+from .workflow_install_offer_error_types import (
+    WorkflowInstallOfferInvalidationCode as WorkflowInstallOfferInvalidationCode,
+)
+from .workflow_revision_reviews import review_is_current
 
 WORKFLOW_INSTALL_OFFER_VERSION = 1
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _READY = "ready"
-
-
-WorkflowInstallOfferErrorCode = (
-    Literal[
-        "invalid-install-plan",
-        "invalid-workflow-install-offer",
-        "too-many-workflow-install-selections",
-        "unverified-install-artifact",
-        "workflow-artifact-drift",
-        "workflow-contract-drift",
-        "workflow-family-unavailable",
-        "workflow-install-not-needed",
-        "workflow-install-offer-changed",
-        "workflow-install-offer-incomplete",
-        "workflow-install-offer-not-actionable",
-        "workflow-install-offer-not-found",
-        "workflow-revision-needs-attention",
-        "workflow-revision-not-current",
-        "workflow-revision-unavailable",
-    ]
-    | WorkflowGraphErrorCode
-    | WorkflowAssetAliasErrorCode
-    | WorkflowDependencyErrorCode
-)
 
 
 class WorkflowInstallOfferError(ValueError):
@@ -98,6 +77,59 @@ class ReviewedWorkflowInstallOffer:
     plan_count: int
     total_bytes: int
     download_requests: tuple[DownloadRequest, ...]
+
+
+def current_reviewed_workflow_install_offer(
+    session: Session, *, workflow_id: str, revision_id: str
+) -> WorkflowInstallOffer | None:
+    """Project one reviewed snapshot for the current revision without side effects.
+
+    This checks recorded execution/dependency identities, not live inventory.
+    Installation must still use revalidate_workflow_install_offer before jobs.
+    Ambiguous ready records never become an arbitrary install action.
+    """
+
+    try:
+        offers = list(
+            session.scalars(
+                select(WorkflowInstallOffer)
+                .where(
+                    WorkflowInstallOffer.workflow_revision_id == revision_id,
+                    WorkflowInstallOffer.status == _READY,
+                )
+                .limit(2)
+            ).all()
+        )
+        if len(offers) != 1:
+            return None
+        revision = _eligible_revision(session, workflow_id, revision_id)
+        offer = offers[0]
+        if (
+            offer.workflow_artifact_sha256 != revision.artifact_sha256
+            or offer.dependency_contract_sha256 != revision.dependency_contract_sha256
+            or any(
+                value is not None
+                for value in (
+                    offer.queued_at,
+                    offer.completed_at,
+                    offer.invalidated_at,
+                    offer.invalidation_code,
+                    offer.invalidation_reason,
+                )
+            )
+            or not isinstance(offer.assets_json, list)
+            or not offer.assets_json
+            or offer.offer_sha256
+            != _offer_sha256(
+                revision,
+                binding_plan_sha256=offer.binding_plan_sha256,
+                assets=offer.assets_json,
+            )
+        ):
+            return None
+        return offer
+    except (TypeError, ValueError):
+        return None
 
 
 def create_workflow_install_offer(
@@ -206,6 +238,64 @@ def revalidate_workflow_install_offer(
     return offer, reviewed.download_requests
 
 
+def assert_workflow_install_offer_identity(
+    session: Session, offer: WorkflowInstallOffer
+) -> WorkflowRevision:
+    """Recheck a persisted offer's content without treating installed files as missing."""
+
+    revision = session.get(WorkflowRevision, offer.workflow_revision_id)
+    if revision is None:
+        raise WorkflowInstallOfferError(
+            "workflow-revision-unavailable", "The workflow revision is unavailable."
+        )
+    revision = _eligible_revision(session, revision.workflow_id, revision.id)
+    if offer.source_plan_id is not None:
+        from .workflow_package_acceptance import assert_compiled_workflow_package_offer
+
+        assert_compiled_workflow_package_offer(session, offer, revision)
+        return revision
+    if (
+        offer.workflow_artifact_sha256 != revision.artifact_sha256
+        or offer.dependency_contract_sha256 != revision.dependency_contract_sha256
+        or not isinstance(offer.assets_json, list)
+        or not offer.assets_json
+        or offer.offer_sha256
+        != _offer_sha256(
+            revision,
+            binding_plan_sha256=offer.binding_plan_sha256,
+            assets=offer.assets_json,
+        )
+    ):
+        raise WorkflowInstallOfferError(
+            "workflow-install-offer-changed", "The accepted installation changed."
+        )
+    return revision
+
+
+def bind_workflow_offer_downloads(
+    session: Session, offer: WorkflowInstallOffer, jobs: Sequence[Job]
+) -> None:
+    """Bind accepted requests before the offer and its jobs commit together."""
+
+    if offer.status != _READY or len(jobs) != offer.plan_count:
+        raise WorkflowInstallOfferError(
+            "workflow-install-offer-incomplete", "The reviewed downloads are incomplete."
+        )
+    session.flush()
+    for job in jobs:
+        accepted = json.loads(json.dumps(job.payload_json, sort_keys=True, ensure_ascii=True))
+        encoded = json.dumps(accepted, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        session.add(
+            WorkflowInstallOfferDownload(
+                offer_id=offer.id,
+                offer_sha256=offer.offer_sha256,
+                job_id=job.id,
+                request_sha256=hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+                request_json=accepted,
+            )
+        )
+
+
 def mark_workflow_install_offer_queued(offer: WorkflowInstallOffer) -> None:
     if offer.status != _READY:
         raise WorkflowInstallOfferError(
@@ -219,7 +309,7 @@ def mark_workflow_install_offer_queued(offer: WorkflowInstallOffer) -> None:
 def invalidate_workflow_install_offer(
     offer: WorkflowInstallOffer,
     *,
-    code: str,
+    code: WorkflowInstallOfferInvalidationCode,
     reason: str,
 ) -> None:
     if offer.status in {"completed", "invalidated", "expired"}:
@@ -363,7 +453,7 @@ def _eligible_revision(
             )
     if (
         revision.engine != "comfyui"
-        or not revision.trusted
+        or not review_is_current(session, definition, revision)
         or not isinstance(revision.ui_graph_json, dict)
         or not revision.ui_graph_json
     ):

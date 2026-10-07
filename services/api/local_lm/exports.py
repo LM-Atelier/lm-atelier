@@ -19,6 +19,7 @@ from .artifact_library import ensure_library_entry
 from .artifact_library_schema import ARTIFACT_METADATA_REFERENCE_KEYS
 from .artifacts import ArtifactStore
 from .auxiliary_assets import AUXILIARY_ASSET_KINDS
+from .chat_recovery_visibility import visible_chat
 from .config import Settings
 from .domain import (
     ArtifactKind,
@@ -44,6 +45,7 @@ from .models import (
     Run,
     RunContextArtifact,
 )
+from .portable_archive_v1 import MAX_PASSPHRASE_BYTES, ArchiveRefused
 from .profile_service import AUTO_PROFILE_ID
 from .project_accepted_context import (
     export_accepted_contexts,
@@ -51,6 +53,7 @@ from .project_accepted_context import (
     removed_at,
     validate_accepted_contexts,
 )
+from .project_archive_encryption import STAGING_PREFIX, encrypt_export, private_staging
 from .project_dependencies import (
     DependencySourceIndex,
     ImportedDependencies,
@@ -58,13 +61,18 @@ from .project_dependencies import (
     dependency_source_index,
     install_dependency_manifest,
     parse_dependency_manifest,
+    refuse_workflow_lora_overrides,
+    strip_workflow_lora_overrides,
 )
 from .project_portability import has_local_path, redact_local_paths
+from .project_recovery_visibility import live_project
 from .project_work_plans import export_work_plans, import_work_plans, validate_work_plans
+from .project_workflow_provenance import remap_workflow_provenance
 from .prompt_helpers import STANDARD_CHAT_SCOPE
 from .saved_settings import normalize_saved_settings
 from .schemas import ChatDetail, ProjectOut, RunOut, SettingField, VisionSettings
 from .settings_registry import validate_settings
+from .workflow_use_case_preset_provenance import read_workflow_use_case_preset
 
 _CAS_IMPORT_SESSION_KEY = "lm_atelier_project_import_cas"
 
@@ -121,8 +129,23 @@ class ProjectExporter:
         # Live engine schema per role, supplied per import by the request layer.
         self._known_fields: dict[str, list[SettingField]] = {}
 
-    def export(self, session: Session, project_id: str, *, include_media: bool = True) -> Artifact:
-        project = session.get(Project, project_id)
+    def export(
+        self,
+        session: Session,
+        project_id: str,
+        *,
+        include_media: bool = True,
+        passphrase: bytes | None = None,
+    ) -> Artifact:
+        """Write a project archive into the store, encrypted under ``passphrase`` when given.
+
+        An encrypted export's plaintext stays in a staged file that is removed
+        before this returns; only the encrypted form reaches the store.
+        """
+        if passphrase is not None and not 1 <= len(passphrase) <= MAX_PASSPHRASE_BYTES:
+            # Refused before the archive is built rather than after.
+            raise ArchiveRefused("archive-passphrase-invalid")
+        project = live_project(session, project_id)
         if not project:
             raise LookupError("project not found")
         chats = session.scalars(
@@ -136,7 +159,11 @@ class ProjectExporter:
                 .selectinload(ResponseRevision.parts)
                 .selectinload(ResponseRevisionPart.artifact),
             )
-            .where(Chat.project_id == project_id, Chat.scope == STANDARD_CHAT_SCOPE)
+            .where(
+                Chat.project_id == project_id,
+                Chat.scope == STANDARD_CHAT_SCOPE,
+                visible_chat(Chat.id),
+            )
             .order_by(Chat.created_at)
         ).all()
         runs = session.scalars(
@@ -216,7 +243,12 @@ class ProjectExporter:
         runs_by_id = {run.id: run for run in runs}
         chat_records: list[dict[str, Any]] = []
         for chat in chats:
-            record = ChatDetail.model_validate(chat).model_dump(mode="json")
+            record = ChatDetail.model_validate(chat).model_dump(
+                mode="json",
+                exclude={
+                    "messages": {"__all__": {"response_revisions": {"__all__": {"activity"}}}}
+                },
+            )
             self._snapshot_generation_defaults(session, chat, record, dependency_index)
             record["generation_settings_json"] = redact_local_paths(
                 record["generation_settings_json"]
@@ -344,12 +376,21 @@ class ProjectExporter:
             "dependencies": dependency_manifest,
             "auxiliary_requirements": auxiliary_requirements,
         }
+        manifest = cast(dict[str, Any], strip_workflow_lora_overrides(manifest))
         if has_local_path([record["provenance_json"] for record in run_records]):
             raise ValueError("project export contains a non-portable local path")
         with tempfile.NamedTemporaryFile(
-            dir=self.settings.export_dir, suffix=".lm-atelier.zip", delete=False
+            # Staged in the private folder under a name startup removes, so the
+            # plaintext is never readable by others and cannot outlast a crash.
+            dir=private_staging(self.settings.export_dir)
+            if passphrase is not None
+            else self.settings.export_dir,
+            prefix=STAGING_PREFIX if passphrase is not None else "tmp",
+            suffix=".lm-atelier.zip",
+            delete=False,
         ) as handle:
             temporary = Path(handle.name)
+        encrypted: Path | None = None
         try:
             with zipfile.ZipFile(temporary, "w", allowZip64=True) as archive:
                 archive.writestr(
@@ -364,22 +405,35 @@ class ProjectExporter:
                             self._archive_path(artifact),
                             compress_type=zipfile.ZIP_STORED,
                         )
+            metadata = {
+                "format": "local-lm-project",
+                "version": 7,
+                "project_id": project.id,
+                "artifact_count": len(referenced),
+                "media_included": include_media,
+            }
+            if passphrase is None:
+                return self.artifacts.ingest_path(
+                    session,
+                    temporary,
+                    kind=ArtifactKind.EXPORT,
+                    media_type="application/zip",
+                    original_name=f"{self._safe_name(project.name)}.lm-atelier.zip",
+                    metadata=metadata,
+                )
+            encrypted = encrypt_export(temporary, self.settings.export_dir, passphrase)
             return self.artifacts.ingest_path(
                 session,
-                temporary,
+                encrypted,
                 kind=ArtifactKind.EXPORT,
-                media_type="application/zip",
-                original_name=f"{self._safe_name(project.name)}.lm-atelier.zip",
-                metadata={
-                    "format": "local-lm-project",
-                    "version": 7,
-                    "project_id": project.id,
-                    "artifact_count": len(referenced),
-                    "media_included": include_media,
-                },
+                media_type="application/octet-stream",
+                original_name=f"{self._safe_name(project.name)}.lm-atelier.encrypted",
+                metadata={**metadata, "encrypted": True},
             )
         finally:
             temporary.unlink(missing_ok=True)
+            if encrypted is not None:
+                encrypted.unlink(missing_ok=True)
 
     @staticmethod
     def _safe_name(value: str) -> str:
@@ -785,6 +839,17 @@ class ProjectExporter:
                 allow_auto=False,
             )
 
+            selection["workflow_family_id"] = None
+            for field, identifiers in (
+                ("workflow_definition_id", dependencies.workflow_ids if dependencies else {}),
+                ("workflow_revision_id", dependencies.revision_ids if dependencies else {}),
+            ):
+                source_id = selection.get(field)
+                if field in selection:
+                    selection[field] = (
+                        identifiers.get(source_id) if isinstance(source_id, str) else None
+                    )
+
         self._import_vision_provenance(provenance, dependencies)
 
         preset = provenance.get("preset")
@@ -997,6 +1062,7 @@ class ProjectExporter:
                     parse_constant=self._reject_json_constant,
                 )
                 self._validate_json_tree(manifest)
+                refuse_workflow_lora_overrides(manifest)
                 self._validate_manifest(manifest)
                 dependency_model = (
                     parse_dependency_manifest(manifest.get("dependencies"))
@@ -2086,6 +2152,11 @@ class ProjectExporter:
                 strict=strict_portability,
             )
             provenance["imported_from_run_id"] = run_data.get("id")
+            source_recipe = read_workflow_use_case_preset(
+                provenance.get("workflow_use_case_preset"),
+                workflow_revision_id=run_data.get("workflow_revision_id"),
+            )
+            remap_workflow_provenance(session, provenance, dependencies)
             imported_run = Run(
                 chat_id=imported_chat.id,
                 user_message_id=user_message.id,
@@ -2125,6 +2196,19 @@ class ProjectExporter:
                     1_000_000,
                 ),
             )
+            if source_recipe is not None:
+                imported_recipe = read_workflow_use_case_preset(
+                    {
+                        **source_recipe.model_dump(mode="json"),
+                        "workflow_revision_id": imported_run.workflow_revision_id,
+                    },
+                    workflow_revision_id=imported_run.workflow_revision_id,
+                )
+                assert imported_recipe is not None
+                imported_run.provenance_json = {
+                    **provenance,
+                    "workflow_use_case_preset": imported_recipe.model_dump(mode="json"),
+                }
             session.add(imported_run)
             session.flush()
             imported_runs[str(run_data["id"])] = imported_run

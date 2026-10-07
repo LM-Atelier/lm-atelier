@@ -149,7 +149,8 @@ async def _automatic_image_source(app: FastAPI, client: AsyncClient) -> dict[str
         },
     )
     assert source.status_code == 202, source.text
-    return source.json()
+    accepted: dict[str, Any] = source.json()
+    return accepted
 
 
 @pytest.mark.parametrize("frozen", [False, True])

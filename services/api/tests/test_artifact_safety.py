@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Protocol, cast
 
 import pytest
 from sqlalchemy import create_engine
@@ -17,8 +20,12 @@ from local_lm.domain import ArtifactKind
 from local_lm.models import Artifact, ArtifactLibraryEntry
 
 
+class _WindowsError(Protocol):
+    winerror: int
+
+
 @pytest.fixture
-def artifact_session(tmp_path: Path) -> tuple[ArtifactStore, Session]:
+def artifact_session(tmp_path: Path) -> Iterator[tuple[ArtifactStore, Session]]:
     settings = Settings(data_dir=tmp_path / "data")
     settings.prepare()
     engine = create_engine(f"sqlite:///{tmp_path / 'artifacts.sqlite3'}")
@@ -135,7 +142,7 @@ def test_temporary_preview_delete_defers_windows_locked_files(
     def locked_replace(source: str | Path, destination: str | Path) -> None:
         if Path(source) == path:
             error = OSError(13, "file is in use")
-            error.winerror = 32  # type: ignore[attr-defined]
+            cast(_WindowsError, error).winerror = 32
             raise error
         real_replace(source, destination)
 
@@ -396,3 +403,57 @@ def test_a_preview_an_unreferenced_artifact_names_is_declined_not_raised(
     assert path.exists()
     # The referrer is untouched: declining is not a licence to break the link.
     assert session.get(Artifact, video.id) is not None
+
+
+def test_retention_drops_a_junction_in_deletion_staging_and_leaves_its_target(
+    artifact_session: tuple[ArtifactStore, Session],
+    tmp_path: Path,
+) -> None:
+    """Recovery removes a junction left in deletion staging.
+
+    A junction is a directory to the path checks, so those checks skip it and
+    the entry stays in the store. The directory it names, and the bytes there,
+    stay where they are.
+    """
+
+    store, session = artifact_session
+    artifact = store.ingest_bytes(
+        session,
+        b"kept beside the link",
+        kind=ArtifactKind.IMAGE,
+        media_type="image/png",
+    )
+    session.commit()
+    kept = store.resolve(artifact)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "victim.bin"
+    victim.write_bytes(b"not ours")
+    trash = store.root / ".delete-pending"
+    trash.mkdir(exist_ok=True)
+    link = trash / f"{'ab' * 32}.{'cd' * 16}"
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+            capture_output=True,
+        )
+        if completed.returncode != 0:
+            pytest.skip("this host refuses to create a directory link")
+    else:
+        try:
+            os.symlink(outside, link, target_is_directory=True)
+        except OSError:
+            pytest.skip("this host refuses to create a directory link")
+
+    store.cleanup_retention(
+        session,
+        retention_days=30,
+        temporary_hours=24,
+        dry_run=False,
+    )
+    session.commit()
+
+    assert victim.read_bytes() == b"not ours"
+    assert outside.is_dir()
+    assert not link.exists()
+    assert kept.read_bytes() == b"kept beside the link"

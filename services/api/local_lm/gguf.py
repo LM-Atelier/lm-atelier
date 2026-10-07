@@ -88,6 +88,13 @@ class _Candidate:
         return sum(size for size in sizes if size is not None)
 
 
+def complete_gguf_selections(items: Iterable[Mapping[str, Any]]) -> tuple[tuple[str, ...], ...]:
+    """List coherent model choices, omitting unsafe or incomplete groups."""
+
+    candidates, _ = _candidates(_records(items), require_split_metadata=True)
+    return tuple(tuple(item.filename for item in candidate.files) for candidate in candidates)
+
+
 def automatic_gguf_selection(
     items: Iterable[Mapping[str, Any]],
     system_memory_bytes: int,

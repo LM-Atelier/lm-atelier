@@ -1,8 +1,20 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { api } from "./api";
 import { GenerationSettingsPanel } from "./GenerationSettingsPanel";
 import type { EngineCapabilities, EngineRole } from "./types";
+
+vi.mock("./api", () => ({
+  api: {
+    workflowRevisionOutputGeometry: vi.fn(),
+    resolveWorkflowRevisionOutputGeometry: vi.fn(),
+    workflowLoraControls: vi.fn(),
+    modelAssets: vi.fn(),
+  },
+}));
 
 /**
  * A claim about React's reconciliation, which only a mounted tree can settle.
@@ -36,6 +48,16 @@ const ENGINES: EngineCapabilities[] = [
     healthy: true,
   } as unknown as EngineCapabilities,
 ];
+
+// The panel asks the controls projection whether this workflow takes added
+// LoRAs, so it needs a query client even with no revision to ask about. The
+// client is built here rather than inside the harness because the harness
+// re-renders on every keystroke, and a client rebuilt per render is a cache
+// that never holds anything.
+function withQueries(node: ReactNode) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={client}>{node}</QueryClientProvider>);
+}
 
 function Panel() {
   const [values, setValues] = useState<Record<string, unknown>>({ steps: 30 });
@@ -113,7 +135,7 @@ function NarrowedPanel({ stored }: { stored: Record<string, unknown> }) {
 
 describe("GenerationSettingsPanel", () => {
   it("does not replace a field's input while the user is typing in it", () => {
-    render(<Panel />);
+    withQueries(<Panel />);
     const input = screen.getByLabelText(/Steps/i);
     input.focus();
     expect(document.activeElement).toBe(input);
@@ -126,7 +148,7 @@ describe("GenerationSettingsPanel", () => {
   });
 
   it("still shows a stored value the workflow accepts", () => {
-    render(<NarrowedPanel stored={{ scheduler: "normal", steps: 4 }} />);
+    withQueries(<NarrowedPanel stored={{ scheduler: "normal", steps: 4 }} />);
 
     expect(screen.getByLabelText(/Scheduler/i)).toHaveValue("normal");
     expect(screen.getByLabelText(/Steps/i)).toHaveValue(4);
@@ -137,7 +159,7 @@ describe("GenerationSettingsPanel", () => {
     // A select whose value matches no option falls to its FIRST option, so
     // without the same filter the panel would say "simple" while the run used
     // "karras" - a setting the user did not choose and is not being given.
-    render(<NarrowedPanel stored={{ scheduler: "dpmpp_3m_sde" }} />);
+    withQueries(<NarrowedPanel stored={{ scheduler: "dpmpp_3m_sde" }} />);
 
     expect(screen.getByLabelText(/Scheduler/i)).toHaveValue("karras");
   });
@@ -145,8 +167,277 @@ describe("GenerationSettingsPanel", () => {
   it("shows the default, not the stored number, when the workflow narrowed the range", () => {
     // The same disagreement without a select: the panel would show 50 against a
     // node that will not take more than 10, while the run used 8.
-    render(<NarrowedPanel stored={{ steps: 50 }} />);
+    withQueries(<NarrowedPanel stored={{ steps: 50 }} />);
 
     expect(screen.getByLabelText(/Steps/i)).toHaveValue(8);
+  });
+});
+
+// The shape control lives in its own file and is tested there. What only a
+// mounted panel can settle is that the panel RENDERS it, hands it the width and
+// height the hierarchy resolved, and stores what it answers - so deleting the
+// element from the panel fails here rather than passing quietly.
+const DIMENSIONED: EngineCapabilities[] = [
+  {
+    engine: "comfyui",
+    roles: ["image"],
+    settings: [
+      {
+        key: "width",
+        label: "Width",
+        type: "integer",
+        default: 1024,
+        minimum: 128,
+        maximum: 2048,
+        step: 64,
+        choices: [],
+        scope: "workflow",
+        visibility: "basic",
+        available: true,
+      },
+      {
+        key: "height",
+        label: "Height",
+        type: "integer",
+        default: 768,
+        minimum: 128,
+        maximum: 2048,
+        step: 64,
+        choices: [],
+        scope: "workflow",
+        visibility: "basic",
+        available: true,
+      },
+    ],
+    healthy: true,
+  } as unknown as EngineCapabilities,
+];
+
+function DimensionedPanel({ revisionId }: { revisionId?: string | null }) {
+  const [values, setValues] = useState<Record<string, unknown>>({});
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return (
+    <QueryClientProvider client={client}>
+      <GenerationSettingsPanel
+        role={ROLE}
+        engines={DIMENSIONED}
+        values={values}
+        onValues={setValues}
+        presets={[]}
+        presetId={null}
+        onPreset={vi.fn()}
+        workflowRevisionId={revisionId ?? null}
+        resetLabel="Reset"
+        onReset={vi.fn()}
+      />
+    </QueryClientProvider>
+  );
+}
+
+const CAPABILITY = {
+  version: 1 as const,
+  available: true,
+  reason: null,
+  revision_id: "rev-1",
+  workflow_id: "wf-1",
+  artifact_sha256: "a".repeat(64),
+  operation: "text_to_image" as const,
+  engine: "comfyui" as const,
+  size_modes: ["exact" as const, "preset" as const],
+  preset_ids: ["16:9" as const, "1:1" as const],
+  width: {
+    key: "width" as const,
+    node_id: "latent",
+    input_name: "width" as const,
+    default: 1024,
+    minimum: 128,
+    maximum: 2048,
+    multiple_of: 64,
+  },
+  height: {
+    key: "height" as const,
+    node_id: "latent",
+    input_name: "height" as const,
+    default: 768,
+    minimum: 128,
+    maximum: 2048,
+    multiple_of: 64,
+  },
+  graph_binding_verified: true,
+  request_authorized: false as const,
+};
+
+const DETECTED_SLOT = {
+  slot_id: `wflora_${"d".repeat(64)}`,
+  position: 0,
+  loader_type: "LoraLoaderModelOnly",
+  loader_contract: null,
+  loader_authority_sha256: null,
+  editability: "detected_read_only" as const,
+  read_only_reason: "missing_core_evidence" as const,
+  dependency_required: null,
+  observed_runtime_reference: "styles/soft-light.safetensors",
+  asset_binding: null,
+  default_enabled: true,
+  default_model_strength: 0.6,
+  default_clip_strength: null,
+  strength_mode: "model_only" as const,
+  editable_fields: [],
+};
+
+async function acceptingControls(accepts: boolean, slots: (typeof DETECTED_SLOT)[] = []) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("rev-1")));
+  return {
+    version: 1 as const,
+    override_contract_version: 1 as const,
+    strength_bounds: { minimum: -4, maximum: 4 },
+    override_target: null,
+    revision_scope_sha256: Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join(""),
+    api_graph_sha256: "b".repeat(64),
+    dependency_contract_sha256: "c".repeat(64),
+    activation_binding_sha256: null,
+    ordering_authority: "presentation_only" as const,
+    base_model_family: "krea2",
+    accepts_added_loras: accepts,
+    evidence_gaps: [],
+    slots,
+  };
+}
+
+describe("the shape control in the panel", () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it("stores the pixels the server resolved for the ratio that was chosen", async () => {
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(CAPABILITY);
+    vi.mocked(api.resolveWorkflowRevisionOutputGeometry).mockResolvedValue({
+      version: 1,
+      workflow_id: "wf-1",
+      revision_id: "rev-1",
+      artifact_sha256: "a".repeat(64),
+      operation: "text_to_image",
+      engine: "comfyui",
+      mode: "image",
+      size_mode: "preset",
+      preset_id: "16:9",
+      width: 1024,
+      height: 576,
+      graph_binding_verified: true,
+      request_authorized: false,
+    });
+
+    render(<DimensionedPanel revisionId="rev-1" />);
+
+    // The workflow's own defaults before anything is chosen.
+    await waitFor(() => expect(screen.getByText("Output: 1024 × 768")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "16:9 Wide" }));
+
+    // The height box is the proof: it holds a number nothing in this test typed.
+    await waitFor(() => expect(screen.getByLabelText(/Height/i)).toHaveValue(576));
+    expect(screen.getByLabelText(/Width/i)).toHaveValue(1024);
+    expect(screen.getByText("Output: 1024 × 576")).toBeTruthy();
+  });
+
+  it("asks about no revision when the turn pins none", () => {
+    render(<DimensionedPanel revisionId={null} />);
+
+    expect(screen.queryByRole("group", { name: "Output aspect ratio" })).toBeNull();
+    expect(api.workflowRevisionOutputGeometry).not.toHaveBeenCalled();
+  });
+});
+
+describe("the workflow's own LoRAs in the panel", () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it("shows the LoRAs a pinned workflow applies, though it takes no added ones", async () => {
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(CAPABILITY);
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("rev-1")));
+    vi.mocked(api.workflowLoraControls).mockResolvedValue({
+      version: 1,
+      override_contract_version: 1,
+      strength_bounds: { minimum: -4, maximum: 4 },
+      override_target: null,
+      revision_scope_sha256: Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join(""),
+      api_graph_sha256: "b".repeat(64),
+      dependency_contract_sha256: "c".repeat(64),
+      activation_binding_sha256: null,
+      ordering_authority: "presentation_only",
+      base_model_family: "krea2",
+      accepts_added_loras: false,
+      evidence_gaps: [],
+      slots: [{
+        slot_id: `wflora_${"d".repeat(64)}`,
+        position: 0,
+        loader_type: "LoraLoaderModelOnly",
+        loader_contract: null,
+        loader_authority_sha256: null,
+        editability: "detected_read_only",
+        read_only_reason: "missing_core_evidence",
+        dependency_required: null,
+        observed_runtime_reference: "styles/soft-light.safetensors",
+        asset_binding: null,
+        default_enabled: true,
+        default_model_strength: 0.6,
+        default_clip_strength: null,
+        strength_mode: "model_only",
+        editable_fields: [],
+      }],
+    });
+
+    render(<DimensionedPanel revisionId="rev-1" />);
+
+    const section = await screen.findByRole("region", { name: "LoRAs" });
+    expect(section).toHaveTextContent("soft-light.safetensors");
+    expect(section).toHaveTextContent("Model strength 0.6");
+    expect(api.workflowLoraControls).toHaveBeenCalledWith("rev-1", expect.anything());
+  });
+
+  it("offers a control for added LoRAs when the workflow takes them and declares none", async () => {
+    // A workflow built from a template declares the setting, so the panel has
+    // always shown this control for those. An imported one can carry the same
+    // insertion point in its graph and declare nothing, and then the run
+    // applied a stack that the panel gave no way to choose. The projection
+    // answers for both, so the control appears in both.
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(CAPABILITY);
+    vi.mocked(api.modelAssets).mockResolvedValue([]);
+    vi.mocked(api.workflowLoraControls).mockResolvedValue(await acceptingControls(true));
+
+    render(<DimensionedPanel revisionId="rev-1" />);
+    // The offered control carries the visibility a declared one carries, so a
+    // workflow that declares the setting and one that only takes it put the
+    // control in the same place. This revision shows no LoRAs of its own, so
+    // the section exists only because the control does.
+    fireEvent.click(screen.getByRole("button", { name: "advanced" }));
+
+    const section = await screen.findByRole("region", { name: "LoRAs" });
+    expect(within(section).getByRole("button", { name: /Add LoRA/ })).toBeTruthy();
+  });
+
+  it("offers no such control when the workflow does not take added LoRAs", async () => {
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(CAPABILITY);
+    vi.mocked(api.modelAssets).mockResolvedValue([]);
+    // One LoRA of the workflow's own, so the section is shown on the strength
+    // of the same answer that withholds the control. Asserting the absence
+    // against a section that never rendered would pass whatever the answer.
+    vi.mocked(api.workflowLoraControls).mockResolvedValue(await acceptingControls(false, [DETECTED_SLOT]));
+
+    render(<DimensionedPanel revisionId="rev-1" />);
+    fireEvent.click(screen.getByRole("button", { name: "advanced" }));
+
+    const section = await screen.findByRole("region", { name: "LoRAs" });
+    expect(section).toHaveTextContent("soft-light.safetensors");
+    expect(within(section).queryByRole("button", { name: /Add LoRA/ })).toBeNull();
+  });
+
+  it("asks nothing about a workflow's LoRAs when the turn pins no workflow", () => {
+    render(<DimensionedPanel revisionId={null} />);
+
+    expect(api.workflowLoraControls).not.toHaveBeenCalled();
+    expect(screen.queryByRole("region", { name: "LoRAs" })).toBeNull();
   });
 });

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
+from typing import TypedDict, TypeGuard
 
 import pytest
 from fastapi import FastAPI
@@ -61,13 +62,29 @@ def _contract(*, resource_policy: dict[str, object] | None = None) -> dict[str, 
     }
 
 
+class _IdentifiedRecord(TypedDict):
+    id: str
+
+
+class _CreatedTemplate(TypedDict):
+    template: _IdentifiedRecord
+    revision: _IdentifiedRecord
+
+
+def _has_template_identities(value: object) -> TypeGuard[_CreatedTemplate]:
+    return isinstance(value, dict) and all(
+        isinstance(value.get(key), dict) and isinstance(value[key].get("id"), str)
+        for key in ("template", "revision")
+    )
+
+
 async def _create_template(
     client: AsyncClient,
     *,
     key: str,
     name: str,
     resource_policy: dict[str, object] | None = None,
-) -> dict[str, object]:
+) -> _CreatedTemplate:
     response = await client.post(
         "/api/prompt-templates",
         json={
@@ -78,7 +95,9 @@ async def _create_template(
         },
     )
     assert response.status_code == 201, response.text
-    return response.json()
+    payload = response.json()
+    assert _has_template_identities(payload)
+    return payload
 
 
 @pytest.mark.asyncio
@@ -537,7 +556,7 @@ async def test_fixed_export_erases_source_identity_and_preview_suggests_local_ma
             "name": "Private portable workflow",
             "operation": "text_to_image",
             "engine": "mock",
-            "api_graph": {},
+            "api_graph": {"node": {"class_type": "PortableTemplateFixture"}},
         },
     )
     seed_workflow_trust(workflow.json()["current_revision_id"])
@@ -958,7 +977,7 @@ async def test_workflow_pool_keys_deduplicate_only_exact_source_revisions(
                 "name": f"Private same-descriptor workflow {ordinal}",
                 "operation": "text_to_image",
                 "engine": "mock",
-                "api_graph": {},
+                "api_graph": {"node": {"class_type": "PortableTemplateFixture"}},
             },
         )
         seed_workflow_trust(workflow.json()["current_revision_id"])

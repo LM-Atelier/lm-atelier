@@ -14,16 +14,16 @@ Two refusals are deliberate product decisions, not limitations:
   is SET NULL on delete, so deleting the middle of a branch would silently
   turn replies into orphaned roots; "delete the replies first" keeps lineage
   honest.
-- An exchange with queued or running jobs is refused. Cancellation is the
-  job queue's business (and the worker reset control exists for wedges);
-  deletion only ever removes finished history.
+- An exchange with unfinished jobs or a held execution claim is refused.
+  A result can precede a slow handoff, so the scheduler's release marks when
+  deletion can remove the finished history.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from sqlalchemy import select
+from sqlalchemy import false, select, update
 from sqlalchemy.orm import Session
 
 from .domain import JobKind, JobStatus, MessageRole
@@ -66,8 +66,8 @@ class ExchangeBusy(ExchangeDeletionError):
     def __init__(self, job_count: int) -> None:
         self.job_count = job_count
         super().__init__(
-            f"this turn still has {job_count} queued or running "
-            f"{'job' if job_count == 1 else 'jobs'}; wait or cancel them first"
+            f"this turn still has {job_count} {'job' if job_count == 1 else 'jobs'} "
+            "in progress; wait for the remaining work to finish or cancel it first"
         )
 
 
@@ -91,6 +91,9 @@ class ExchangeDeletion:
 def delete_exchange(session: Session, user_message_id: str) -> ExchangeDeletion:
     """Delete the exchange rooted at one user message and summarize it."""
 
+    # Hold the writer from the claim check through deletion so a retry cannot
+    # acquire the same job after its finished history has been inspected.
+    session.execute(update(Job).where(false()).values(claim_owner=Job.claim_owner))
     user = session.get(Message, user_message_id)
     if not user or user.role != MessageRole.USER.value:
         raise ExchangeNotFound
@@ -113,19 +116,23 @@ def delete_exchange(session: Session, user_message_id: str) -> ExchangeDeletion:
     jobs = (
         list(
             session.scalars(
-                select(Job).where(
+                select(Job)
+                .where(
                     (Job.run_id.in_(run_ids))
                     | (
                         (Job.kind == JobKind.EDIT_VERIFY.value)
                         & (Job.payload_json["source_run_id"].as_string().in_(run_ids))
                     )
                 )
+                .execution_options(populate_existing=True)
             )
         )
         if run_ids
         else []
     )
-    busy = [job for job in jobs if job.status in _ACTIVE_JOB_STATUSES]
+    busy = [
+        job for job in jobs if job.status in _ACTIVE_JOB_STATUSES or job.claim_owner is not None
+    ]
     if busy:
         raise ExchangeBusy(len(busy))
     work_plan_ids = sorted({run.work_plan_id for run in runs if run.work_plan_id})

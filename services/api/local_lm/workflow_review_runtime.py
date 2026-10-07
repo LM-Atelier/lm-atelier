@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-import asyncio
+import json
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
 from sqlalchemy.orm import Session
 
 from .adapters.base import MediaAdapter
-from .comfy_registry_installs import _verified_comfy_registry_launch_contract
-from .comfy_registry_paths import registry_wheel_environment_root
+from .artifacts import ArtifactStore
+from .comfy_registry_launch_verification import _FIELDS, VerifiedComfyRegistryLaunch
+from .comfy_registry_target_verification import ComfyRegistryVerificationTarget
 from .config import Settings
 from .custom_nodes import CustomNodeManager
 from .models import (
@@ -108,14 +109,58 @@ def _reviewed_package_inputs(session: Session, snapshot: ReviewSnapshot) -> Revi
     return ReviewedPackages(tuple(git_installs), tuple(registry_installs))
 
 
+def _registry_snapshots(
+    rows: tuple[ComfyRegistryInstall, ...] | list[ComfyRegistryInstall],
+) -> tuple[str, ...]:
+    return tuple(
+        json.dumps(
+            {name: getattr(row, name) for name in _FIELDS},
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        for row in sorted(rows, key=lambda row: row.id)
+    )
+
+
+@dataclass(frozen=True)
+class VerifiedReviewedPackages:
+    target: ComfyRegistryVerificationTarget
+    registry: VerifiedComfyRegistryLaunch
+
+    async def refresh(self) -> VerifiedReviewedPackages:
+        """Recheck the same selected packages after awaited consumer work."""
+
+        def unchanged(rows: list[ComfyRegistryInstall]) -> None:
+            if _registry_snapshots(rows) != self.registry.snapshots:
+                raise WorkflowReviewError("workflow_review_changed")
+
+        try:
+            proof = await self.target.verify(
+                self.registry.install_ids, include_active=False, prepare_installs=unchanged
+            )
+        except (ValueError, OSError) as exc:
+            raise WorkflowReviewError("workflow_review_node_unavailable") from exc
+        return VerifiedReviewedPackages(self.target, proof)
+
+    def require_current(self, session: Session) -> None:
+        """Bind a durable decision or final dispatch to current source authority."""
+        try:
+            self.target.require_configuration()
+            self.registry.require_current(session)
+        except (ValueError, OSError) as exc:
+            raise WorkflowReviewError("workflow_review_changed") from exc
+
+
 async def verify_reviewed_packages(
     settings: Settings,
     session: Session | None,
     snapshot: ReviewSnapshot,
     *,
+    session_factory: Callable[[], Session],
     custom_nodes: CustomNodeManager | None = None,
     packages: ReviewedPackages | None = None,
-) -> None:
+) -> VerifiedReviewedPackages | None:
     if packages is None:
         if session is None:
             raise WorkflowReviewError("workflow_review_node_unavailable")
@@ -124,14 +169,27 @@ async def verify_reviewed_packages(
         if custom_nodes is None:
             custom_nodes = CustomNodeManager(settings)
         await custom_nodes.verify(install)
-    if packages.registry:
-        context = PreparationContext.from_settings(settings)
-        await asyncio.to_thread(
-            _verified_comfy_registry_launch_contract,
-            packages.registry,
-            custom_node_root=context.custom_node_root,
-            environment_root=registry_wheel_environment_root(context.state_root),
+    if not packages.registry:
+        return None
+    expected = _registry_snapshots(packages.registry)
+
+    def unchanged(rows: list[ComfyRegistryInstall]) -> None:
+        if _registry_snapshots(rows) != expected:
+            raise WorkflowReviewError("workflow_review_changed")
+
+    context = replace(
+        PreparationContext.from_settings(settings), source_store=ArtifactStore(settings)
+    )
+    target = context.verification_target(session_factory, settings)
+    try:
+        proof = await target.verify(
+            tuple(row.id for row in packages.registry),
+            include_active=False,
+            prepare_installs=unchanged,
         )
+    except (ValueError, OSError) as exc:
+        raise WorkflowReviewError("workflow_review_node_unavailable") from exc
+    return VerifiedReviewedPackages(target, proof)
 
 
 @dataclass(frozen=True)
@@ -140,6 +198,15 @@ class VerifiedWorkflowReview:
     worker_id: int
     snapshot: ReviewSnapshot
     object_info: dict[str, Any] | None
+    packages: VerifiedReviewedPackages | None = None
+
+
+async def refresh_workflow_review_packages(
+    verified: VerifiedWorkflowReview,
+) -> VerifiedWorkflowReview:
+    if verified.packages is None:
+        return verified
+    return replace(verified, packages=await verified.packages.refresh())
 
 
 def revalidate_workflow_review_runtime(
@@ -151,6 +218,14 @@ def revalidate_workflow_review_runtime(
     """Match dispatch inputs to the completed verification in its fresh read."""
     if revision.id != verified.revision_id or _runtime_id(processes) != verified.worker_id:
         raise WorkflowReviewError("workflow_review_changed")
+    if verified.packages is not None:
+        revision_id = revision.id
+        verified.packages.require_current(session)
+        session.expire_all()
+        current_revision = session.get(WorkflowRevision, revision_id)
+        if current_revision is None:
+            raise WorkflowReviewError("workflow_review_changed")
+        revision = current_revision
     definition = session.get(WorkflowDefinition, revision.workflow_id)
     if definition is None or not review_is_current(session, definition, revision):
         raise WorkflowReviewError("workflow_review_changed")
@@ -195,11 +270,17 @@ async def verify_workflow_review_runtime(
         if snapshot.reasons or snapshot.subject_sha256 != reviewed_subject:
             raise WorkflowReviewError("workflow_review_changed")
         packages = _reviewed_package_inputs(session, snapshot)
-    await verify_reviewed_packages(settings, None, snapshot, packages=packages)
+    verified_packages = await verify_reviewed_packages(
+        settings, None, snapshot, session_factory=session_factory, packages=packages
+    )
     current_info = await review_runtime_object_info(processes, media)
     if worker_id is None or worker_id != _runtime_id(processes):
         raise WorkflowReviewError("workflow_review_changed")
-    verified = VerifiedWorkflowReview(revision_id, worker_id, snapshot, deepcopy(current_info))
+    if verified_packages is not None:
+        verified_packages = await verified_packages.refresh()
+    verified = VerifiedWorkflowReview(
+        revision_id, worker_id, snapshot, deepcopy(current_info), verified_packages
+    )
     with session_factory() as session:
         revision = session.get(WorkflowRevision, revision_id)
         if revision is None:

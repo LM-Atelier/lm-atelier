@@ -46,7 +46,9 @@ from local_lm.workflow_dependencies import (
 @pytest.fixture
 def sessions(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
     engine = create_engine(f"sqlite:///{tmp_path / 'vocab.sqlite3'}")
-    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("BEGIN")
+        Base.metadata.create_all(connection)
     yield sessionmaker(engine, expire_on_commit=False)
     engine.dispose()
 

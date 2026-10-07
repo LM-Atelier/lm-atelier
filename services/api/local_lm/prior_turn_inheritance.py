@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 
-from .accepted_turn_context import AcceptedContext, accepted_context
+from .accepted_turn_context import AcceptedContext, accepted_context, settings_workflow
+from .auxiliary_assets import revision_accepts_added_loras
 from .domain import Operation
 from .models import GenerationPreset, ModelProfile, Run
 from .schemas import (
@@ -19,6 +20,8 @@ from .schemas import (
     TurnRequest,
 )
 from .turn_inheritance import TurnInheritance, inherited_edit_strength
+from .workflow_use_case_execution import InheritedWorkflowUseCasePreset
+from .workflow_use_case_preset_provenance import read_workflow_use_case_preset
 
 if TYPE_CHECKING:
     from .orchestrator import ConversationOrchestrator
@@ -32,6 +35,9 @@ class SourceConfiguration:
     step_id: str | None
     values: PriorTurnEditConfiguration
     snapshot: AcceptedContext | None
+    #: Asked of the workflow `values.workflow_schema` came from.
+    takes_added_loras: bool
+    use_case_preset: InheritedWorkflowUseCasePreset
 
 
 @dataclass
@@ -65,6 +71,8 @@ class PriorTurnInheritance:
             run = session.get(Run, config.source_run_id)
             if run is None:
                 raise ValueError("A source configuration is no longer available.")
+            snapshot = accepted_context(session, run)
+            workflow = settings_workflow(session, run, snapshot)
             self.sources.append(
                 SourceConfiguration(
                     run.id,
@@ -72,7 +80,16 @@ class PriorTurnInheritance:
                     getattr(config, "ordinal", None),
                     getattr(config, "step_id", None),
                     config,
-                    accepted_context(session, run),
+                    snapshot,
+                    workflow is not None and revision_accepts_added_loras(workflow),
+                    InheritedWorkflowUseCasePreset(
+                        snapshot.workflow_use_case_preset
+                        if snapshot
+                        else read_workflow_use_case_preset(
+                            run.provenance_json.get("workflow_use_case_preset"),
+                            workflow_revision_id=run.workflow_revision_id,
+                        )
+                    ),
                 )
             )
         known = {item.step_id for item in self.sources if item.step_id is not None}
@@ -160,6 +177,14 @@ class PriorTurnInheritance:
             inherit_loras=request.preset_id is None and "loras" not in request.settings,
         )
         values: dict[str, object] = {}
+        if operation == Operation.IMAGE_TO_IMAGE and "upscale" not in fields_set:
+            values["upscale"] = source.values.upscale
+        source_fit = request.source_fit
+        if operation == Operation.IMAGE_TO_IMAGE and "source_fit" not in fields_set:
+            source_fit = source.values.source_fit
+            values["source_fit"] = source_fit.model_copy(deep=True) if source_fit else None
+        if ordinal is not None and source_fit is not None:
+            raise ValueError("Choose a single image edit to fit its source canvas.")
         if ordinal is None and "output_count" not in fields_set:
             values["output_count"] = source.values.output_count
         inherited_strength = (
@@ -182,7 +207,11 @@ class PriorTurnInheritance:
                 source.values.resolved_settings,
                 input_schema=source.values.workflow_schema,
                 engine=source.values.profile_engine,
+                accepts_added_loras=source.takes_added_loras,
             )
+            if source_fit is not None:
+                baseline.pop("width", None)
+                baseline.pop("height", None)
             values["settings"] = {**baseline, **request.settings}
         self.bound[ordinal] = inherited
         context = source.snapshot
@@ -190,7 +219,9 @@ class PriorTurnInheritance:
             profile=context.profile if context and inherited.inherit_profile else None,
             vision_profile=context.vision_profile if context and inherited.inherit_vision else None,
             workflow=context.workflow if context and inherited.inherit_workflow else None,
+            source_fit=context.source_fit if context and inherited.inherit_workflow else None,
             image_edit_strength=inherited_strength,
+            use_case_preset=source.use_case_preset,
         )
 
     def validate_consumed(self) -> None:

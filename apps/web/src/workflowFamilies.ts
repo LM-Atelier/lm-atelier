@@ -27,3 +27,8 @@ export function orderFamilies(
     (left, right) => rank(left) - rank(right) || left.name.localeCompare(right.name),
   );
 }
+
+export const workflowOperationLabels: Record<string, string> = {
+  text: "Text", text_to_image: "Text to image", image_to_image: "Image to image",
+  text_to_video: "Text to video", image_to_video: "Image to video",
+};

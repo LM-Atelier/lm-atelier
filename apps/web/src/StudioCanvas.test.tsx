@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { StudioCanvas } from "./StudioCanvas";
-import { createMask } from "./studioMasks";
-import type { ImagePoint, PointerTool, ToolPreview } from "./studioTools";
+import { createMask, isEmpty } from "./studioMasks";
+import { PerspectiveTool, pictureCorners } from "./studioPerspective";
+import { BrushTool, RectTool, type ImagePoint, type PointerTool, type ToolPreview } from "./studioTools";
+import type { ScreenRect } from "./studioViewport";
 
 /** jsdom has no 2D context; the component must tolerate null contexts and
  * still run its geometry and tool forwarding, which is what these pin. */
@@ -133,7 +135,83 @@ describe("StudioCanvas", () => {
     expect(tool.calls.map(([kind]) => kind)).toEqual(["down", "up"]);
   });
 
-  it("closes a cancelled gesture and clears pan state on lost capture", () => {
+  /** One pointer's event at a place. jsdom has no PointerEvent, so it is a
+   * mouse event under the pointer event's name, as a mouse delivers them, with
+   * the pointer's own id set on it. */
+  function pointer(target: Element, type: string, pointerId: number, x: number, y: number) {
+    const event = new MouseEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true });
+    Object.defineProperty(event, "pointerId", { value: pointerId });
+    fireEvent(target, event);
+  }
+
+  function watchShown(tool: PointerTool | null) {
+    const overlay = vi.fn<(shown: ScreenRect) => null>(() => null);
+    const { container } = render(<StudioCanvas image={image} mask={null} tool={tool} overlay={overlay} />);
+    return { surface: container.querySelector(".studio-canvas")!, shown: () => overlay.mock.calls.at(-1)![0] };
+  }
+
+  it("zooms with two fingers, keeping what lay under each finger under it", () => {
+    const tool = new SpyTool();
+    const { surface, shown } = watchShown(tool);
+
+    pointer(surface, "pointerdown", 1, 150, 100);
+    pointer(surface, "pointerdown", 2, 250, 100);
+    // The second finger spreads to twice the distance: twice the zoom, with
+    // the picture's point (150, 100) still under the first finger.
+    pointer(surface, "pointermove", 2, 350, 100);
+    expect(shown()).toEqual({ x: -150, y: -100, width: 800, height: 400 });
+    // Then the first spreads the other way, to three times the distance, and
+    // (250, 100) is still under the second.
+    pointer(surface, "pointermove", 1, 50, 100);
+    expect(shown()).toEqual({ x: -400, y: -200, width: 1200, height: 600 });
+    // The stroke the first finger began ended when the second landed.
+    expect(tool.calls.map(([kind]) => kind)).toEqual(["down", "up"]);
+
+    // Both lifted, one finger draws again, at the picture's point under it.
+    pointer(surface, "pointerup", 1, 50, 100);
+    pointer(surface, "pointerup", 2, 350, 100);
+    pointer(surface, "pointerdown", 3, 200, 100);
+    pointer(surface, "pointerup", 3, 200, 100);
+    expect(tool.calls.map(([kind]) => kind)).toEqual(["down", "up", "down", "up"]);
+    expect(tool.calls[2][1]).toEqual({ x: 200, y: 100 });
+  });
+
+  it("carries the picture the whole length of a drag, and only with pointers that are down", () => {
+    const { surface, shown } = watchShown(null);
+    pointer(surface, "pointerdown", 1, 100, 100);
+    pointer(surface, "pointermove", 1, 110, 105);
+    pointer(surface, "pointermove", 1, 130, 120);
+    pointer(surface, "pointermove", 1, 160, 140);
+    expect(shown()).toEqual({ x: 60, y: 40, width: 400, height: 200 });
+
+    // A pointer hovering over the canvas is not holding the picture.
+    pointer(surface, "pointermove", 9, 300, 10);
+    expect(shown()).toEqual({ x: 60, y: 40, width: 400, height: 200 });
+  });
+
+  it("pans on with the finger that stays when the other lifts, from where it is", () => {
+    const { surface, shown } = watchShown(null);
+    pointer(surface, "pointerdown", 1, 100, 100);
+    pointer(surface, "pointerdown", 2, 200, 100);
+    pointer(surface, "pointerup", 2, 200, 100);
+
+    pointer(surface, "pointermove", 1, 120, 110);
+
+    expect(shown()).toEqual({ x: 20, y: 10, width: 400, height: 200 });
+  });
+
+  it("pinches with the first two fingers down and leaves a third alone", () => {
+    const { surface, shown } = watchShown(null);
+    pointer(surface, "pointerdown", 1, 100, 100);
+    pointer(surface, "pointerdown", 2, 200, 100);
+    pointer(surface, "pointerdown", 3, 300, 100);
+
+    pointer(surface, "pointermove", 3, 360, 140);
+
+    expect(shown()).toEqual({ x: 0, y: 0, width: 400, height: 200 });
+  });
+
+  it("abandons a cancelled gesture rather than finishing it, and clears pan state on lost capture", () => {
     const tool = new SpyTool();
     const onStrokeEnd = vi.fn();
     const { container } = render(
@@ -144,12 +222,64 @@ describe("StudioCanvas", () => {
     fireEvent.pointerDown(surface, { pointerType: "mouse", clientX: 10, clientY: 10, button: 0, pointerId: 3 });
     fireEvent.pointerCancel(surface, { pointerType: "mouse", clientX: 15, clientY: 10, pointerId: 3 });
 
-    expect(tool.calls.map(([kind]) => kind)).toEqual(["down", "up"]);
+    expect(tool.calls.map(([kind]) => kind)).toEqual(["down", "cancel"]);
+    // Told all the same, so what a brush already painted is shown and counted.
     expect(onStrokeEnd).toHaveBeenCalledTimes(1);
 
     // A further move must not continue the cancelled stroke.
     fireEvent.pointerMove(surface, { pointerType: "mouse", clientX: 40, clientY: 10, pointerId: 3 });
     expect(tool.calls.filter(([kind]) => kind === "move")).toHaveLength(1);
+  });
+
+  it("drops a rectangle whose pointer was lost, and keeps what a brush had painted", () => {
+    // jsdom's pointer events carry no coordinates, so these are mouse events
+    // under the pointer events' names, as a mouse delivers them anyway.
+    const at = (target: Element, type: string, x: number, y: number) =>
+      fireEvent(target, new MouseEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true }));
+    const rectangleMask = createMask(400, 200);
+    const { container, rerender } = render(
+      <StudioCanvas image={image} mask={rectangleMask} tool={new RectTool(rectangleMask)} />,
+    );
+    const surface = container.querySelector(".studio-canvas")!;
+    at(surface, "pointerdown", 10, 10);
+    at(surface, "pointermove", 90, 60);
+    at(surface, "lostpointercapture", 90, 60);
+    expect(isEmpty(rectangleMask)).toBe(true);
+
+    const brushMask = createMask(400, 200);
+    rerender(<StudioCanvas image={image} mask={brushMask} tool={new BrushTool(brushMask, 8)} />);
+    at(surface, "pointerdown", 10, 10);
+    at(surface, "pointermove", 60, 10);
+    at(surface, "pointercancel", 60, 10);
+    expect(isEmpty(brushMask)).toBe(false);
+  });
+
+  it("drops a gesture still being drawn when the window loses focus, and forgets the pointer held for it", () => {
+    const at = (target: Element, type: string, x: number, y: number) =>
+      fireEvent(target, new MouseEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true }));
+    const mask = createMask(400, 200);
+    const onStrokeEnd = vi.fn();
+    const { container } = render(
+      <StudioCanvas image={image} mask={mask} tool={new RectTool(mask)} onStrokeEnd={onStrokeEnd} />,
+    );
+    const surface = container.querySelector(".studio-canvas")!;
+    at(surface, "pointerdown", 10, 10);
+    at(surface, "pointermove", 90, 60);
+
+    // The button came up in another window, so no release or cancel ever reaches the canvas.
+    fireEvent.blur(window);
+    expect(onStrokeEnd).toHaveBeenCalledTimes(1);
+
+    // Back over the canvas with no button down, a move must not carry the rectangle on, nor a release close it.
+    at(surface, "pointermove", 150, 120);
+    at(surface, "pointerup", 150, 120);
+    expect(isEmpty(mask)).toBe(true);
+
+    // And the next press draws, rather than being taken for a second finger and panning.
+    at(surface, "pointerdown", 20, 20);
+    at(surface, "pointermove", 60, 50);
+    at(surface, "pointerup", 60, 50);
+    expect(isEmpty(mask)).toBe(false);
   });
 
   it("zooms the layer transform about the wheel cursor", () => {
@@ -162,6 +292,32 @@ describe("StudioCanvas", () => {
 
     expect(layers.style.transform).not.toBe(before);
     expect(layers.style.transform).toContain("scale(1.2");
+  });
+
+  it("tells what it lays over the picture where the picture is shown, at the zoom", () => {
+    const overlay = vi.fn((shown: { x: number; y: number; width: number; height: number }) => (
+      <span data-testid="over" data-width={shown.width} />
+    ));
+    const { container } = render(
+      <StudioCanvas image={image} mask={null} tool={null} overlay={overlay} />,
+    );
+    expect(overlay).toHaveBeenLastCalledWith({ x: 0, y: 0, width: 400, height: 200 });
+
+    fireEvent.wheel(container.querySelector(".studio-canvas")!, {
+      deltaY: -120,
+      clientX: 200,
+      clientY: 100,
+    });
+
+    // Zoomed by 1.2 about (200, 100): that point stays put and the picture grows around it.
+    const shown = overlay.mock.calls.at(-1)![0];
+    expect(shown.x).toBeCloseTo(-40);
+    expect(shown.y).toBeCloseTo(-20);
+    expect(shown.width).toBeCloseTo(480);
+    expect(shown.height).toBeCloseTo(240);
+    // Laid over the canvas at screen scale, not inside the zoomed layers.
+    expect(container.querySelector(".studio-canvas > [data-testid='over']")).not.toBeNull();
+    expect(container.querySelector(".studio-canvas-layers [data-testid='over']")).toBeNull();
   });
 
   it("passes the live viewport scale to drawing tools", () => {
@@ -327,6 +483,43 @@ describe("StudioCanvas", () => {
     expect(painted.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("repaints only what a stroke changed while it is drawn, and the whole tint otherwise", () => {
+    // A context that records where each tint is put; jsdom has none of its own.
+    const puts: Array<[number, number, number, number]> = [];
+    const context = new Proxy(
+      {
+        putImageData: (data: { width: number; height: number }, x: number, y: number) =>
+          puts.push([x, y, data.width, data.height]),
+      },
+      { get: (target, name) => (name in target ? target[name as "putImageData"] : () => undefined) },
+    );
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      context as unknown as CanvasRenderingContext2D,
+    );
+    vi.stubGlobal("ImageData", class {
+      constructor(readonly data: Uint8ClampedArray, readonly width: number, readonly height: number) {}
+    });
+    // A tool that writes as it travels and says which part it changed.
+    const stroke: PointerTool = {
+      appliesWhileMoving: true,
+      down: () => undefined,
+      move: () => undefined,
+      up: () => false,
+      cancel: () => undefined,
+      preview: () => ({ kind: "none" }),
+      takeChanged: () => ({ left: 90, top: 95, width: 20, height: 10 }),
+    };
+    const { container } = render(<StudioCanvas image={image} mask={createMask(400, 200)} tool={stroke} />);
+    expect(puts.at(-1)).toEqual([0, 0, 400, 200]);
+    puts.length = 0;
+
+    const surface = container.querySelector(".studio-canvas")!;
+    fireEvent.pointerDown(surface, { pointerType: "mouse", button: 0, pointerId: 1 });
+    fireEvent.pointerMove(surface, { pointerType: "mouse", pointerId: 1 });
+
+    expect(puts).toEqual([[90, 95, 20, 10], [90, 95, 20, 10]]);
+  });
+
   it("leaves the tint alone for a gesture that commits nothing until it closes", () => {
     const painted = recordPaints();
     const stroke = strokeAcross(new SpyTool());
@@ -335,5 +528,107 @@ describe("StudioCanvas", () => {
     stroke();
 
     expect(painted).toHaveLength(0);
+  });
+});
+
+describe("comparing with an earlier picture", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  const layer = (container: HTMLElement) =>
+    container.querySelector('canvas[data-layer="before"]') as HTMLCanvasElement | null;
+
+  function recordDraws() {
+    const draws: unknown[][] = [];
+    const context = new Proxy(
+      { drawImage: (...args: unknown[]) => draws.push(args) },
+      {
+        get: (target: Record<string, unknown>, key: string) =>
+          key in target ? target[key] : () => undefined,
+        set: () => true,
+      },
+    );
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      context as unknown as CanvasRenderingContext2D,
+    );
+    return draws;
+  }
+
+  it("adds no layer when there is nothing to compare", () => {
+    const { container } = render(<StudioCanvas image={image} mask={null} tool={null} />);
+    expect(layer(container)).toBeNull();
+    expect(container.querySelector(".studio-compare-divider")).toBeNull();
+  });
+
+  it("lays the earlier picture over the result, uncovered from the left edge", () => {
+    const earlier = { width: 800, height: 400 } as ImageBitmap;
+    const { container, rerender } = render(
+      <StudioCanvas image={image} mask={null} tool={null} before={{ image: earlier, reveal: 0 }} />,
+    );
+    // Over the picture and beneath the selection, at the picture's own size.
+    expect([...container.querySelectorAll("canvas")].indexOf(layer(container)!)).toBe(1);
+    expect(layer(container)).toHaveAttribute("width", "400");
+    expect(layer(container)!.style.clipPath).toBe("inset(0 100% 0 0)");
+    expect(container.querySelector(".studio-compare-divider")).toBeNull();
+
+    rerender(<StudioCanvas image={image} mask={null} tool={null} before={{ image: earlier, reveal: 0.25 }} />);
+    expect(layer(container)!.style.clipPath).toBe("inset(0 75% 0 0)");
+    expect((container.querySelector(".studio-compare-divider") as HTMLElement).style.left).toBe("25%");
+
+    rerender(<StudioCanvas image={image} mask={null} tool={null} before={{ image: earlier, reveal: 1 }} />);
+    expect(layer(container)!.style.clipPath).toBe("inset(0 0% 0 0)");
+    expect(container.querySelector(".studio-compare-divider")).toBeNull();
+  });
+
+  it("draws a picture of the same shape edge for edge, and another shape whole and centred", () => {
+    const draws = recordDraws();
+    const same = { width: 800, height: 400 } as ImageBitmap;
+    const { rerender } = render(
+      <StudioCanvas image={image} mask={null} tool={null} before={{ image: same, reveal: 1 }} />,
+    );
+    expect(draws).toContainEqual([same, 0, 0, 400, 200]);
+
+    const square = { width: 200, height: 200 } as ImageBitmap;
+    rerender(<StudioCanvas image={image} mask={null} tool={null} before={{ image: square, reveal: 1 }} />);
+    expect(draws).toContainEqual([square, 100, 0, 200, 200]);
+  });
+
+  it("keeps the divider two pixels wide on screen at any zoom", () => {
+    const earlier = { width: 400, height: 200 } as ImageBitmap;
+    const { container } = render(
+      <StudioCanvas image={image} mask={null} tool={null} before={{ image: earlier, reveal: 0.5 }} />,
+    );
+    const surface = container.querySelector(".studio-canvas") as HTMLElement;
+    const width = () => parseFloat((container.querySelector(".studio-compare-divider") as HTMLElement).style.width);
+    const before = width();
+    fireEvent.keyDown(surface, { key: "+" });
+    // Zoomed in, each of the picture's pixels is larger on screen, so the
+    // divider spans fewer of them.
+    expect(width()).toBeCloseTo(before / 1.2);
+  });
+
+  it("shows a perspective correction's corners as soon as the tool is in hand", () => {
+    const handles: number[] = [];
+    const context = new Proxy(
+      { arc: (x: number) => handles.push(x) },
+      {
+        get: (target: Record<string, unknown>, key: string) =>
+          key in target ? target[key] : () => undefined,
+        set: () => true,
+      },
+    );
+    vi.stubGlobal("ImageData", class {});
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      context as unknown as CanvasRenderingContext2D,
+    );
+    const tool = new PerspectiveTool(pictureCorners(400, 200), { width: 400, height: 200 }, vi.fn());
+
+    render(<StudioCanvas image={image} mask={createMask(400, 200)} tool={tool} />);
+
+    // A handle at each corner, left to right along the top and back along the
+    // bottom, with no pointer on the canvas at all.
+    expect(handles.slice(-4)).toEqual([0, 400, 400, 0]);
   });
 });

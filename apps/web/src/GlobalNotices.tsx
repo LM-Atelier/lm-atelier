@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { X } from "lucide-react";
+import { useNoticeSpace } from "./useNoticeSpace";
+import "./GlobalNotices.css";
 
 /** The two things the app has to say for itself: a failure, and a dead socket. */
 
@@ -39,8 +41,10 @@ export function GlobalNotices({
   // because reading a second failure must not un-dismiss the first.
   const [dismissed, setDismissed] = useState<ReadonlySet<Error>>(() => new Set());
   const failure = firstUnreadError(mutations, dismissed);
+  const rail = useNoticeSpace(connected, failure);
+  if (connected && !failure) return null;
   return (
-    <>
+    <div ref={rail} className="global-notices">
       {!connected && (
         <div className="toast" role="status">
           <span className="status-dot offline" aria-hidden />
@@ -60,6 +64,6 @@ export function GlobalNotices({
           </button>
         </div>
       )}
-    </>
+    </div>
   );
 }

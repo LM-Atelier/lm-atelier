@@ -1,0 +1,17 @@
+.jobs-page-summary { display: grid; justify-items: start; gap: calc(8px * var(--spacing-scale, 1)); padding: calc(4px * var(--spacing-scale, 1)) calc(3px * var(--spacing-scale, 1)) calc(10px * var(--spacing-scale, 1)); color: var(--ink-secondary); font-size: 12px; }
+
+/* A narrow transcript needs its full width for message actions and previews. */
+@media (max-width: 680px) {
+  .app-shell:has(> .jobs-panel) { grid-template-rows: auto auto minmax(0, 1fr); }
+  .app-shell:has(> .jobs-panel) > main { grid-row: 3; }
+  .app-shell > .jobs-panel { position: relative; grid-row: 2; right: auto; bottom: auto; width: auto; max-height: 20vh; margin: calc(8px * var(--spacing-scale, 1)) calc(12px * var(--spacing-scale, 1)); box-shadow: none; }
+}
+
+/* Image Studio keeps its options and main action in a panel down the right edge, where the floating
+   panel would sit over them, so while it is open the panel takes its own row above the Studio. */
+@media (min-width: 681px) {
+  .app-shell:has(.studio-view):has(> .jobs-panel) { grid-template-rows: auto minmax(0, 1fr); }
+  .app-shell:has(.studio-view):has(> .jobs-panel) > :is(.sidebar, .sidebar-resizer) { grid-row: 1 / -1; }
+  .app-shell:has(.studio-view):has(> .jobs-panel) > main { grid-row: 2; grid-column: 3; }
+  .app-shell:has(.studio-view) > .jobs-panel { position: relative; grid-row: 1; grid-column: 3; right: auto; bottom: auto; width: auto; max-height: 20vh; margin: calc(8px * var(--spacing-scale, 1)) calc(12px * var(--spacing-scale, 1)); box-shadow: none; }
+}

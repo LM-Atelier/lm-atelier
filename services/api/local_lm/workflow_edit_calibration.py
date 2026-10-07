@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from .graph_placeholders import binds_parameter
+
 EDIT_CALIBRATION_SCHEMA_KEY = "x-lm-atelier-edit-calibration"
 EDIT_CALIBRATION_VERSION = 1
 EDIT_SCOPES = ("minimal", "localized", "replacement", "global", "fallback")
@@ -62,6 +64,75 @@ def standard_edit_calibration(
             "minimum_effective_steps": dict(_DEFAULT_MINIMUM_EFFECTIVE_STEPS),
         }
     return result
+
+
+def edit_calibration_reaches_graph(
+    workflow: object, input_schema: Mapping[str, Any] | None
+) -> None:
+    """Refuse a declared edit strength the graph never consumes.
+
+    An edit workflow declares which of its settings is the change strength, and
+    the product builds a slider from that declaration. Nothing downstream checks
+    the graph takes the number, so a workflow that declares the parameter and
+    then fixes the value in its node offers a slider that changes nothing.
+
+    Only the STRENGTH is required. `steps_parameter` is deliberately not: a step
+    count is frequently fixed by the model or the schedule, and demanding a
+    placeholder for it would refuse workflows behaving correctly - the same
+    reasoning that exempts a video frame rate.
+
+    A parameter the settings path does not OFFER is exempt too, because then no
+    slider exists to be a lie: with no field, `resolve_image_edit_strength`
+    returns None and injects nothing, so a graph holding its own fixed value is
+    simply what runs, honestly and visibly.
+
+    That question is asked of the real overlay rather than read off the schema,
+    and the difference is not academic. `readOnly` removes an ENGINE setting and
+    does NOT remove a custom property - the custom-property branch adds it
+    regardless - so a workflow naming its own strength could carry the flag,
+    keep an offered control, resolve a value, and still be exempted by a check
+    that trusted the marker.
+
+    Video length does NOT get that exemption, and the difference is measured
+    rather than assumed: a declared length contract appends a duration control
+    whether or not the frame count is read-only, so the run still resolves a
+    frame count and records the seconds it believes it delivered.
+
+    This asks whether the value reaches the GRAPH, not whether it decides the
+    output. A placeholder feeding an unrelated input still passes.
+    """
+
+    if not input_schema:
+        return
+    calibration = validate_workflow_edit_calibration(input_schema)
+    if calibration is None:
+        return
+    if not _strength_is_offered(input_schema, calibration.parameter):
+        return
+    if not binds_parameter(workflow, calibration.parameter):
+        raise ValueError(
+            "workflow edit calibration declares "
+            f"{calibration.parameter} but the graph never uses it"
+        )
+
+
+def _strength_is_offered(input_schema: Mapping[str, Any], parameter: str) -> bool:
+    """Whether the settings path still offers a usable control for this parameter.
+
+    Measured by running the overlay the request path itself runs, so this cannot
+    drift from what a person is actually shown. A schema that the overlay
+    refuses outright tells us nothing about availability, so it counts as
+    offered: requiring the binding is the safe answer, and the schema's own
+    validation reports the real problem.
+    """
+
+    from .settings_registry import IMAGE_SETTINGS, workflow_settings
+
+    try:
+        fields = workflow_settings(IMAGE_SETTINGS, input_schema)
+    except ValueError:
+        return True
+    return any(field.key == parameter and field.available for field in fields)
 
 
 def validate_workflow_edit_calibration(

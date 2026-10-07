@@ -1,4 +1,5 @@
 import type { PromptBatch, PromptBatchItem, RoutingMode } from "./types";
+import type { TurnEditorState } from "./useTurnEditorState";
 
 export interface ComposerPromptSource {
   version: 1;
@@ -16,6 +17,11 @@ export interface ComposerPromptSource {
 export interface ComposerDraft {
   text: string;
   promptSource: ComposerPromptSource | null;
+  /** Everything else the composer holds for this chat: attachments, mode,
+   *  references, output count and template settings. Kept with the text so a
+   *  chat switched away from comes back with the whole draft, not the words
+   *  alone. Absent until the composer is first used. */
+  editor?: TurnEditorState;
 }
 
 export type ComposerDraftUpdate = ComposerDraft | ((current: ComposerDraft) => ComposerDraft);
@@ -60,6 +66,7 @@ export function composerDraftWithText(
   text: string,
 ): ComposerDraft {
   return {
+    ...draft,
     text,
     promptSource: text.trim() ? draft.promptSource : null,
   };

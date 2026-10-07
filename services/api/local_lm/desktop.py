@@ -221,15 +221,18 @@ def main() -> int:
 
         return download_worker_main()
     if "--runtime-self-test" in sys.argv[1:]:
+        from . import portable_archive_v1
         from .credentials import CredentialStore
         from .runtime_provisioning import default_engine_manifest_path
 
         credential_vault_available = CredentialStore().vault_available()
+        portable_archives_available = portable_archive_v1.self_test()
         print(
             json.dumps(
                 {
                     "version": __version__,
                     "credential_vault_available": credential_vault_available,
+                    "portable_archives_available": portable_archives_available,
                     "chat_engine": os.environ["LOCAL_LM_CHAT_ENGINE"],
                     "media_engine": os.environ["LOCAL_LM_MEDIA_ENGINE"],
                     "engine_manifest_available": default_engine_manifest_path().is_file(),
@@ -237,6 +240,10 @@ def main() -> int:
             )
         )
         if sys.platform == "win32" and not credential_vault_available:
+            return 1
+        # Pull-request checks never freeze the app, so this is where a build
+        # that cannot load the archive encryption is caught.
+        if not portable_archives_available:
             return 1
         return 0
 

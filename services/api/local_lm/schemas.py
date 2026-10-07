@@ -14,6 +14,7 @@ from pydantic import (
     StringConstraints,
     field_serializer,
     field_validator,
+    model_validator,
 )
 
 from .comfy_workflow_packages import WorkflowPackageIssueCode
@@ -32,6 +33,7 @@ from .domain import (
 from .install_plan_types import InstallPlanFailureCode
 from .model_asset_types import BoundWorkflowAssetKind, InstalledAssetKind
 from .model_asset_types import WorkflowAssetKind as WorkflowAssetKind
+from .output_geometry import MAX_DIMENSION, PresetId
 from .references import (
     MAX_REFERENCES_PER_TURN,
     MAX_ROLE,
@@ -42,6 +44,7 @@ from .references import (
 from .saved_settings import GenerationSettingsByRole, SavedRoleSettings
 from .studio_capabilities import StudioToolKind
 from .worker_failures import WorkerFailureCode
+from .workflow_install_offer_error_types import WorkflowInstallOfferInvalidationCode
 
 
 class ApiModel(BaseModel):
@@ -84,6 +87,8 @@ class WebSettings(ApiModel):
     """
 
     allow_url_fetch: bool = False
+    allow_search: bool = Field(default=False, strict=True)
+    allow_search_without_asking: bool = Field(default=False, strict=True)
 
 
 class ProjectCreate(ApiModel):
@@ -94,6 +99,25 @@ class ProjectCreate(ApiModel):
     video_workflow_revision_id: str | None = None
     generation_settings_json: GenerationSettingsByRole = Field(default_factory=dict)
     generation_preset_ids_json: GenerationPresetIdsByRole = Field(default_factory=dict)
+
+
+class ProjectExportRequest(ApiModel):
+    """An export's options sent in its body, so a passphrase never travels in an address."""
+
+    passphrase: str | None = Field(default=None, min_length=1, max_length=1024)
+
+
+class EncryptedOutputRecipeRequest(ApiModel):
+    """A record download's options and passphrase, in its body rather than its address."""
+
+    passphrase: str = Field(min_length=1, max_length=1024)
+    prompts: Literal["include", "omit"]
+    # The record the person was shown; a record rebuilt differently is refused.
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class EncryptedOutputRecipeBundleRequest(EncryptedOutputRecipeRequest):
+    inputs: Literal["include", "omit"] = "omit"
 
 
 class ProjectUpdate(ApiModel):
@@ -149,6 +173,59 @@ class ChatUpdate(ApiModel):
     web_settings_json: WebSettings | None = None
 
 
+class GenerationRetryPolicyOut(ApiModel):
+    max_retries: StrictInt = Field(default=3, ge=0, le=10)
+    revision: StrictInt = Field(default=0, ge=0)
+
+
+class GenerationRetryPolicyUpdate(ApiModel):
+    max_retries: StrictInt = Field(ge=0, le=10)
+    expected_revision: StrictInt = Field(ge=0)
+
+
+class WorkspaceLockStatusOut(ApiModel):
+    locked: bool
+    enabled: bool
+    require_pin: bool
+    # Changes with every lock and every restart; null while the lock is off.
+    lock_epoch: str | None
+    # How long the workspace may go unused before it locks itself; null for never,
+    # and while the lock is off.
+    idle_lock_seconds: int | None = None
+
+
+class WorkspaceUnlockIn(ApiModel):
+    # Bounded well above any PIN so parsing stays cheap. A PIN of the wrong
+    # length is answered like a wrong PIN, not refused here.
+    pin: StrictStr | None = Field(default=None, max_length=256)
+
+
+class WorkspaceLockPolicyOut(ApiModel):
+    enabled: bool
+    require_pin: bool
+    revision: int = Field(ge=0)
+    idle_lock_minutes: int | None = None
+
+
+class WorkspaceLockPolicyWrite(ApiModel):
+    expected_revision: StrictInt = Field(ge=0, le=9_223_372_036_854_775_807)
+    enabled: StrictBool
+    # Minutes without use before the workspace locks itself; null for never.
+    # Left out, the saved choice is kept.
+    idle_lock_minutes: StrictInt | None = Field(default=None, ge=1, le=24 * 60)
+    new_pin: StrictStr | None = Field(default=None, max_length=256)
+    clear_pin: StrictBool = False
+    # Needed when a PIN is set and the change replaces it, removes it, or
+    # turns the lock off.
+    current_pin: StrictStr | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def one_pin_change(self) -> Self:
+        if self.new_pin is not None and self.clear_pin:
+            raise ValueError("Choose a new PIN or remove the PIN, not both.")
+        return self
+
+
 class GenerationIdentityOut(ApiModel):
     model_profile_name: str | None = None
     workflow_family_name: str | None = None
@@ -199,6 +276,15 @@ class ArtifactLibraryPage(ApiModel):
     next_cursor: str | None = Field(default=None, min_length=1, max_length=2_048)
 
 
+class ArtifactAlbumEntrySummary(ArtifactLibraryEntrySummary):
+    collection_position: int = Field(ge=0, le=9_007_199_254_740_991)
+
+
+class ArtifactAlbumPage(ApiModel):
+    items: list[ArtifactAlbumEntrySummary]
+    next_cursor: str | None = Field(default=None, min_length=1, max_length=2_048)
+
+
 class ArtifactStorageInfo(ApiModel):
     total_bytes: int
     total_count: int
@@ -232,6 +318,32 @@ class ArtifactCleanupResult(ApiModel):
     truncated: bool = False
 
 
+#: The installation settings' own bounds, so a window chosen in Settings is
+#: always one the configuration could have set.
+MAX_RETENTION_DAYS = 3650
+MAX_TEMPORARY_RETENTION_HOURS = 168
+
+
+class RetentionWindowsIn(ApiModel):
+    """How long media nothing uses is kept, and how long previews are kept."""
+
+    media_days: StrictInt = Field(ge=1, le=MAX_RETENTION_DAYS)
+    temporary_hours: StrictInt = Field(ge=1, le=MAX_TEMPORARY_RETENTION_HOURS)
+
+
+class RetentionPolicyWrite(RetentionWindowsIn):
+    expected_revision: StrictInt = Field(ge=0, le=9_223_372_036_854_775_807)
+
+
+class RetentionPolicyOut(ApiModel):
+    media_days: int
+    temporary_hours: int
+    # 0 until somebody chooses, and both windows are then the installation's.
+    revision: int = Field(ge=0)
+    default_media_days: int
+    default_temporary_hours: int
+
+
 class ArtifactDeleteResult(ApiModel):
     artifact_id: str
     reference_count: int
@@ -257,6 +369,7 @@ class ResponseRevisionOut(ApiModel):
     status: MessageStatus
     parts: list[MessagePartOut]
     feedback: Literal["up", "down"] | None = None
+    activity: ChatActivityReferenceOut | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -323,6 +436,36 @@ class ResponseFeedbackOut(ApiModel):
     rating: Literal["up", "down"] | None
 
 
+class ChatActivityReferenceOut(ApiModel):
+    id: str
+    sequence: int = Field(ge=1)
+    message_id: str
+    response_revision_id: str
+    occurred_at: datetime
+
+    @field_serializer("occurred_at", when_used="json")
+    def serialize_timestamp_as_utc(self, value: datetime) -> str:
+        return value.replace(tzinfo=UTC).isoformat() if value.tzinfo is None else value.isoformat()
+
+
+class ChatActivityOut(ApiModel):
+    active_work_count: int = Field(ge=0)
+    unresolved_failed_count: int = Field(ge=0)
+    last_output: ChatActivityReferenceOut | None
+    last_failure: ChatActivityReferenceOut | None
+
+
+class ChatSummaryOut(ApiModel):
+    id: str
+    project_id: str | None
+    title: str
+    archived: bool
+    pinned: bool
+    created_at: datetime
+    updated_at: datetime
+    activity: ChatActivityOut
+
+
 class ChatOut(ApiModel):
     id: str
     project_id: str | None
@@ -347,8 +490,122 @@ class ChatOut(ApiModel):
     updated_at: datetime
 
 
+class WebSearchResultOut(ApiModel):
+    url: str = Field(max_length=2_000)
+    title: str = Field(max_length=200)
+    snippet: str = Field(max_length=2_000)
+
+
+class WebSearchOut(ApiModel):
+    run_id: str
+    assistant_message_id: str
+    job_id: str | None = None
+    revision: int | None = None
+    state: Literal[
+        "awaiting_approval",
+        "scheduled",
+        "approved",
+        "declined",
+        "cancelled",
+        "dispatching",
+        "complete",
+        "failed",
+        "uncertain",
+    ]
+    query: str = Field(min_length=1, max_length=2_000)
+    provider: Literal["CRW"] = "CRW"
+    provider_endpoint: str = Field(max_length=2_000)
+    dispatch_after: datetime | None = None
+    results: list[WebSearchResultOut] = Field(default_factory=list, max_length=5)
+    result_count: int = Field(default=0, ge=0, le=5)
+    truncated: bool = False
+    error_code: (
+        Literal[
+            "search_provider_invalid",
+            "search_query_invalid",
+            "search_credentials_refused",
+            "search_redirect_refused",
+            "search_rate_limited",
+            "search_unavailable",
+            "search_timeout",
+            "search_response_invalid",
+            "search_response_too_large",
+            "search_dispatch_uncertain",
+            "search_permission_revoked",
+            "search_provider_changed",
+            "search_work_unavailable",
+        ]
+        | None
+    ) = None
+
+
+class ChatSearchPage(ApiModel):
+    chat_id: str
+    searches: list[WebSearchOut]
+    next_before: str | None
+
+
+class WebSearchDecisionRequest(ApiModel):
+    revision: int = Field(strict=True, ge=1, le=2**63 - 1)
+    action: Literal["approve", "decline", "cancel"]
+
+
+class WebSearchEditRequest(ApiModel):
+    revision: int = Field(strict=True, ge=1, le=2**63 - 1)
+    query: str = Field(strict=True, min_length=1, max_length=2_000)
+
+
+class WebSearchConfiguration(ApiModel):
+    installation_enabled: bool
+    configured: bool
+    provider: Literal["CRW"] = "CRW"
+    provider_endpoint: str | None = None
+    error_code: (
+        Literal["search_not_configured", "search_provider_invalid", "search_credentials_invalid"]
+        | None
+    ) = None
+
+
 class ChatDetail(ChatOut):
     messages: list[MessageOut]
+    web_searches: list[WebSearchOut] = Field(default_factory=list)
+
+
+class ChatMessageWindow(ApiModel):
+    """One page of a conversation, and whether more of it exists either side.
+
+    A whole transcript is not a page size that scales: a long conversation
+    answers this endpoint in the same bounded time as a short one, which the
+    endpoint that returns every message cannot do. ``has_older`` and
+    ``has_newer`` are what let a reader ask for the next page without guessing
+    whether there is one.
+    """
+
+    chat_id: str
+    messages: list[MessageOut]
+    has_older: bool
+    has_newer: bool
+
+
+class ChatEditLineageStep(ApiModel):
+    message_id: str
+    artifact_id: str
+    instruction: str
+
+
+class ChatEditLineagePage(ApiModel):
+    chat_id: str
+    result_message_id: str
+    steps: list[ChatEditLineageStep]
+    next_before: str | None
+
+
+class ChatTranscriptContext(ApiModel):
+    chat_id: str
+    head_id: str | None
+    has_prior_visual: bool
+    has_prior_image: bool
+    has_pending_response: bool
 
 
 class ExchangeDeletionOut(ApiModel):
@@ -420,6 +677,202 @@ class StudioSessionCreate(ApiModel):
     # When the studio is entered from a chat, its profile and settings
     # snapshot carry over so applies run with the same models.
     source_chat_id: str | None = Field(default=None, max_length=40)
+
+
+#: The edits the studio makes itself, without a model.
+StudioLocalEditOperation = Literal[
+    "rotate_clockwise",
+    "rotate_counterclockwise",
+    "flip_horizontal",
+    "flip_vertical",
+    "straighten",
+    "perspective",
+    "crop",
+    "resize",
+    "adjust",
+    "blur",
+    "pixelate",
+    "paint",
+    "caption",
+    "canvas",
+    "subject",
+]
+
+
+class StudioCropBox(ApiModel):
+    """The part of a picture to keep, in its own pixels as it is seen upright."""
+
+    left: StrictInt = Field(ge=0)
+    top: StrictInt = Field(ge=0)
+    width: StrictInt = Field(ge=1)
+    height: StrictInt = Field(ge=1)
+
+
+class StudioPoint(ApiModel):
+    """A point on a picture, in its own pixels as it is seen upright."""
+
+    x: StrictInt = Field(ge=0, le=MAX_DIMENSION)
+    y: StrictInt = Field(ge=0, le=MAX_DIMENSION)
+
+
+class StudioPerspective(ApiModel):
+    """Where the corners of something that should be a rectangle lie on the picture.
+
+    Correcting the perspective makes what lies inside them the whole picture,
+    upright and square-cornered.
+    """
+
+    top_left: StudioPoint
+    top_right: StudioPoint
+    bottom_right: StudioPoint
+    bottom_left: StudioPoint
+
+
+class StudioStraighten(ApiModel):
+    """How far to turn a picture to straighten it, in degrees, clockwise when positive."""
+
+    degrees: float = Field(ge=-45, le=45)
+
+
+class StudioPictureSize(ApiModel):
+    """The size a picture is resized to, in pixels."""
+
+    width: StrictInt = Field(ge=1, le=MAX_DIMENSION)
+    height: StrictInt = Field(ge=1, le=MAX_DIMENSION)
+
+
+class StudioCurvePoint(ApiModel):
+    """A point a tone curve passes through: a level, and the level it becomes."""
+
+    x: StrictInt = Field(ge=1, le=254)
+    y: StrictInt = Field(ge=0, le=255)
+
+
+class StudioColorAdjustments(ApiModel):
+    """Where each light and color slider stands, from -100 to 100, with 0 unchanged."""
+
+    brightness: StrictInt = Field(default=0, ge=-100, le=100)
+    contrast: StrictInt = Field(default=0, ge=-100, le=100)
+    highlights: StrictInt = Field(default=0, ge=-100, le=100)
+    shadows: StrictInt = Field(default=0, ge=-100, le=100)
+    whites: StrictInt = Field(default=0, ge=-100, le=100)
+    blacks: StrictInt = Field(default=0, ge=-100, le=100)
+    saturation: StrictInt = Field(default=0, ge=-100, le=100)
+    warmth: StrictInt = Field(default=0, ge=-100, le=100)
+    tint: StrictInt = Field(default=0, ge=-100, le=100)
+    sharpness: StrictInt = Field(default=0, ge=-100, le=100)
+    vibrance: StrictInt = Field(default=0, ge=-100, le=100)
+    vignette: StrictInt = Field(default=0, ge=-100, le=100)
+    #: Grain is added or not, so it runs from 0 only.
+    grain: StrictInt = Field(default=0, ge=0, le=100)
+    #: The tone curve's points between black and white, left to right.
+    curve: list[StudioCurvePoint] = Field(default_factory=list, max_length=6)
+
+    @field_validator("curve")
+    @classmethod
+    def validate_curve(cls, value: list[StudioCurvePoint]) -> list[StudioCurvePoint]:
+        if any(left.x >= right.x for left, right in zip(value, value[1:], strict=False)):
+            raise ValueError("A tone curve's points must run left to right, one to a level.")
+        return value
+
+
+class StudioSelectionBlur(ApiModel):
+    """The marked area to blur, uploaded as a selection, and how far to blur it."""
+
+    mask_artifact_id: str = Field(min_length=1, max_length=80)
+    radius: StrictInt = Field(ge=1, le=100)
+
+
+class StudioSelectionPixelate(ApiModel):
+    """The marked area to pixelate, uploaded as a selection, and the block size in pixels."""
+
+    mask_artifact_id: str = Field(min_length=1, max_length=80)
+    block: StrictInt = Field(ge=2, le=100)
+
+
+class StudioSelectionPaint(ApiModel):
+    """The marked area to paint, uploaded as a selection, with its color and opacity."""
+
+    mask_artifact_id: str = Field(min_length=1, max_length=80)
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+    opacity: StrictInt = Field(ge=1, le=100)
+
+
+class StudioCaptionOverlay(ApiModel):
+    """Words the browser drew at the picture's size, uploaded as a transparent picture."""
+
+    overlay_artifact_id: str = Field(min_length=1, max_length=80)
+
+
+#: Where the picture sits on a new canvas: a corner, an edge's middle, or the center.
+StudioCanvasAnchor = Literal[
+    "top_left",
+    "top",
+    "top_right",
+    "left",
+    "center",
+    "right",
+    "bottom_left",
+    "bottom",
+    "bottom_right",
+]
+
+
+class StudioCanvasChange(ApiModel):
+    """A new canvas size, where the picture sits on it, and what fills the rest."""
+
+    width: StrictInt = Field(ge=1, le=MAX_DIMENSION)
+    height: StrictInt = Field(ge=1, le=MAX_DIMENSION)
+    anchor: StudioCanvasAnchor = "center"
+    fill: Literal["transparent", "white", "black"] = "transparent"
+
+
+class StudioLocalEditCreate(ApiModel):
+    """One edit to a picture in a studio session that the studio makes without a model."""
+
+    source_artifact_id: str = Field(min_length=1, max_length=80)
+    operation: StudioLocalEditOperation
+    crop: StudioCropBox | None = None
+    straighten: StudioStraighten | None = None
+    perspective: StudioPerspective | None = None
+    size: StudioPictureSize | None = None
+    adjustments: StudioColorAdjustments | None = None
+    blur: StudioSelectionBlur | None = None
+    pixelate: StudioSelectionPixelate | None = None
+    paint: StudioSelectionPaint | None = None
+    caption: StudioCaptionOverlay | None = None
+    #: The new subject the browser placed at the picture's size; given with a
+    #: replaced subject only. It has the same shape as drawn words.
+    subject: StudioCaptionOverlay | None = None
+    canvas: StudioCanvasChange | None = None
+
+    @model_validator(mode="after")
+    def details_only_for_their_edit(self) -> Self:
+        if (self.operation == "crop") != (self.crop is not None):
+            raise ValueError("A crop names the part to keep, and no other edit does.")
+        if (self.operation == "straighten") != (self.straighten is not None):
+            raise ValueError("A straightening names its angle, and no other edit does.")
+        if (self.operation == "perspective") != (self.perspective is not None):
+            raise ValueError(
+                "A perspective correction names its four corners, and no other edit does."
+            )
+        if (self.operation == "resize") != (self.size is not None):
+            raise ValueError("A resize names the new size, and no other edit does.")
+        if (self.operation == "adjust") != (self.adjustments is not None):
+            raise ValueError("An adjustment names its sliders, and no other edit does.")
+        if (self.operation == "blur") != (self.blur is not None):
+            raise ValueError("A blur names the marked area, and no other edit does.")
+        if (self.operation == "pixelate") != (self.pixelate is not None):
+            raise ValueError("A pixelation names the marked area, and no other edit does.")
+        if (self.operation == "paint") != (self.paint is not None):
+            raise ValueError("A paint names the marked area and its color, and no other edit does.")
+        if (self.operation == "caption") != (self.caption is not None):
+            raise ValueError("A caption names its drawn words, and no other edit does.")
+        if (self.operation == "subject") != (self.subject is not None):
+            raise ValueError("A replaced subject names its placed subject, and no other edit does.")
+        if (self.operation == "canvas") != (self.canvas is not None):
+            raise ValueError("A canvas change names the new canvas, and no other edit does.")
+        return self
 
 
 class PromptHelperCreate(ApiModel):
@@ -670,8 +1123,11 @@ class PromptExpansionBatchOut(ApiModel):
     prompt_template_revision_id: str = Field(min_length=1, max_length=40)
     schema_version: Literal[1]
     contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    codec_version: Literal[2]
+    codec_version: Literal[2, 3]
     requested_count: int = Field(ge=1, le=16)
+    unfilled_ordinals: list[Annotated[int, Field(ge=1, le=16)]] = Field(
+        default_factory=list, max_length=16
+    )
     selection_seed: int = Field(ge=0, lt=2_147_483_648)
     plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     state: Literal["draft", "queued"]
@@ -731,9 +1187,30 @@ TurnWorkflowSelectionIn = Annotated[
 ]
 
 
+class DefaultOutputShapesIn(ApiModel):
+    """The shape to make new pictures and videos in when nothing else sets their size."""
+
+    image: PresetId | None = None
+    video: PresetId | None = None
+
+
+class SourceFitRequest(ApiModel):
+    """An explicit canvas choice; source and workflow identity are resolved by the server.
+
+    Extend keeps the whole source and makes the rest of the canvas; crop keeps
+    the middle of the source that has the canvas's shape and fills the canvas
+    with it at one scale.
+    """
+
+    mode: Literal["extend", "crop"]
+    width: StrictInt = Field(ge=1, le=MAX_DIMENSION)
+    height: StrictInt = Field(ge=1, le=MAX_DIMENSION)
+
+
 class TurnRoleOverrides(ApiModel):
     """Deliberate choices for whichever steps route to this role."""
 
+    upscale: StrictBool = False
     settings: dict[str, Any] = Field(default_factory=dict)
     preset_id: str | None = Field(default=None, min_length=1, max_length=40)
     profile_id: str | None = Field(default=None, min_length=1, max_length=40)
@@ -743,6 +1220,9 @@ class TurnRoleOverrides(ApiModel):
 
 
 class TurnRequest(ApiModel):
+    upscale: StrictBool = False
+    source_fit: SourceFitRequest | None = None
+    default_output_shapes: DefaultOutputShapesIn | None = None
     text: str = Field(min_length=1, max_length=200_000)
     preset_id: str | None = Field(default=None, min_length=1, max_length=40)
     profile_id: str | None = Field(default=None, min_length=1, max_length=40)
@@ -802,6 +1282,63 @@ class TurnRequest(ApiModel):
         return self.model_copy(update=values)
 
 
+#: How much a draft's template settings may hold. A template's settings are a
+#: handful of numbers and names; this bounds a stored draft, not a real template.
+MAX_DRAFT_TEMPLATE_SETTINGS = 64
+MAX_DRAFT_TEMPLATE_SETTINGS_BYTES = 64_000
+
+
+class ChatComposerDraftAttachmentIn(ApiModel):
+    """One file attached to an unsent draft, as the composer shows it."""
+
+    artifact_id: str = Field(min_length=1, max_length=80)
+    kind: Literal["image", "video"]
+    origin: Literal["uploaded", "generated", "edited"]
+
+
+class ChatComposerDraftMentionIn(ApiModel):
+    """One Reference mentioned in an unsent draft, and the text that names it."""
+
+    reference_subject_id: str = Field(min_length=1, max_length=80)
+    mention_slug: str = Field(min_length=1, max_length=80)
+
+
+class ChatComposerDraftTemplateIn(ApiModel):
+    """The one-click edit template applied to an unsent draft."""
+
+    name: str = Field(min_length=1, max_length=240)
+    settings: dict[str, Any] = Field(default_factory=dict, max_length=MAX_DRAFT_TEMPLATE_SETTINGS)
+
+
+class ChatComposerDraftIn(ApiModel):
+    """Everything an unsent message would be sent with, bounded like the send itself."""
+
+    text: str = Field(default="", max_length=200_000)
+    prompt_source: PromptComposerSourceIn | None = None
+    mode: RoutingMode = RoutingMode.AUTO
+    output_count: int = Field(default=1, ge=1, le=16)
+    attachments: list[ChatComposerDraftAttachmentIn] = Field(default_factory=list, max_length=16)
+    mentions: list[ChatComposerDraftMentionIn] = Field(
+        default_factory=list, max_length=MAX_REFERENCES_PER_TURN
+    )
+    template_settings: ChatComposerDraftTemplateIn | None = None
+
+
+class ChatComposerDraftWrite(ApiModel):
+    """Replace a chat's draft, but only if it is still the revision the writer read."""
+
+    expected_revision: int = Field(ge=0)
+    draft: ChatComposerDraftIn
+
+
+class ChatComposerDraftOut(ChatComposerDraftIn):
+    """A chat's unsent draft. Revision 0 means the chat has never had one."""
+
+    chat_id: str
+    revision: int
+    updated_at: datetime | None = None
+
+
 class PriorTurnEditRequest(TurnRequest):
     """An exact retryable edit; omitted collection fields inherit the source."""
 
@@ -813,6 +1350,8 @@ class PriorTurnEditRequest(TurnRequest):
 
 
 class PriorTurnEditConfiguration(ApiModel):
+    upscale: bool = False
+    source_fit: SourceFitRequest | None = None
     image_edit_strength: dict[str, Any] | None = None
     operation: str
     profile_engine: str | None = None
@@ -1032,6 +1571,7 @@ class TurnAccepted(ApiModel):
     run: RunOut
     user_message: MessageOut
     assistant_message: MessageOut
+    assistant_messages: list[MessageOut] = Field(default_factory=list)
 
 
 class PriorTurnEditAccepted(TurnAccepted):
@@ -1100,6 +1640,95 @@ class JobOut(ApiModel):
     updated_at: datetime
 
 
+class JobActivityOut(ApiModel):
+    active: list[JobOut]
+    active_count: int = Field(ge=0)
+    recent_issues: list[JobOut]
+
+
+class QueueLaneCountsOut(ApiModel):
+    generation: int = Field(default=0, ge=0)
+    transfer: int = Field(default=0, ge=0)
+    install: int = Field(default=0, ge=0)
+    utility: int = Field(default=0, ge=0)
+
+
+class QueueControlCommand(ApiModel):
+    expected_revision: StrictInt = Field(ge=0, le=9_223_372_036_854_775_807)
+    idempotency_key: StrictStr = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class QueueControlResultOut(ApiModel):
+    owner_id: str
+    control_state: Literal["eligible", "held"]
+    control_revision: int = Field(ge=1)
+    eligible_since: datetime | None
+
+
+class GenerationQueuePolicyOut(ApiModel):
+    lane: Literal["generation"]
+    dispatch_state: Literal["open", "draining", "paused"]
+    revision: int = Field(ge=0)
+    running_jobs: int = Field(ge=0)
+    allowed_actions: list[Literal["pause_after_current", "resume"]]
+
+
+class TransferQueuePolicyOut(ApiModel):
+    lane: Literal["transfer"]
+    dispatch_state: Literal["open", "draining", "paused"]
+    revision: int = Field(ge=0)
+    running_jobs: int = Field(ge=0)
+    allowed_actions: list[Literal["pause_after_current", "resume"]]
+
+
+class InstallQueuePolicyOut(ApiModel):
+    lane: Literal["install"]
+    dispatch_state: Literal["open", "draining", "paused"]
+    revision: int = Field(ge=0)
+    running_jobs: int = Field(ge=0)
+    allowed_actions: list[Literal["pause_after_current", "resume"]]
+
+
+class UtilityQueuePolicyOut(ApiModel):
+    lane: Literal["utility"]
+    dispatch_state: Literal["open", "draining", "paused"]
+    revision: int = Field(ge=0)
+    running_jobs: int = Field(ge=0)
+    allowed_actions: list[Literal["pause_after_current", "resume"]]
+
+
+class QueueActivityItemOut(ApiModel):
+    owner_type: Literal["work_plan", "job"]
+    owner_id: str
+    label: str
+    lane: Literal["generation", "transfer", "install", "utility"]
+    status: Literal["running", "queued", "paused", "blocked"]
+    chat_id: str | None
+    chat_title: str | None
+    created_at: datetime
+    updated_at: datetime
+    step_count: int = Field(ge=0)
+    completed_steps: int = Field(ge=0)
+    blocked_steps: int = Field(ge=0)
+    active_jobs: int = Field(ge=0)
+    running_jobs: int = Field(ge=0)
+    queued_jobs: int = Field(ge=0)
+    paused_jobs: int = Field(ge=0)
+    progress: float | None = Field(ge=0, le=1)
+
+    control_state: Literal["eligible", "held"] | None = None
+    control_revision: int | None = Field(default=None, ge=0)
+    allowed_actions: list[Literal["hold", "release"]] = Field(default_factory=list)
+
+
+class QueueActivityPageOut(ApiModel):
+    items: list[QueueActivityItemOut]
+    total: int = Field(ge=0)
+    lane_counts: QueueLaneCountsOut
+    next_cursor: str | None
+    observed_at: datetime
+
+
 class WorkStepImport(ApiModel):
     """Portable step input; unknown historical statuses normalize during import."""
 
@@ -1124,6 +1753,25 @@ class WorkStepImport(ApiModel):
 
 WorkStepStatus = JobStatus | Literal["blocked"]
 WorkPlanStatus = WorkStepStatus | Literal["partial"]
+
+
+class QueueStepOut(ApiModel):
+    id: str
+    ordinal: int
+    label: str
+    status: WorkStepStatus
+    blocked_by: int = Field(ge=0)
+    progress: float | None = Field(default=None, ge=0, le=1)
+    progress_scope: Literal["overall", "stage"] | None = None
+    recorded_media_outputs: int | None = Field(default=None, ge=0)
+
+
+class QueuePlanStepsOut(ApiModel):
+    plan_id: str
+    items: list[QueueStepOut]
+    total: int = Field(ge=0)
+    next_offset: int | None
+    observed_at: datetime
 
 
 class WorkStepOut(WorkStepImport):
@@ -1256,6 +1904,11 @@ class ModelInstallOut(ApiModel):
     updated_at: datetime
 
 
+class CatalogInstallMatches(ApiModel):
+    remote_ids: list[str]
+    workflow_template_ids: list[str]
+
+
 class ModelUpdateOut(ApiModel):
     """One installed asset's staleness verdict against its provider.
 
@@ -1311,9 +1964,16 @@ class ModelProfileCreate(ApiModel):
     is_default: bool = False
 
 
+class ModelProfileModelUpdate(ApiModel):
+    expected_install_id: str = Field(min_length=1, max_length=40)
+    download_job_id: str = Field(min_length=1, max_length=40)
+
+
 class ModelProfileUpdate(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     use_case: str | None = Field(default=None, max_length=1_000)
+    use_case_derived: bool | None = None
+    expected_use_case: str | None = Field(default=None, max_length=1_000)
     load_settings: dict[str, Any] | None = None
     request_settings: dict[str, Any] | None = None
     is_default: bool | None = None
@@ -1321,6 +1981,14 @@ class ModelProfileUpdate(ApiModel):
 
 class ModelProfileClone(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class UseCaseSuggestionRequest(ApiModel):
+    expected_use_case: str = Field(max_length=1_000)
+
+
+class UseCaseSuggestionOut(ApiModel):
+    suggestion: str = Field(min_length=1, max_length=500)
 
 
 class ModelProfileBundle(ApiModel):
@@ -1407,6 +2075,16 @@ class WorkflowRevisionCreate(ApiModel):
     dependencies: dict[str, Any] = Field(default_factory=dict)
 
 
+class ModelAssetAdopt(ApiModel):
+    """A file already in the runtime's folder, offered for registration."""
+
+    kind: InstalledAssetKind
+    comfy_name: str
+    name: str | None = Field(default=None, min_length=1, max_length=300)
+    family: str | None = Field(default=None, min_length=1, max_length=100)
+    use_case: str | None = Field(default=None, max_length=10_000)
+
+
 class WorkflowRevisionReviewRequest(ApiModel):
     action: Literal["approve", "revoke"]
     subject_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -1444,6 +2122,8 @@ class StudioToolCapability(ApiModel):
     workflow_class: str
     available: bool
     reason: str | None
+    workflow_revision_id: str | None = None
+    adapter_asset_id: str | None = None
 
 
 class StudioCapabilityReport(ApiModel):
@@ -1460,8 +2140,15 @@ class WorkflowRevisionOut(ApiModel):
     api_graph_json: dict[str, Any]
     input_schema_json: dict[str, Any]
     dependencies_json: dict[str, Any]
+    dependency_contract_sha256: str | None = None
     trusted: bool
     created_at: datetime
+
+
+# The ratio presets a chat can offer. The ids are the ratios they name, and the
+# workflow decides which of them it can express exactly.
+WorkflowOutputGeometryPresetId = Literal["1:1", "3:4", "2:3", "9:16", "4:3", "3:2", "16:9"]
+WorkflowOutputGeometryOperation = Literal["text_to_image", "text_to_video", "image_to_video"]
 
 
 class WorkflowOutputGeometryBindingOut(ApiModel):
@@ -1481,9 +2168,10 @@ class WorkflowOutputGeometryCapabilityOut(ApiModel):
     revision_id: str | None
     workflow_id: str | None
     artifact_sha256: str | None
-    operation: Literal["text_to_image"] | None
+    operation: WorkflowOutputGeometryOperation | None
     engine: Literal["comfyui"] | None
-    size_modes: list[Literal["exact"]]
+    size_modes: list[Literal["exact", "preset"]]
+    preset_ids: list[WorkflowOutputGeometryPresetId]
     width: WorkflowOutputGeometryBindingOut | None
     height: WorkflowOutputGeometryBindingOut | None
     latent_node_id: str | None
@@ -1500,14 +2188,128 @@ class WorkflowOutputGeometryResolutionOut(ApiModel):
     workflow_id: str
     revision_id: str
     artifact_sha256: str
-    operation: Literal["text_to_image"]
+    operation: WorkflowOutputGeometryOperation
     engine: Literal["comfyui"]
-    mode: Literal["image"]
-    size_mode: Literal["exact"]
+    mode: Literal["image", "video"]
+    size_mode: Literal["exact", "preset"]
+    preset_id: WorkflowOutputGeometryPresetId | None
     width: int
     height: int
     graph_binding_verified: Literal[True]
     request_authorized: Literal[False]
+
+
+class WorkflowSummaryOut(ApiModel):
+    id: str
+    family_id: str | None = None
+    name: str
+    operation: str
+    description: str
+    current_revision_id: str | None
+    revision_count: int = Field(ge=0)
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkflowRevisionChoiceOut(ApiModel):
+    revision_id: str
+    workflow_id: str
+    workflow_name: str
+    operation: str
+    version: int
+
+
+class WorkflowRevisionSchemaOut(ApiModel):
+    revision_id: str
+    workflow_id: str
+    operation: str
+    input_schema_json: dict[str, Any]
+
+
+WorkflowLoraEditability = Literal[
+    "editable",
+    "required_locked",
+    "detected_read_only",
+]
+WorkflowLoraStrengthMode = Literal["separate", "coupled", "model_only", "unknown"]
+WorkflowLoraEditableField = Literal["enabled", "model_strength", "clip_strength"]
+WorkflowLoraEvidenceGap = Literal[
+    "dependency_contract_unavailable",
+    "dependency_contract_invalid",
+    "active_activation_unavailable",
+    "active_activation_invalid",
+    "ui_graph_provenance_unavailable",
+    "core_runtime_evidence_unavailable",
+    "core_graph_binding_unavailable",
+    "package_binding_evidence_unavailable",
+    "package_graph_binding_unavailable",
+]
+
+
+class WorkflowLoraAssetBindingOut(ApiModel):
+    dependency_slot: str = Field(min_length=1, max_length=100)
+    requirement_key: str = Field(min_length=1, max_length=100)
+    resource_identity_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    runtime_reference: str = Field(min_length=1, max_length=1_000)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class WorkflowLoraControlSlotOut(ApiModel):
+    slot_id: str = Field(pattern=r"^wflora_[0-9a-f]{64}$")
+    position: int = Field(ge=0, lt=64)
+    loader_type: str = Field(min_length=1, max_length=200)
+    loader_contract: str | None = Field(default=None, max_length=200)
+    loader_authority_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    editability: WorkflowLoraEditability
+    read_only_reason: str | None = Field(default=None, max_length=100)
+    dependency_required: bool | None
+    observed_runtime_reference: str | None = Field(default=None, max_length=1_000)
+    asset_binding: WorkflowLoraAssetBindingOut | None
+    default_enabled: bool | None
+    default_model_strength: float | None
+    default_clip_strength: float | None
+    strength_mode: WorkflowLoraStrengthMode
+    editable_fields: list[WorkflowLoraEditableField] = Field(max_length=3)
+
+
+class WorkflowLoraStrengthBoundsOut(ApiModel):
+    minimum: float
+    maximum: float
+
+
+class WorkflowLoraOverrideTargetWitnessOut(ApiModel):
+    workflow_family_id: str | None = Field(min_length=1, max_length=64)
+    workflow_definition_id: str = Field(min_length=1, max_length=64)
+    workflow_variant_key: str | None = Field(min_length=1, max_length=100)
+    workflow_revision_id: str = Field(min_length=1, max_length=40)
+    slot_contract_version: Literal[1]
+    revision_scope_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    api_graph_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    dependency_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    activation_binding_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    activation_witness_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class WorkflowLoraControlsOut(ApiModel):
+    version: Literal[1]
+    override_contract_version: Literal[1]
+    strength_bounds: WorkflowLoraStrengthBoundsOut
+    override_target: WorkflowLoraOverrideTargetWitnessOut | None
+    revision_scope_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    api_graph_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    dependency_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    activation_binding_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    ordering_authority: Literal["presentation_only"]
+    evidence_gaps: list[WorkflowLoraEvidenceGap] = Field(max_length=9)
+    base_model_family: str | None = Field(default=None, max_length=64)
+    accepts_added_loras: bool = False
+    slots: list[WorkflowLoraControlSlotOut] = Field(max_length=64)
 
 
 class WorkflowOut(ApiModel):
@@ -1558,6 +2360,19 @@ class WorkflowFamilyVariantOut(ApiModel):
     trusted: bool
     readiness: WorkflowVariantReadiness
     readiness_reason: str | None = None
+    setup_resolution: Literal["reviewed_download_available", "attention_required"] | None = None
+    install_offer: WorkflowInstallOfferOut | None = None
+    install_progress: WorkflowInstallProgressOut | None = None
+
+
+class WorkflowReadyRevisionOut(ApiModel):
+    family_id: str
+    family_name: str
+    workflow_id: str
+    workflow_name: str
+    revision_id: str
+    revision_version: int
+    operation: Operation
 
 
 class WorkflowFamilyPreferenceOut(ApiModel):
@@ -1565,6 +2380,11 @@ class WorkflowFamilyPreferenceOut(ApiModel):
     enabled: bool
     is_default: bool
     sort_order: int
+
+
+class WorkflowFamilyDependencySummaryOut(ApiModel):
+    dependency_count: int = Field(ge=0)
+    names: list[str] = Field(default_factory=list)
 
 
 class WorkflowFamilyOut(ApiModel):
@@ -1578,7 +2398,12 @@ class WorkflowFamilyOut(ApiModel):
     archived: bool
     compatibility: bool
     variants: list[WorkflowFamilyVariantOut] = Field(default_factory=list)
+    supported_selector_capabilities: list[WorkflowSelectorCapability] | None = None
+    variant_count: int | None = Field(default=None, ge=0)
+    ready_variant_count: int | None = Field(default=None, ge=0)
+    best_readiness: WorkflowVariantReadiness | None = None
     preferences: list[WorkflowFamilyPreferenceOut] = Field(default_factory=list)
+    dependency_summary: WorkflowFamilyDependencySummaryOut | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -1899,6 +2724,56 @@ class WorkflowAssetReviewOut(ApiModel):
     total_bytes: int
 
 
+WorkflowInstallStatus = Literal["ready", "queued", "invalidated", "completed", "expired"]
+WorkflowInstallAttentionCode = Literal[
+    "download-acceptance-unavailable",
+    "download-acceptance-changed",
+    "download-result-unavailable",
+    "download-result-changed",
+    "download-plan-changed",
+    "workflow-download-failed",
+    "workflow-dependencies-need-selection",
+    "download-results-need-binding",
+    "workflow-install-offer-changed",
+    "workflow-review-required",
+    "workflow-completion-unavailable",
+    "workflow-runtime-plan-unavailable",
+    "workflow-runtime-plan-changed",
+    "workflow-extension-review-required",
+    "workflow-media-restore-failed",
+    "workflow-install-cancelled",
+]
+
+
+WorkflowInstallPhase = Literal[
+    "ready",
+    "downloading",
+    "paused",
+    "verifying",
+    "needs_attention",
+    "completed",
+    "invalidated",
+    "expired",
+]
+
+
+class WorkflowInstallProgressOut(ApiModel):
+    id: str
+    workflow_revision_id: str
+    status: WorkflowInstallStatus
+    phase: WorkflowInstallPhase
+    total_downloads: int
+    completed_downloads: int
+    failed_downloads: int
+    cancelled_downloads: int
+    paused_downloads: int
+    pending_downloads: int
+    unavailable_downloads: int
+    attention_code: WorkflowInstallAttentionCode | None
+    # The stopped installation job a retry would resume, when there is one.
+    retry_job_id: str | None = None
+
+
 class WorkflowInstallOfferCreate(ApiModel):
     """Explicit plan choices for one persisted workflow revision."""
 
@@ -1922,7 +2797,7 @@ class WorkflowInstallOfferOut(ApiModel):
     queued_at: datetime | None
     completed_at: datetime | None
     invalidated_at: datetime | None
-    invalidation_code: str | None
+    invalidation_code: WorkflowInstallOfferInvalidationCode | None
     invalidation_reason: str | None
 
 
@@ -1937,6 +2812,9 @@ class WorkflowPackageImportRequest(ApiModel):
     name: str = Field(min_length=1, max_length=240)
     operation: Operation
     description: str = Field(default="", max_length=10_000)
+    # Only an explicit portable declaration supplies dependency slots. An
+    # omitted contract remains unknown rather than declaring no dependencies.
+    dependencies: dict[str, Any] = Field(default_factory=dict)
     # A package that needed preparation is first persisted as a deliberately
     # non-executable revision. Supplying both identities lets import finalize
     # that exact draft instead of creating a second, unrelated workflow.
@@ -2174,6 +3052,30 @@ class CatalogPage(ApiModel):
     stale: bool = False
 
 
+class LoraSuggestionOut(CatalogModel):
+    """Describe a suggested LoRA with the intent derived from its catalog metadata."""
+
+    use_case: str = Field(default="", max_length=1000)
+    use_case_derived: bool = False
+
+
+class LoraSuggestionsOut(ApiModel):
+    """Well-rated general-audience LoRAs for the model family a workflow runs."""
+
+    family: str | None = Field(default=None, max_length=64)
+    gap: Literal["family_unknown", "family_unsupported"] | None = None
+    items: list[LoraSuggestionOut] = Field(default_factory=list, max_length=12)
+    next_cursor: str | None = None
+    stale: bool = False
+
+
+class WorkflowCatalogGraphOut(ApiModel):
+    """A discovered workflow's graph, fetched so it can be reviewed like a local file."""
+
+    version_id: str
+    ui_graph: dict[str, Any]
+
+
 class CatalogDetail(ApiModel):
     model: CatalogModel
     revision: str
@@ -2237,6 +3139,87 @@ class CatalogFileSource(ApiModel):
     source_file_id: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,11}$")
 
 
+HardwareFitStatus = Literal["recommended", "likely", "tight", "unsupported", "unknown"]
+HardwareFitBasis = Literal["unknown", "calculated", "declared", "measured", "tested", "certified"]
+
+
+class HardwareFitReasonOut(ApiModel):
+    code: Literal[
+        "accelerator_backend_missing",
+        "accelerator_memory_below_minimum",
+        "accelerator_memory_busy",
+        "accelerator_memory_declared",
+        "accelerator_memory_estimated",
+        "accelerator_memory_measured",
+        "accelerator_memory_unknown",
+        "accelerator_missing",
+        "architecture_unsupported",
+        "cpu_capabilities_unknown",
+        "cpu_capability_missing",
+        "chat_context_estimate",
+        "evidence_stale",
+        "platform_unsupported",
+        "runtime_backend_missing",
+        "system_memory_below_minimum",
+        "system_memory_busy",
+        "system_memory_declared",
+        "system_memory_estimated",
+        "system_memory_measured",
+        "system_memory_unknown",
+    ]
+    severity: Literal["info", "warning", "block"]
+    message: str
+
+
+class HardwareFitAlternativeOut(ApiModel):
+    code: Literal[
+        "choose_compatible_backend",
+        "choose_cpu_compatible_variant",
+        "choose_smaller_variant",
+        "free_current_memory",
+        "install_supported_runtime",
+        "use_safer_settings",
+    ]
+    message: str
+
+
+class HardwareFitResourceOut(ApiModel):
+    kind: Literal["system", "accelerator"]
+    capacity_bytes: int = Field(ge=0)
+    available_bytes: int | None = Field(ge=0)
+    required_bytes: int = Field(ge=0)
+    status: HardwareFitStatus
+    basis: HardwareFitBasis
+    immediate_pressure: bool
+
+
+class HardwareFitSettingOut(ApiModel):
+    key: str
+    label: str
+    unit: str
+    minimum: int
+    maximum: int
+    advisory_only: bool
+    preserves_user_override: bool
+
+
+class HardwareFitAdviceOut(ApiModel):
+    status: HardwareFitStatus
+    basis: HardwareFitBasis
+    evidence_label: Literal["tested", "certified"] | None
+    reasons: list[HardwareFitReasonOut]
+    alternatives: list[HardwareFitAlternativeOut]
+    resources: list[HardwareFitResourceOut]
+    settings: list[HardwareFitSettingOut]
+
+
+class CatalogHardwareAlternative(ApiModel):
+    selected_files: list[str]
+    download_bytes: int = Field(ge=0)
+    download_size_complete: bool
+    hardware_fit: HardwareFitAdviceOut
+
+
 class CatalogPreflight(ApiModel):
     remote_id: str
     source_remote_id: str | None = None
@@ -2248,9 +3231,12 @@ class CatalogPreflight(ApiModel):
     workflow_template_id: str | None = None
     workflow_template_sha256: str | None = None
     download_bytes: int
+    download_size_complete: bool = False
     available_disk_bytes: int
     estimated_ram_bytes: int | None = None
     estimated_vram_bytes: int | None = None
+    hardware_fit: HardwareFitAdviceOut | None = None
+    hardware_alternatives: list[CatalogHardwareAlternative] = Field(default_factory=list)
     can_install: bool
     checks: list[CatalogPreflightCheck]
     install_plan: InstallPlanOut | None = None
@@ -2299,9 +3285,11 @@ class ModelAssetOut(ApiModel):
     manifest_json: dict[str, Any]
     active: bool
     use_case: str
+    use_case_derived: bool = False
     auto_apply: bool
     default_model_strength: float
     default_clip_strength: float
+    typed_trigger_words: list[str]
     verified_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -2309,10 +3297,17 @@ class ModelAssetOut(ApiModel):
 
 class ModelAssetUpdate(ApiModel):
     active: bool | None = None
+    #: The base model the asset is for. An empty string clears it; a file
+    #: registered without declaring one otherwise never gets one.
+    family: str | None = Field(default=None, max_length=100)
     use_case: str | None = Field(default=None, max_length=1_000)
+    use_case_derived: bool | None = None
+    expected_use_case: str | None = Field(default=None, max_length=1_000)
     auto_apply: bool | None = None
     default_model_strength: float | None = Field(default=None, ge=-4, le=4)
     default_clip_strength: float | None = Field(default=None, ge=-4, le=4)
+    # Replaces the whole recorded list; an empty list clears it.
+    typed_trigger_words: list[str] | None = Field(default=None, max_length=100)
 
 
 class AdapterPromptGrammarReview(ApiModel):
@@ -2644,9 +3639,41 @@ class ApplicationInfo(ApiModel):
     web_access_enabled: bool = False
 
 
+class ThirdPartyNoticesOut(ApiModel):
+    # Both null when not running from a release, which carries them.
+    text: str | None
+    license_folder: str | None
+
+
+class CustomNodeContainmentStatus(ApiModel):
+    """Whether custom-node code on a media worker is confined.
+
+    This is separate from the worker being ready. `unavailable` means no
+    installed backend has proved confinement. The record does not authorize
+    a launch and does not grant an Offline badge.
+    """
+
+    level: Literal[
+        "unavailable",
+        "process_tree_only",
+        "filesystem_restricted",
+        "filesystem_no_egress",
+        "verified",
+    ]
+    platform: str
+    profile_version: int = Field(ge=1)
+    backend: str
+    backend_version: str
+    profile_sha256: str | None = None
+    file_denial_provable: bool
+    connect_denial_provable: bool
+    authorizes_execution: bool
+    offline_badge: bool
+
+
 class WorkerStatus(ApiModel):
     name: Literal["chat", "media"]
-    state: Literal["stopped", "starting", "ready", "exited"] = "stopped"
+    state: Literal["stopped", "starting", "ready", "stopping", "exited"] = "stopped"
     managed: bool
     running: bool
     pid: int | None = None
@@ -2686,12 +3713,31 @@ class WorkerStatus(ApiModel):
     failure_remedy: str | None = None
     stderr_tail: str | None = None
     log_path: str | None = None
+    # Null on the chat worker, where custom-node confinement does not apply.
+    # On the media worker this is the host capability. It is not a canary run,
+    # and a ready worker does not make it stronger.
+    custom_node_containment: CustomNodeContainmentStatus | None = None
 
 
 class WorkerSettings(ApiModel):
     # Bounds mirror Settings.worker_startup_seconds so a value accepted here is
     # never rejected when the process restarts and reads it back from disk.
     worker_startup_seconds: float = Field(ge=1, le=600)
+
+
+class KeepAwakeSetting(ApiModel):
+    enabled: bool
+
+
+class KeepAwakeStatus(ApiModel):
+    enabled: bool
+    # Whether this platform gives LM Atelier any way to keep the computer awake.
+    supported: bool
+    # Whether the computer is being kept awake right now.
+    active: bool
+    # Jobs running that want it awake. Running jobs with nothing active means
+    # the setting is off or the platform refused, and the work went on anyway.
+    running_jobs: int = Field(ge=0)
 
 
 class WorkerResetResult(ApiModel):
@@ -2725,13 +3771,20 @@ class RuntimeStatus(ApiModel):
     security_status: Literal["checksum-pinned", "blocked"] = "checksum-pinned"
     security_message: str = ""
     message: str = ""
+    #: Another version's managed release that the configuration still uses, when
+    #: this build's pinned release is not installed.
+    installed_release: str | None = None
 
 
 SetupReadinessCode = Literal[
     "activation_ready",
     "activation_required",
     "activation_stale",
+    "custom_node_containment_unavailable",
     "generation_verification_failed",
+    "generation_verification_paused",
+    "generation_verification_pausing",
+    "generation_verification_queued",
     "generation_verification_required",
     "generation_verification_running",
     "generation_verified",
@@ -2746,6 +3799,7 @@ SetupReadinessCode = Literal[
     "runtime_failed",
     "runtime_installing",
     "runtime_missing",
+    "runtime_other_version",
     "runtime_ready",
     "runtime_unsupported",
     "worker_failed",
@@ -2818,6 +3872,152 @@ class BackupInfo(ApiModel):
     media_size_bytes: int = 0
 
 
+class BackupRestoreStateOut(ApiModel):
+    """A restore waiting for the next start, or why the last one asked for was not applied."""
+
+    state: Literal["none", "pending", "failed"]
+    backup: str | None = None
+    reason: (
+        Literal[
+            "backup-missing",
+            "backup-invalid",
+            "backup-newer",
+            "backup-key-missing",
+            "restore-failed",
+        ]
+        | None
+    ) = None
+    failed_at: datetime | None = None
+    encrypted: bool = False
+
+
+class EncryptedBackupRequest(ApiModel):
+    """An encrypted backup's options, in its body so a passphrase never travels in an address."""
+
+    passphrase: str = Field(min_length=1, max_length=1024)
+    include_media: bool = False
+
+
+class EncryptedBackupCheck(ApiModel):
+    """What an encrypted backup holds, once it has opened and passed a backup's checks."""
+
+    created_at: datetime
+    app_version: str
+    schema_revision: str
+    database_size_bytes: int
+    media_included: bool
+    media_size_bytes: int | None = None
+    artifact_count: int
+
+
+def _utc_instant(value: datetime) -> str:
+    """SQLite keeps these naive and they are UTC; say so at the browser boundary."""
+
+    normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    return normalized.isoformat().replace("+00:00", "Z")
+
+
+class EmptyChatEntryOut(ApiModel):
+    """One empty chat, described by the decision rather than by its content.
+
+    No title, no draft text, no prompt. A maintenance list that shows titles is
+    a list of what somebody wrote, and the reasons are what the decision needs.
+    """
+
+    id: str
+    classification: Literal["strict_blank", "configured_blank", "inconsistent"]
+    created_at: datetime
+    updated_at: datetime
+    age_hours: float
+    reasons: list[str] = Field(default_factory=list)
+    #: `inconsistent` is never offered for deletion, and says so here rather
+    #: than leaving the surface to infer it from the classification.
+    deletable: bool
+
+    @field_serializer("created_at", "updated_at", when_used="json")
+    def serialize_timestamp_as_utc(self, value: datetime) -> str:
+        return _utc_instant(value)
+
+
+class EmptyChatPageOut(ApiModel):
+    entries: list[EmptyChatEntryOut] = Field(default_factory=list)
+    next_cursor: str | None = None
+    #: Of this page, not of the library. A count over everything would be a
+    #: second query answering a different question from the rows shown.
+    counts: dict[str, int] = Field(default_factory=dict)
+    evaluated_at: datetime
+
+    @field_serializer("evaluated_at", when_used="json")
+    def serialize_evaluated_at_as_utc(self, value: datetime) -> str:
+        return _utc_instant(value)
+
+
+#: The most chats one cleanup may name: a page's worth, so a selection is always
+#: something a person could have looked at.
+EMPTY_CHAT_SELECTION_LIMIT = 200
+
+
+class EmptyChatPreviewIn(ApiModel):
+    """The exact ids chosen, and the filter state they were chosen under."""
+
+    chat_ids: list[Annotated[str, Field(min_length=1, max_length=40)]] = Field(
+        min_length=1, max_length=EMPTY_CHAT_SELECTION_LIMIT
+    )
+    min_age_hours: Annotated[float, Field(ge=0)] = 24.0
+    include_archived: bool = False
+    include_configured: bool = False
+
+
+class EmptyChatConflictOut(ApiModel):
+    chat_id: str
+    reason: Literal[
+        "missing",
+        "out_of_scope",
+        "not_empty",
+        "too_young",
+        "archived_excluded",
+        "inconsistent",
+        "filtered_out",
+    ]
+
+
+class EmptyChatPreviewOut(ApiModel):
+    #: Names this issuance. Deleting must send it back, because the deadline
+    #: below belongs to this preview and not to the selection in general.
+    preview_id: str
+    digest: str
+    expires_at: datetime
+    strict_count: int
+    configured_count: int
+    conflicts: list[EmptyChatConflictOut] = Field(default_factory=list)
+
+    @field_serializer("expires_at", when_used="json")
+    def serialize_expires_at_as_utc(self, value: datetime) -> str:
+        return _utc_instant(value)
+
+
+class EmptyChatExecuteIn(EmptyChatPreviewIn):
+    #: Client-generated before asking, and the same across a retry of one
+    #: decision, so a repeat returns the first result instead of deleting again.
+    operation_id: str = Field(min_length=1, max_length=80)
+    preview_id: str = Field(min_length=1, max_length=64)
+    digest: str = Field(min_length=64, max_length=64)
+    acknowledged_count: Annotated[int, Field(ge=0)]
+    acknowledged_configured: bool = False
+
+
+class EmptyChatDeletionOut(ApiModel):
+    operation_id: str
+    deleted_ids: list[str] = Field(default_factory=list)
+    deleted_at: datetime
+    #: True when this returned an earlier operation's result rather than deleting now.
+    replayed: bool
+
+    @field_serializer("deleted_at", when_used="json")
+    def serialize_deleted_at_as_utc(self, value: datetime) -> str:
+        return _utc_instant(value)
+
+
 class EventOut(ApiModel):
     sequence: int
     type: str
@@ -2834,7 +4034,7 @@ class HealthOut(ApiModel):
 
 
 class CredentialStatus(ApiModel):
-    provider: Literal["huggingface", "civitai"]
+    provider: Literal["huggingface", "civitai", "crw"]
     configured: bool
     source: Literal["none", "environment", "credential_vault"]
     vault_available: bool

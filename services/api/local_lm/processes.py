@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 import httpx
 import psutil
 
+from .chat_memory import DEFAULT_CHAT_CONTEXT, estimated_chat_memory
 from .comfy_editor_bridge import (
     ComfyEditorBridgeError,
     ComfyEditorBridgeSupport,
@@ -29,6 +30,7 @@ from .comfy_editor_bridge import (
 )
 from .comfy_registry_paths import registry_wheel_environment_root
 from .config import Settings
+from .custom_node_containment import host_containment_capability
 from .events import EventBroker
 from .filesystem_links import (
     AnchoredDirectory,
@@ -45,7 +47,7 @@ from .gguf import GGUFSelectionError, automatic_mmproj_selection, validate_gguf_
 from .model_manifests import COMFY_MODEL_FOLDERS, comfy_folder_for_kind
 from .models import ModelAssetInstall, ModelInstall, ModelProfile
 from .network import shared_tls_context
-from .schemas import WorkerStatus
+from .schemas import CustomNodeContainmentStatus, WorkerStatus
 from .security import trusted_browser_origins
 from .subprocess_env import python_subprocess_environment
 from .worker_failures import (
@@ -57,8 +59,9 @@ from .worker_failures import (
 
 if TYPE_CHECKING:
     from .comfy_registry_installs import ComfyRegistryLaunchContract
+    from .comfy_registry_reviewed_inputs import ComfyRegistryReviewedInputContext
     from .runtime_provisioning import RuntimeProvisioner
-    from .workflow_activations import WorkflowActivationLaunchScope
+    from .workflow_activations import WorkflowMediaLaunchScope
 
 
 STATE_REFUSED = "LM Atelier's state folder may not be a filesystem link"
@@ -77,6 +80,13 @@ class WorkerStartRefused(RuntimeError):
 
 class ProcessStateError(RuntimeError):
     """State beneath the data folder could not be reached or published safely."""
+
+
+class WorkerStopIncomplete(ValueError):
+    """Shutdown could not confirm that every owned worker process stopped."""
+
+    def __init__(self) -> None:
+        super().__init__("Worker shutdown did not complete. Its process ownership is retained.")
 
 
 @contextlib.contextmanager
@@ -383,6 +393,33 @@ class WorkerRecord:
     launch_scope_sha256: str | None = None
     editor_bridge_launch_id: str | None = None
     editor_bridge_support: ComfyEditorBridgeSupport | None = None
+    stopping: bool = False
+    shutdown_incomplete: bool = False
+
+
+def _media_containment_status(name: str) -> CustomNodeContainmentStatus | None:
+    """Report the installed capability for the media worker, and nothing for chat.
+
+    This is not a canary. The level stays unavailable and neither grant is
+    set, including when a later capability claims its denials are provable:
+    a status read has no witness for those denials.
+    """
+
+    if name != "media":
+        return None
+    capability = host_containment_capability()
+    return CustomNodeContainmentStatus(
+        level="unavailable",
+        platform=capability.platform,
+        profile_version=capability.version,
+        backend=capability.backend,
+        backend_version=capability.backend_version,
+        profile_sha256=None,
+        file_denial_provable=capability.file_denial_provable,
+        connect_denial_provable=capability.connect_denial_provable,
+        authorizes_execution=False,
+        offline_badge=False,
+    )
 
 
 class ProcessSupervisor:
@@ -423,7 +460,11 @@ class ProcessSupervisor:
             )
             if record and current_memory is not None:
                 record.peak_memory_bytes = max(record.peak_memory_bytes, current_memory)
-            stderr_tail = self._stderr_tail(record) if record and not running else None
+            stderr_tail = (
+                self._stderr_tail(record)
+                if record and not running and not record.stopping
+                else None
+            )
             failure_detail = None
             failure = WorkerFailure(WorkerFailureCode.UNKNOWN, None)
             if record is None:
@@ -434,7 +475,13 @@ class ProcessSupervisor:
                         f"running and holding its port: {orphan}."
                     )
                     failure = worker_failure(WorkerFailureCode.PORT_IN_USE)
-            if record and not running:
+            if record and record.shutdown_incomplete:
+                failure_detail = str(WorkerStopIncomplete())
+                failure = WorkerFailure(
+                    WorkerFailureCode.UNKNOWN,
+                    "Try stopping the worker again. If it still cannot stop, restart the computer.",
+                )
+            elif record and not running and not record.stopping:
                 exit_code = (
                     record.process.returncode
                     if record.process.returncode is not None
@@ -456,7 +503,13 @@ class ProcessSupervisor:
                 WorkerStatus(
                     name=name,
                     state=(
-                        record.state if running and record else "exited" if record else "stopped"
+                        "stopping"
+                        if record and record.stopping
+                        else record.state
+                        if running and record
+                        else "exited"
+                        if record
+                        else "stopped"
                     ),
                     managed=record is not None,
                     running=running,
@@ -475,6 +528,7 @@ class ProcessSupervisor:
                     failure_remedy=failure.remedy,
                     stderr_tail=stderr_tail,
                     log_path=self._public_log_path(name),
+                    custom_node_containment=_media_containment_status(name),
                 )
             )
         return result
@@ -483,7 +537,12 @@ class ProcessSupervisor:
         """Return the live ready worker's exact activation scope, if it has one."""
 
         record = self._workers.get(name)
-        if record is None or record.process.returncode is not None or record.state != "ready":
+        if (
+            record is None
+            or record.stopping
+            or record.process.returncode is not None
+            or record.state != "ready"
+        ):
             return None
         return record.launch_scope_sha256
 
@@ -491,7 +550,12 @@ class ProcessSupervisor:
         """Return authority for the ready launch that whitelisted the verified bridge."""
 
         record = self._workers.get("media")
-        if record is None or record.process.returncode is not None or record.state != "ready":
+        if (
+            record is None
+            or record.stopping
+            or record.process.returncode is not None
+            or record.state != "ready"
+        ):
             return None
         support = record.editor_bridge_support
         if support is None or not support.supported:
@@ -502,7 +566,12 @@ class ProcessSupervisor:
         """Return the exact editor support fact bound to the live ready media launch."""
 
         record = self._workers.get("media")
-        if record is None or record.process.returncode is not None or record.state != "ready":
+        if (
+            record is None
+            or record.stopping
+            or record.process.returncode is not None
+            or record.state != "ready"
+        ):
             return None
         support = record.editor_bridge_support
         if support is None:
@@ -518,6 +587,7 @@ class ProcessSupervisor:
         *,
         launch_scope_sha256: str | None = None,
         vision_max_images: int | None = None,
+        before_replace: Callable[[], None] | None = None,
     ) -> WorkerStatus:
         if profile.engine == "vllm":
             return await self._load_vllm_chat(
@@ -525,6 +595,7 @@ class ProcessSupervisor:
                 install,
                 launch_scope_sha256=launch_scope_sha256,
                 vision_max_images=vision_max_images,
+                before_replace=before_replace,
             )
         if profile.engine != "llama.cpp":
             raise ValueError("the selected profile is not a managed chat profile")
@@ -560,8 +631,21 @@ class ProcessSupervisor:
         if projection_path is not None:
             model_size += projection_path.stat().st_size
         estimate = self._estimate_chat_memory(model_size, profile.load_settings_json)
-        previous_engine = self.settings.chat_engine
-        self.settings.chat_engine = "llama.cpp"
+        previous_engine: str | None = None
+
+        def select_engine() -> None:
+            nonlocal previous_engine
+            if before_replace is not None:
+                before_replace()
+            if previous_engine is None:
+                previous_engine = self.settings.chat_engine
+            self.settings.chat_engine = "llama.cpp"
+
+        replacement_checks: dict[str, Any] = {}
+        if before_replace is None:
+            select_engine()
+        else:
+            replacement_checks["before_replace"] = select_engine
         try:
             await self._replace(
                 "chat",
@@ -570,9 +654,11 @@ class ProcessSupervisor:
                 profile.id,
                 estimated_memory_bytes=estimate,
                 launch_scope_sha256=launch_scope_sha256,
+                **replacement_checks,
             )
         except (Exception, asyncio.CancelledError):
-            self.settings.chat_engine = previous_engine
+            if previous_engine is not None:
+                self.settings.chat_engine = previous_engine
             raise
         return self.statuses()[0]
 
@@ -583,6 +669,7 @@ class ProcessSupervisor:
         *,
         launch_scope_sha256: str | None = None,
         vision_max_images: int | None = None,
+        before_replace: Callable[[], None] | None = None,
     ) -> WorkerStatus:
         if (
             vision_max_images is not None
@@ -649,8 +736,21 @@ class ProcessSupervisor:
             candidate.stat().st_size for candidate in model_root.rglob("*") if candidate.is_file()
         )
         estimate = self._estimate_chat_memory(model_size, profile.load_settings_json)
-        previous_engine = self.settings.chat_engine
-        self.settings.chat_engine = "vllm"
+        previous_engine: str | None = None
+
+        def select_engine() -> None:
+            nonlocal previous_engine
+            if before_replace is not None:
+                before_replace()
+            if previous_engine is None:
+                previous_engine = self.settings.chat_engine
+            self.settings.chat_engine = "vllm"
+
+        replacement_checks: dict[str, Any] = {}
+        if before_replace is None:
+            select_engine()
+        else:
+            replacement_checks["before_replace"] = select_engine
         try:
             await self._replace(
                 "chat",
@@ -659,9 +759,11 @@ class ProcessSupervisor:
                 profile.id,
                 estimated_memory_bytes=estimate,
                 launch_scope_sha256=launch_scope_sha256,
+                **replacement_checks,
             )
         except (Exception, asyncio.CancelledError):
-            self.settings.chat_engine = previous_engine
+            if previous_engine is not None:
+                self.settings.chat_engine = previous_engine
             raise
         return self.statuses()[0]
 
@@ -670,9 +772,17 @@ class ProcessSupervisor:
         provisional_model_paths: tuple[Path, dict[str, str]] | None = None,
         *,
         phase_callback: Callable[[str], Awaitable[None]] | None = None,
-        activation_scope: WorkflowActivationLaunchScope | None = None,
+        activation_scope: WorkflowMediaLaunchScope | None = None,
+        before_replace: Callable[[], None] | None = None,
     ) -> WorkerStatus:
+        from .workflow_activations import WorkflowSourceLaunchScope
+
+        def check_start() -> None:
+            if before_replace is not None:
+                before_replace()
+
         async def report_phase(phase: str) -> None:
+            check_start()
             if phase_callback is None:
                 return
             try:
@@ -684,9 +794,13 @@ class ProcessSupervisor:
                 raise
             except Exception:
                 logger.warning("Could not publish media startup phase", exc_info=True)
+            check_start()
 
         if provisional_model_paths is not None and activation_scope is not None:
             raise ValueError("Provisional model paths cannot broaden an activation-scoped launch")
+        check_start()
+        await self._revalidate_source_media_scope(activation_scope)
+        check_start()
         if (
             not self.settings.comfy_executable
             or not self.settings.comfy_executable.is_file()
@@ -694,11 +808,15 @@ class ProcessSupervisor:
             or not (self.settings.comfy_directory / "main.py").is_file()
         ) and self.runtimes:
             await report_phase("Provisioning media runtime")
-            await self.runtimes.ensure("comfyui")
+            if before_replace is None:
+                await self.runtimes.ensure("comfyui")
+            else:
+                await self.runtimes.ensure("comfyui", require_claim=before_replace)
         executable = self.settings.comfy_executable
         directory = self.settings.comfy_directory
         if not executable or not directory:
             raise RuntimeError("The ComfyUI runtime is not installed.")
+        configured_runtime = (executable, directory)
         directory = directory.expanduser().resolve(strict=True)
         entrypoint = (directory / "main.py").resolve(strict=True)
         if directory not in entrypoint.parents:
@@ -708,36 +826,21 @@ class ProcessSupervisor:
         await report_phase("Validating media dependencies")
         custom_node_types: tuple[str, ...] = ()
         if activation_scope is None:
+            if before_replace is None:
+                await self._clear_cancelled_workflow_activations()
+            else:
+                await self._clear_cancelled_workflow_activations(before_stop=before_replace)
+            check_start()
             trusted_custom_nodes = await self._trusted_comfy_node_folders()
-            registry_contract = await asyncio.to_thread(self._trusted_comfy_registry_contract)
         else:
             trusted_custom_nodes, custom_node_types = await self._scoped_comfy_node_folders(
                 activation_scope
             )
-            registry_contract = await asyncio.to_thread(
-                self._scoped_comfy_registry_contract,
-                activation_scope,
-            )
-        if registry_contract.runtime_distributions:
-            await report_phase("Verifying media runtime packages")
-            from .comfy_registry_interpreter import (
-                ComfyRegistryInterpreterError,
-                probe_comfy_registry_runtime_target,
-            )
-
-            try:
-                _, _, current_runtime_distributions = await probe_comfy_registry_runtime_target(
-                    executable
-                )
-            except ComfyRegistryInterpreterError as exc:
-                raise RuntimeError(
-                    "The managed media runtime package baseline could not be verified."
-                ) from exc
-            if current_runtime_distributions != registry_contract.runtime_distributions:
-                raise RuntimeError(
-                    "The managed media runtime changed after workflow dependencies "
-                    "were prepared. Prepare the workflow package again."
-                )
+        check_start()
+        registry_contract, reviewed_inputs = await self._verified_comfy_registry_contract(
+            activation_scope, phase_callback=report_phase
+        )
+        check_start()
         try:
             editor_bridge = await asyncio.to_thread(
                 prepare_comfy_editor_bridge,
@@ -770,13 +873,16 @@ class ProcessSupervisor:
                     "Native workflow editing is unavailable: %s",
                     editor_bridge.support.message,
                 )
+        check_start()
         trusted_custom_nodes = sorted(
             {*trusted_custom_nodes, *registry_contract.custom_node_folders}
         )
         output_directory = self.settings.comfy_output_dir.resolve()
         output_directory.mkdir(parents=True, exist_ok=True)
         environment_overrides = (
-            {"PYTHONDONTWRITEBYTECODE": "1"} if registry_contract.site_packages else None
+            {"PYTHONDONTWRITEBYTECODE": "1"}
+            if registry_contract.site_packages or editor_bridge_support.supported
+            else None
         )
         if activation_scope is not None:
             model_paths_config = self._write_scoped_comfy_model_paths(activation_scope)
@@ -809,6 +915,28 @@ class ProcessSupervisor:
         if trusted_custom_nodes:
             command.extend(["--whitelist-custom-nodes", *trusted_custom_nodes])
         await report_phase("Starting media runtime")
+
+        async def revalidate() -> None:
+            if (
+                self.settings.comfy_executable,
+                self.settings.comfy_directory,
+            ) != configured_runtime:
+                raise WorkerStartRefused("The configured media runtime changed before startup.")
+            if isinstance(activation_scope, WorkflowSourceLaunchScope):
+                await self._revalidate_source_media_scope(activation_scope)
+            else:
+                await self._revalidate_comfy_registry_contract(activation_scope, registry_contract)
+            if (
+                self.settings.comfy_executable,
+                self.settings.comfy_directory,
+            ) != configured_runtime:
+                raise WorkerStartRefused("The configured media runtime changed before startup.")
+
+        source_checks: dict[str, Any] = {}
+        if before_replace is not None:
+            source_checks["before_replace"] = before_replace
+        if reviewed_inputs is not None or isinstance(activation_scope, WorkflowSourceLaunchScope):
+            source_checks["prestart_check"] = revalidate
         if activation_scope is not None:
             expected_node_types = tuple(sorted({*custom_node_types, *registry_contract.node_types}))
             await self._replace(
@@ -823,6 +951,7 @@ class ProcessSupervisor:
                 ),
                 launch_scope_sha256=activation_scope.launch_sha256,
                 editor_bridge_support=editor_bridge_support,
+                **source_checks,
             )
         elif registry_contract.site_packages:
             await self._replace(
@@ -832,18 +961,182 @@ class ProcessSupervisor:
                 environment_overrides=environment_overrides,
                 ready_check=lambda: self._verify_comfy_node_types(registry_contract.node_types),
                 editor_bridge_support=editor_bridge_support,
+                **source_checks,
             )
         else:
             await self._replace(
                 "media",
                 command,
                 self.worker_health_url("media"),
+                environment_overrides=environment_overrides,
                 editor_bridge_support=editor_bridge_support,
+                **source_checks,
             )
         return self.statuses()[1]
 
+    async def _clear_cancelled_workflow_activations(
+        self, *, before_stop: Callable[[], None] | None = None
+    ) -> None:
+        from .db import SessionLocal
+        from .workflow_completion_jobs import (
+            cancelled_workflow_activation_packages,
+            deactivate_cancelled_workflow_activations,
+        )
+        from .workflow_package_activation import media_worker_stopped
+
+        def pending() -> bool:
+            with SessionLocal() as session:
+                return bool(cancelled_workflow_activation_packages(session))
+
+        def clear() -> None:
+            if before_stop is not None:
+                before_stop()
+            with SessionLocal() as session:
+                deactivate_cancelled_workflow_activations(session)
+                session.commit()
+
+        if not await asyncio.to_thread(pending):
+            return
+        async with self._locks["media"]:
+            if not await asyncio.to_thread(pending):
+                return
+            if before_stop is not None:
+                before_stop()
+            await self._stop_unlocked("media")
+            remaining = await asyncio.to_thread(self._matching_worker_processes, "media")
+            if not media_worker_stopped(self) or remaining:
+                raise RuntimeError(
+                    "The media worker must stop before cancelled extensions can be disabled."
+                )
+            cleanup = asyncio.create_task(asyncio.to_thread(clear))
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                with contextlib.suppress(Exception):
+                    cleanup.result()
+                raise
+
+    async def _verified_comfy_registry_contract(
+        self,
+        scope: WorkflowMediaLaunchScope | None,
+        *,
+        phase_callback: Callable[[str], Awaitable[None]] | None = None,
+    ) -> tuple[ComfyRegistryLaunchContract, ComfyRegistryReviewedInputContext | None]:
+        from .artifacts import ArtifactStore
+        from .comfy_registry_activation_batches import _worker
+        from .comfy_registry_installs import ComfyRegistryInstallError
+        from .comfy_registry_interpreter import probe_comfy_registry_runtime_target
+        from .comfy_registry_reviewed_inputs import ComfyRegistryReviewedInputContext
+        from .comfy_registry_runtime import canonical_comfy_registry_runtime_distributions
+        from .db import SessionLocal
+
+        def contract(
+            reviewed: ComfyRegistryReviewedInputContext | None = None,
+        ) -> ComfyRegistryLaunchContract:
+            if scope is None:
+                return (
+                    self._trusted_comfy_registry_contract()
+                    if reviewed is None
+                    else self._trusted_comfy_registry_contract(reviewed_inputs=reviewed)
+                )
+            return (
+                self._scoped_comfy_registry_contract(scope)
+                if reviewed is None
+                else self._scoped_comfy_registry_contract(scope, reviewed_inputs=reviewed)
+            )
+
+        current = None
+        reviewed_inputs = None
+        try:
+            current = await _worker(contract)
+        except ComfyRegistryInstallError as exc:
+            if exc.code != "source_review_context_required":
+                raise
+        if current is not None and not current.runtime_distributions:
+            return current, None
+        if phase_callback is not None:
+            await phase_callback("Verifying media runtime packages")
+        executable = self.settings.comfy_executable
+        if executable is None:
+            raise RuntimeError("The managed media runtime package baseline could not be verified.")
+        try:
+            environment, tags, distributions = await probe_comfy_registry_runtime_target(executable)
+            runtime = canonical_comfy_registry_runtime_distributions(distributions)
+        except (ValueError, OSError) as exc:
+            raise RuntimeError(
+                "The managed media runtime package baseline could not be verified."
+            ) from exc
+        if current is None:
+            reviewed_inputs = ComfyRegistryReviewedInputContext(
+                SessionLocal, ArtifactStore(self.settings), environment, tags
+            )
+            current = await _worker(lambda: contract(reviewed_inputs))
+        if current.runtime_distributions != runtime:
+            raise RuntimeError(
+                "The managed media runtime changed after workflow dependencies "
+                "were prepared. Prepare the workflow package again."
+            )
+        return current, reviewed_inputs
+
+    async def _revalidate_comfy_registry_contract(
+        self, scope: WorkflowMediaLaunchScope | None, expected: ComfyRegistryLaunchContract
+    ) -> None:
+        current, _reviewed = await self._verified_comfy_registry_contract(scope)
+        if current != expected:
+            raise WorkerStartRefused("The verified media dependencies changed before startup.")
+
+    async def _revalidate_source_media_scope(self, scope: WorkflowMediaLaunchScope | None) -> None:
+        from .comfy_registry_activation_batches import _worker
+        from .db import SessionLocal
+        from .workflow_activations import (
+            WorkflowSourceLaunchScope,
+            materialize_comfy_runtime_dependency,
+        )
+        from .workflow_package_preparation import PreparationContext
+        from .workflow_source_launch import revalidate_workflow_source_launch_scope
+
+        if not isinstance(scope, WorkflowSourceLaunchScope):
+            return
+        executable = self.settings.comfy_executable
+        directory = self.settings.comfy_directory
+        provisioner = self.runtimes
+        if (
+            executable is None
+            or not executable.is_file()
+            or directory is None
+            or not (directory / "main.py").is_file()
+            or provisioner is None
+        ):
+            raise WorkerStartRefused("The accepted workflow runtime is unavailable.")
+        _contract, reviewed_inputs = await self._verified_comfy_registry_contract(scope)
+        await _worker(
+            lambda: revalidate_workflow_source_launch_scope(
+                SessionLocal,
+                scope,
+                context=PreparationContext(
+                    executable,
+                    self.settings.custom_node_dir,
+                    self.settings.registry_dir,
+                ),
+                runtime_materializer=lambda requirement, selection: (
+                    materialize_comfy_runtime_dependency(provisioner, requirement, selection)
+                ),
+                reviewed_inputs=reviewed_inputs,
+            )
+        )
+
     def _scoped_comfy_registry_contract(
-        self, scope: WorkflowActivationLaunchScope
+        self,
+        scope: WorkflowMediaLaunchScope,
+        *,
+        reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
     ) -> ComfyRegistryLaunchContract:
         from .comfy_registry_installs import scoped_comfy_registry_launch_contract
         from .db import SessionLocal
@@ -853,26 +1146,35 @@ class ProcessSupervisor:
         ):
             raise ValueError("Workflow activation Registry package scope is inconsistent")
         with SessionLocal() as session:
+            session.connection().exec_driver_sql("BEGIN")
             return scoped_comfy_registry_launch_contract(
                 session,
                 scope.registry_packages,
                 custom_node_root=self.settings.custom_node_dir,
                 environment_root=registry_wheel_environment_root(self.settings.registry_dir),
+                reviewed_inputs=reviewed_inputs,
             )
 
-    def _trusted_comfy_registry_contract(self) -> ComfyRegistryLaunchContract:
+    def _trusted_comfy_registry_contract(
+        self, *, reviewed_inputs: ComfyRegistryReviewedInputContext | None = None
+    ) -> ComfyRegistryLaunchContract:
         from .comfy_registry_installs import trusted_comfy_registry_launch_contract
         from .db import SessionLocal
 
         with SessionLocal() as session:
+            session.connection().exec_driver_sql("BEGIN")
             return trusted_comfy_registry_launch_contract(
                 session,
                 custom_node_root=self.settings.custom_node_dir,
                 environment_root=registry_wheel_environment_root(self.settings.registry_dir),
+                reviewed_inputs=reviewed_inputs,
             )
 
     def _trusted_comfy_registry_package_node_types(
         self,
+        *,
+        reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
+        expected_contract: ComfyRegistryLaunchContract | None = None,
     ) -> dict[tuple[str, str], frozenset[str]]:
         from sqlalchemy import select
 
@@ -881,11 +1183,17 @@ class ProcessSupervisor:
         from .models import ComfyRegistryInstall
 
         with SessionLocal() as session:
+            session.connection().exec_driver_sql("BEGIN")
             contract = trusted_comfy_registry_launch_contract(
                 session,
                 custom_node_root=self.settings.custom_node_dir,
                 environment_root=registry_wheel_environment_root(self.settings.registry_dir),
+                reviewed_inputs=reviewed_inputs,
             )
+            if expected_contract is not None and contract != expected_contract:
+                raise WorkerStartRefused(
+                    "The verified media dependencies changed before inspection."
+                )
             installs = session.scalars(
                 select(ComfyRegistryInstall).where(
                     ComfyRegistryInstall.trusted.is_(True),
@@ -916,7 +1224,14 @@ class ProcessSupervisor:
         worker and read its live ``object_info`` before compilation.
         """
 
-        return await asyncio.to_thread(self._trusted_comfy_registry_package_node_types)
+        from .comfy_registry_activation_batches import _worker
+
+        contract, reviewed_inputs = await self._verified_comfy_registry_contract(None)
+        return await _worker(
+            lambda: self._trusted_comfy_registry_package_node_types(
+                reviewed_inputs=reviewed_inputs, expected_contract=contract
+            )
+        )
 
     async def trusted_comfy_custom_node_package_node_types(
         self,
@@ -1061,7 +1376,7 @@ class ProcessSupervisor:
         return [install.installed_path for install in installs]
 
     async def _scoped_comfy_node_folders(
-        self, scope: WorkflowActivationLaunchScope
+        self, scope: WorkflowMediaLaunchScope
     ) -> tuple[list[str], tuple[str, ...]]:
         from .custom_nodes import CustomNodeManager
         from .db import SessionLocal
@@ -1113,7 +1428,7 @@ class ProcessSupervisor:
             await manager.verify(install)
         return [install.installed_path for install in installs], tuple(sorted(node_types))
 
-    def _write_scoped_comfy_model_paths(self, scope: WorkflowActivationLaunchScope) -> Path:
+    def _write_scoped_comfy_model_paths(self, scope: WorkflowMediaLaunchScope) -> Path:
         if not re.fullmatch(r"[0-9a-f]{64}", scope.launch_sha256):
             raise ValueError("Workflow activation launch identity is invalid")
         if tuple(item.model_install_id for item in scope.models) != scope.model_install_ids:
@@ -1223,15 +1538,24 @@ class ProcessSupervisor:
             result[key] = item
         return result
 
-    async def stop(self, name: str) -> WorkerStatus:
+    async def stop(
+        self, name: str, *, before_stop: Callable[[], None] | None = None
+    ) -> WorkerStatus:
         if name not in self._locks:
             raise ValueError("worker must be chat or media")
         async with self._locks[name]:
+            if before_stop is not None:
+                before_stop()
             await self._stop_unlocked(name)
         return next(item for item in self.statuses() if item.name == name)
 
     async def close(self) -> None:
-        await asyncio.gather(*(self.stop(name) for name in tuple(self._locks)))
+        results = await asyncio.gather(
+            *(self.stop(name) for name in tuple(self._locks)), return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     async def _replace(
         self,
@@ -1244,18 +1568,25 @@ class ProcessSupervisor:
         ready_check: Callable[[], Awaitable[None]] | None = None,
         launch_scope_sha256: str | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
+        prestart_check: Callable[[], Awaitable[None]] | None = None,
+        before_replace: Callable[[], None] | None = None,
     ) -> None:
         if launch_scope_sha256 is not None and not re.fullmatch(
             r"[0-9a-f]{64}", launch_scope_sha256
         ):
             raise ValueError("Worker launch scope identity is invalid")
         async with self._locks[name]:
+            if prestart_check is not None:
+                await prestart_check()
+            if before_replace is not None:
+                before_replace()
             current = self._workers.get(name)
             if (
                 launch_scope_sha256 is not None
                 and current is not None
                 and current.process.returncode is None
                 and current.state == "ready"
+                and not current.stopping
                 and current.command == command
                 and current.launch_scope_sha256 == launch_scope_sha256
                 and current.editor_bridge_support == editor_bridge_support
@@ -1266,6 +1597,10 @@ class ProcessSupervisor:
             await self._stop_unlocked(name)
             await self._reclaim_port_from_our_own_children(name, health_url)
             await self._ensure_port_available(name, health_url)
+            if prestart_check is not None:
+                await prestart_check()
+            if before_replace is not None:
+                before_replace()
             startup_started_at = time.perf_counter()
             log_path = self.settings.log_dir / f"{name}-worker.log"
             worker_log = _RotatingWorkerLog(log_path)
@@ -1338,7 +1673,12 @@ class ProcessSupervisor:
                 except Exception:
                     logger.exception("Could not clean up cancelled %s worker start", name)
                 finally:
-                    if self._workers.get(name) is record:
+                    if (
+                        cleanup.done()
+                        and not cleanup.cancelled()
+                        and cleanup.exception() is None
+                        and self._workers.get(name) is record
+                    ):
                         self._workers.pop(name)
                 raise
             except Exception as exc:
@@ -1500,13 +1840,13 @@ class ProcessSupervisor:
             if self._workers.get(record.name) is not record:
                 return
             record.failure_detail = f"{record.name} worker exited with code {exit_code}."
+            await self._terminate_record(record, cancel_monitor=False)
             await self._publish_worker_event(
                 "worker.exited",
                 record,
                 state="exited",
                 exit_code=exit_code,
             )
-            await self._terminate_record(record, cancel_monitor=False)
 
     async def _publish_worker_event(
         self,
@@ -2132,11 +2472,15 @@ class ProcessSupervisor:
                 process = self._matching_process(identity)
                 if process is not None:
                     matches.append(process)
-        if matches:
-            self._terminate_processes(matches, self.settings.worker_shutdown_seconds)
-            logger.info("Attempted cleanup of %s persisted worker process(es)", len(matches))
-        for name in tuple(self._worker_identities):
-            self._refresh_worker_identities_after_stop(name)
+        try:
+            if matches:
+                self._terminate_processes(matches, self.settings.worker_shutdown_seconds)
+                logger.info("Attempted cleanup of %s persisted worker process(es)", len(matches))
+        except WorkerStopIncomplete:
+            logger.warning("Persisted worker shutdown did not complete; identities are retained")
+        finally:
+            for name in tuple(self._worker_identities):
+                self._refresh_worker_identities_after_stop(name)
 
     @staticmethod
     def _terminate_processes(
@@ -2144,23 +2488,32 @@ class ProcessSupervisor:
         timeout_seconds: float,
     ) -> None:
         by_pid = {process.pid: process for process in processes}
+        tree_unavailable = False
         for process in tuple(by_pid.values()):
-            with contextlib.suppress(psutil.AccessDenied, psutil.NoSuchProcess):
+            try:
                 for child in process.children(recursive=True):
                     by_pid.setdefault(child.pid, child)
+            except psutil.AccessDenied:
+                tree_unavailable = True
+            except psutil.NoSuchProcess:
+                pass
         live: list[psutil.Process] = []
         for process in by_pid.values():
             try:
                 process.terminate()
                 live.append(process)
-            except (psutil.AccessDenied, psutil.NoSuchProcess):
+            except psutil.AccessDenied:
+                live.append(process)
+            except psutil.NoSuchProcess:
                 continue
         _gone, remaining = psutil.wait_procs(live, timeout=timeout_seconds)
         for process in remaining:
             with contextlib.suppress(psutil.AccessDenied, psutil.NoSuchProcess):
                 process.kill()
         if remaining:
-            psutil.wait_procs(remaining, timeout=timeout_seconds)
+            _gone, remaining = psutil.wait_procs(remaining, timeout=timeout_seconds)
+        if remaining or tree_unavailable:
+            raise WorkerStopIncomplete()
 
     @staticmethod
     def _descendant_processes(pid: int) -> list[psutil.Process]:
@@ -2189,9 +2542,11 @@ class ProcessSupervisor:
             psutil.wait_procs(remaining, timeout=timeout_seconds)
 
     async def _stop_unlocked(self, name: str) -> None:
-        record = self._workers.pop(name, None)
+        record = self._workers.get(name)
         if record:
             await self._terminate_record(record)
+            if self._workers.get(name) is record:
+                self._workers.pop(name)
             return
         # No in-memory record does NOT mean nothing is running, and treating it
         # that way is what made this unrecoverable from inside the product.
@@ -2219,21 +2574,23 @@ class ProcessSupervisor:
         """
 
         persisted = await asyncio.to_thread(self._matching_worker_processes, name)
-        if not persisted:
-            return
-        logger.info(
-            "Stopping %s orphaned %s worker process(es) with no live record",
-            len(persisted),
-            name,
-        )
         try:
-            await asyncio.to_thread(
-                self._terminate_processes,
-                persisted,
-                self.settings.worker_shutdown_seconds,
-            )
+            if persisted:
+                logger.info(
+                    "Stopping %s orphaned %s worker process(es) with no live record",
+                    len(persisted),
+                    name,
+                )
+                await asyncio.to_thread(
+                    self._terminate_processes,
+                    persisted,
+                    self.settings.worker_shutdown_seconds,
+                )
         finally:
             self._refresh_worker_identities_after_stop(name)
+        with self._identity_lock:
+            if self._worker_identities.get(name):
+                raise WorkerStopIncomplete()
 
     async def _terminate_record(
         self,
@@ -2241,6 +2598,8 @@ class ProcessSupervisor:
         *,
         cancel_monitor: bool = True,
     ) -> None:
+        record.stopping = True
+        record.shutdown_incomplete = False
         current_task = asyncio.current_task()
         if cancel_monitor and record.monitor_task and record.monitor_task is not current_task:
             if not record.monitor_task.done():
@@ -2263,12 +2622,13 @@ class ProcessSupervisor:
                 except TimeoutError:
                     with contextlib.suppress(ProcessLookupError):
                         record.process.kill()
-                    await record.process.wait()
-            remaining = {
-                process.pid: process
-                for process in [*descendants, *persisted]
-                if process.pid != record.process.pid
-            }
+                    try:
+                        await asyncio.wait_for(
+                            record.process.wait(), timeout=self.settings.worker_shutdown_seconds
+                        )
+                    except TimeoutError as exc:
+                        raise WorkerStopIncomplete() from exc
+            remaining = {process.pid: process for process in [*descendants, *persisted]}
             if remaining:
                 await asyncio.to_thread(
                     self._terminate_processes,
@@ -2276,10 +2636,19 @@ class ProcessSupervisor:
                     self.settings.worker_shutdown_seconds,
                 )
             if record.output_task:
-                await record.output_task
+                await asyncio.shield(record.output_task)
+        except (WorkerStopIncomplete, OSError) as exc:
+            record.shutdown_incomplete = True
+            raise WorkerStopIncomplete() from exc
         finally:
             self._refresh_worker_identities_after_stop(record.name)
-            record.log.close()
+        with self._identity_lock:
+            outstanding = bool(self._worker_identities.get(record.name))
+        if outstanding:
+            record.shutdown_incomplete = True
+            raise WorkerStopIncomplete()
+        record.log.close()
+        record.stopping = False
 
     async def _capture_process_output(self, record: WorkerRecord) -> None:
         log_failed = False
@@ -2593,9 +2962,8 @@ class ProcessSupervisor:
 
     @staticmethod
     def _estimate_chat_memory(model_bytes: int, settings: dict[str, Any]) -> int:
-        context_length = int(settings.get("context_length", 8192))
-        context_overhead = max(512 * 1024**2, context_length * 128 * 1024)
-        return model_bytes + context_overhead
+        context_length = int(settings.get("context_length", DEFAULT_CHAT_CONTEXT))
+        return estimated_chat_memory(model_bytes, context_length)
 
     @staticmethod
     def _process_tree_rss(pid: int) -> int | None:

@@ -21,3 +21,25 @@ export function StudioToolGuidance({
     </p>
   );
 }
+
+/** What a model's tool says before the Studio knows whether its workflow is here.
+ *
+ * Apply waits for the answer rather than guessing. Guessing yes made a tool
+ * whose workflow was missing look ready, and the gap was found only when the
+ * edit was refused, after the selection had been drawn.
+ */
+export function StudioCapabilityCheck({ failed, onRetry }: { failed: boolean; onRetry: () => void }) {
+  return (
+    <p className="studio-tool-guidance" role="status">
+      {failed ? "Could not check whether this tool can run here." : "Checking whether this tool can run here…"}
+      {failed && (
+        <>
+          {" "}
+          <button className="link-button" onClick={onRetry}>
+            Try again
+          </button>
+        </>
+      )}
+    </p>
+  );
+}

@@ -2,7 +2,8 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
 import { api } from "./api";
-import { servesCapability } from "./workflowFamilies";
+import { useReadyWorkflowChoices } from "./useReadyWorkflowChoices";
+import { ReadyWorkflowBrowseControls } from "./ReadyWorkflowBrowseControls";
 import type { PromptTemplateLora } from "./types";
 import type { SimplePromptTemplateResourcePolicy } from "./promptTemplateImageSetup";
 
@@ -28,22 +29,10 @@ export function PromptTemplateImageSetupPicker({
   value: SimplePromptTemplateResourcePolicy;
   onChange: (value: SimplePromptTemplateResourcePolicy) => void;
 }) {
-  const workflows = useQuery({
-    queryKey: ["workflow-families", "image"],
-    queryFn: () => api.workflowFamilies("image"),
-  });
-  const workflowChoices = useMemo(() => {
-    const seen = new Set<string>();
-    return (workflows.data ?? []).flatMap((family) => {
-      if (!servesCapability(family, "image")) return [];
-      return family.variants.flatMap((variant) => {
-        const id = variant.current_revision_id;
-        if (!id || variant.operation !== "text_to_image" || variant.readiness !== "ready" || seen.has(id)) return [];
-        seen.add(id);
-        return [{ id, label: `${family.name} - ${variant.name}` }];
-      });
-    });
-  }, [workflows.data]);
+  const workflows = useReadyWorkflowChoices(value.mode === "fixed" ? [value.workflow_revision_id] : []);
+  const workflowChoices = workflows.rows.map(row => ({
+    id: row.revision_id, label: `${row.family_name} - ${row.workflow_name}`,
+  }));
   const assets = useQuery({
     queryKey: ["model-assets", "lora"],
     queryFn: () => api.modelAssets("lora"),
@@ -62,6 +51,17 @@ export function PromptTemplateImageSetupPicker({
   const updateStack = (stack: PromptTemplateLora[]) => {
     if (value.mode !== "fixed") return;
     onChange({ ...value, lora_policy: { mode: "fixed", stack } });
+  };
+  /** One strength of one LoRA, as its box reads. An emptied box, or one holding
+   * something that is not a number, is not a strength: the stack keeps the last
+   * one, as the workflow LoRA rows do, rather than carrying no strength into a
+   * template the server would refuse. */
+  const setStrength = (index: number, field: "model_strength" | "clip_strength", entered: number) => {
+    if (!Number.isFinite(entered)) return;
+    updateStack(value.mode === "fixed" && value.lora_policy.mode === "fixed"
+      ? value.lora_policy.stack.map((item, itemIndex) => itemIndex !== index ? item
+        : field === "model_strength" ? { ...item, model_strength: entered } : { ...item, clip_strength: entered })
+      : []);
   };
 
   return (
@@ -82,6 +82,7 @@ export function PromptTemplateImageSetupPicker({
       </label>
       {value.mode === "fixed" && (
         <>
+          <ReadyWorkflowBrowseControls workflows={workflows} />
           <label>
             Workflow
             <select
@@ -90,10 +91,11 @@ export function PromptTemplateImageSetupPicker({
               onChange={(event) => onChange({ ...value, workflow_revision_id: event.target.value })}
             >
               <option value="">Choose a ready image workflow</option>
+              {value.workflow_revision_id && !workflowChoices.some(row => row.id === value.workflow_revision_id)
+                && <option value={value.workflow_revision_id}>{workflows.missingLabel}</option>}
               {workflowChoices.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.label}</option>)}
             </select>
           </label>
-          {workflows.isError && <p className="muted">Ready workflows could not be loaded.</p>}
           <label>
             LoRAs
             <select
@@ -139,8 +141,8 @@ export function PromptTemplateImageSetupPicker({
                   </label>
                   <details>
                     <summary>Adjust strength</summary>
-                    <label>Model strength<input aria-label={`Template LoRA ${index + 1} model strength`} type="number" min={-4} max={4} step="0.05" value={lora.model_strength} onChange={(event) => updateStack(value.lora_policy.mode === "fixed" ? value.lora_policy.stack.map((item, itemIndex) => itemIndex === index ? { ...item, model_strength: event.target.valueAsNumber } : item) : [])} /></label>
-                    <label>CLIP strength<input aria-label={`Template LoRA ${index + 1} CLIP strength`} type="number" min={-4} max={4} step="0.05" value={lora.clip_strength} onChange={(event) => updateStack(value.lora_policy.mode === "fixed" ? value.lora_policy.stack.map((item, itemIndex) => itemIndex === index ? { ...item, clip_strength: event.target.valueAsNumber } : item) : [])} /></label>
+                    <label>Model strength<input aria-label={`Template LoRA ${index + 1} model strength`} type="number" min={-4} max={4} step="0.05" value={lora.model_strength} onChange={(event) => setStrength(index, "model_strength", event.target.valueAsNumber)} /></label>
+                    <label>CLIP strength<input aria-label={`Template LoRA ${index + 1} CLIP strength`} type="number" min={-4} max={4} step="0.05" value={lora.clip_strength} onChange={(event) => setStrength(index, "clip_strength", event.target.valueAsNumber)} /></label>
                   </details>
                   <button type="button" className="secondary compact-button" onClick={() => updateStack(value.lora_policy.mode === "fixed" ? value.lora_policy.stack.filter((_, itemIndex) => itemIndex !== index) : [])}>Remove LoRA</button>
                 </fieldset>

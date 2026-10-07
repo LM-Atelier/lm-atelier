@@ -2,33 +2,34 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from httpx2 import AsyncClient
 
 from local_lm.artifacts import _MAX_VIDEO_POSTER_BYTES, ArtifactStore
+from local_lm.config import Settings
 
 
-async def test_browser_safe_video_does_not_need_a_proxy(settings) -> None:  # type: ignore[no-untyped-def]
+async def test_browser_safe_video_does_not_need_a_proxy(settings: Settings) -> None:
     store = ArtifactStore(settings)
-    artifact = SimpleNamespace(media_type="video/mp4")
-    assert await store.browser_video_proxy(artifact) is None  # type: ignore[arg-type]
+    artifact = Mock(spec_set=["media_type"], media_type="video/mp4")
+    assert await store.browser_video_proxy(artifact) is None
 
 
 async def test_missing_ffmpeg_leaves_incompatible_original_available(
-    settings,
-    monkeypatch,  # type: ignore[no-untyped-def]
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = ArtifactStore(settings)
     monkeypatch.setattr("local_lm.artifacts.shutil.which", lambda _name: None)
-    artifact = SimpleNamespace(media_type="image/gif")
-    assert await store.browser_video_proxy(artifact) is None  # type: ignore[arg-type]
+    artifact = Mock(spec_set=["media_type"], media_type="image/gif")
+    assert await store.browser_video_proxy(artifact) is None
 
 
 async def test_video_proxy_remains_file_backed_until_its_owner_discards_it(
-    settings,
-    monkeypatch,  # type: ignore[no-untyped-def]
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = ArtifactStore(settings)
     source = settings.data_dir / "source-video.mkv"
@@ -41,19 +42,20 @@ async def test_video_proxy_remains_file_backed_until_its_owner_discards_it(
         async def wait(self) -> int:
             return self.returncode
 
-    async def create_process(*arguments, **_kwargs):  # type: ignore[no-untyped-def]
+    async def create_process(*arguments: str, **_kwargs: object) -> FakeProcess:
         Path(arguments[-1]).write_bytes(proxy_content)
         return FakeProcess()
 
     monkeypatch.setattr("local_lm.artifacts.shutil.which", lambda _name: "ffmpeg")
     monkeypatch.setattr("local_lm.artifacts.asyncio.create_subprocess_exec", create_process)
     monkeypatch.setattr(store, "resolve", lambda _artifact: source)
-    artifact = SimpleNamespace(
+    artifact = Mock(
+        spec_set=["media_type", "original_name"],
         media_type="video/x-matroska",
         original_name="source.mkv",
     )
 
-    staged = await store.browser_video_proxy(artifact)  # type: ignore[arg-type]
+    staged = await store.browser_video_proxy(artifact)
 
     assert staged is not None
     assert staged.path.parent == store.root
@@ -64,8 +66,8 @@ async def test_video_proxy_remains_file_backed_until_its_owner_discards_it(
 
 
 async def test_video_poster_rejects_oversized_ffmpeg_output(
-    settings,
-    monkeypatch,  # type: ignore[no-untyped-def]
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = ArtifactStore(settings)
     source = settings.data_dir / "source-video.mp4"
@@ -96,21 +98,21 @@ async def test_video_poster_rejects_oversized_ffmpeg_output(
 
     process = FakeProcess()
 
-    async def create_process(*_arguments, **_kwargs):  # type: ignore[no-untyped-def]
+    async def create_process(*_arguments: str, **_kwargs: object) -> FakeProcess:
         return process
 
     monkeypatch.setattr("local_lm.artifacts.shutil.which", lambda _name: "ffmpeg")
     monkeypatch.setattr("local_lm.artifacts.asyncio.create_subprocess_exec", create_process)
     monkeypatch.setattr(store, "resolve", lambda _artifact: source)
-    artifact = SimpleNamespace(media_type="video/mp4")
+    artifact = Mock(spec_set=["media_type"], media_type="video/mp4")
 
-    assert await store.video_poster(artifact) is None  # type: ignore[arg-type]
+    assert await store.video_poster(artifact) is None
     assert process.killed is True
 
 
 async def test_cancelling_video_poster_reaps_ffmpeg(
-    settings,
-    monkeypatch,  # type: ignore[no-untyped-def]
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = ArtifactStore(settings)
     source = settings.data_dir / "cancelled-source-video.mp4"
@@ -139,14 +141,14 @@ async def test_cancelling_video_poster_reaps_ffmpeg(
 
     process = FakeProcess()
 
-    async def create_process(*_arguments, **_kwargs):  # type: ignore[no-untyped-def]
+    async def create_process(*_arguments: str, **_kwargs: object) -> FakeProcess:
         return process
 
     monkeypatch.setattr("local_lm.artifacts.shutil.which", lambda _name: "ffmpeg")
     monkeypatch.setattr("local_lm.artifacts.asyncio.create_subprocess_exec", create_process)
     monkeypatch.setattr(store, "resolve", lambda _artifact: source)
-    artifact = SimpleNamespace(media_type="video/mp4")
-    task = asyncio.create_task(store.video_poster(artifact))  # type: ignore[arg-type]
+    artifact = Mock(spec_set=["media_type"], media_type="video/mp4")
+    task = asyncio.create_task(store.video_poster(artifact))
     await started.wait()
 
     task.cancel()

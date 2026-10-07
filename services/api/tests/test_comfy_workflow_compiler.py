@@ -13,6 +13,11 @@ from local_lm.comfy_workflow_compiler import (
 from local_lm.comfy_workflow_packages import WorkflowPackageError
 
 
+def _mapping(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
+
+
 def _object_info() -> dict[str, Any]:
     return {
         "Source": {
@@ -283,7 +288,7 @@ def test_compiles_a_fixed_primitive_widget_value() -> None:
     compiled = compile_comfyui_ui_graph(workflow, _object_info())
 
     assert compiled.execution_order == ("1", "2")
-    assert compiled.api_graph["1"]["inputs"]["label"] == "from primitive"
+    assert _mapping(compiled.api_graph["1"]["inputs"])["label"] == "from primitive"
     assert "3" not in compiled.api_graph
 
 
@@ -727,8 +732,8 @@ def test_a_reroute_feeding_several_targets_reconnects_each_of_them() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, _object_info())
 
-    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
-    assert compiled.api_graph["3"]["inputs"]["images"] == ["1", 0]
+    assert _mapping(compiled.api_graph["2"]["inputs"])["images"] == ["1", 0]
+    assert _mapping(compiled.api_graph["3"]["inputs"])["images"] == ["1", 0]
     assert "9" not in compiled.api_graph
 
 
@@ -835,8 +840,8 @@ def test_one_written_value_feeds_every_reader_of_it() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, _object_info())
 
-    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
-    assert compiled.api_graph["3"]["inputs"]["images"] == ["1", 0]
+    assert _mapping(compiled.api_graph["2"]["inputs"])["images"] == ["1", 0]
+    assert _mapping(compiled.api_graph["3"]["inputs"])["images"] == ["1", 0]
     assert "11" not in compiled.api_graph
     assert "12" not in compiled.api_graph
 
@@ -864,7 +869,7 @@ def test_a_value_written_through_a_reroute_resolves_through_both() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, _object_info())
 
-    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
+    assert _mapping(compiled.api_graph["2"]["inputs"])["images"] == ["1", 0]
     assert set(compiled.api_graph) == {"1", "2"}
 
 
@@ -920,7 +925,7 @@ def test_a_value_written_twice_but_never_read_still_compiles() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, _object_info())
 
-    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
+    assert _mapping(compiled.api_graph["2"]["inputs"])["images"] == ["1", 0]
     assert set(compiled.api_graph) == {"1", "2"}
 
 
@@ -979,7 +984,7 @@ def _power_loras(*entries: Any, properties: dict[str, Any] | None = None) -> dic
 
 def _compiled_loras(*entries: Any) -> dict[str, Any]:
     compiled = compile_comfyui_ui_graph(_power_loras(*entries), _drawn_object_info())
-    return dict(compiled.api_graph["3"]["inputs"])
+    return dict(_mapping(compiled.api_graph["3"]["inputs"]))
 
 
 def test_each_saved_lora_becomes_the_input_the_node_names_it() -> None:
@@ -1034,8 +1039,10 @@ def test_the_links_the_node_carries_survive_its_widgets() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, _drawn_object_info())
 
-    assert compiled.api_graph["3"]["inputs"]["model"] == ["1", 0]
-    assert compiled.api_graph["3"]["inputs"]["lora_1"]["lora"] == "one.safetensors"
+    assert _mapping(compiled.api_graph["3"]["inputs"])["model"] == ["1", 0]
+    assert (
+        _mapping(_mapping(compiled.api_graph["3"]["inputs"])["lora_1"])["lora"] == "one.safetensors"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1134,7 +1141,7 @@ def test_a_name_the_graph_did_not_save_falls_back_to_the_declared_default() -> N
 
     compiled = compile_comfyui_ui_graph(workflow, _object_info())
 
-    assert compiled.api_graph["1"]["inputs"]["label"] == "default"
+    assert _mapping(compiled.api_graph["1"]["inputs"])["label"] == "default"
 
 
 def test_a_link_still_overrides_a_widget_saved_by_name() -> None:
@@ -1291,7 +1298,9 @@ def test_the_other_audited_revision_of_the_same_layout_is_read() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, _drawn_object_info())
 
-    assert compiled.api_graph["3"]["inputs"]["lora_1"]["lora"] == "one.safetensors"
+    assert (
+        _mapping(_mapping(compiled.api_graph["3"]["inputs"])["lora_1"])["lora"] == "one.safetensors"
+    )
 
 
 @pytest.mark.parametrize("divider", [{}, None])
@@ -1314,7 +1323,9 @@ def test_both_recorded_furniture_variants_are_read(divider: Any) -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, _drawn_object_info())
 
-    assert compiled.api_graph["3"]["inputs"]["lora_1"]["lora"] == "one.safetensors"
+    assert (
+        _mapping(_mapping(compiled.api_graph["3"]["inputs"])["lora_1"])["lora"] == "one.safetensors"
+    )
 
 
 @pytest.mark.parametrize("strength", [float("nan"), float("inf"), float("-inf")])
@@ -1410,8 +1421,8 @@ def test_the_players_own_state_is_recognised_and_dropped() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, object_info)
 
-    assert "videopreview" not in compiled.api_graph["4"]["inputs"]
-    assert compiled.api_graph["4"]["inputs"]["crf"] == 17
+    assert "videopreview" not in _mapping(compiled.api_graph["4"]["inputs"])
+    assert _mapping(compiled.api_graph["4"]["inputs"])["crf"] == 17
 
 
 @pytest.mark.parametrize(
@@ -1659,7 +1670,7 @@ def test_a_reader_takes_the_value_from_its_own_nesting_or_one_around_it(
         _scoped_named_wires(writer_scope, reader_scope), _object_info()
     )
 
-    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
+    assert _mapping(compiled.api_graph["2"]["inputs"])["images"] == ["1", 0]
 
 
 @pytest.mark.parametrize(
@@ -1741,8 +1752,8 @@ def test_two_copies_of_one_nesting_each_keep_their_own_value() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, _object_info())
 
-    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
-    assert compiled.api_graph["6"]["inputs"]["images"] == ["5", 0]
+    assert _mapping(compiled.api_graph["2"]["inputs"])["images"] == ["1", 0]
+    assert _mapping(compiled.api_graph["6"]["inputs"])["images"] == ["5", 0]
 
 
 def test_a_value_set_twice_in_one_nesting_is_still_ambiguous() -> None:
@@ -2050,3 +2061,191 @@ def test_a_group_control_that_carries_a_wire_still_refuses() -> None:
     workflow["links"].append([20, 9, 0, 10, 0, "*"])
 
     _assert_error("frontend_node_link", workflow, _object_info())
+
+
+def _dynamic_save_info() -> dict[str, Any]:
+    info = _object_info()
+    info["Save"] = {
+        "input": {
+            "required": {
+                "images": ["IMAGE"],
+                "filename_prefix": ["STRING", {"default": "ComfyUI"}],
+                "codec": [
+                    "COMFY_DYNAMICCOMBO_V3",
+                    {
+                        "options": [
+                            {"key": "auto", "inputs": {"required": {}}},
+                            {
+                                "key": "tuned",
+                                "inputs": {
+                                    "required": {"quality": ["INT", {"default": 23}]},
+                                    "optional": {"speed": ["COMBO", {"options": ["fast", "slow"]}]},
+                                },
+                            },
+                        ]
+                    },
+                ],
+                "keep_metadata": ["BOOLEAN", {"default": True}],
+            }
+        },
+        "input_order": {"required": ["images", "filename_prefix", "codec", "keep_metadata"]},
+        "output": [],
+        "output_node": True,
+    }
+    return info
+
+
+def test_a_dynamic_combo_brings_its_chosen_options_inputs_under_its_name() -> None:
+    # The chosen option's widgets are saved straight after the choice, so the
+    # widget declared after the combo keeps its own value.
+    workflow = _workflow()
+    workflow["nodes"][1]["widgets_values"] = ["result", "tuned", 19, "slow", False]
+
+    compiled = compile_comfyui_ui_graph(workflow, _dynamic_save_info())
+
+    assert compiled.api_graph["2"]["inputs"] == {
+        "images": ["1", 0],
+        "filename_prefix": "result",
+        "codec": "tuned",
+        "codec.quality": 19,
+        "codec.speed": "slow",
+        "keep_metadata": False,
+    }
+
+
+def test_a_dynamic_combo_option_without_inputs_leaves_the_next_value_alone() -> None:
+    workflow = _workflow()
+    workflow["nodes"][1]["widgets_values"] = ["result", "auto", False]
+
+    compiled = compile_comfyui_ui_graph(workflow, _dynamic_save_info())
+
+    assert compiled.api_graph["2"]["inputs"] == {
+        "images": ["1", 0],
+        "filename_prefix": "result",
+        "codec": "auto",
+        "keep_metadata": False,
+    }
+
+
+def test_a_dynamic_combo_refuses_an_option_it_does_not_offer() -> None:
+    workflow = _workflow()
+    workflow["nodes"][1]["widgets_values"] = ["result", "lossless", False]
+
+    _assert_error("invalid_widget_choice", workflow, _dynamic_save_info())
+
+
+def _grown_batch(*linked: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Two sources feeding a batch node whose image sockets grow from a template."""
+
+    info = _object_info()
+    info["Batch"] = {
+        "input": {
+            "required": {
+                "images": [
+                    "COMFY_AUTOGROW_V3",
+                    {
+                        "template": {
+                            "input": {"required": {"image": ["IMAGE", {}]}},
+                            "prefix": "image",
+                            "min": 1,
+                            "max": 3,
+                        }
+                    },
+                ]
+            }
+        },
+        "input_order": {"required": ["images"]},
+        "output": ["IMAGE"],
+    }
+    workflow = _workflow()
+    second = deepcopy(workflow["nodes"][0])
+    second["id"] = 3
+    second["outputs"][0]["links"] = [8]
+    workflow["nodes"][0]["outputs"][0]["links"] = [7]
+    sockets = [
+        {"name": f"images.image{index}", "type": "IMAGE", "link": link}
+        for index, link in enumerate((7 if 0 in linked else None, 8 if 1 in linked else None, None))
+    ]
+    workflow["nodes"][1] = {
+        "id": 2,
+        "type": "Batch",
+        "inputs": sockets,
+        "outputs": [],
+        "widgets_values": [],
+    }
+    workflow["nodes"].append(second)
+    workflow["links"] = [
+        link for link in ([7, 1, 0, 2, 0, "IMAGE"], [8, 3, 0, 2, 1, "IMAGE"]) if link[4] in linked
+    ]
+    if 0 not in linked:
+        workflow["nodes"][0]["outputs"][0]["links"] = []
+    if 1 not in linked:
+        second["outputs"][0]["links"] = []
+    return workflow, info
+
+
+def test_an_autogrow_input_links_each_grown_socket_under_its_name() -> None:
+    workflow, info = _grown_batch(0, 1)
+
+    compiled = compile_comfyui_ui_graph(workflow, info)
+
+    assert compiled.api_graph["2"]["inputs"] == {
+        "images.image0": ["1", 0],
+        "images.image1": ["3", 0],
+    }
+
+
+def test_an_autogrow_input_still_requires_its_minimum_sockets() -> None:
+    workflow, info = _grown_batch(1)
+
+    _assert_error("missing_required_input", workflow, info)
+
+
+def test_a_socket_the_autogrow_template_never_makes_is_unknown() -> None:
+    workflow, info = _grown_batch(0)
+    workflow["nodes"][1]["inputs"][2]["name"] = "images.image9"
+
+    _assert_error("unknown_input_slot", workflow, info)
+
+
+def test_a_named_autogrow_socket_takes_a_link_even_when_its_template_is_a_widget() -> None:
+    # The runtime forces an autogrow template to an input, so no saved widget
+    # value belongs to it and the widget after it keeps its own.
+    info = _object_info()
+    info["Format"] = {
+        "input": {
+            "required": {
+                "values": [
+                    "COMFY_AUTOGROW_V3",
+                    {
+                        "template": {
+                            "input": {"required": {"value": ["STRING", {"multiline": False}]}},
+                            "names": ["a", "b"],
+                            "min": 1,
+                        }
+                    },
+                ],
+                "pattern": ["STRING", {"default": ""}],
+            }
+        },
+        "input_order": {"required": ["values", "pattern"]},
+        "output": ["STRING"],
+    }
+    info["Source"]["output"] = ["STRING"]
+    workflow = _workflow()
+    workflow["nodes"][0]["outputs"][0]["type"] = "STRING"
+    workflow["nodes"][1] = {
+        "id": 2,
+        "type": "Format",
+        "inputs": [
+            {"name": "values.a", "type": "STRING", "link": 7},
+            {"name": "values.b", "type": "STRING", "link": None},
+        ],
+        "outputs": [],
+        "widgets_values": ["{a}"],
+    }
+    workflow["links"] = [[7, 1, 0, 2, 0, "STRING"]]
+
+    compiled = compile_comfyui_ui_graph(workflow, info)
+
+    assert compiled.api_graph["2"]["inputs"] == {"values.a": ["1", 0], "pattern": "{a}"}

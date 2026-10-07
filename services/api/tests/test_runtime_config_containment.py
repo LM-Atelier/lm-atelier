@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import subprocess
 from pathlib import Path
 
@@ -90,7 +91,9 @@ def test_a_planted_file_at_the_old_fixed_staging_name_is_not_used(
     assert planted.read_text(encoding="utf-8") == "planted", "wrote through the old name"
 
 
-def test_a_relative_data_directory_still_works(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_a_relative_data_directory_still_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The documented .env spelling allows a relative data directory."""
 
     monkeypatch.chdir(tmp_path)
@@ -101,8 +104,8 @@ def test_a_relative_data_directory_still_works(tmp_path: Path, monkeypatch) -> N
 
 
 def test_a_redirected_state_folder_refuses_startup_cleanly(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     """A refusal at startup must read like the sibling one, not like a crash.
 
     configure_desktop_environment is the first thing that touches the state
@@ -168,34 +171,32 @@ def test_a_redirected_ANCESTOR_with_absent_state_creates_nothing(
 
 
 def test_a_failure_opening_the_staging_file_leaves_nothing_behind(
-    tmp_path: Path, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """fdopen owns the descriptor only once it succeeds."""
-
-    from local_lm import runtime_config
 
     data_dir = tmp_path / "data"
 
     def explode(*_args: object, **_kwargs: object) -> object:
         raise OSError("no stream for you")
 
-    monkeypatch.setattr(runtime_config.os, "fdopen", explode)
+    monkeypatch.setattr(os, "fdopen", explode)
     with pytest.raises(OSError):
         persist_runtime_values(data_dir, {"LOCAL_LM_CHAT_ENGINE": "mock"}, {})
     leftover = sorted(p.name for p in (data_dir / "state").iterdir())
     assert leftover == [], f"staging entries left behind: {leftover}"
 
 
-def test_an_abandoned_staging_entry_does_not_block_a_write(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_an_abandoned_staging_entry_does_not_block_a_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A deterministic staging name could be blocked by an interrupted run."""
-
-    from local_lm import runtime_config
 
     data_dir = tmp_path / "data"
     state = data_dir / "state"
     state.mkdir(parents=True)
     names = iter(["collides", "collides", "free"])
-    monkeypatch.setattr(runtime_config.secrets, "token_hex", lambda _n: next(names))
+    monkeypatch.setattr(secrets, "token_hex", lambda _n: next(names))
     (state / "runtime-config.json.collides.tmp").write_text("abandoned", encoding="utf-8")
 
     persist_runtime_values(data_dir, {"LOCAL_LM_CHAT_ENGINE": "mock"}, {})

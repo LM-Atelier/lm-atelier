@@ -306,9 +306,23 @@ def media_event_contract_errors(
     return errors
 
 
+def _valid_origin(origin: object) -> bool:
+    """An origin is three bounded values or nothing; anything else is refused.
+
+    `stated_origin` already reduces an engine's answer to these, so a shape
+    outside them means an adapter built the record itself rather than passing
+    the engine's own words through.
+    """
+
+    if origin is None:
+        return True
+    return isinstance(origin, dict) and set(origin) == {"node_id", "output_type", "collection"}
+
+
 def _valid_asset(asset: object) -> bool:
     return (
         isinstance(asset, GeneratedAsset)
+        and _valid_origin(asset.origin)
         and isinstance(asset.content, bytes)
         and asset.kind in {"image", "video"}
         and _printable_text(asset.media_type, 200)

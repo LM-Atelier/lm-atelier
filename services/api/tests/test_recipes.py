@@ -3,18 +3,31 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import httpx
+import pytest
+from fastapi import FastAPI
 from httpx2 import AsyncClient
 
+from local_lm import api as api_module
 from local_lm.catalog import HuggingFaceCatalog
 from local_lm.downloads import DownloadManager
+from local_lm.model_planner import PlannedArtifact, ResolvedInstallPlan
 from local_lm.processes import ProcessSupervisor
-from local_lm.recipes import get_reference_recipe, list_reference_recipes
+from local_lm.recipes import (
+    get_reference_recipe,
+    list_reference_recipes,
+    recipe_workflow_template,
+)
+from local_lm.schemas import CatalogPreflightRequest, ReferenceRecipe
 from local_lm.settings_registry import (
     CHAT_SETTINGS,
     IMAGE_SETTINGS,
     VIDEO_SETTINGS,
     validate_settings,
 )
+
+#: Certified on this project's own measured run; every other recipe is a candidate.
+CERTIFIED = {"ltx-video-2b-0.9.5-i2v"}
 
 
 def test_reference_recipes_are_immutable_safe_candidates() -> None:
@@ -25,13 +38,20 @@ def test_reference_recipes_are_immutable_safe_candidates() -> None:
         "sd35-medium-fp8",
         "wan21-t2v-13b",
         "wan21-i2v-14b-480p-fp8",
+        "ltx-video-2b-0.9.5-i2v",
     }
     blocked = {".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle"}
     for recipe in recipes:
         assert re.fullmatch(r"[0-9a-f]{40}", recipe.revision)
-        assert recipe.license_id in {"Apache-2.0", "stabilityai-ai-community"}
-        assert recipe.status == "reference-candidate"
-        assert recipe.certified is False
+        assert recipe.license_id in {
+            "Apache-2.0",
+            "stabilityai-ai-community",
+            "ltx-video-2b-0.9.5-openrail-m",
+        }
+        if recipe.id in CERTIFIED:
+            assert (recipe.status, recipe.certified) == ("certified", True)
+        else:
+            assert (recipe.status, recipe.certified) == ("reference-candidate", False)
         assert recipe.files
         assert all(Path(file.path).suffix.lower() not in blocked for file in recipe.files)
         assert all(not Path(file.path).is_absolute() for file in recipe.files)
@@ -44,7 +64,12 @@ def test_every_recipe_pins_a_checksum_for_every_file() -> None:
         assert all(file.sha256 for file in recipe.files), recipe.id
 
 
-def _chat_recipe_catalog(recipe, monkeypatch, *, files=None):  # type: ignore[no-untyped-def]
+def _chat_recipe_catalog(
+    recipe: ReferenceRecipe,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    files: list[dict[str, object]] | None = None,
+) -> None:
     """Answer catalog lookups with exactly what the recipe pins, unless overridden."""
 
     async def inspect(
@@ -52,7 +77,7 @@ def _chat_recipe_catalog(recipe, monkeypatch, *, files=None):  # type: ignore[no
         remote_id: str,
         revision: str = "main",
         requested_role: str | None = None,
-    ) -> dict:  # type: ignore[type-arg]
+    ) -> dict[str, object]:
         return {
             "model": {
                 "remote_id": remote_id,
@@ -78,8 +103,8 @@ def _chat_recipe_catalog(recipe, monkeypatch, *, files=None):  # type: ignore[no
 
 async def test_recipe_install_produces_a_plan_matching_its_pins(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Recipes used to bypass the install plan entirely and could never be ready."""
     recipe = get_reference_recipe("qwen3-8b-q4-k-m")
     assert recipe
@@ -126,10 +151,65 @@ async def test_recipe_install_produces_a_plan_matching_its_pins(
     await client.post(f"/api/jobs/{job['id']}/cancel")
 
 
+async def test_recipe_install_plans_its_pinned_revision_after_the_repository_moves_on(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recipe pins a commit, so the repository's main branch moving on must not matter.
+
+    The real catalog lookup runs against a transport that answers the way Hugging
+    Face does: the default branch for a bare model path, whatever query it
+    carries, and the pinned commit only for that commit's revision path.
+    """
+    recipe = get_reference_recipe("qwen3-8b-q4-k-m")
+    assert recipe
+    moved_on = "f" * 40
+    assert recipe.revision != moved_on
+    model_path = f"/api/models/{recipe.remote_id}"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == model_path:
+            sha = moved_on
+        elif request.url.path == f"{model_path}/revision/{recipe.revision}":
+            sha = recipe.revision
+        else:
+            return httpx.Response(404)
+        return httpx.Response(
+            200,
+            json={
+                "id": recipe.remote_id,
+                "sha": sha,
+                "pipeline_tag": "text-generation",
+                "tags": ["gguf"],
+                "siblings": [
+                    {
+                        "rfilename": file.path,
+                        "size": file.size_bytes,
+                        "lfs": {"sha256": file.sha256},
+                    }
+                    for file in recipe.files
+                ],
+            },
+        )
+
+    monkeypatch.delattr(HuggingFaceCatalog, "inspect_file_prefix", raising=False)
+    async with httpx.AsyncClient(
+        base_url="https://huggingface.co", transport=httpx.MockTransport(handler)
+    ) as hub:
+        monkeypatch.setattr(app.state.services.catalog, "_client", hub)
+        accepted = await client.post(f"/api/recipes/{recipe.id}/install")
+
+    assert accepted.status_code == 202, accepted.text
+    job = accepted.json()
+    assert job["payload_json"]["revision"] == recipe.revision
+    await client.post(f"/api/jobs/{job['id']}/cancel")
+
+
 async def test_recipe_install_refuses_a_repository_that_drifted_from_its_pins(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Preflight carries no hashes, so drift has to be caught before installing."""
     recipe = get_reference_recipe("qwen3-8b-q4-k-m")
     assert recipe
@@ -150,8 +230,8 @@ async def test_recipe_install_refuses_a_repository_that_drifted_from_its_pins(
 
 async def test_recipe_install_refuses_a_repository_missing_pinned_files(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     recipe = get_reference_recipe("qwen3-8b-q4-k-m")
     assert recipe
     _chat_recipe_catalog(
@@ -203,9 +283,9 @@ async def test_reference_recipe_api_lists_pinned_metadata(client: AsyncClient) -
     response = await client.get("/api/recipes")
     assert response.status_code == 200
     recipes = response.json()
-    assert len(recipes) == 5
+    assert len(recipes) == 6
     assert all(len(recipe["revision"]) == 40 for recipe in recipes)
-    assert all(recipe["certified"] is False for recipe in recipes)
+    assert {recipe["id"] for recipe in recipes if recipe["certified"]} == CERTIFIED
 
     detail = await client.get("/api/recipes/qwen3-8b-q4-k-m")
     assert detail.status_code == 200
@@ -217,8 +297,8 @@ async def test_reference_recipe_api_lists_pinned_metadata(client: AsyncClient) -
 
 async def test_recipe_install_reports_an_unreachable_catalog_as_unavailable(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The shared operation raises a domain error; each route maps it itself."""
 
     async def unreachable(
@@ -226,7 +306,7 @@ async def test_recipe_install_reports_an_unreachable_catalog_as_unavailable(
         _remote_id: str,
         _revision: str = "main",
         _requested_role: str | None = None,
-    ) -> dict:  # type: ignore[type-arg]
+    ) -> dict[str, object]:
         raise OSError("network is down")
 
     monkeypatch.setattr(HuggingFaceCatalog, "inspect", unreachable)
@@ -239,8 +319,8 @@ async def test_recipe_install_reports_an_unreachable_catalog_as_unavailable(
 
 async def test_drift_refusal_leaves_no_installable_plan(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A refused recipe must not leave a usable plan behind.
 
     A persisted plan is installable on its own through the download endpoint, so
@@ -267,3 +347,90 @@ async def test_drift_refusal_leaves_no_installable_plan(
     with SessionLocal() as session:
         assert session.query(InstallPlan).count() == 0
         assert session.query(Job).count() == 0
+
+
+@pytest.mark.parametrize(
+    ("recipe_id", "template"),
+    [("ltx-video-2b-0.9.5-i2v", "ltxv_image_to_video"), ("qwen3-8b-q4-k-m", None)],
+)
+async def test_recipe_install_asks_the_install_check_for_its_own_template(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, recipe_id: str, template: str | None
+) -> None:
+    """A template recipe is planned through that template; any other recipe through none."""
+
+    recipe = get_reference_recipe(recipe_id)
+    assert recipe
+    asked: list[CatalogPreflightRequest] = []
+
+    async def preflight(
+        _services: object,
+        _session: object,
+        remote_id: str,
+        request: CatalogPreflightRequest,
+        **_: object,
+    ) -> object:
+        assert remote_id == recipe.remote_id
+        asked.append(request)
+        raise ValueError("stopped after the request was built")
+
+    monkeypatch.setattr(api_module, "resolve_catalog_preflight", preflight)
+    response = await client.post(f"/api/recipes/{recipe.id}/install")
+    assert response.status_code == 422
+    assert response.json()["code"] == "recipe-plan-unresolvable"
+    assert [(item.revision, item.workflow_template_id) for item in asked] == [
+        (recipe.revision, template)
+    ]
+    assert asked[0].selected_files == [file.path for file in recipe.files]
+
+
+def _resolved(recipe: ReferenceRecipe, contract: dict[str, object]) -> ResolvedInstallPlan:
+    return ResolvedInstallPlan(
+        provider="huggingface",
+        remote_id=recipe.remote_id,
+        revision=recipe.revision,
+        role=recipe.role,
+        engine=recipe.engine,
+        architecture=None,
+        family=None,
+        compatibility="supported",
+        artifacts=tuple(
+            PlannedArtifact(
+                path=file.path,
+                kind="model",
+                target_folder="checkpoints",
+                size_bytes=file.size_bytes,
+                sha256=file.sha256,
+            )
+            for file in recipe.files
+        ),
+        runtime_contract=contract,
+        activation_probe={"required": True},
+    )
+
+
+@pytest.mark.parametrize(
+    "contract",
+    [
+        {},
+        {"workflow_template_id": "ltxv_text_to_video"},
+        {"workflow_template_id": "ltxv_image_to_video", "workflow_template_sha256": "0" * 64},
+    ],
+)
+def test_a_template_recipe_refuses_any_other_template(contract: dict[str, object]) -> None:
+    recipe = get_reference_recipe("ltx-video-2b-0.9.5-i2v")
+    assert recipe
+    template = recipe_workflow_template(recipe)
+    assert template
+    pinned: dict[str, object] = {
+        "workflow_template_id": template[0],
+        "workflow_template_sha256": template[1],
+    }
+    api_module._assert_recipe_pins_hold(recipe, _resolved(recipe, pinned))
+    with pytest.raises(ValueError, match="different workflow template"):
+        api_module._assert_recipe_pins_hold(recipe, _resolved(recipe, contract))
+
+
+def test_a_recipe_without_a_template_needs_none() -> None:
+    recipe = get_reference_recipe("qwen3-8b-q4-k-m")
+    assert recipe and recipe_workflow_template(recipe) is None
+    api_module._assert_recipe_pins_hold(recipe, _resolved(recipe, {}))

@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import FastAPI
 from httpx2 import AsyncClient
 from run_waits import wait_for_terminal_status
-from test_custom_node_source_identity import _git
+from test_custom_node_source_identity import InstalledSource, _git
 from test_custom_node_source_identity import installed_source as installed_source
 from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
 
+from local_lm.adapters.base import MediaEvent, MediaRequest
+from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.models import CustomNodeInstall, WorkflowRevision
+
+type CustomWorkflow = tuple[dict[str, Any], str, Path]
 
 _NODE_SOURCE = """class ConstructedSize:
     @classmethod
@@ -27,7 +34,12 @@ _GRAPH = {"1": {"class_type": "ConstructedSize", "inputs": {"aspect_ratio": "por
 
 
 @pytest.fixture
-async def custom_workflow(client: AsyncClient, app, installed_source, monkeypatch):
+async def custom_workflow(
+    client: AsyncClient,
+    app: FastAPI,
+    installed_source: InstalledSource,
+    monkeypatch: pytest.MonkeyPatch,
+) -> CustomWorkflow:
     _, install, root = installed_source
     (root / "node.py").write_text(_NODE_SOURCE, encoding="utf-8")
     (root / "__init__.py").write_text(
@@ -48,7 +60,7 @@ async def custom_workflow(client: AsyncClient, app, installed_source, monkeypatc
         session.add(install)
         session.commit()
 
-    async def object_info():
+    async def object_info() -> dict[str, Any]:
         return {
             "ConstructedSize": {
                 "python_module": "custom_nodes.constructed",
@@ -73,7 +85,7 @@ async def custom_workflow(client: AsyncClient, app, installed_source, monkeypatc
     return workflow, install.id, root
 
 
-async def _approve_custom(client: AsyncClient, custom_workflow):
+async def _approve_custom(client: AsyncClient, custom_workflow: CustomWorkflow) -> dict[str, Any]:
     workflow, _, _ = custom_workflow
     revision_id = workflow["current_revision_id"]
     url = f"/api/workflows/{workflow['id']}/revisions/{revision_id}/review"
@@ -88,11 +100,13 @@ async def _approve_custom(client: AsyncClient, custom_workflow):
         },
     )
     assert approved.status_code == 200, approved.text
-    return approved.json()
+    result = approved.json()
+    assert isinstance(result, dict)
+    return result
 
 
 async def test_review_records_the_separately_pinned_custom_node(
-    client: AsyncClient, custom_workflow
+    client: AsyncClient, custom_workflow: CustomWorkflow
 ) -> None:
     _, install_id, _ = custom_workflow
     approved = await _approve_custom(client, custom_workflow)
@@ -125,7 +139,12 @@ async def test_review_records_the_separately_pinned_custom_node(
     ],
 )
 async def test_changed_node_identity_invalidates_workflow_execution(
-    client: AsyncClient, custom_workflow, app, settings, field, replacement
+    client: AsyncClient,
+    custom_workflow: CustomWorkflow,
+    app: FastAPI,
+    settings: Settings,
+    field: str,
+    replacement: object,
 ) -> None:
     await _approve_custom(client, custom_workflow)
     from local_lm.workflow_review_runtime import verify_workflow_review_runtime
@@ -148,7 +167,12 @@ async def test_changed_node_identity_invalidates_workflow_execution(
 
 @pytest.mark.parametrize("change_source", [False, True])
 async def test_explicit_reviewed_custom_workflow_reaches_dispatch_only_with_current_source(
-    custom_workflow, client: AsyncClient, app, settings, monkeypatch, change_source: bool
+    custom_workflow: CustomWorkflow,
+    client: AsyncClient,
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    change_source: bool,
 ) -> None:
     workflow, _, root = custom_workflow
     await _approve_custom(client, custom_workflow)
@@ -160,7 +184,7 @@ async def test_explicit_reviewed_custom_workflow_reaches_dispatch_only_with_curr
     captured = []
     generate = services.engines.media.generate
 
-    async def capture(request):
+    async def capture(request: MediaRequest) -> AsyncIterator[MediaEvent]:
         captured.append(request)
         async for event in generate(request):
             yield event

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import sqlite3
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -13,16 +14,22 @@ from threading import Event
 import pytest
 from alembic import command
 from alembic.autogenerate import compare_metadata
+from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
 from alembic_head import EXPECTED_ALEMBIC_HEAD
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import UniqueConstraint, create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.orm import Session
 
-from local_lm import db, models  # noqa: F401 - importing registers every table to compare
+from local_lm import (  # noqa: F401 - importing registers every table to compare
+    database_migrations,
+    db,
+    models,
+)
 from local_lm.artifact_library_schema import CREATE_TRIGGER_SQL
 from local_lm.backups import BackupManager
 from local_lm.chat_item_removal_schema import (
@@ -392,16 +399,30 @@ def test_artifact_library_entry_migration_backfills_once_and_seals_membership(
             "recovery_id = 'recover-image', version = 2 WHERE artifact_id = 'legacy-image'",
             (stamp,),
         )
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+            connection.execute(
+                "UPDATE artifact_library_entries SET state = 'trashed', deleted_at = ?, "
+                "recovery_id = 'recover-image', version = 2 WHERE artifact_id = 'legacy-video'",
+                (stamp,),
+            )
+        assert connection.execute(
+            "SELECT state, recovery_id, version FROM artifact_library_entries "
+            "WHERE artifact_id = 'legacy-video'"
+        ).fetchone() == ("visible", None, 1)
         connection.execute(
             "UPDATE artifact_library_entries SET state = 'trashed', deleted_at = ?, "
             "recovery_id = 'recover-video', version = 2 WHERE artifact_id = 'legacy-video'",
             (stamp,),
         )
-        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+        with pytest.raises(sqlite3.IntegrityError, match="media-recovery-write-refused"):
             connection.execute(
                 "UPDATE artifact_library_entries SET recovery_id = 'recover-image', version = 3 "
                 "WHERE artifact_id = 'legacy-video'"
             )
+        assert connection.execute(
+            "SELECT state, recovery_id, version FROM artifact_library_entries "
+            "WHERE artifact_id = 'legacy-video'"
+        ).fetchone() == ("trashed", "recover-video", 2)
         assert connection.execute(
             "SELECT kind, original_name, favorite FROM artifacts ORDER BY id"
         ).fetchall() == [
@@ -523,7 +544,7 @@ def test_artifact_library_migration_fence_blocks_concurrent_dangling_writer(
         if "SELECT CASE" not in statement or audit_started.is_set():
             return
         audit_started.set()
-        if writer_started.wait(5):
+        if writer_started.wait(PATIENCE_SECONDS):
             writer_was_blocked.append(not writer_done.wait(0.2))
 
     def register_trace(dbapi_connection: object, _record: object) -> None:
@@ -533,10 +554,12 @@ def test_artifact_library_migration_fence_blocks_concurrent_dangling_writer(
         command.upgrade(config, "head")
 
     def write_dangling_reference() -> str:
-        assert audit_started.wait(5)
+        assert audit_started.wait(PATIENCE_SECONDS)
         writer_started.set()
         try:
-            with sqlite3.connect(database, timeout=5) as connection:
+            # The writer waits out the fence, which lasts until the upgrade
+            # commits; on a loaded runner that has taken longer than five seconds.
+            with sqlite3.connect(database, timeout=PATIENCE_SECONDS) as connection:
                 connection.execute(
                     """
                     INSERT INTO jobs
@@ -562,8 +585,8 @@ def test_artifact_library_migration_fence_blocks_concurrent_dangling_writer(
         with ThreadPoolExecutor(max_workers=2) as executor:
             upgrade_result = executor.submit(upgrade)
             writer_result = executor.submit(write_dangling_reference)
-            upgrade_result.result(timeout=15)
-            outcome = writer_result.result(timeout=15)
+            upgrade_result.result(timeout=3 * PATIENCE_SECONDS)
+            outcome = writer_result.result(timeout=3 * PATIENCE_SECONDS)
     finally:
         event.remove(Engine, "connect", register_trace)
 
@@ -1859,6 +1882,67 @@ def _recorded_revisions_for(settings: Settings) -> set[str]:
         return {row[0] for row in connection.execute("SELECT version_num FROM alembic_version")}
 
 
+def test_a_start_on_current_data_does_not_run_the_upgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Applying nothing is not free: arriving at that answer walks the whole
+    revision graph, which means reading every migration in the build."""
+
+    settings = Settings(data_dir=tmp_path / "already-current")
+    settings.prepare()
+    upgrade_database(settings)
+    current = _recorded_revisions_for(settings)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("upgraded data that was already at this build's revision")
+
+    monkeypatch.setattr(command, "upgrade", refuse)
+
+    upgrade_database(settings)
+
+    assert _recorded_revisions_for(settings) == current
+
+
+def test_a_start_one_revision_behind_still_reaches_the_head(tmp_path: Path) -> None:
+    """The one step that has to survive declining to do nothing."""
+
+    settings = Settings(data_dir=tmp_path / "one-behind")
+    settings.prepare()
+    parent = _parent_revision(settings)
+    command.upgrade(alembic_config(settings), parent)
+    assert _recorded_revisions_for(settings) == {parent}
+
+    upgrade_database(settings)
+
+    assert _recorded_revisions_for(settings) == {EXPECTED_ALEMBIC_HEAD}
+
+
+def test_an_older_migration_set_is_not_answered_from_the_current_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading a migration set once is only safe while each set answers for
+    itself. An older set knows nothing of the revision this data records, and
+    has to say so rather than inherit the answer the current set gave."""
+
+    settings = Settings(data_dir=tmp_path / "older-set")
+    settings.prepare()
+    upgrade_database(settings)
+
+    script = ScriptDirectory.from_config(alembic_config(settings))
+    older = tmp_path / "older-migrations"
+    shutil.copytree(
+        Path(script.dir),
+        older,
+        ignore=shutil.ignore_patterns(Path(script.get_revision("head").path).name, "__pycache__"),
+    )
+    config = alembic_config(settings)
+    config.set_main_option("script_location", str(older))
+    monkeypatch.setattr(database_migrations, "alembic_config", lambda _settings: config)
+
+    with pytest.raises(DatabaseVersionError, match="does not recognize"):
+        upgrade_database(settings)
+
+
 def _trigger_definitions(database: Path) -> dict[str, str]:
     with sqlite3.connect(database) as connection:
         return dict(
@@ -2121,7 +2205,7 @@ _ARTIFACT_INDEX_REVISION = "b41e7c0a92d5"
 _ARTIFACT_INDEX_PRIOR = "c9e1d4a70b82"
 
 
-def _migrated_to(tmp_path: Path, revision: str) -> tuple[Settings, object, Path]:
+def _migrated_to(tmp_path: Path, revision: str) -> tuple[Settings, Config, Path]:
     """Bring a fresh database to an exact revision and hand back its handles."""
 
     settings = Settings(data_dir=tmp_path / "data")

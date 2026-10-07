@@ -12,13 +12,18 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any, TypeGuard
-from urllib.parse import urlencode, urlparse, urlunparse
+from urllib.parse import quote, urlencode, urlparse, urlunparse
 from uuid import uuid4
 
 import httpx
 import websockets
 from websockets.exceptions import WebSocketException
 
+from ..comfy_lora_runtime_names import (
+    bind_lora_runtime_names,
+    has_nested_lora_names,
+    lora_runtime_names_need_binding,
+)
 from ..domain import Operation
 from ..filesystem_links import (
     AnchoredDirectory,
@@ -31,6 +36,7 @@ from ..filesystem_links import (
     remove_entry,
 )
 from ..network import shared_tls_context
+from ..output_origin import stated_origin
 from ..schemas import EngineCapabilities
 from ..settings_registry import IMAGE_SETTINGS, VIDEO_SETTINGS
 from .base import GeneratedAsset, MediaEvent, MediaRequest
@@ -40,6 +46,9 @@ logger = logging.getLogger(__name__)
 _CANCELLED = object()
 _MAX_COMFY_JSON_BYTES = 32 * 1024 * 1024
 _MAX_COMFY_OUTPUTS = 64
+#: How long a finished prompt's history may take to appear, and how often to look.
+_HISTORY_SETTLE_SECONDS = 30.0
+_HISTORY_POLL_SECONDS = 0.25
 
 #: The one subfolder every conditioning upload is addressed to. The backend's
 #: temp directory also holds files this adapter did not write, so this is the
@@ -331,7 +340,9 @@ class ComfyUIAdapter:
         return (await self._upload_files(request, [Path(raw_path)], label="mask"))[0]
 
     async def _upload_inputs(self, request: MediaRequest) -> list[str]:
-        return await self._upload_files(request, request.input_paths, label="")
+        return await self._upload_files(
+            request, request.input_paths, label="", contents=request.input_contents
+        )
 
     async def _upload_files(
         self,
@@ -339,11 +350,22 @@ class ComfyUIAdapter:
         paths: list[Path],
         *,
         label: str,
+        contents: tuple[bytes, ...] | None = None,
     ) -> list[str]:
+        if contents is not None and (
+            type(contents) is not tuple
+            or len(contents) != len(paths)
+            or any(type(content) is not bytes for content in contents)
+        ):
+            raise ValueError("The input bytes do not match the conditioning images")
         uploaded: list[str] = []
         upload_subfolder = _UPLOAD_SUBFOLDER
         for index, path in enumerate(paths):
-            content = await asyncio.to_thread(path.read_bytes)
+            content = (
+                contents[index]
+                if contents is not None
+                else await asyncio.to_thread(path.read_bytes)
+            )
             extension, media_type = self._image_format(content)
             suffix = f"{label}-{index}" if label else str(index)
             filename = f"lm-atelier-{request.run_id}-{suffix}{extension}"
@@ -421,6 +443,31 @@ class ComfyUIAdapter:
                 )
         return parameters
 
+    async def _runtime_lora_graph(
+        self, graph: dict[str, Any], cancelled: asyncio.Event
+    ) -> dict[str, Any]:
+        if not has_nested_lora_names(graph):
+            return graph
+        try:
+            info = await self.object_info()
+        except (httpx.HTTPError, ValueError):
+            return graph
+        if cancelled.is_set() or not lora_runtime_names_need_binding(graph, info):
+            return graph
+        try:
+            response = await self._client.get("/system_stats", timeout=10)
+            response.raise_for_status()
+            if len(response.content) > _MAX_COMFY_JSON_BYTES:
+                return graph
+            metadata = response.json()
+        except (httpx.HTTPError, ValueError):
+            return graph
+        system = metadata.get("system") if isinstance(metadata, dict) else None
+        platform = system.get("os") if isinstance(system, dict) else None
+        return bind_lora_runtime_names(
+            graph, info, runtime_platform=platform if isinstance(platform, str) else None
+        )
+
     async def generate(self, request: MediaRequest) -> AsyncIterator[MediaEvent]:
         if request.run_id in self._cancelled:
             self._cancelled.discard(request.run_id)
@@ -428,11 +475,12 @@ class ComfyUIAdapter:
             return
         cancel_event = asyncio.Event()
         self._cancel_events[request.run_id] = cancel_event
+        self._jobs.pop(request.run_id, None)
         prompt_id: str | None = None
         outputs_collected = False
         abandoned = False
         refused_after_acceptance = False
-        bound_after_timeout = False
+        bound_after_submission_failure = False
         try:
             yield MediaEvent(
                 type="progress",
@@ -458,6 +506,7 @@ class ComfyUIAdapter:
                 yield MediaEvent(type="cancelled")
                 return
             graph = self._compile(request.workflow, parameters)
+            graph = await self._runtime_lora_graph(graph, cancel_event)
             yield MediaEvent(
                 type="progress",
                 phase="Submitting media workflow",
@@ -484,7 +533,7 @@ class ComfyUIAdapter:
                         json=prompt_payload,
                         timeout=30,
                     )
-                except httpx.TimeoutException:
+                except (httpx.TimeoutException, asyncio.CancelledError):
                     # The request went out and no answer came back. Nothing
                     # here knows whether the backend took it, and the one
                     # thing that would say so is the identifier that never
@@ -495,8 +544,9 @@ class ComfyUIAdapter:
                     bound = await self._prompt_id_for_client(client_id)
                     if bound is not None:
                         prompt_id = bound
-                        self._jobs[request.run_id] = prompt_id
-                        bound_after_timeout = True
+                        if self._cancel_events.get(request.run_id) is cancel_event:
+                            self._jobs[request.run_id] = prompt_id
+                        bound_after_submission_failure = True
                     raise
                 response.raise_for_status()
                 payload = response.json()
@@ -512,7 +562,8 @@ class ComfyUIAdapter:
                     # and node_errors together. This identifier is the only
                     # handle that can stop it or clean up after it.
                     prompt_id = raw_prompt_id
-                    self._jobs[request.run_id] = prompt_id
+                    if self._cancel_events.get(request.run_id) is cancel_event:
+                        self._jobs[request.run_id] = prompt_id
                 if payload.get("node_errors"):
                     # Refusing a prompt the backend has ALREADY taken. The
                     # caller is told the generation failed, so the teardown has
@@ -631,8 +682,16 @@ class ComfyUIAdapter:
             if cancel_event.is_set():
                 yield MediaEvent(type="cancelled")
                 return
-            assets = await self._collect_outputs(prompt_id, request.operation)
-            outputs_collected = True
+            assets = await self._collect_outputs(prompt_id, request.operation, cancel_event)
+            # Collected outputs were removed from the backend as they were read.
+            # Nothing collected means a stop ended the wait for the run's record,
+            # and the teardown still has to look for its files.
+            outputs_collected = bool(assets)
+            if cancel_event.is_set():
+                # A stop that arrives while the result is being collected wins,
+                # as it does just before: the run ends cancelled, not complete.
+                yield MediaEvent(type="cancelled")
+                return
             yield MediaEvent(
                 type="complete",
                 progress=1,
@@ -648,6 +707,7 @@ class ComfyUIAdapter:
             abandoned = True
             raise
         except asyncio.CancelledError:
+            abandoned = True
             raise
         except WebSocketException:
             raise RuntimeError("ComfyUI generation connection failed") from None
@@ -662,11 +722,12 @@ class ComfyUIAdapter:
         except OSError:
             raise RuntimeError("ComfyUI could not access local generation files") from None
         finally:
-            self._jobs.pop(request.run_id, None)
-            self._cancel_events.pop(request.run_id, None)
-            self._cancelled.discard(request.run_id)
+            if self._cancel_events.get(request.run_id) is cancel_event:
+                self._jobs.pop(request.run_id, None)
+                self._cancel_events.pop(request.run_id, None)
+                self._cancelled.discard(request.run_id)
             if prompt_id and not outputs_collected:
-                if bound_after_timeout or (
+                if bound_after_submission_failure or (
                     (abandoned or refused_after_acceptance) and not cancel_event.is_set()
                 ):
                     # A prompt was submitted and the consumer walked away.
@@ -755,25 +816,68 @@ class ComfyUIAdapter:
         if not completed:
             raise RuntimeError("ComfyUI did not produce media during the model activation probe.")
 
-    async def _collect_outputs(self, prompt_id: str, operation: str) -> list[GeneratedAsset]:
-        response = await self._client.get(f"/history/{prompt_id}", timeout=30)
-        response.raise_for_status()
-        if len(response.content) > _MAX_COMFY_JSON_BYTES:
-            raise RuntimeError("ComfyUI output history is too large")
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise RuntimeError("ComfyUI returned invalid output history")
+    async def _finished_history(
+        self,
+        prompt_id: str,
+        cancel_event: asyncio.Event | None = None,
+    ) -> dict[str, Any] | None:
+        """The backend's record of a finished prompt, once it has written one.
+
+        ComfyUI reports success from inside the run and stores the run's
+        history only afterwards, once its end-of-run work is done. With large
+        models that work can take long enough for a read made on the report to
+        find no record of a run that did produce output. A missing record is
+        therefore read again, for a bounded time, before it counts as no output;
+        a record that is present is final as it stands.
+
+        None means a stop arrived while the record was still missing; waiting
+        out the rest of the bound would only delay the cancellation.
+        """
+
+        deadline = time.monotonic() + _HISTORY_SETTLE_SECONDS
+        while True:
+            response = await self._client.get(f"/history/{prompt_id}", timeout=30)
+            response.raise_for_status()
+            if len(response.content) > _MAX_COMFY_JSON_BYTES:
+                raise RuntimeError("ComfyUI output history is too large")
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError("ComfyUI returned invalid output history")
+            if prompt_id in payload or time.monotonic() >= deadline:
+                break
+            if cancel_event is None:
+                await asyncio.sleep(_HISTORY_POLL_SECONDS)
+                continue
+            with suppress(TimeoutError):
+                await asyncio.wait_for(cancel_event.wait(), timeout=_HISTORY_POLL_SECONDS)
+            if cancel_event.is_set():
+                return None
         history = payload.get(prompt_id, {})
         if not isinstance(history, dict):
             raise RuntimeError("ComfyUI returned invalid output history")
+        return history
+
+    async def _collect_outputs(
+        self,
+        prompt_id: str,
+        operation: str,
+        cancel_event: asyncio.Event | None = None,
+    ) -> list[GeneratedAsset]:
+        history = await self._finished_history(prompt_id, cancel_event)
+        if history is None:
+            return []
         outputs = history.get("outputs") or {}
         if not isinstance(outputs, dict):
             raise RuntimeError("ComfyUI returned invalid output history")
         assets: list[GeneratedAsset] = []
         managed_paths: set[Path] = set()
-        output_items: list[tuple[dict[str, Any], str]] = []
+        output_items: list[tuple[dict[str, Any], str, str, object]] = []
         too_many_outputs = False
-        for node_output in outputs.values():
+        # Keyed by the graph node that wrote each file. Dropping the key here
+        # was the only place that fact existed: afterwards a file is addressed
+        # by a digest of its own content, and two nodes that wrote the same
+        # bytes are one row.
+        for node_id, node_output in outputs.items():
             if not isinstance(node_output, dict):
                 continue
             for collection, default_kind in (
@@ -789,7 +893,7 @@ class ComfyUIAdapter:
                         continue
                     item = dict(raw_item)
                     if len(output_items) < _MAX_COMFY_OUTPUTS:
-                        output_items.append((item, default_kind))
+                        output_items.append((item, default_kind, collection, node_id))
                     else:
                         too_many_outputs = True
                     if managed_path := self._managed_output_path(item):
@@ -798,7 +902,7 @@ class ComfyUIAdapter:
             if too_many_outputs:
                 raise RuntimeError(f"ComfyUI returned more than {_MAX_COMFY_OUTPUTS} outputs")
             total_bytes = 0
-            for item, default_kind in output_items:
+            for item, default_kind, collection, node_id in output_items:
                 filename = str(item.get("filename") or "")
                 if (
                     not filename
@@ -854,6 +958,7 @@ class ComfyUIAdapter:
                         kind=kind,
                         name=filename,
                         metadata={"prompt_id": prompt_id, "operation": operation},
+                        origin=stated_origin(node_id, params["type"], collection),
                     )
                 )
             if not assets:
@@ -1124,46 +1229,23 @@ class ComfyUIAdapter:
         return None
 
     async def _abandon_prompt(self, prompt_id: str) -> None:
-        """Ask the backend to drop one prompt this adapter stopped listening to.
+        """Cancel the submitted prompt through the atomic job endpoint when available.
 
-        Scoped to the submitted identity, because the backend scopes it too.
-        ComfyUI v0.28.0's post_interrupt reads prompt_id from the body, walks
-        the currently running items, and interrupts only when one of them
-        matches; with no prompt_id it interrupts whatever is running. An
-        abandoned run sending the empty-body form could therefore stop the
-        prompt that had already replaced it.
-
-        A run that never began sampling is still PENDING rather than running,
-        and an interrupt does nothing for it, so its queue entry is deleted as
-        well - and deleted FIRST. The backend worker consumes the queue
-        independently of these handlers, so a pending prompt can start in the
-        gap between the two requests: interrupting first leaves it pending, and
-        the deletion that follows removes only pending entries, so it does
-        nothing and the abandoned prompt runs to completion. Deleting first
-        closes that. Either the entry is removed before it can start, or the
-        worker won the transition and the interrupt that follows finds it
-        running. Deleting is safe for a running prompt too, for the same reason
-        it is useless against one: post_queue only removes pending entries.
-
-        One window no client ordering can close: between the backend dequeuing
-        a prompt and listing it as running, it is in neither the pending queue
-        nor the running set, so a delete misses it and an interrupt skips it.
-        That is the backend's own bookkeeping, and this pair is a best effort
-        against it rather than a guarantee.
-
-        One TOTAL deadline covers both requests. httpx timeouts are per-phase,
-        so a response trickling a byte at a time satisfies every one of them
-        and can still consume the whole five seconds `close_iterator` allows
-        for the close - taking the output cleanup after this with it. The
-        deadline is what keeps that cleanup's turn.
-
-        Failures are suppressed for the same reason the rest of this teardown
-        suppresses them: the caller is already unwinding, and a best-effort
-        request must not become the reason it stopped.
+        A completed or unknown job is a successful no-op. Only an unavailable
+        endpoint permits the older delete-then-interrupt protocol, which remains
+        best effort because its running check and interrupt are separate steps.
+        One total deadline bounds all requests so output cleanup can still run.
+        Failures remain local to this already-unwinding attempt.
         """
 
         with suppress(Exception):
             async with asyncio.timeout(ABANDONED_INTERRUPT_SECONDS):
+                identifier = quote(prompt_id, safe="")
+                if identifier in {".", ".."}:
+                    identifier = identifier.replace(".", "%2E")
+                response = await self._client.post(f"/api/jobs/{identifier}/cancel")
+                if response.status_code not in (404, 405):
+                    return
                 await self._client.post("/queue", json={"delete": [prompt_id]})
                 await self._client.post("/interrupt", json={"prompt_id": prompt_id})
 

@@ -15,23 +15,26 @@ import type { CatalogModel, ModelUpdate } from "./types";
 export function ModelUpdatesPanel({
   onInstall,
 }: {
-  onInstall: (model: CatalogModel, selectedRole: string) => void;
+  onInstall: (model: CatalogModel, selectedRole: string, previousInstallId?: string) => void;
 }) {
   const check = useMutation({ mutationFn: () => api.modelUpdates() });
   const review = useMutation({
     mutationFn: async (update: ModelUpdate) => {
       let role = "lora";
       if (update.kind === "checkpoint") {
-        const installed = (await api.models()).find((model) => model.id === update.install_id);
+        const installed = await api.modelInstall(update.install_id);
         if (!installed || !["chat", "image", "video"].includes(installed.role)) {
           throw new Error("Could not determine the installed model's role. Check for updates again.");
         }
         role = installed.role;
       }
       const detail = await api.catalogItemDetail("civitai", update.update_version_id ?? "", role);
-      return { model: detail.model, role };
+      return { model: detail.model, role, previousInstallId: update.kind === "checkpoint" ? update.install_id : undefined };
     },
-    onSuccess: ({ model, role }) => onInstall(model, role),
+    onSuccess: ({ model, role, previousInstallId }) => {
+      if (previousInstallId) onInstall(model, role, previousInstallId);
+      else onInstall(model, role);
+    },
   });
   const report = check.data;
   const updates = report?.filter((update) => update.state === "update_available") ?? [];

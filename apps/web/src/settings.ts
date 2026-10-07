@@ -1,4 +1,5 @@
 import type { EngineCapabilities, EngineRole, SettingField } from "./types";
+import { NATIVE_SETTINGS_KEY, NATIVE_SETTING_KEYS, UNMAPPED_SETTING_REASON, nativeWorkflowUnboundParameters } from "./nativeWorkflowSettings";
 
 export interface VideoLengthControl {
   frames_parameter: string;
@@ -41,12 +42,41 @@ export function resolveCapabilitySettings(
   return engine?.settings_by_role?.[role] ?? engine?.settings ?? [];
 }
 
+/** The LoRA setting as a workflow declares it, mirrored from the server. */
+function addedLoraField(): SettingField | null {
+  return workflowField("loras", {
+    type: "array",
+    title: "LoRAs",
+    description: "Optional verified LoRAs applied in order.",
+    default: [],
+    maxItems: 8,
+  });
+}
+
+/**
+ * Offer the LoRA setting when the workflow takes one and declares none.
+ *
+ * `acceptsAddedLoras` is what the RUN decides: whether the revision provides
+ * an insertion point, declared or read from its graph. Without it the two
+ * disagree, because this function sees only the schema, so a stack reaching
+ * the run through a prompt had no control here to choose one by hand. A
+ * declared setting wins, so a workflow that named its own title keeps it.
+ */
+function withAddedLoras(resolved: SettingField[], acceptsAddedLoras: boolean): SettingField[] {
+  if (!acceptsAddedLoras || resolved.some((field) => field.key === "loras")) return resolved;
+  const offered = addedLoraField();
+  return offered ? [...resolved, offered] : resolved;
+}
+
 export function resolveWorkflowSettings(
   fields: SettingField[],
   inputSchema: Record<string, unknown> | undefined,
+  acceptsAddedLoras = false,
 ): SettingField[] {
   const properties = isRecord(inputSchema?.properties) ? inputSchema.properties : null;
-  if (!inputSchema || !properties) return fields;
+  if (!inputSchema || !properties) return withAddedLoras(fields, acceptsAddedLoras);
+  const nativeSettings = Object.hasOwn(inputSchema, NATIVE_SETTINGS_KEY);
+  const unbound = new Set(nativeWorkflowUnboundParameters(inputSchema));
 
   const videoLength = workflowVideoLengthField(fields, inputSchema, properties);
   const hiddenVideoKeys = videoLength?.video_length
@@ -54,14 +84,31 @@ export function resolveWorkflowSettings(
     : new Set<string>();
 
   const baseKeys = new Set(fields.map((field) => field.key));
-  const resolved = fields.filter((field) => !hiddenVideoKeys.has(field.key)).map((field) => {
-    const property = properties[field.key];
-    return isRecord(property) ? workflowField(field.key, property, field) ?? field : field;
-  });
+  const resolved = fields
+    .filter((field) => !hiddenVideoKeys.has(field.key))
+    // A workflow that marks one of these read-only is saying the caller cannot
+    // set it - its graph decides that value itself, from a node the settings
+    // panel has no business editing. The server drops such a field outright
+    // (settings_registry.py, the readOnly check in workflow_settings), so
+    // keeping it here rendered a control that changed nothing: a Width box
+    // showing 1024 for a workflow whose own ResolutionSelector picks the size.
+    // Only the base fields are dropped, because only they are dropped there -
+    // a workflow's OWN key stays, and a const on it still reads as fixed.
+    .filter((field) => !isReadOnly(properties[field.key]))
+    .map((field) => {
+      if (unbound.has(field.key)) {
+        return { ...field, available: false, unavailable_reason: UNMAPPED_SETTING_REASON };
+      }
+      const property = properties[field.key];
+      if (isRecord(property)) return workflowField(field.key, property, field) ?? field;
+      return nativeSettings && NATIVE_SETTING_KEYS.has(field.key)
+        ? { ...field, available: false, unavailable_reason: UNMAPPED_SETTING_REASON } : field;
+    });
   if (videoLength) resolved.push(videoLength);
   for (const [key, property] of Object.entries(properties)) {
     if (
       baseKeys.has(key)
+      || unbound.has(key)
       || hiddenVideoKeys.has(key)
       || !isRecord(property)
       || isReservedSettingKey(key)
@@ -70,7 +117,12 @@ export function resolveWorkflowSettings(
     const custom = workflowField(key, property);
     if (custom) resolved.push(custom);
   }
-  return resolved;
+  return withAddedLoras(resolved, acceptsAddedLoras);
+}
+
+/** Whether a workflow says this value is not the caller's to set. */
+function isReadOnly(property: unknown): boolean {
+  return isRecord(property) && property.readOnly === true;
 }
 
 function workflowVideoLengthField(
@@ -219,7 +271,8 @@ export function normalizeSettingsForFields(
   const definitions = new Map(fields.map((field) => [field.key, field]));
   return Object.fromEntries(Object.entries(values).filter(([key, value]) => {
     const field = definitions.get(key);
-    if (!field) return false;
+    if (!field || field.available === false) return false;
+    if (field.type === "integer" && (typeof value !== "number" || !Number.isInteger(value))) return false;
     if (field.choices.length > 0 && !field.choices.includes(value)) return false;
     if (typeof value === "number") {
       if (field.minimum != null && value < field.minimum) return false;
@@ -248,9 +301,12 @@ function workflowField(
     base
     && declared
     && declared !== base.type
+    && !(base.type === "number" && declared === "integer")
     && !(base.type === "enum" && ["boolean", "integer", "number", "string"].includes(declared))
   ) return null;
-  const inferred = base?.type ?? declared ?? inferType(schema.const ?? schema.default);
+  const inferred = base?.type === "number" && declared === "integer"
+    ? declared
+    : base?.type ?? declared ?? inferType(schema.const ?? schema.default);
   if (!inferred) return null;
   const declaredChoices = "const" in schema
     ? [schema.const]
@@ -297,11 +353,14 @@ function workflowField(
   return {
     key,
     label: typeof schema.title === "string" ? schema.title : base?.label ?? titleCase(key),
-    type: inferred,
+    type: !("const" in schema) && ["boolean", "integer", "number", "string"].includes(inferred) && choices.length > 0
+      ? "enum" : inferred,
     default: defaultValue,
     minimum,
     maximum,
-    step: typeof schema.multipleOf === "number" ? schema.multipleOf : base?.step ?? null,
+    step: typeof schema.multipleOf === "number" ? schema.multipleOf
+      : typeof schema["x-lm-atelier-step"] === "number" && schema["x-lm-atelier-step"] > 0
+        ? schema["x-lm-atelier-step"] : base?.step ?? null,
     multiple_of: declaredMultiple ?? base?.multiple_of ?? null,
     choices,
     scope: base?.scope ?? "workflow",

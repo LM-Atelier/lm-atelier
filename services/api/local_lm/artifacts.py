@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import mimetypes
 import os
 import re
@@ -9,10 +10,12 @@ import secrets
 import shutil
 import stat
 import tempfile
+import threading
+import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from collections.abc import Set as AbstractSet
-from contextlib import suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -30,6 +33,7 @@ from .artifact_deletion_authority import (
     restrict_artifact_deletion_proof,
 )
 from .artifact_library import (
+    ArtifactReferenceDataError,
     artifacts_naming,
     begin_artifact_write_fence,
     fenced_reference_snapshot,
@@ -44,17 +48,21 @@ from .filesystem_links import (
     AnchoredDirectoryError,
     AnchoredEntry,
     AnchoredEntryKind,
+    available_bytes,
     create_entry,
     discard_entry,
     is_link_or_reparse,
     list_entries,
     open_child_directory,
     open_entry,
+    open_entry_unshared,
     remove_directory_entry,
     remove_entry,
+    remove_link_entry,
     rename_entry,
     sync_directory,
 )
+from .media_process import outlast_cancellation
 from .models import (
     Artifact,
     ArtifactLibraryEntry,
@@ -80,18 +88,34 @@ _RESTORE_PARTIAL = re.compile(r"(?:[0-9a-f]{64}|\.[0-9a-f]{64}\.[^.]+)\.restore-
 _ROOT_LISTING_LIMIT: Final = 65536
 _STAGED_DELETION = re.compile(r"^(?P<digest>[0-9a-f]{64})\.[0-9a-f]{32}$")
 _MAX_VIDEO_POSTER_BYTES = 16 * 1024 * 1024
+_TOOL_INPUT_PREFIX: Final = "tool-input-"
+#: Exactly the names the copy below makes, and so the only ones the sweep may remove.
+_TOOL_INPUT_NAME: Final = re.compile(r"tool-input-[0-9a-f]{32}\.tmp")
+_TOOL_OUTPUT_PREFIX: Final = "tool-output-"
+_TOOL_OUTPUT_NAME: Final = re.compile(r"tool-output-[0-9a-f]{32}\.tmp")
+_COPY_READ: Final = 1024 * 1024
+#: Room a private copy must leave free on the store's volume, so that making it
+#: never fills the volume other writes, the database's among them, depend on.
+_COPY_HEADROOM: Final = 1024 * 1024 * 1024
 
 
 def _is_temporary_name(name: str) -> bool:
     """True only for a name this store's own staging could have produced.
 
-    `ingest_bytes` stages as `ingest-<hex>.tmp`, and the proxy encoder uses
-    `mkstemp(prefix="video-proxy-", suffix=".mp4")`. Reading the shapes the
-    store WRITES on the way back out means a pass can only ever delete
-    something this store could have left behind.
+    `ingest_bytes` stages as `ingest-<hex>.tmp`, the proxy encoder uses
+    `mkstemp(prefix="video-proxy-", suffix=".mp4")`, and a copy made for a tool
+    to read is `tool-input-` and a file made for a tool to write into is
+    `tool-output-`, each with 32 lowercase hex digits and `.tmp`, matched
+    exactly. Reading the shapes the store WRITES on the way back out means a
+    pass can only ever delete something this store could have left behind.
     """
 
-    return name.startswith("ingest-") or (name.startswith("video-proxy-") and name.endswith(".mp4"))
+    return (
+        name.startswith("ingest-")
+        or (name.startswith("video-proxy-") and name.endswith(".mp4"))
+        or _TOOL_INPUT_NAME.fullmatch(name) is not None
+        or _TOOL_OUTPUT_NAME.fullmatch(name) is not None
+    )
 
 
 def _aged_file_size(entry: AnchoredEntry, cutoff: datetime) -> int | None:
@@ -171,8 +195,21 @@ def _removed(anchor: AnchoredDirectory, name: str, *, counted: int, cutoff: date
 # One required reference snapshot precedes that clock; the writer reservation
 # includes its fixed cost too. The ceiling lets fast authorized deletions
 # amortize that snapshot while the time budget still bounds slower deletion work.
+# The clock is short because every other writer gives up after five seconds,
+# and a batch holds the writer for its snapshot, this clock and its commit
+# together: on a library of some twelve thousand items the snapshot alone is
+# about two seconds.
 RETENTION_BATCH_DELETIONS = 1000
-RETENTION_BATCH_SECONDS = 2.0
+RETENTION_BATCH_SECONDS = 0.5
+# What a batch may delete once the sweep has seen one remove nothing inside
+# its budget: a row pass that finds nothing to remove, followed by a walk of
+# the unindexed files that spends the whole budget without removing one,
+# reports exactly that. The clock comes off for the batches after it, and this
+# ceiling is what then bounds how many rows one of them removes while holding
+# the writer. Continuing one row per batch is bounded by the same measure and
+# is why such a backlog can hold the writer for minutes: each row pays for
+# another whole reference snapshot.
+RETENTION_UNTIMED_BATCH_DELETIONS = 25
 
 
 @dataclass(frozen=True)
@@ -187,6 +224,13 @@ class RetentionCleanupSummary:
     truncated: bool = False
     #: Rows inspected in this pass, including retained rows and the stopping boundary.
     examined_count: int = 0
+    #: Unindexed files included in removed_count, or eligible files during a dry run.
+    removed_orphan_file_count: int = 0
+
+    @property
+    def removed_row_count(self) -> int:
+        """Artifact rows removed or eligible, even when their files are already missing."""
+        return self.removed_count - self.removed_orphan_file_count
 
 
 class _DeletionBudget:
@@ -227,6 +271,153 @@ class _DeletionBudget:
             self.report_removed()
 
 
+class _BoundedWalk:
+    """How long one batch may walk the store's shards before it stops.
+
+    Listing every shard of a large store takes seconds, and the walk runs with
+    the database writer held, so an automatic batch walks for its clock and the
+    next batch goes on from the last leaf shard this one finished. At least one
+    leaf is walked each time, so even a clock of zero moves the walk forward.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+        self.started = time.monotonic()
+        self.leaves = 0
+
+    def over(self) -> bool:
+        return self.leaves > 0 and time.monotonic() - self.started >= self.seconds
+
+
+class _CopyAbandoned(Exception):
+    """The caller was cancelled and asked the copy to stop; it still waits for it to end."""
+
+
+class ArtifactCopyUnavailable(OSError):
+    """A private copy of a stored file could not be made: no room, or the store refused it."""
+
+
+class ToolOutputChanged(Exception):
+    """A tool's output is no longer the file that was measured, so it is not kept."""
+
+
+@dataclass(frozen=True)
+class ToolOutput:
+    """A file the store made for one tool to write its result into.
+
+    ``path`` is the name the tool is told to write over; ``maximum_bytes`` is
+    the most the store keeps from it.
+    """
+
+    path: Path
+    maximum_bytes: int
+
+
+@dataclass(frozen=True)
+class ToolOutputSeal:
+    """A tool's output as it was sealed: its bytes' digest and the file it was.
+
+    Whatever measures the output reads it by name, so keeping it is bound to
+    this: the file kept must still be the same file, unchanged since, and the
+    bytes kept must have this digest.
+    """
+
+    sha256: str
+    size: int
+    identity: tuple[int, ...]
+
+
+# How long a seal may take to show that a file system's change time moves.
+_CHANGE_TIME_PROOF_SECONDS: Final = 3.0
+
+
+def _identity(status: os.stat_result) -> tuple[int, ...]:
+    identity = (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
+    if os.name == "nt":
+        return identity
+    # Outside Windows the seal shows first that this file's change time moves;
+    # any change to the file, to its bytes, times, mode or names, then moves it,
+    # and nothing a program does can set it back.
+    return (*identity, status.st_ctime_ns)
+
+
+def _proven_change_time(
+    descriptor: int, status: os.stat_result, stop: threading.Event
+) -> os.stat_result:
+    """Show that a held file's change time moves, then wait out one step of its clock.
+
+    Outside Windows nothing keeps others from writing the file, so the seal
+    rests on its change time. Not every file system keeps one apart: on FAT it
+    is the modification time, which a program can set back, and a change to
+    nothing else leaves it where it was. The file's mode is set to itself, a
+    change to nothing else, until the change time has moved twice; a file
+    system where it does not move, or that refuses the change, is refused. The
+    two moves show how long one step of its clock is, and the seal waits that
+    long past the second, so no later change can share its step. Returns the
+    file's state after the last move, which the seal then binds.
+    """
+
+    change = getattr(os, "fchmod", None)
+    mode = stat.S_IMODE(status.st_mode)
+    moves = [status]
+    deadline = time.monotonic() + _CHANGE_TIME_PROOF_SECONDS
+    while len(moves) < 3:
+        if stop.is_set():
+            raise _CopyAbandoned
+        if change is None or time.monotonic() > deadline:
+            raise ToolOutputChanged("this file system keeps no change time to hold the output by")
+        try:
+            change(descriptor, mode)
+        except OSError as exc:
+            raise ToolOutputChanged("a tool's output could not be held unchanged") from exc
+        current = os.fstat(descriptor)
+        if (current.st_size, current.st_mtime_ns) != (status.st_size, status.st_mtime_ns):
+            raise ToolOutputChanged("a tool's output changed while it was sealed")
+        if current.st_ctime_ns > moves[-1].st_ctime_ns:
+            moves.append(current)
+        else:
+            time.sleep(0.005)
+    step = moves[2].st_ctime_ns - moves[1].st_ctime_ns
+    settle = moves[2].st_ctime_ns + step - time.time_ns()
+    if settle > 0:
+        time.sleep(settle / 1_000_000_000)
+    return moves[2]
+
+
+class _BoundedRead(io.RawIOBase):
+    """A tool's output read through one held descriptor, never past its bound.
+
+    Given the digest it was sealed with, the end of the read is refused with
+    ``ToolOutputChanged`` unless the bytes read have that digest, so whatever
+    consumes the stream fails before it can keep other bytes.
+    """
+
+    def __init__(self, source: io.FileIO, limit: int, sealed_sha256: str | None = None) -> None:
+        self._source = source
+        self._remaining = limit
+        self._sealed_sha256 = sealed_sha256
+        self._digest = hashlib.sha256()
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        count = self._source.readinto(buffer) or 0
+        self._remaining -= count
+        if self._remaining < 0:
+            raise ArtifactCopyUnavailable("a tool wrote more than the store keeps")
+        if self._sealed_sha256 is not None:
+            if count:
+                self._digest.update(memoryview(buffer)[:count])
+            elif self._digest.hexdigest() != self._sealed_sha256:
+                raise ToolOutputChanged("a tool's output is not the bytes that were sealed")
+        return count
+
+    def close(self) -> None:
+        self._source.close()
+        super().close()
+
+
 @dataclass(frozen=True)
 class StagedArtifactFile:
     path: Path
@@ -235,6 +426,15 @@ class StagedArtifactFile:
 
     def discard(self) -> None:
         self.path.unlink(missing_ok=True)
+
+
+def _read_stored(source: IO[bytes]) -> bytes:
+    """The next chunk of a stored file; a failed read is the stored file's fault."""
+
+    try:
+        return source.read(_COPY_READ)
+    except OSError as exc:
+        raise ValueError("artifact file could not be read") from exc
 
 
 def _path_follows_a_link(path: Path) -> bool:
@@ -267,6 +467,9 @@ class ArtifactStore:
         self.root = requested.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self._verified_files: dict[Path, tuple[int, int]] = {}
+        # The last leaf shard a bounded walk finished, so the next batch goes
+        # on from there; cleared when a walk reaches the end of the store.
+        self._walk_resume_after: tuple[str, str] | None = None
 
     def _destination(self, digest: str) -> Path:
         if not _SHA256.fullmatch(digest):
@@ -380,6 +583,303 @@ class ArtifactStore:
         if content_digest.hexdigest() != digest_value:
             raise ValueError("artifact file checksum does not match its record")
         return bytes(content)
+
+    @asynccontextmanager
+    async def verified_copy(self, artifact: Artifact, *, maximum_bytes: int) -> AsyncIterator[Path]:
+        """Exactly the verified bytes of an artifact, as a file a tool can open by name.
+
+        A tool handed the stored path opens it after any check made here, so it
+        reads whatever that name holds by then, and the verified-path cache
+        cannot tell a replacement that kept the size and time. This copies from
+        the one held descriptor whose size and digest are checked into a new,
+        unpredictable name created exclusively in the store root, and the tool
+        reads that copy, which nothing else writes. The copy is removed when the
+        block ends; one left by a crash has a temporary name, so the orphan
+        sweep removes it. A caller cancelled during the copy stops it and waits
+        for it, so no copy is left behind for the sweep.
+        """
+
+        stop = threading.Event()
+        copying = asyncio.ensure_future(
+            asyncio.to_thread(self._copy_verified, artifact, maximum_bytes, stop)
+        )
+        try:
+            name = await outlast_cancellation(copying, on_cancel=stop.set)
+            yield self.root / name
+        finally:
+            if copying.done() and not copying.cancelled() and copying.exception() is None:
+                # Best effort: a copy this cannot remove is left for the orphan sweep.
+                with (
+                    suppress(AnchoredDirectoryError, OSError),
+                    AnchoredDirectory(self.root) as root,
+                ):
+                    discard_entry(root, copying.result())
+
+    def _copy_verified(self, artifact: Artifact, maximum_bytes: int, stop: threading.Event) -> str:
+        """Copy the artifact through its held, checked descriptor into a new root entry.
+
+        Size and digest are measured on the bytes as they are copied, so the
+        copy holds exactly what was verified. Returns the new entry's name.
+        """
+
+        if maximum_bytes < 0:
+            raise ValueError("maximum artifact read size is invalid")
+        digest_value = artifact.sha256
+        if artifact.id != f"sha256:{digest_value}" or not _SHA256.fullmatch(digest_value):
+            raise ValueError("artifact identity is invalid")
+        expected_relative = PurePosixPath(
+            digest_value[:2],
+            digest_value[2:4],
+            digest_value,
+        ).as_posix()
+        if artifact.relative_path != expected_relative:
+            raise ValueError("artifact path is not canonical")
+
+        name = f"{_TOOL_INPUT_PREFIX}{secrets.token_hex(16)}.tmp"
+        descriptor: int | None = None
+        try:
+            with (
+                AnchoredDirectory(self.root) as root,
+                open_child_directory(root, digest_value[:2]) as first,
+                open_child_directory(first, digest_value[2:4]) as second,
+            ):
+                descriptor = open_entry(second, digest_value)
+                if descriptor is None:
+                    raise FileNotFoundError("artifact file is missing")
+                measured = os.fstat(descriptor)
+                if not stat.S_ISREG(measured.st_mode):
+                    raise ValueError("artifact entry is not a regular file")
+                if measured.st_size != artifact.size_bytes:
+                    raise ValueError("artifact file size does not match its record")
+                if measured.st_size > maximum_bytes:
+                    raise ValueError("artifact is larger than this read allows")
+
+                # Created only once the source is open and checked, so a
+                # refusal before this point has nothing to remove.
+                try:
+                    if available_bytes(root) < measured.st_size + _COPY_HEADROOM:
+                        raise ArtifactCopyUnavailable("there is no room for a private copy")
+                    sink = create_entry(root, name)
+                except AnchoredDirectoryError as exc:
+                    raise ArtifactCopyUnavailable("a private copy could not be created") from exc
+                try:
+                    copied = 0
+                    content_digest = hashlib.sha256()
+                    try:
+                        with os.fdopen(sink, "wb") as copy, os.fdopen(descriptor, "rb") as source:
+                            descriptor = None
+                            while chunk := _read_stored(source):
+                                if stop.is_set():
+                                    raise _CopyAbandoned
+                                copied += len(chunk)
+                                if copied > measured.st_size:
+                                    raise ValueError("artifact file size does not match its record")
+                                content_digest.update(chunk)
+                                copy.write(chunk)
+                    except OSError as exc:
+                        # Reading the stored file reports its own failures; this is the copy's.
+                        raise ArtifactCopyUnavailable(
+                            "a private copy could not be written"
+                        ) from exc
+                    if copied != artifact.size_bytes:
+                        raise ValueError("artifact file size does not match its record")
+                    if content_digest.hexdigest() != digest_value:
+                        raise ValueError("artifact file checksum does not match its record")
+                except BaseException:
+                    discard_entry(root, name)
+                    raise
+        except AnchoredDirectoryError as exc:
+            raise ValueError("artifact path could not be held for reading") from exc
+        finally:
+            if descriptor is not None:
+                with suppress(OSError):
+                    os.close(descriptor)
+        return name
+
+    @asynccontextmanager
+    async def tool_output(self, *, maximum_bytes: int) -> AsyncIterator[ToolOutput]:
+        """An empty file of the store's own for a tool to write its result into.
+
+        The file is created exclusively, under a new unpredictable name in the
+        store root, before the tool runs. The tool opens it by name, as a tool
+        opens a private copy; what it wrote is read back only through the held
+        store root. Room is checked once, up front, for the most the tool may
+        write and for the store's own copy of it should it be kept, leaving the
+        same headroom a private copy leaves. The file is removed when the block
+        ends, kept or not, and a caller cancelled while it is being created
+        waits for it and removes it too; one a crash leaves behind has a
+        temporary name, so the orphan sweep removes it.
+        """
+
+        if maximum_bytes < 0:
+            raise ValueError("maximum tool output size is invalid")
+        creating = asyncio.ensure_future(asyncio.to_thread(self._create_tool_output, maximum_bytes))
+        try:
+            name = await outlast_cancellation(creating)
+            yield ToolOutput(self.root / name, maximum_bytes)
+        finally:
+            if creating.done() and not creating.cancelled() and creating.exception() is None:
+                # Best effort: a file this cannot remove is left for the orphan sweep.
+                with (
+                    suppress(AnchoredDirectoryError, OSError),
+                    AnchoredDirectory(self.root) as root,
+                ):
+                    discard_entry(root, creating.result())
+
+    def _create_tool_output(self, maximum_bytes: int) -> str:
+        name = f"{_TOOL_OUTPUT_PREFIX}{secrets.token_hex(16)}.tmp"
+        try:
+            with AnchoredDirectory(self.root) as root:
+                if available_bytes(root) < 2 * maximum_bytes + _COPY_HEADROOM:
+                    raise ArtifactCopyUnavailable("there is no room for a tool's output")
+                os.close(create_entry(root, name))
+        except AnchoredDirectoryError as exc:
+            raise ArtifactCopyUnavailable("a tool's output file could not be created") from exc
+        return name
+
+    def tool_output_size(self, output: ToolOutput) -> int:
+        """How many bytes a tool wrote, measured through the held store root."""
+
+        with self._held_tool_output(output) as descriptor:
+            return os.fstat(descriptor).st_size
+
+    @asynccontextmanager
+    async def sealed_tool_output(self, output: ToolOutput) -> AsyncIterator[ToolOutputSeal]:
+        """What a tool wrote, sealed, and held unchanged until the block ends.
+
+        The output is opened through the held store root and read once, never
+        past ``output.maximum_bytes``, for its digest and identity; a file that
+        changed while it was read is refused. Whatever measures it inside the
+        block reads it by name, so it is held unchanged until the block ends.
+        On Windows the sealing descriptor stays open without write or delete
+        sharing, so nothing can write, replace, rename or delete the file, and
+        one something still holds open for writing is refused. Elsewhere the
+        seal first shows that the file's change time moves, refusing a file
+        system that keeps none apart, and carries it, so keeping the file
+        refuses one changed and then changed back. A caller cancelled while it
+        is sealed stops the read and waits for it.
+        """
+
+        stop = threading.Event()
+        sealing = asyncio.ensure_future(asyncio.to_thread(self._seal_tool_output, output, stop))
+        try:
+            descriptor, seal = await outlast_cancellation(sealing, on_cancel=stop.set)
+        except BaseException:
+            if sealing.done() and not sealing.cancelled() and sealing.exception() is None:
+                with suppress(OSError):
+                    os.close(sealing.result()[0])
+            raise
+        try:
+            yield seal
+        finally:
+            with suppress(OSError):
+                os.close(descriptor)
+
+    def _seal_tool_output(
+        self, output: ToolOutput, stop: threading.Event
+    ) -> tuple[int, ToolOutputSeal]:
+        descriptor = self._open_tool_output(output, unshared=True)
+        try:
+            before = os.fstat(descriptor)
+            if before.st_size > output.maximum_bytes:
+                raise ArtifactCopyUnavailable("a tool wrote more than the store keeps")
+            digest = hashlib.sha256()
+            size = 0
+            duplicate = os.dup(descriptor)
+            with io.BufferedReader(
+                _BoundedRead(os.fdopen(duplicate, "rb", buffering=0), output.maximum_bytes)
+            ) as source:
+                while chunk := source.read(1024 * 1024):
+                    if stop.is_set():
+                        raise _CopyAbandoned
+                    digest.update(chunk)
+                    size += len(chunk)
+            if size != before.st_size or _identity(os.fstat(descriptor)) != _identity(before):
+                raise ToolOutputChanged("a tool's output changed while it was sealed")
+            if os.name != "nt":
+                before = _proven_change_time(descriptor, before, stop)
+            return descriptor, ToolOutputSeal(digest.hexdigest(), size, _identity(before))
+        except BaseException:
+            with suppress(OSError):
+                os.close(descriptor)
+            raise
+
+    def ingest_tool_output(
+        self,
+        session: Session,
+        output: ToolOutput,
+        *,
+        seal: ToolOutputSeal,
+        kind: ArtifactKind,
+        media_type: str,
+        original_name: str,
+        metadata: dict[str, object],
+    ) -> Artifact:
+        """Keep what a tool wrote as an artifact, only if it is what was sealed.
+
+        The output is opened through the held store root, which refuses a link
+        or anything but a regular file, and read through that one descriptor
+        and never past ``output.maximum_bytes``. It is never opened again by
+        name, so what is kept is the file the store made. That file must still
+        be the one sealed, unchanged since, and the bytes read from it must
+        have the sealed digest, checked at the end of the read and so before
+        anything is published; otherwise nothing is kept and
+        ``ToolOutputChanged`` is raised.
+        """
+
+        with self._held_tool_output(output) as descriptor:
+            status = os.fstat(descriptor)
+            if status.st_size > output.maximum_bytes:
+                raise ArtifactCopyUnavailable("a tool wrote more than the store keeps")
+            if _identity(status) != seal.identity:
+                raise ToolOutputChanged("a tool's output changed after it was sealed")
+            duplicate = os.dup(descriptor)
+            with io.BufferedReader(
+                _BoundedRead(
+                    os.fdopen(duplicate, "rb", buffering=0), output.maximum_bytes, seal.sha256
+                )
+            ) as source:
+                return self.ingest_stream(
+                    session,
+                    source,
+                    kind=kind,
+                    media_type=media_type,
+                    original_name=original_name,
+                    metadata=metadata,
+                )
+
+    @contextmanager
+    def _held_tool_output(self, output: ToolOutput) -> Iterator[int]:
+        descriptor = self._open_tool_output(output)
+        try:
+            yield descriptor
+        finally:
+            with suppress(OSError):
+                os.close(descriptor)
+
+    def _open_tool_output(self, output: ToolOutput, *, unshared: bool = False) -> int:
+        name = output.path.name
+        if output.path.parent != self.root or _TOOL_OUTPUT_NAME.fullmatch(name) is None:
+            raise ValueError("this is not a file the store made for a tool")
+        descriptor: int | None = None
+        try:
+            with AnchoredDirectory(self.root) as root:
+                if not unshared:
+                    descriptor = open_entry(root, name)
+                else:
+                    try:
+                        descriptor = open_entry_unshared(root, name)
+                    except AnchoredDirectoryError as exc:
+                        # Something still holds it open for writing, as a tool
+                        # that has not finished with it would.
+                        raise ToolOutputChanged(
+                            "a tool's output could not be held unchanged"
+                        ) from exc
+        except AnchoredDirectoryError as exc:
+            raise ArtifactCopyUnavailable("a tool's output could not be held for reading") from exc
+        if descriptor is None:
+            raise ArtifactCopyUnavailable("a tool's output is missing")
+        return descriptor
 
     def delivery_metadata(self, artifact: Artifact) -> tuple[Path, str, str]:
         path = self.verified_path(artifact)
@@ -556,9 +1056,12 @@ class ArtifactStore:
                 try:
                     second = open_child_directory(first, sha256[2:4], create=True)
                     try:
-                        # Content-addressed, so replacing is idempotent: the
-                        # destination name can only ever hold these bytes.
-                        rename_entry(root_anchor, staging, sha256, into=second, replace=True)
+                        # A reader can keep replacement unavailable on Windows.
+                        # Reuse only bytes verified through this held directory.
+                        if self._existing_bytes_match(second, sha256, size):
+                            discard_entry(root_anchor, staging)
+                        else:
+                            rename_entry(root_anchor, staging, sha256, into=second, replace=True)
                         sync_directory(second)
                     finally:
                         second.close()
@@ -573,6 +1076,34 @@ class ArtifactStore:
                     discard_entry(root_anchor, staging)
                 raise
             return sha256, size
+
+    @staticmethod
+    def _existing_bytes_match(anchor: AnchoredDirectory, digest: str, size: int) -> bool:
+        """Verify an existing regular entry before reusing its stored bytes."""
+
+        descriptor: int | None = None
+        try:
+            descriptor = open_entry(anchor, digest)
+            if descriptor is None:
+                return False
+            if os.fstat(descriptor).st_size != size:
+                return False
+            measured = hashlib.sha256()
+            count = 0
+            with os.fdopen(descriptor, "rb") as source:
+                descriptor = None
+                while chunk := source.read(min(1024 * 1024, size - count + 1)):
+                    count += len(chunk)
+                    if count > size:
+                        return False
+                    measured.update(chunk)
+            return count == size and measured.hexdigest() == digest
+        except (AnchoredDirectoryError, OSError):
+            return False
+        finally:
+            if descriptor is not None:
+                with suppress(OSError):
+                    os.close(descriptor)
 
     def export_copy(self, artifact: Artifact, destination: Path) -> Path:
         source = self.resolve(artifact)
@@ -732,7 +1263,11 @@ class ArtifactStore:
         # this set. Taking the fence first is what makes the snapshot safe to
         # hand back, so the check costs one walk rather than two.
         begin_artifact_write_fence(session)
-        retained = self.referenced_artifact_ids(session, for_deletion=True)
+        try:
+            retained = self.referenced_artifact_ids(session, for_deletion=True)
+        except ArtifactReferenceDataError:
+            # Without complete references, keep the preview for later cleanup.
+            return False
         if artifact.id in retained:
             return False
         # Being unreachable from the walk is not the same as being
@@ -769,13 +1304,15 @@ class ArtifactStore:
         self,
         session: Session,
         *,
-        retention_days: int,
-        temporary_hours: int,
+        retention_days: int | None = None,
+        temporary_hours: int | None = None,
+        windows_from: Callable[[Session], tuple[int, int]] | None = None,
         dry_run: bool,
         now: datetime | None = None,
         max_deletions: int | None = None,
         should_stop: Callable[[], bool] | None = None,
         report_phase: Callable[[str], None] | None = None,
+        walk_seconds: float | None = None,
     ) -> RetentionCleanupSummary:
         """Remove expired unretained artifacts within the caller's stop/budget.
 
@@ -785,16 +1322,39 @@ class ArtifactStore:
         observed immediately before an actual deletion. Metadata updates survive
         truncated passes; orphan cleanup runs only after a complete row pass.
         Callers may commit each bounded pass to preserve completed work.
+
+        With `walk_seconds`, the walk of the store's files for unindexed ones
+        stops after that long even when it has removed nothing, and the next
+        call goes on from the last shard this one finished, so a store too
+        large to walk in one batch is walked across several. Without it, a
+        walk runs to the end of the store, as a preview and a person's own
+        request need it to.
+
+        The windows are given either as `retention_days` and `temporary_hours`,
+        or as `windows_from`, which returns both and is called once the writer
+        reservation is held, so a choice committed before this pass took the
+        reservation is the one it uses.
         """
 
+        if windows_from is not None:
+            if retention_days is not None or temporary_hours is not None:
+                raise TypeError("give the retention windows or windows_from, not both")
+        elif retention_days is None or temporary_hours is None:
+            raise TypeError("give both retention windows, or windows_from")
         phase: Callable[[str], None] = report_phase or (lambda _name: None)
         current = now or datetime.now(UTC)
         if not dry_run:
             phase("acquire-writer")
             begin_artifact_write_fence(session)
             phase("writer-acquired")
+        if windows_from is not None:
+            retention_days, temporary_hours = windows_from(session)
+        if retention_days is None or temporary_hours is None:
+            # Settled by the checks above; restated so the windows are known ints.
+            raise TypeError("give both retention windows, or windows_from")
+        if not dry_run:
             phase("recover-staged-deletions")
-            self._recover_staged_deletions(session)
+            self._recover_staged_deletions(session, should_stop=should_stop)
         phase("reference-snapshot")
         referenced = self.referenced_artifact_ids(session, for_deletion=not dry_run)
         examined_count = 0
@@ -879,8 +1439,15 @@ class ArtifactStore:
             # answers to the same stop request, so the final batch of a pass
             # is bounded exactly like the ones before it.
             remaining = None if max_deletions is None else max(max_deletions - removed_count, 0)
+            walk = None if walk_seconds is None or dry_run else _BoundedWalk(walk_seconds)
+
+            def stop_walking() -> bool:
+                if should_stop is not None and should_stop():
+                    return True
+                return walk is not None and walk.over()
+
             budget = _DeletionBudget(
-                remaining, should_stop, report_removed=lambda: phase("orphan-file-removed")
+                remaining, stop_walking, report_removed=lambda: phase("orphan-file-removed")
             )
             if budget.allow():
                 phase("cleanup-orphan-files")
@@ -890,6 +1457,7 @@ class ArtifactStore:
                     temporary_hours=temporary_hours,
                     dry_run=dry_run,
                     budget=budget,
+                    walk=walk,
                 )
             truncated = budget.truncated
         return RetentionCleanupSummary(
@@ -897,6 +1465,7 @@ class ArtifactStore:
             marked_count=marked_count,
             pending_count=pending_count,
             removed_count=removed_count + orphan_count,
+            removed_orphan_file_count=orphan_count,
             reclaimed_bytes=reclaimed_bytes + orphan_bytes,
             truncated=truncated,
         )
@@ -1132,31 +1701,75 @@ class ArtifactStore:
             os.replace(staged, original)
             self._remember_verified(original)
 
-    def _recover_staged_deletions(self, session: Session) -> None:
-        trash = self.root / ".delete-pending"
-        if not trash.is_dir() or self._is_link(trash):
-            return
+    def _recover_staged_deletions(
+        self,
+        session: Session,
+        *,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> None:
+        """Restore interrupted deletions, and drop links left in that directory.
+
+        The staging directory is held and listed. A directory junction is a
+        directory to the path checks, so those checks skip it and leave the
+        entry in the store. The listing reports that junction as a link. The
+        link entry is removed. The directory it names stays where it is.
+
+        The same stop that bounds the orphan walk bounds this listing. A stop
+        after one native record must not fetch the next one.
+        """
+
         artifacts_by_sha = {
             artifact.sha256: artifact for artifact in session.scalars(select(Artifact)).all()
         }
-        for staged in trash.iterdir():
-            match = _STAGED_DELETION.fullmatch(staged.name)
-            if not match or (not staged.is_file() and not staged.is_symlink()):
-                continue
-            if self._is_link(staged):
-                staged.unlink(missing_ok=True)
-                continue
-            artifact = artifacts_by_sha.get(match.group("digest"))
-            if artifact is None:
-                staged.unlink(missing_ok=True)
-                continue
-            try:
-                original = self.resolve(artifact)
-            except ValueError:
-                continue
-            self._restore_staged_file(staged, original)
-        with suppress(OSError):
-            trash.rmdir()
+        try:
+            with AnchoredDirectory(self.root) as root:
+                trash = next(
+                    (
+                        entry
+                        for entry in list_entries(
+                            root, include_metadata=False, should_stop=should_stop
+                        )
+                        if entry.name == ".delete-pending"
+                    ),
+                    None,
+                )
+                if trash is None or trash.kind is not AnchoredEntryKind.DIRECTORY:
+                    return
+                with open_child_directory(root, ".delete-pending") as held:
+                    for entry in list_entries(
+                        held, include_metadata=False, should_stop=should_stop
+                    ):
+                        self._recover_one_staged_entry(held, entry, artifacts_by_sha)
+                with suppress(AnchoredDirectoryError):
+                    remove_directory_entry(root, ".delete-pending")
+        except AnchoredDirectoryError:
+            return
+
+    def _recover_one_staged_entry(
+        self,
+        held: AnchoredDirectory,
+        entry: AnchoredEntry,
+        artifacts_by_sha: dict[str, Artifact],
+    ) -> None:
+        match = _STAGED_DELETION.fullmatch(entry.name)
+        if match is None:
+            return
+        if entry.kind is AnchoredEntryKind.LINK:
+            with suppress(AnchoredDirectoryError, OSError):
+                remove_link_entry(held, entry.name)
+            return
+        if entry.kind is not AnchoredEntryKind.FILE:
+            return
+        artifact = artifacts_by_sha.get(match.group("digest"))
+        if artifact is None:
+            with suppress(AnchoredDirectoryError, OSError):
+                remove_entry(held, entry.name)
+            return
+        try:
+            original = self.resolve(artifact)
+        except ValueError:
+            return
+        self._restore_staged_file(self.root / ".delete-pending" / entry.name, original)
 
     def _cleanup_orphan_files(
         self,
@@ -1166,6 +1779,7 @@ class ArtifactStore:
         temporary_hours: int,
         dry_run: bool,
         budget: _DeletionBudget | None = None,
+        walk: _BoundedWalk | None = None,
     ) -> tuple[int, int]:
         """Remove aged temporaries and unindexed files through held directories.
 
@@ -1189,18 +1803,33 @@ class ArtifactStore:
         than one enumeration may report - prunes nothing rather than pruning
         something else. What that leaves unsaid is the gap the store root
         already has: the refusal is not reported to anyone.
+
+        A bounded `walk` starts after the last leaf shard an earlier bounded
+        walk finished and records each leaf it finishes, so walking a store
+        too large for one batch goes on across batches. Reaching the end of
+        the store clears that place, and the next walk starts at the top.
         """
 
         indexed = {artifact.relative_path for artifact in session.scalars(select(Artifact)).all()}
         cutoff = current - timedelta(hours=temporary_hours)
         allowance = budget or _DeletionBudget(None, None)
+        resume_after = self._walk_resume_after if walk is not None else None
         try:
             with AnchoredDirectory(self.root) as anchor:
-                return self._sweep_orphans(
-                    anchor, indexed=indexed, cutoff=cutoff, dry_run=dry_run, budget=allowance
+                counted = self._sweep_orphans(
+                    anchor,
+                    indexed=indexed,
+                    cutoff=cutoff,
+                    dry_run=dry_run,
+                    budget=allowance,
+                    walk=walk,
+                    resume_after=resume_after,
                 )
         except (AnchoredDirectoryError, OSError):
             return 0, 0
+        if walk is not None and not allowance.truncated:
+            self._walk_resume_after = None
+        return counted
 
     def _sweep_orphans(
         self,
@@ -1210,8 +1839,14 @@ class ArtifactStore:
         cutoff: datetime,
         dry_run: bool,
         budget: _DeletionBudget,
+        walk: _BoundedWalk | None = None,
+        resume_after: tuple[str, str] | None = None,
     ) -> tuple[int, int]:
-        """One enumeration of the held root, read twice for its two jobs."""
+        """One enumeration of the held root, read twice for its two jobs.
+
+        Shards are walked in name order, so a walk that resumes after a leaf
+        shard has already seen every one before it.
+        """
 
         removed_count = 0
         reclaimed_bytes = 0
@@ -1234,13 +1869,29 @@ class ArtifactStore:
             budget.spend()
             removed_count += 1
             reclaimed_bytes += size
-        for entry in entries:
-            if entry.kind is not AnchoredEntryKind.DIRECTORY or not _SHARD.fullmatch(entry.name):
+        shards = sorted(
+            entry.name
+            for entry in entries
+            if entry.kind is AnchoredEntryKind.DIRECTORY and _SHARD.fullmatch(entry.name)
+        )
+        for first in shards:
+            if resume_after is not None and first < resume_after[0]:
                 continue
             if budget.truncated:
                 return removed_count, reclaimed_bytes
             count, reclaimed = self._sweep_first_shard(
-                anchor, entry.name, indexed=indexed, cutoff=cutoff, dry_run=dry_run, budget=budget
+                anchor,
+                first,
+                indexed=indexed,
+                cutoff=cutoff,
+                dry_run=dry_run,
+                budget=budget,
+                walk=walk,
+                skip_through=(
+                    resume_after[1]
+                    if resume_after is not None and first == resume_after[0]
+                    else None
+                ),
             )
             removed_count += count
             reclaimed_bytes += reclaimed
@@ -1255,28 +1906,36 @@ class ArtifactStore:
         cutoff: datetime,
         dry_run: bool,
         budget: _DeletionBudget,
+        walk: _BoundedWalk | None = None,
+        skip_through: str | None = None,
     ) -> tuple[int, int]:
         """Sweep one first-level shard, then drop it if this pass emptied it.
 
         A shard is dropped only when the walk through it ran to the end; a
         walk cut short by the budget may have left entries it never reached.
+        Leaf shards named up to `skip_through` were finished by an earlier
+        bounded walk and are not walked again; each leaf a bounded walk
+        finishes here becomes the place the next one resumes after.
         """
 
         removed_count = 0
         reclaimed_bytes = 0
         try:
             with open_child_directory(anchor, first) as held:
-                for entry in list_entries(held, should_stop=lambda: not budget.allow()):
-                    if entry.kind is not AnchoredEntryKind.DIRECTORY or not _SHARD.fullmatch(
-                        entry.name
-                    ):
+                leaves = sorted(
+                    entry.name
+                    for entry in list_entries(held, should_stop=lambda: not budget.allow())
+                    if entry.kind is AnchoredEntryKind.DIRECTORY and _SHARD.fullmatch(entry.name)
+                )
+                for second in leaves:
+                    if skip_through is not None and second <= skip_through:
                         continue
                     if budget.truncated:
                         return removed_count, reclaimed_bytes
                     count, reclaimed = self._sweep_second_shard(
                         held,
                         first,
-                        entry.name,
+                        second,
                         indexed=indexed,
                         cutoff=cutoff,
                         dry_run=dry_run,
@@ -1284,6 +1943,9 @@ class ArtifactStore:
                     )
                     removed_count += count
                     reclaimed_bytes += reclaimed
+                    if walk is not None and not budget.truncated:
+                        walk.leaves += 1
+                        self._walk_resume_after = (first, second)
         except (AnchoredDirectoryError, OSError):
             return removed_count, reclaimed_bytes
         if removed_count and not dry_run and not budget.truncated:

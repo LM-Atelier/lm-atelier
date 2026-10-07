@@ -8,9 +8,10 @@ import logging
 import os
 import shutil
 import tempfile
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -19,11 +20,23 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.tags import parse_tag
 from packaging.utils import InvalidWheelFilename, canonicalize_name, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
+from sqlalchemy.orm import Session
 
+from .artifacts import ArtifactStore
+from .comfy_registry_source_artifacts import VerifiedSourceWheel, verified_reviewed_source_wheel
 from .comfy_registry_wheel_artifacts import (
     MAX_WHEEL_ARTIFACT_BYTES,
     ComfyRegistryWheelArtifact,
     ComfyRegistryWheelArtifactManifest,
+    comfy_registry_wheel_target_sha256,
+)
+from .comfy_registry_wheel_inputs_v1 import (
+    ComfyRegistryReviewedWheelInput,
+    ComfyRegistryWheelInputError,
+    ComfyRegistryWheelInputManifest,
+    validate_comfy_registry_wheel_input_manifest,
+    wheel_input_from_verified_source,
+    wheel_input_manifest_payload,
 )
 from .filesystem_links import AnchoredDirectory, AnchoredDirectoryError
 from .network import shared_tls_context
@@ -110,6 +123,8 @@ class ComfyRegistryWheelDownloader:
         parent: Path,
         *,
         progress: WheelDownloadProgress | None,
+        inputs: ComfyRegistryWheelInputManifest | None = None,
+        read_local: Callable[[ComfyRegistryReviewedWheelInput], VerifiedSourceWheel] | None = None,
     ) -> ComfyRegistryWheelStageReport:
         staging: Path | None = None
         try:
@@ -128,7 +143,11 @@ class ComfyRegistryWheelDownloader:
                     wheel_path,
                     expected_sha256=artifact.sha256,
                     expected_size=artifact.size_bytes,
-                    maximum_size=artifact.size_bytes,
+                    maximum_size=(
+                        artifact.size_bytes
+                        if inputs is None
+                        else min(artifact.size_bytes, MAX_REGISTRY_WHEEL_STAGE_BYTES - total_bytes)
+                    ),
                     progress=progress,
                 )
                 metadata_filename: str | None = None
@@ -140,7 +159,14 @@ class ComfyRegistryWheelDownloader:
                         staging / metadata_filename,
                         expected_sha256=artifact.metadata_sha256,
                         expected_size=None,
-                        maximum_size=MAX_REGISTRY_WHEEL_METADATA_BYTES,
+                        maximum_size=(
+                            MAX_REGISTRY_WHEEL_METADATA_BYTES
+                            if inputs is None
+                            else min(
+                                MAX_REGISTRY_WHEEL_METADATA_BYTES,
+                                MAX_REGISTRY_WHEEL_STAGE_BYTES - total_bytes - wheel_size,
+                            )
+                        ),
                         progress=progress,
                     )
                 total_bytes += wheel_size + (metadata_size or 0)
@@ -154,13 +180,37 @@ class ComfyRegistryWheelDownloader:
                         metadata_size,
                     )
                 )
-            report, encoded = _stage_report(
-                manifest,
-                artifact_payload,
-                tuple(staged),
-                total_bytes,
-            )
-            _write_new_file(staging / "stage-manifest.json", encoded)
+            if inputs is not None:
+                if read_local is None:
+                    raise ComfyRegistryWheelDownloadError(
+                        "source_review_unavailable", "Reviewed wheel bytes are unavailable"
+                    )
+                for item in inputs.reviewed_local:
+                    await _publish_progress(progress, item.filename, 0, item.size_bytes)
+                    staged_item = await _local_stage_work(
+                        partial(
+                            _copy_reviewed_wheel,
+                            staging,
+                            item,
+                            read_local,
+                            remaining_bytes=MAX_REGISTRY_WHEEL_STAGE_BYTES - total_bytes,
+                        )
+                    )
+                    total_bytes += staged_item.size_bytes + (staged_item.metadata_size_bytes or 0)
+                    staged.append(staged_item)
+                    await _publish_progress(
+                        progress, item.filename, item.size_bytes, item.size_bytes
+                    )
+                report = await _local_stage_work(
+                    partial(
+                        _finish_mixed_stage, staging, inputs, read_local, tuple(staged), total_bytes
+                    )
+                )
+            else:
+                report, encoded = _stage_report(
+                    manifest, artifact_payload, tuple(staged), total_bytes
+                )
+                _write_new_file(staging / "stage-manifest.json", encoded)
             if destination.exists() or destination.is_symlink():
                 raise ComfyRegistryWheelDownloadError(
                     "stage_destination_exists",
@@ -172,6 +222,56 @@ class ComfyRegistryWheelDownloader:
         finally:
             if staging is not None:
                 shutil.rmtree(staging, ignore_errors=True)
+
+    async def download_and_stage_inputs(
+        self,
+        manifest: ComfyRegistryWheelInputManifest,
+        destination: Path,
+        *,
+        session_factory: Callable[[], Session],
+        store: ArtifactStore,
+        marker_environment: Mapping[str, str],
+        supported_tags: Sequence[str],
+        progress: WheelDownloadProgress | None = None,
+    ) -> ComfyRegistryWheelStageReport:
+        """Stage both sources and bind the report to their mixed manifest identity."""
+        inputs = validate_comfy_registry_wheel_input_manifest(manifest)
+        environment = dict(marker_environment)
+        tags = tuple(supported_tags)
+        if comfy_registry_wheel_target_sha256(environment, tags) != inputs.remote.target_sha256:
+            raise ComfyRegistryWheelInputError("wheel_input_target_mismatch")
+        artifact_payload, remote = _validated_manifest(inputs.remote)
+        if (
+            sum(item.size_bytes for item in remote)
+            + sum(item.size_bytes for item in inputs.reviewed_local)
+            > MAX_REGISTRY_WHEEL_STAGE_BYTES
+        ):
+            raise ComfyRegistryWheelDownloadError(
+                "wheel_stage_too_large", "Registry wheel stage exceeds the total size limit"
+            )
+
+        def read_local(item: ComfyRegistryReviewedWheelInput) -> VerifiedSourceWheel:
+            with session_factory() as session:
+                wheel = verified_reviewed_source_wheel(session, store, declaration=item.declaration)
+                current = wheel_input_from_verified_source(
+                    wheel, marker_environment=environment, supported_tags=tags
+                )
+                if current != item:
+                    raise ComfyRegistryWheelInputError("reviewed_wheel_input_changed")
+                return wheel
+
+        parent, lock_name = _stage_target(destination)
+        with _hold_stage_lock(parent, lock_name):
+            return await self._stage_locked(
+                inputs.remote,
+                artifact_payload,
+                remote,
+                destination,
+                parent,
+                progress=progress,
+                inputs=inputs,
+                read_local=read_local,
+            )
 
     async def _download(
         self,
@@ -523,6 +623,86 @@ def _write_new_file(path: Path, content: bytes) -> None:
         output.write(content)
         output.flush()
         os.fsync(output.fileno())
+
+
+async def _local_stage_work[T](work: Callable[[], T]) -> T:
+    """Keep blocking local work off the loop and drain it before cancellation cleanup."""
+    task = asyncio.create_task(asyncio.to_thread(work))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled():
+            task.exception()
+        raise
+
+
+def _copy_reviewed_wheel(
+    staging: Path,
+    item: ComfyRegistryReviewedWheelInput,
+    read_local: Callable[[ComfyRegistryReviewedWheelInput], VerifiedSourceWheel],
+    *,
+    remaining_bytes: int,
+) -> ComfyRegistryStagedWheel:
+    wheel = read_local(item)
+    metadata_size = len(wheel.core_metadata)
+    if len(wheel.payload) + metadata_size > remaining_bytes:
+        raise ComfyRegistryWheelDownloadError(
+            "wheel_stage_too_large", "Registry wheel stage exceeds the total size limit"
+        )
+    _write_new_file(staging / item.filename, wheel.payload)
+    metadata_filename = f"{item.filename}.metadata"
+    _write_new_file(staging / metadata_filename, wheel.core_metadata)
+    return ComfyRegistryStagedWheel(
+        item.filename,
+        item.sha256,
+        item.size_bytes,
+        metadata_filename,
+        item.metadata_sha256,
+        metadata_size,
+    )
+
+
+def _finish_mixed_stage(
+    staging: Path,
+    inputs: ComfyRegistryWheelInputManifest,
+    read_local: Callable[[ComfyRegistryReviewedWheelInput], VerifiedSourceWheel],
+    artifacts: tuple[ComfyRegistryStagedWheel, ...],
+    total_bytes: int,
+) -> ComfyRegistryWheelStageReport:
+    # Progress callbacks may outlive the review used when each wheel was copied.
+    for item in inputs.reviewed_local:
+        read_local(item)
+    report, encoded = _mixed_stage_report(inputs, artifacts, total_bytes)
+    _write_new_file(staging / "stage-manifest.json", encoded)
+    return report
+
+
+def _mixed_stage_report(
+    manifest: ComfyRegistryWheelInputManifest,
+    artifacts: tuple[ComfyRegistryStagedWheel, ...],
+    total_bytes: int,
+) -> tuple[ComfyRegistryWheelStageReport, bytes]:
+    ordered = tuple(sorted(artifacts, key=lambda item: item.filename))
+    encoded = _encode_payload(
+        {
+            "version": 2,
+            "input_manifest_sha256": manifest.manifest_sha256,
+            "input_manifest": wheel_input_manifest_payload(manifest),
+            "total_bytes": total_bytes,
+            "files": [asdict(item) for item in ordered],
+        },
+        trailing_newline=True,
+    )
+    return ComfyRegistryWheelStageReport(
+        manifest.manifest_sha256, hashlib.sha256(encoded).hexdigest(), total_bytes, ordered
+    ), encoded
 
 
 def _artifact_payload(artifact: ComfyRegistryWheelArtifact) -> dict[str, object]:

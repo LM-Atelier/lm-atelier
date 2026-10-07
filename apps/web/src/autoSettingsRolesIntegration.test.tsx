@@ -1,6 +1,8 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AUTO_SETTINGS_ROLES_KEY } from "./autoSettingsRoles";
 import { SettingsDrawer } from "./SettingsDrawer";
@@ -15,6 +17,8 @@ import { useAutoSettingsRoles } from "./useAutoSettingsRoles";
  * that removing `key={role}` really preserves the disclosure level - that last
  * one is a claim about React's reconciliation, not about a function.
  */
+
+vi.mock("./api", () => ({ api: { presetsPage: vi.fn().mockResolvedValue([]), workflowLoraControls: vi.fn() } }));
 
 const ENGINES: EngineCapabilities[] = [
   {
@@ -95,7 +99,6 @@ function drawer(role: EngineRole, onRole: (next: EngineRole) => void) {
       engines={ENGINES}
       values={{}}
       onValues={() => {}}
-      presets={[]}
       presetId={null}
       onPreset={() => {}}
       imageEdit={false}
@@ -104,14 +107,24 @@ function drawer(role: EngineRole, onRole: (next: EngineRole) => void) {
   );
 }
 
+// The drawer's panel asks the controls projection whether the pinned workflow
+// takes added LoRAs, so it reads server state even when no workflow is pinned
+// and there is nothing to ask about. The client is built outside the tree
+// because the switcher below re-renders, and a client rebuilt per render is a
+// cache that never holds anything.
+function renderDrawer(node: ReactNode) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={client}>{node}</QueryClientProvider>);
+}
+
 describe("the two stacked pickers", () => {
-  it("are separately named groups, not one control repeated", () => {
-    render(drawer("chat", () => {}));
+  it("are separately named groups, not one control repeated", async () => {
+    renderDrawer(drawer("chat", () => {}));
     expect(screen.getByRole("group", { name: "Settings role" })).toBeTruthy();
-    expect(screen.getByRole("group", { name: "Settings detail level" })).toBeTruthy();
+    expect(await screen.findByRole("group", { name: "Settings detail level" })).toBeTruthy();
   });
 
-  it("keeps the chosen detail level when the role changes", () => {
+  it("keeps the chosen detail level when the role changes", async () => {
     // This is the whole point of removing key={role}. The panel derives
     // everything else from its props, so the key was resetting only the
     // reader's disclosure choice - which has nothing to do with which role is
@@ -120,12 +133,12 @@ describe("the two stacked pickers", () => {
       const [role, setRole] = useState<EngineRole>("chat");
       return drawer(role, setRole);
     }
-    render(<Switcher />);
+    renderDrawer(<Switcher />);
 
-    fireEvent.click(screen.getByRole("button", { name: "advanced" }));
-    expect(screen.getByRole("button", { name: "advanced" }).className).toContain("active");
+    fireEvent.click((await screen.findByRole("button", { name: "advanced" })));
+    expect((await screen.findByRole("button", { name: "advanced" })).className).toContain("active");
 
     fireEvent.click(screen.getByRole("button", { name: "image" }));
-    expect(screen.getByRole("button", { name: "advanced" }).className).toContain("active");
+    expect((await screen.findByRole("button", { name: "advanced" })).className).toContain("active");
   });
 });

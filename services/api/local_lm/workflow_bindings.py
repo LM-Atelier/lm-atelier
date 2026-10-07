@@ -11,8 +11,7 @@ from urllib.parse import urlparse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .auxiliary_assets import AUXILIARY_ASSET_KINDS
-from .model_manifests import COMFY_MODEL_FOLDERS
+from .model_manifests import COMFY_MODEL_ASSET_KINDS, COMFY_MODEL_FOLDERS
 from .models import (
     ComfyRegistryInstall,
     CustomNodeInstall,
@@ -39,6 +38,7 @@ from .workflow_dependencies import (
 
 WORKFLOW_BINDING_VERSION = 1
 MAX_WORKFLOW_BINDING_SELECTIONS = 512
+MAX_WORKFLOW_IDENTITY_TEXT_LENGTH = 200
 WORKFLOW_DEPENDENCY_MATERIALIZER_ISSUE_CODES: frozenset[str] = frozenset(
     {
         "dependency_unavailable",
@@ -51,7 +51,9 @@ _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _DIGEST_INPUT = re.compile(r"^[0-9a-fA-F]{64}$")
 _TREE_HASH = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 _COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
-_STABLE_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/+-]{0,199}$")
+_STABLE_TEXT = re.compile(
+    rf"^[A-Za-z0-9][A-Za-z0-9_.:/+-]{{0,{MAX_WORKFLOW_IDENTITY_TEXT_LENGTH - 1}}}$"
+)
 _PACKAGE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 _LOWERCASE_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _SEMANTIC_VERSION = re.compile(r"^[0-9]+[.][0-9]+[.][0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
@@ -281,7 +283,7 @@ def resolve_workflow_activation(
     resolved.sort(key=lambda item: (item.slot_name, item.requirement_key))
     issues.sort(key=lambda item: (item.slot_name, item.requirement_key or "", item.code))
     complete = not issues and not missing_required
-    binding_sha256 = _workflow_activation_binding_sha256(contract, resolved) if complete else None
+    binding_sha256 = workflow_activation_binding_sha256(contract, resolved) if complete else None
     return WorkflowActivationResolution(
         tuple(resolved),
         tuple(issues),
@@ -313,6 +315,15 @@ def workflow_resource_identity_sha256(
         "identity": portable,
     }
     return hashlib.sha256(canonical_workflow_dependency_json(payload)).hexdigest()
+
+
+def workflow_activation_binding_sha256(
+    contract: WorkflowDependencyContract,
+    bindings: Sequence[ResolvedWorkflowBinding],
+) -> str:
+    """Validate and hash one complete resolved dependency binding snapshot."""
+
+    return _workflow_activation_binding_sha256(contract, bindings)
 
 
 def _workflow_activation_binding_sha256(
@@ -486,7 +497,7 @@ def materialize_model_asset(asset: ModelAssetInstall) -> MaterializedWorkflowDep
     if (
         not asset.active
         or asset.verified_at is None
-        or asset.kind not in AUXILIARY_ASSET_KINDS
+        or asset.kind not in COMFY_MODEL_ASSET_KINDS
         or not isinstance(digest, str)
         or not _DIGEST_INPUT.fullmatch(digest)
         or not isinstance(runtime_reference, str)
@@ -822,6 +833,12 @@ def _runtime_reference(value: object) -> str:
             "invalid_dependency_identity", "Model component runtime reference is invalid"
         )
     return value
+
+
+def validate_workflow_runtime_reference(value: object) -> str:
+    """Return one portable runtime loader name or raise the binding contract error."""
+
+    return _runtime_reference(value)
 
 
 def _canonical_github_repository(value: object) -> str:

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
+from collections.abc import Set as AbstractSet
+from typing import Any, cast
 
 import pytest
 from httpx2 import AsyncClient
+from run_waits import wait_for_terminal_status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -23,12 +24,13 @@ from local_lm.references import MentionSource
 
 
 async def wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
-    for _ in range(400):
+    async def read() -> dict[str, Any]:
         payload: dict[str, Any] = (await client.get(f"/api/runs/{run_id}")).json()
-        if payload["status"] in {"complete", "failed", "cancelled"}:
-            return payload
-        await asyncio.sleep(0.01)
-    raise AssertionError("run did not finish in time")
+        return payload
+
+    return cast(
+        dict[str, Any], await wait_for_terminal_status(read, what=f"run {run_id}", expected=None)
+    )
 
 
 async def _turn(client: AsyncClient, chat_id: str, text: str) -> dict[str, Any]:
@@ -314,16 +316,17 @@ async def test_reference_copy_failure_rolls_back_the_whole_fork(
         assert {row.message_id for row in rows} == set(source_message_ids)
 
 
-async def test_forking_walks_the_artifact_reference_graph_once_not_once_per_message(
+async def test_forking_does_not_walk_the_artifact_reference_graph(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Carrying references must not buy a whole-graph walk per copied message.
 
-    A pending MessageReference that pins an asset makes the before_flush guard
-    walk the entire artifact reference graph, so carrying references costs one
-    full walk for every flush taken while a carry is pending. A fork must pay
-    that walk once, however many messages the lineage holds.
+    A pending MessageReference that pins an asset still takes the writer and
+    still has its artifacts checked for existence, but the before_flush guard
+    walks the whole artifact reference graph only for a flush that deletes an
+    artifact. A fork deletes none, so however many messages the lineage holds,
+    it pays no walk at all.
     """
 
     from local_lm import artifact_library
@@ -365,7 +368,7 @@ async def test_forking_walks_the_artifact_reference_graph_once_not_once_per_mess
     calls = 0
     real = artifact_library.referenced_artifact_ids
 
-    def counted(*args: Any, **kwargs: Any) -> set[str]:
+    def counted(*args: Any, **kwargs: Any) -> AbstractSet[str]:
         nonlocal calls
         calls += 1
         return real(*args, **kwargs)
@@ -377,7 +380,7 @@ async def test_forking_walks_the_artifact_reference_graph_once_not_once_per_mess
         fork_chat_from_message(session, leaf_id)
         session.commit()
 
-    assert calls == 1, (
+    assert calls == 0, (
         f"forking a six-message lineage walked the reference graph {calls} times; "
-        f"a fork pays exactly one walk however long the lineage is"
+        f"a fork deletes nothing, so it walks none however long the lineage is"
     )

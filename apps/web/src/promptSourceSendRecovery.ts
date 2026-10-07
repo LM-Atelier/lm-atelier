@@ -19,7 +19,9 @@ export function recoverPromptSourceSend(
     if (existing.text.trim() || existing.promptSource) return current;
     return {
       ...current,
-      [variables.chatId]: { text: variables.text, promptSource },
+      // Whatever else the composer holds for the chat stays; only the words
+      // and their source come back.
+      [variables.chatId]: { ...existing, text: variables.text, promptSource },
     };
   });
   void client.invalidateQueries({ queryKey: ["prompt-batch", promptSource.batch_id] });

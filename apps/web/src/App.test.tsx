@@ -1,22 +1,35 @@
+import { installChatReadFixtures } from "./chatReadFixtures";
+import { recoveryItem, recoveryImpact } from "./test/recoveryFixtures";
+import { exerciseWorkspaceHistory } from "./workspaceHistoryAppCase.test-support";
+import { mockWorkflowFamilyPages, mockWorkflowReadsFromFixture, mockWorkflowConsumerReadsFromFixture } from "./workflowReadFixtures";
 import { exerciseEditedBranchNavigation } from "./editedBranchAppCase.test-support";
 import { exerciseQueuedOutputActions } from "./queuedOutputActions.test-support";
 import { exercisePriorTurnEditor } from "./priorTurnEditAppCase.test-support";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { exercisePriorImageWorkflowControls } from "./priorImageWorkflowControlsAppCase.test-support";
+import { act, cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider, type InfiniteData } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { api, connectEvents } from "./api";
-import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, EngineRole, Job, ModelAssetInstall, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted, WorkPlan } from "./types";
+import type { BackupInfo, Chat, ChatDetail, ChatMessageWindow, EngineCapabilities, EngineRole, Job, ModelAssetInstall, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted, WorkPlan, Workflow } from "./types";
 import { DEFAULT_CHAT_WORKFLOW_SELECTIONS, DEFAULT_PROJECT_WORKFLOW_SELECTIONS, familiesForWorkflows } from "./workflowSelectionFixtures";
+import { asChatSummary } from "./chatSummaryFixtures";
 const clipboardWrite = vi.fn();
-
+let workflowFixtures: Workflow[] = [];
+function setWorkflowFixtures(values: Workflow[]) { workflowFixtures = values; }
+// These cases wait on renders that follow mocked queries across the whole
+// workspace, so the time is CPU work. Run about eighteen times slower than a
+// quiet machine, as a busy shared runner can be, several cases pass five
+// seconds and one wait misses its one-second default. These limits leave room
+// for that and still fail a render that never arrives.
+configure({ asyncUtilTimeout: 5_000 });
+const CASE_TIMEOUT_MS = 20_000;
 function renderApp() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}><App /></QueryClientProvider>,
   );
 }
-
 const imageSetting: SettingField = {
   key: "negative_prompt",
   label: "Negative prompt",
@@ -98,19 +111,25 @@ const roleAwareMediaEngine: EngineCapabilities = {
 vi.mock("./api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./api")>()),
   api: {
+    searchConfiguration: vi.fn().mockResolvedValue({
+      installation_enabled: true, configured: true, provider: "CRW",
+      provider_endpoint: "https://search.example.test", error_code: null,
+    }),
+    decideSearch: vi.fn(),
+    editSearch: vi.fn(),
     initialize: vi.fn().mockResolvedValue(undefined),
     setupReadiness: vi.fn().mockResolvedValue({ version: 2, state: "ready", roles: [] }),
     verifySetupRole: vi.fn(),
-    projects: vi.fn().mockResolvedValue([]),
-    chats: vi.fn().mockResolvedValue([]),
-    chat: vi.fn(),
+    projects: vi.fn().mockResolvedValue([]), project: vi.fn(),
+    chats: vi.fn().mockResolvedValue([]), chatSummaries: vi.fn((...args: Parameters<typeof api.chats>) => api.chats(...args).then((rows) => rows.map(asChatSummary))),
+    chat: vi.fn(), chatMetadata: vi.fn((id: string) => api.chat(id)),
     classifyDraft: vi.fn(),
     createProject: vi.fn(),
     updateProject: vi.fn(),
-    deleteProject: vi.fn(),
+    deleteProject: vi.fn(), trashProject: vi.fn(), projectDeletionImpact: vi.fn(),
     createChat: vi.fn(),
     updateChat: vi.fn(),
-    deleteChat: vi.fn(),
+    deleteChat: vi.fn(), trashChat: vi.fn(), deletionImpact: vi.fn(), recoveryImpact: vi.fn(), restoreRecovery: vi.fn(),
     createPromptHelper: vi.fn(),
     promptHelper: vi.fn(),
     updatePromptHelper: vi.fn(),
@@ -137,6 +156,7 @@ vi.mock("./api", async (importOriginal) => ({
     queueEditedMessage: vi.fn(),
     cancelChat: vi.fn(),
     jobs: vi.fn().mockResolvedValue([]),
+    jobActivity: vi.fn(),
     workPlans: vi.fn().mockResolvedValue([]),
     editedBranches: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
     activateEditedBranch: vi.fn(),
@@ -203,24 +223,24 @@ vi.mock("./api", async (importOriginal) => ({
     }),
     platforms: vi.fn().mockResolvedValue([]),
     createDiagnostics: vi.fn(),
-    credentialStatus: vi.fn((provider: "huggingface" | "civitai") => Promise.resolve({ provider, configured: false, source: "none", vault_available: true })),
+    credentialStatus: vi.fn((provider: "huggingface" | "civitai" | "crw") => Promise.resolve({ provider, configured: false, source: "none", vault_available: true })),
     setCredentialToken: vi.fn(),
     deleteCredentialToken: vi.fn(),
-    models: vi.fn(),
+    models: vi.fn(), modelsPage: vi.fn(async (options) => (await import("./test/modelLibraryPageFixtures")).modelPages(api, options)), catalogInstallMatches: vi.fn(async (options) => (await import("./test/modelLibraryPageFixtures")).catalogMatches(api, options)),
     modelAssets: vi.fn().mockResolvedValue([]),
     updateModelAsset: vi.fn(),
     deleteModelAsset: vi.fn(),
     modelStorage: vi.fn().mockResolvedValue({ installed_bytes: 0, partial_download_bytes: 0, catalog_cache_bytes: 0, installed_count: 0, partial_download_count: 0 }),
     deleteModel: vi.fn(),
     cleanupDownloads: vi.fn(),
-    profiles: vi.fn().mockResolvedValue([]),
+    profiles: vi.fn().mockResolvedValue([]), profilesPage: vi.fn(async (options) => (await import("./test/modelLibraryPageFixtures")).profilePages(api, options)),
     updateProfile: vi.fn(),
     cloneProfile: vi.fn(),
     resetProfile: vi.fn(),
     deleteProfile: vi.fn(),
     exportProfile: vi.fn(),
     importProfile: vi.fn(),
-    presets: vi.fn().mockResolvedValue([]),
+    presets: vi.fn().mockResolvedValue([]), presetsPage: vi.fn(async (options) => (await import("./test/modelLibraryPageFixtures")).presetPages(api, options)),
     createPreset: vi.fn(),
     updatePreset: vi.fn(),
     clonePreset: vi.fn(),
@@ -253,7 +273,11 @@ vi.mock("./api", async (importOriginal) => ({
     installRecipe: vi.fn(),
     download: vi.fn(),
     importModel: vi.fn(),
-    workflows: vi.fn(), workflowFamilies: vi.fn().mockResolvedValue([]), setWorkflowFamilyPreference: vi.fn(), chatWorkflowSelections: vi.fn().mockResolvedValue([]), setChatWorkflowSelection: vi.fn(), projectWorkflowSelections: vi.fn().mockResolvedValue([]), setProjectWorkflowSelection: vi.fn(),
+    workflowSummaries: vi.fn().mockResolvedValue([]),
+    workflow: vi.fn(),
+    workflowRevisionChoices: vi.fn().mockResolvedValue([]),
+    workflowRevisionSchema: vi.fn(), workflowReadyRevisions: vi.fn().mockResolvedValue([]),
+    workflows: vi.fn(), workflowFamilyOperations: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn().mockResolvedValue([]), setWorkflowFamilyPreference: vi.fn(), chatWorkflowSelections: vi.fn().mockResolvedValue([]), setChatWorkflowSelection: vi.fn(), projectWorkflowSelections: vi.fn().mockResolvedValue([]), setProjectWorkflowSelection: vi.fn(),
     editTemplates: vi.fn().mockResolvedValue([]),
     createEditTemplate: vi.fn(),
     deleteEditTemplate: vi.fn(),
@@ -320,8 +344,17 @@ function setupReport(...roles: SetupRoleReadiness[]): SetupReadinessReport {
 }
 
 afterEach(cleanup);
-describe("App", () => {
+/** Settings is destinations now, so a case must say which one it means. */
+async function openSettings(destination: string) {
+  fireEvent.click(await screen.findByText("Settings"));
+  fireEvent.click(screen.getByRole("button", { name: destination }));
+}
+
+describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
+  it("restores workspace destinations and focus with browser history", async () => { await exerciseWorkspaceHistory(renderApp); });
   beforeEach(() => {
+  installChatReadFixtures();
+    window.history.replaceState(null, "", "/");
     vi.clearAllMocks();
     clipboardWrite.mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
@@ -331,7 +364,7 @@ describe("App", () => {
     localStorage.clear();
     sessionStorage.clear();
     vi.mocked(api.setupReadiness).mockResolvedValue({ version: 2, state: "ready", roles: [] });
-    vi.mocked(api.projects).mockResolvedValue([]); vi.mocked(api.profiles).mockResolvedValue([]);
+    vi.mocked(api.projects).mockResolvedValue([]); vi.mocked(api.profiles).mockResolvedValue([]); vi.mocked(api.project).mockImplementation(async (id) => (await api.projects()).find((project) => project.id === id)!);
     vi.mocked(api.presets).mockResolvedValue([]); vi.mocked(api.chats).mockResolvedValue([]);
     // No prior visual to reuse is the resting state for most of this suite.
     vi.mocked(api.classifyDraft).mockResolvedValue({ references_prior_visual: false });
@@ -354,6 +387,16 @@ describe("App", () => {
     vi.mocked(api.workerSettings).mockResolvedValue({ worker_startup_seconds: 60 });
     vi.mocked(api.runtimes).mockResolvedValue([]);
     vi.mocked(api.jobs).mockResolvedValue([]);
+    vi.mocked(api.jobActivity).mockImplementation(async (limit = 100) => {
+      const jobs = (await api.jobs()).filter((job) => job.kind !== "edit_verify");
+      const active = jobs.filter((job) => ["queued", "running", "paused"].includes(job.status));
+      return {
+        active: active.slice(0, limit),
+        active_count: active.length,
+        recent_issues: jobs.filter((job) => ["failed", "cancelled", "interrupted"].includes(job.status))
+          .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)).slice(0, 3),
+      };
+    });
     vi.mocked(api.workPlans).mockResolvedValue([]);
     vi.mocked(api.editedBranches).mockResolvedValue({ items: [], next_cursor: null });
     vi.mocked(api.backups).mockResolvedValue([]);
@@ -362,12 +405,28 @@ describe("App", () => {
     vi.mocked(api.catalog).mockResolvedValue({ items: [], next_cursor: null });
     vi.mocked(api.artifactLibrary).mockResolvedValue({ items: [], next_cursor: null });
     vi.mocked(api.workflowCatalogModels).mockResolvedValue([]);
-    vi.mocked(api.workflows).mockResolvedValue([]);
-    vi.mocked(api.workflowFamilies).mockImplementation(async () => familiesForWorkflows(await api.workflows()));
+    setWorkflowFixtures([]);
+    vi.mocked(api.workflows).mockRejectedValue(new Error("Bulk workflow reads are forbidden"));
+    mockWorkflowReadsFromFixture(async () => workflowFixtures);
+    mockWorkflowConsumerReadsFromFixture(async () => workflowFixtures);
+    mockWorkflowFamilyPages(async () => familiesForWorkflows(workflowFixtures));
     vi.mocked(api.chatWorkflowSelections).mockResolvedValue(DEFAULT_CHAT_WORKFLOW_SELECTIONS);
     vi.mocked(api.projectWorkflowSelections).mockResolvedValue(DEFAULT_PROJECT_WORKFLOW_SELECTIONS);
     vi.mocked(api.customNodes).mockResolvedValue([]);
   });
+  it("opens the workspace and workflow Library without requesting bulk graphs", async () => {
+    vi.mocked(api.workflows).mockRejectedValue(new Error("Bulk workflow reads are forbidden"));
+    mockWorkflowFamilyPages([]);
+    vi.mocked(api.workflowSummaries).mockResolvedValue([]);
+    renderApp();
+    const library = await screen.findByRole("button", { name: "Workflows" });
+    expect(api.workflows).not.toHaveBeenCalled();
+    fireEvent.click(library);
+    await waitFor(() => expect(api.workflowSummaries).toHaveBeenCalledTimes(1));
+    expect(api.workflows).not.toHaveBeenCalled();
+    expect(api.workflow).not.toHaveBeenCalled();
+  });
+
   it("renders the local workspace shell without an existing chat", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
@@ -538,7 +597,8 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
     expect(await screen.findByRole("region", { name: "Projects and chats" })).toBeInTheDocument();
-    expect(window.location.search).toBe("");
+    expect(new URL(window.location.href).searchParams.has("firstRunSetup")).toBe(false);
+    expect(new URL(window.location.href).searchParams.get("view")).toBe("chat");
   });
 
   it("totals live downloads into one figure with an honest optional eta", async () => {
@@ -591,9 +651,7 @@ describe("App", () => {
     );
 
     // 6 GB + 8 GB remaining at a combined 100 MB/s: one figure to plan around.
-    expect(await screen.findByRole("status")).toHaveTextContent(
-      "14 GB left to download · about 2 min at the current speed",
-    );
+    expect(await screen.findByText("14 GB left to download · about 2 min at the current speed")).toHaveAttribute("role", "status");
   });
 
   it("names the load a ready role has not paid yet and offers to pay it now", async () => {
@@ -928,7 +986,7 @@ describe("App", () => {
     ).not.toBeNull();
     fireEvent.change(screen.getByLabelText("Search projects and chats"), { target: { value: "notes" } });
     fireEvent.click(screen.getByRole("button", { name: "Manage Model notes" }));
-    fireEvent.change(screen.getByDisplayValue("Model notes"), { target: { value: "Renamed notes" } });
+    fireEvent.change(await screen.findByDisplayValue("Model notes"), { target: { value: "Renamed notes" } });
     fireEvent.change(screen.getByLabelText("Project"), { target: { value: "" } });
     fireEvent.click(screen.getByRole("checkbox", { name: /Archived/ }));
     fireEvent.click(screen.getByRole("checkbox", { name: /Review image edits/ }));
@@ -992,12 +1050,12 @@ describe("App", () => {
     const selector = await screen.findByRole("combobox", {
       name: "Text workflow",
     });
-    await waitFor(() => expect(selector).toHaveValue("default"));
+    await waitFor(() => expect(selector).toHaveValue("Default"));
     expect(screen.queryByRole("combobox", { name: "vision" })).not.toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Visual observer" })).not.toBeInTheDocument();
     expect(api.updateChat).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Manage Vision selector" }));
-    expect(screen.getByRole("dialog", { name: "Manage chat" })).toBeVisible();
+    expect(screen.getByRole("dialog", { name: "Chat settings" })).toBeVisible();
     expect(screen.queryByText("Workflows for this chat")).not.toBeInTheDocument();
   });
 
@@ -1023,8 +1081,9 @@ describe("App", () => {
       messages: [],
     }));
     let finishDelete: (() => void) | undefined;
-    vi.mocked(api.deleteChat).mockImplementation(
-      () => new Promise<void>((resolve) => { finishDelete = resolve; }),
+    vi.mocked(api.deletionImpact).mockResolvedValue({ ...recoveryImpact("chat-1"), delete_generated_media: true });
+    vi.mocked(api.trashChat).mockImplementation(
+      () => new Promise<ReturnType<typeof recoveryItem>>((resolve) => { finishDelete = () => resolve(recoveryItem("chat-1")); }),
     );
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
@@ -1034,20 +1093,19 @@ describe("App", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Manage First chat" }));
-    expect(screen.getByText("Ask before Auto mode starts an image or video when the planner is unsure.")).toBeVisible();
+    expect(await screen.findByText("Ask before Auto mode starts an image or video when the planner is unsure.")).toBeVisible();
     fireEvent.click(screen.getByRole("checkbox", { name: /Delete generated media with chat/ }));
     fireEvent.click(screen.getByRole("button", { name: "Delete chat" }));
-    // The question names the media that goes with the chat, which is the
-    // part the checkbox above just changed.
-    expect(screen.getByText(/generated media used only by this chat/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Delete chat and history" }));
+    expect(screen.getByText(/At permanent deletion, exclusive generated media also leaves the Media Library/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Move to Recently Deleted" })).toHaveAttribute("aria-disabled", "false"));
+    fireEvent.click(screen.getByRole("button", { name: "Move to Recently Deleted" }));
 
     await waitFor(() => {
       expect(screen.queryByRole("button", { name: "Manage First chat" })).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Manage Second chat" })).toBeInTheDocument();
       expect(localStorage.getItem("local-lm-chat")).toBe("chat-2");
     });
-    expect(vi.mocked(api.deleteChat)).toHaveBeenCalledWith("chat-1", true);
+    expect(api.trashChat).toHaveBeenCalledWith("chat-1", expect.objectContaining({ delete_generated_media: true, expected_revision: "b".repeat(64), impact_sha256: "c".repeat(64) }));
     finishDelete?.();
   });
 
@@ -1200,27 +1258,27 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Manage Creative work" }));
     const dialog = screen.getByRole("dialog", { name: "Manage project" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
-    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(2048);
-    fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), {
+    expect(await screen.findByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(2048);
+    fireEvent.change(await screen.findByRole("spinbutton", { name: /Maximum output/ }), {
       target: { value: "4096" },
     });
 
     fireEvent.click(screen.getByRole("button", { name: "image" }));
-    expect(screen.getByLabelText(/Negative prompt/)).toHaveValue("noise");
+    expect(await screen.findByLabelText(/Negative prompt/)).toHaveValue("noise");
     fireEvent.change(screen.getByRole("combobox", { name: "image project preset" }), {
       target: { value: imagePreset.id },
     });
-    fireEvent.change(screen.getByLabelText(/Negative prompt/), {
+    fireEvent.change(await screen.findByLabelText(/Negative prompt/), {
       target: { value: "fog" },
     });
 
     fireEvent.click(screen.getByRole("button", { name: "video" }));
-    expect(screen.getByRole("spinbutton", { name: /Frames/ })).toHaveValue(49);
-    fireEvent.change(screen.getByRole("spinbutton", { name: /Frames/ }), {
+    expect(await screen.findByRole("spinbutton", { name: /Frames/ })).toHaveValue(49);
+    fireEvent.change(await screen.findByRole("spinbutton", { name: /Frames/ }), {
       target: { value: "81" },
     });
     fireEvent.click(screen.getByRole("button", { name: "chat" }));
-    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(4096);
+    expect(await screen.findByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(4096);
     fireEvent.click(screen.getByRole("button", { name: "Save project" }));
 
     await waitFor(() => expect(api.updateProject).toHaveBeenCalledWith(
@@ -1379,10 +1437,10 @@ describe("App", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
-    expect(screen.getByRole("combobox", { name: "image preset" }))
-      .toHaveDisplayValue("Inherit · Project image");
-    expect(screen.getByLabelText(/Negative prompt/)).toHaveValue("project value");
-    fireEvent.change(screen.getByLabelText(/Negative prompt/), {
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "image preset" }))
+      .toHaveDisplayValue("Inherit · Project image"));
+    expect(await screen.findByLabelText(/Negative prompt/)).toHaveValue("project value");
+    fireEvent.change(await screen.findByLabelText(/Negative prompt/), {
       target: { value: "chat value" },
     });
 
@@ -1420,9 +1478,9 @@ describe("App", () => {
     const opener = await screen.findByRole("button", { name: "Manage Keyboard dialog" });
     opener.focus();
     fireEvent.click(opener);
-    const dialog = screen.getByRole("dialog", { name: "Manage chat" });
+    const save = await screen.findByRole("button", { name: "Save chat" });
+    const dialog = screen.getByRole("dialog", { name: "Chat settings" });
     const close = screen.getByRole("button", { name: "Close chat manager" });
-    const save = screen.getByRole("button", { name: "Save chat" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
     expect(close).toHaveFocus();
 
@@ -1433,7 +1491,7 @@ describe("App", () => {
     expect(save).toHaveFocus();
 
     fireEvent.keyDown(dialog, { key: "Escape" });
-    expect(screen.queryByRole("dialog", { name: "Manage chat" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Chat settings" })).not.toBeInTheDocument();
     expect(opener).toHaveFocus();
   });
 
@@ -1525,7 +1583,7 @@ describe("App", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
     expect(screen.getByRole("dialog", { name: "Chat settings" })).toBeInTheDocument();
-    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(2048);
+    expect(await screen.findByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(2048);
 
     const rolePicker = screen.getByRole("group", { name: "Settings role" });
     expect(rolePicker).toBeInTheDocument();
@@ -1536,11 +1594,11 @@ describe("App", () => {
     fireEvent.click(imageTab);
     expect(screen.getByRole("dialog", { name: "Image settings" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "image" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByLabelText(/Negative prompt/)).toHaveValue("noise");
+    expect(await screen.findByLabelText(/Negative prompt/)).toHaveValue("noise");
 
     // The backend scopes an image-routed turn to generation_settings_json.image,
     // so the Auto-mode edit must land in that bag and leave the others alone.
-    fireEvent.change(screen.getByLabelText(/Negative prompt/), { target: { value: "fog" } });
+    fireEvent.change(await screen.findByLabelText(/Negative prompt/), { target: { value: "fog" } });
     await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(
       chat.id,
       expect.objectContaining({
@@ -1566,7 +1624,7 @@ describe("App", () => {
     expect(screen.getByRole("dialog", { name: "Video settings" })).toBeInTheDocument();
     // Value 81 comes from the chat's video bag, not the field default (49),
     // proving the video role reads its own bag rather than merely retitling.
-    expect(screen.getByRole("spinbutton", { name: /Frames/ })).toHaveValue(81);
+    expect(await screen.findByRole("spinbutton", { name: /Frames/ })).toHaveValue(81);
 
     fireEvent.click(screen.getByRole("button", { name: "image" }));
     fireEvent.keyDown(screen.getByRole("dialog", { name: "Image settings" }), { key: "Escape" });
@@ -1596,7 +1654,7 @@ describe("App", () => {
     vi.mocked(api.chats).mockResolvedValue([chat]);
     vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
     vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
-    vi.mocked(api.workflows).mockResolvedValue([{
+    setWorkflowFixtures([{
       id: "workflow-auto-schema",
       name: "Schema image",
       operation: "text_to_image",
@@ -1715,7 +1773,7 @@ describe("App", () => {
     expect(screen.queryByRole("group", { name: "Image edit change strength mode" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "image" }));
     expect(screen.getByRole("dialog", { name: "Image settings" })).toBeInTheDocument();
-    expect(screen.getByRole("group", { name: "Image edit change strength mode" })).toBeInTheDocument();
+    expect(await screen.findByRole("group", { name: "Image edit change strength mode" })).toBeInTheDocument();
     fireEvent.keyDown(screen.getByRole("dialog", { name: "Image settings" }), { key: "Escape" });
 
     // The attachment Edit button persists routing_mode without touching the
@@ -1728,7 +1786,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(screen.getByRole("dialog", { name: "Image settings" })).toBeInTheDocument();
     expect(screen.queryByRole("group", { name: "Settings role" })).not.toBeInTheDocument();
-    expect(screen.getByRole("group", { name: "Image edit change strength mode" })).toBeInTheDocument();
+    expect(await screen.findByRole("group", { name: "Image edit change strength mode" })).toBeInTheDocument();
     fireEvent.keyDown(screen.getByRole("dialog", { name: "Image settings" }), { key: "Escape" });
 
     // Returning to Auto through the mode select brings the picker back on
@@ -1887,7 +1945,7 @@ describe("App", () => {
     vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
     vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
     vi.mocked(api.projectWorkflowSelections).mockResolvedValue([{ selector_capability: "video", mode: "revision", workflow_family_id: null, workflow_revision_id: "revision-video", legacy_profile_id: null }]);
-    vi.mocked(api.workflows).mockResolvedValue([{
+    setWorkflowFixtures([{
       id: "workflow-lora",
       name: "LoRA image",
       operation: "text_to_image",
@@ -1928,7 +1986,7 @@ describe("App", () => {
       use_case: "",
       auto_apply: false,
       default_model_strength: 1,
-      default_clip_strength: 1,
+      default_clip_strength: 1, typed_trigger_words: [],
       verified_at: stamp,
       created_at: stamp,
       updated_at: stamp,
@@ -2253,7 +2311,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-    fireEvent.click(screen.getByText("Settings"));
+    await openSettings("Advanced");
     expect(await screen.findByText("Test CPU 9000")).toBeInTheDocument();
     expect(screen.getByText("CPU model")).toBeInTheDocument();
     expect(screen.queryByText(/logical processors/i)).not.toBeInTheDocument();
@@ -2288,7 +2346,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Data & backups");
     expect(await screen.findByText(first.name)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: `Verify backup ${first.name}` }));
     expect(await screen.findByText("Backup verified.")).toBeInTheDocument();
@@ -2316,7 +2374,7 @@ describe("App", () => {
     );
     renderApp();
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Data & backups");
     const create = await screen.findByRole("button", { name: "Back up state" });
     fireEvent.click(create);
     expect(await screen.findByRole("button", { name: "Backing up…" })).toBeDisabled();
@@ -2375,7 +2433,7 @@ describe("App", () => {
     });
     renderApp();
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Advanced");
     expect(await screen.findByText("v0.28.0 · Manual setup required")).toBeInTheDocument();
     expect(
       screen.getByText(
@@ -2437,7 +2495,7 @@ describe("App", () => {
     });
     renderApp();
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("About & support");
     expect(await screen.findByText("Version 0.1.7")).toBeInTheDocument();
     expect(screen.getByText("C:\\Users\\someone\\LM Atelier\\data")).toBeInTheDocument();
     expect(screen.getByText("C:\\Users\\someone\\LM Atelier\\data\\artifacts")).toBeInTheDocument();
@@ -2499,7 +2557,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Model sources");
     const input = await screen.findByLabelText(`${label} access token`);
     fireEvent.change(input, { target: { value: "temporary-token" } });
     fireEvent.click(screen.getByRole("button", { name: `Save ${label} token` }));
@@ -2528,7 +2586,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Models & generation");
     expect(await screen.findByText(/Local chat.*default/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Edit profile: Local chat" }));
     expect(await screen.findByText("Edit profile")).toBeInTheDocument();
@@ -3045,7 +3103,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    const status = await screen.findByRole("status");
+    const status = (await screen.findByText(/Preparing chat model/)).closest('[role="status"]');
     expect(status).toHaveTextContent(/Preparing chat model/);
     expect(status).toHaveTextContent(/· 0s/);
   });
@@ -3074,7 +3132,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Advanced");
     expect(await screen.findByText("Ready · PID 123")).toBeInTheDocument();
     expect(screen.getByText("current RAM")).toBeInTheDocument();
     expect(screen.getByText("measured peak")).toBeInTheDocument();
@@ -3112,7 +3170,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Advanced");
     const alert = await screen.findByRole("alert");
     // The headline says what happened; the exit code is no longer the lead.
     expect(alert).toHaveTextContent("The chat engine could not read the selected model.");
@@ -3156,7 +3214,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Advanced");
     // The ordinary controls stay refused while jobs are queued...
     expect(await screen.findByRole("button", { name: "Unload chat worker" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Restart chat worker" })).toBeDisabled();
@@ -3176,7 +3234,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Advanced");
     const input = await screen.findByLabelText("Worker startup time limit in seconds");
     await waitFor(() => expect(input).toHaveValue(60));
     const save = screen.getByRole("button", { name: "Save limit" });
@@ -3211,7 +3269,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Advanced");
     fireEvent.click(await screen.findByText("Test structured tools"));
     expect(await screen.findByText("Structured tool schema passed on mock 1.")).toBeInTheDocument();
   });
@@ -3223,7 +3281,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Advanced");
     expect(await screen.findByRole("img", { name: "mock engine: ready" })).toBeInTheDocument();
     expect(screen.queryByText("Download redacted diagnostics")).not.toBeInTheDocument();
     expect(screen.queryByText("FFmpeg")).not.toBeInTheDocument();
@@ -3350,11 +3408,11 @@ describe("App", () => {
       name: "Installed chat capability",
     });
     fireEvent.change(capability, { target: { value: "vision" } });
-    expect(screen.getByRole("button", { name: "Delete Visual observer" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "Delete Visual observer" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Delete Text specialist" })).not.toBeInTheDocument();
 
     fireEvent.change(capability, { target: { value: "text" } });
-    expect(screen.getByRole("button", { name: "Delete Text specialist" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "Delete Text specialist" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Delete Visual observer" })).not.toBeInTheDocument();
   });
 
@@ -3429,7 +3487,7 @@ describe("App", () => {
       use_case: "",
       auto_apply: false,
       default_model_strength: 1,
-      default_clip_strength: 1,
+      default_clip_strength: 1, typed_trigger_words: [],
       verified_at: "2026-07-22T00:00:00Z",
       created_at: "2026-07-22T00:00:00Z",
       updated_at: "2026-07-22T00:00:00Z",
@@ -3803,7 +3861,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-    fireEvent.click(await screen.findByText("Model library"));
+    fireEvent.click(await screen.findByRole("button", { name: "Model library" }));
     expect(await screen.findByRole("button", { name: "Needs vLLM" })).toBeDisabled();
 
     rendered.unmount();
@@ -3854,7 +3912,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-    fireEvent.click(await screen.findByText("Model library"));
+    fireEvent.click(await screen.findByRole("button", { name: "Model library" }));
     fireEvent.click(await screen.findByRole("button", { name: "Install" }));
     await waitFor(() => expect(api.catalogPreflight).toHaveBeenCalledWith(
       model.remote_id,
@@ -3960,7 +4018,7 @@ describe("App", () => {
 
   it("renders workflow revision history and declared controls", async () => {
     const stamp = "2026-07-22T00:00:00Z";
-    vi.mocked(api.workflows).mockResolvedValue([
+    setWorkflowFixtures([
       {
         id: "workflow-1",
         name: "Studio image",
@@ -4015,7 +4073,7 @@ describe("App", () => {
     expect(screen.queryByText("Restore as new revision")).not.toBeInTheDocument();
   });
   it("reviews a raw ComfyUI workflow instead of rejecting it", async () => {
-    vi.mocked(api.workflows).mockResolvedValue([]);
+    setWorkflowFixtures([]);
     vi.mocked(api.analyzeWorkflowPackage).mockResolvedValue({
       format_version: "0.4",
       frontend_version: "1.45.21",
@@ -4070,20 +4128,20 @@ describe("App", () => {
     expect(screen.getByText("blocked")).toBeInTheDocument();
     expect(api.importWorkflow).not.toHaveBeenCalled();
 
-    // An unresolved package with one pinned version can be prepared safely.
     vi.mocked(api.ensureWorkflowPackageDraft).mockResolvedValue({ id: "draft-1", current_revision_id: "draft-revision-1" } as never);
     vi.mocked(api.prepareWorkflowPackage).mockResolvedValue({ id: "job-prep" } as never);
-    fireEvent.click(screen.getByRole("button", { name: "Prepare 1.2.3" }));
+    expect(screen.getByText(/Registry releases can run automatically/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Install and enable 1.2.3" }));
     await waitFor(() =>
       // The original graph travels with the selection so the API can derive
       // the package's exact node closure independently.
       expect(api.prepareWorkflowPackage).toHaveBeenCalledWith("rgthree-comfy", "1.2.3", graph, "draft-revision-1"),
     );
-    expect(await screen.findByText(/stays inactive and untrusted/)).toBeInTheDocument();
+    expect(await screen.findByText(/Extension setup queued/)).toBeInTheDocument();
   });
 
   it("still imports LM Atelier bundles directly", async () => {
-    vi.mocked(api.workflows).mockResolvedValue([]);
+    setWorkflowFixtures([]);
     vi.mocked(api.importWorkflow).mockResolvedValue({
       id: "workflow-imported",
       name: "Bundle",
@@ -4110,7 +4168,7 @@ describe("App", () => {
     expect(screen.queryByRole("dialog", { name: "Review workflow package" })).not.toBeInTheDocument();
   });
 
-  it("browses durable EntryV1 media without delete or cleanup authority", async () => {
+  it("browses durable library media with recoverable membership deletion", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const entrySha = "a".repeat(64);
     vi.mocked(api.artifactLibrary).mockResolvedValue({
@@ -4172,7 +4230,7 @@ describe("App", () => {
     expect(await screen.findByText("observatory.png")).toBeInTheDocument();
     expect(screen.getByText(/2\.0 KB/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /cleanup/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /delete/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Move observatory.png to Recently Deleted" })).toBeInTheDocument();
     expect(api.artifacts).not.toHaveBeenCalled();
   });
 
@@ -4316,7 +4374,7 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Media library"));
     expect(await screen.findByText("one.png")).toBeVisible();
     expect(screen.getByText("two.png")).toBeVisible();
-    expect(screen.queryByRole("checkbox", { name: /Select/ })).not.toBeInTheDocument();
+    screen.getAllByRole("checkbox", { name: /^Select (one|two)\.png$/ }).forEach((checkbox) => fireEvent.click(checkbox));
     expect(screen.queryByText(/images selected/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Edit together/ })).not.toBeInTheDocument();
   });
@@ -4505,7 +4563,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Models & generation");
     await screen.findByText("Image profile");
     fireEvent.click(screen.getByRole("button", { name: "Edit profile: Image profile" }));
     expect(await screen.findByText("Negative prompt")).toBeInTheDocument();
@@ -4539,7 +4597,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Models & generation");
     await screen.findByText("Chat preset");
     fireEvent.click(screen.getByRole("button", { name: "Edit preset: Chat preset" }));
     expect(await screen.findByText("Maximum output")).toBeInTheDocument();
@@ -5170,7 +5228,7 @@ describe("App", () => {
 
     const composer = await screen.findByRole("textbox", { name: "Message" });
     expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("auto");
-    expect(screen.getByText("Auto chooses the request type at send.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Hide workflows" })).toBeVisible();
     for (const label of ["Text workflow", "Image workflow", "Video workflow"]) {
       expect(screen.getByRole("combobox", { name: label })).toBeVisible();
     }
@@ -5554,7 +5612,7 @@ describe("App", () => {
     expect(await screen.findByText("Stay with the first chat")).toBeVisible();
 
     fireEvent.click(screen.getByText(second.title));
-    expect(await screen.findByRole("heading", { name: second.title })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: second.title })).toBeInTheDocument();
     expect(screen.queryByText("Stay with the first chat")).not.toBeInTheDocument();
     const secondComposer = screen.getByRole("textbox", { name: "Message" });
     expect(secondComposer).toBeEnabled();
@@ -5565,14 +5623,14 @@ describe("App", () => {
       finishTurn?.(accepted);
     });
     await waitFor(() => {
-      const origin = client.getQueryData<ChatDetail>(["chat", first.id]);
-      expect(origin?.messages.map((message) => message.id)).toEqual([
+      const origin = client.getQueryData<InfiniteData<ChatMessageWindow>>(["chat", first.id, "messages", "assistant-origin"]);
+      expect(origin?.pages.flatMap((page) => page.messages.map((message) => message.id))).toEqual([
         "user-origin",
         "assistant-origin",
       ]);
     });
-    expect(client.getQueryData<ChatDetail>(["chat", second.id])?.messages).toEqual([]);
-    expect(screen.getByRole("heading", { name: second.title })).toBeInTheDocument();
+    expect(client.getQueryData<InfiniteData<ChatMessageWindow>>(["chat", second.id, "messages", null])?.pages.flatMap((page) => page.messages)).toEqual([]);
+    expect(screen.getByRole("region", { name: second.title })).toBeInTheDocument();
   });
 
   it("applies the pinned workflow schema to per-turn controls", async () => {
@@ -5607,7 +5665,7 @@ describe("App", () => {
     vi.mocked(api.chats).mockResolvedValue([chat]);
     vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
     vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
-    vi.mocked(api.workflows).mockResolvedValue([{
+    setWorkflowFixtures([{
       id: "workflow-video",
       name: "Fixed video",
       operation: "text_to_video",
@@ -5639,7 +5697,7 @@ describe("App", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
     const frames = await screen.findByRole("spinbutton", { name: /Frames/ });
-    expect(frames).toHaveValue(81);
+    await waitFor(() => expect(frames).toHaveValue(81));
     expect(frames).toBeDisabled();
     expect(screen.getByText(/Fixed by this workflow at 81/)).toBeInTheDocument();
   });
@@ -5741,7 +5799,7 @@ describe("App", () => {
     expect(messageMeta.compareDocumentPosition(uploadedImage) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     // The result of an edit can be held against its source directly.
-    fireEvent.click(screen.getByRole("button", { name: "Compare with the source" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Compare with the source" }));
     expect(await screen.findByRole("dialog", { name: "Compare with the source" })).toBeVisible();
     expect(screen.getByRole("img", { name: "The source before the edit" })).toBeVisible();
     expect(screen.getByRole("img", { name: "The edited result" })).toBeVisible();
@@ -5753,179 +5811,10 @@ describe("App", () => {
     );
   });
   it("selects prior-image workflow controls only for an explicit visual follow-up", async () => {
-    const stamp = "2026-07-22T00:00:00Z";
-    const chat = {
-      id: "chat-prior-image-controls",
-      project_id: null,
-      title: "Prior image controls",
-      pinned: false, archived: false,
-      routing_mode: "image" as const,
-      confirm_uncertain_media: false,
-      active_chat_profile_id: null,
-      active_image_profile_id: null,
-      active_video_profile_id: null,
-      active_head_message_id: "assistant-prior-image",
-      created_at: stamp,
-      updated_at: stamp,
-    };
-    const userMessage = {
-      id: "user-prior-image",
-      chat_id: chat.id,
-      parent_id: null,
-      role: "user" as const,
-      status: "complete" as const,
-      parts: [{ id: "prior-prompt", position: 0, type: "text" as const, text: "Make an apple", artifact_id: null, metadata_json: {} }],
-      created_at: stamp,
-      updated_at: stamp,
-    };
-    const assistantMessage = {
-      id: "assistant-prior-image",
-      chat_id: chat.id,
-      parent_id: userMessage.id,
-      role: "assistant" as const,
-      status: "complete" as const,
-      parts: [{ id: "prior-image", position: 0, type: "image" as const, text: null, artifact_id: "sha256:prior", metadata_json: {} }],
-      created_at: stamp,
-      updated_at: stamp,
-    };
-    const workflow = (
-      id: string,
-      operation: "text_to_image" | "image_to_image",
-      title: string,
-    ) => ({
-      id,
-      name: title,
-      operation,
-      description: "",
-      current_revision_id: `${id}-revision`,
-      revisions: [{
-        id: `${id}-revision`,
-        workflow_id: id,
-        version: 1,
-        engine: "mock",
-        engine_version: null,
-        ui_graph_json: {},
-        api_graph_json: {},
-        input_schema_json: {
-          type: "object",
-          properties: {
-            negative_prompt: {
-              type: "string",
-              title,
-              default: "",
-            },
-            ...(operation === "image_to_image" ? {
-              strength: {
-                type: "number",
-                title: "Edit strength",
-                default: 0.9,
-                minimum: 0,
-                maximum: 1,
-                "x-lm-atelier-visibility": "basic",
-              },
-              steps: { type: "integer", title: "Steps", default: 4 },
-            } : {}),
-          },
-          ...(operation === "image_to_image" ? {
-            "x-lm-atelier-edit-calibration": {
-              version: 1,
-              edit_strength: {
-                parameter: "strength",
-                minimum: 0,
-                maximum: 1,
-                recommended: {
-                  minimal: 0.3,
-                  localized: 0.45,
-                  replacement: 0.6,
-                  global: 0.8,
-                  fallback: 0.5,
-                },
-              },
-              schedule: {
-                steps_parameter: "steps",
-                minimum_effective_steps: {
-                  localized: 2,
-                  replacement: 3,
-                  global: 3,
-                },
-              },
-            },
-          } : {}),
-        },
-        dependencies_json: {},
-        trusted: true,
-        created_at: stamp,
-      }],
-    });
-    localStorage.setItem("local-lm-chat", chat.id);
-    vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
-    vi.mocked(api.chats).mockResolvedValue([chat]);
-    vi.mocked(api.chat).mockResolvedValue({
-      ...chat,
-      messages: [userMessage, assistantMessage],
-    });
-    vi.mocked(api.workflows).mockResolvedValue([
-      workflow("fresh-image", "text_to_image", "Fresh image exclusion"),
-      workflow("edit-image", "image_to_image", "Edit image exclusion"),
-    ]);
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(
-      <QueryClientProvider client={client}>
-        <App />
-      </QueryClientProvider>,
-    );
-
-    // The router, not the browser, decides whether a draft reuses the prior
-    // image; this stands in for it with the answers the server gives.
-    vi.mocked(api.classifyDraft).mockImplementation(async (_chatId, draft) => ({
-      references_prior_visual: draft.trim() === "Make it green",
-    }));
-
-    const composer = await screen.findByRole("textbox", { name: "Message" });
-    fireEvent.change(composer, { target: { value: "Create an image of a pear" } });
-    await waitFor(() => expect(api.classifyDraft).toHaveBeenCalledWith(
-      chat.id,
-      "Create an image of a pear",
-      "image",
-    ));
-    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
-    expect(screen.getByLabelText(/Fresh image exclusion/)).toBeInTheDocument();
-    expect(screen.queryByLabelText(/Edit image exclusion/)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
-
-    fireEvent.change(composer, { target: { value: "Make it green" } });
-    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
-    await waitFor(() => expect(screen.getByLabelText(/Edit image exclusion/)).toBeInTheDocument());
-    expect(screen.queryByLabelText(/Fresh image exclusion/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Auto" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByText("Predicted: localized")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Manual change strength")).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Manual" }));
-    expect(screen.getByLabelText("Manual change strength")).toHaveValue(0.5);
-    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, {
-      generation_settings_json: {
-        image: {
-          _image_edit_strength_mode: "manual",
-          strength: 0.5,
-        },
-      },
-    }));
-    fireEvent.click(screen.getByRole("button", { name: "Auto" }));
-    expect(screen.queryByLabelText("Manual change strength")).not.toBeInTheDocument();
-    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, {
-      generation_settings_json: {
-        image: { _image_edit_strength_mode: "auto" },
-      },
-    }));
-    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
-    fireEvent.click(screen.getByRole("button", { name: "Edit this image" }));
-    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, { routing_mode: "image" }));
-    expect(screen.getByText("sha256:prior")).toBeInTheDocument();
-    expect(composer).toHaveFocus();
+    await exercisePriorImageWorkflowControls(roleAwareMediaEngine, setWorkflowFixtures);
   });
 
-  it("isolates unsent text per chat and clears visual edit targets when switching", async () => {
+  it("isolates the unsent draft per chat, attachments included, and clears it from the other chat", async () => {
     const stamp = "2026-07-30T00:00:00Z";
     const first: Chat = {
       id: "chat-draft-first",
@@ -6004,14 +5893,14 @@ describe("App", () => {
     expect(await screen.findByRole("button", { name: /Remove Generated image: sha256:synthetic/ })).toBeVisible();
 
     fireEvent.click(screen.getByText(second.title));
-    expect(await screen.findByRole("heading", { name: second.title })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: second.title })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
     expect(screen.queryByRole("button", { name: /Remove Generated image: sha256:synthetic/ })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByText(first.title));
-    expect(await screen.findByRole("heading", { name: first.title })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: first.title })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("Unsent first-chat draft");
-    expect(screen.queryByRole("button", { name: /Remove Generated image: sha256:synthetic/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Remove Generated image: sha256:synthetic/ })).toBeVisible();
   });
 
   it.each(["other-message", "other-revision", "target-revision"] as const)(
@@ -6085,7 +5974,7 @@ describe("App", () => {
     let currentDetail = detail;
     vi.mocked(api.chat).mockImplementation(async () => currentDetail);
     vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
-    vi.mocked(api.workflows).mockResolvedValue([
+    setWorkflowFixtures([
       workflow("text_to_video", "Text video frames"),
       workflow("image_to_video", "Image motion frames"),
     ]);
@@ -6197,7 +6086,7 @@ describe("App", () => {
     expect(screen.getByText("Uploaded image")).toBeVisible();
     fireEvent.change(composer, { target: { value: "Replace the jacket" } });
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
-    expect(screen.getByRole("group", { name: "Image edit change strength mode" })).toBeInTheDocument();
+    expect(await screen.findByRole("group", { name: "Image edit change strength mode" })).toBeInTheDocument();
     expect(screen.getByText("Predicted: replacement")).toBeInTheDocument();
   });
 
@@ -6368,20 +6257,20 @@ describe("App", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
-    fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "4096" } });
+    fireEvent.change(await screen.findByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "4096" } });
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 
     fireEvent.click(screen.getByText(secondChat.title));
-    await screen.findByRole("heading", { name: secondChat.title });
+    await screen.findByRole("region", { name: secondChat.title });
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
-    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(1024);
-    fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "2048" } });
+    expect(await screen.findByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(1024);
+    fireEvent.change(await screen.findByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "2048" } });
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 
     fireEvent.click(screen.getByText(firstChat.title));
-    await screen.findByRole("heading", { name: firstChat.title });
+    await screen.findByRole("region", { name: firstChat.title });
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
-    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(4096);
+    expect(await screen.findByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(4096);
   });
 
   it("persists each chat mode, role defaults, and preset binding without leakage", async () => {
@@ -6446,11 +6335,11 @@ describe("App", () => {
       firstChat.id,
       { routing_mode: "image" },
     ));
-    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" })); await screen.findByRole("option", { name: imagePreset.name });
     fireEvent.change(screen.getByRole("combobox", { name: "image preset" }), {
       target: { value: imagePreset.id },
     });
-    fireEvent.change(screen.getByLabelText(/Negative prompt/), {
+    fireEvent.change(await screen.findByLabelText(/Negative prompt/), {
       target: { value: "no fog" },
     });
     await waitFor(() => {
@@ -6464,18 +6353,18 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 
     fireEvent.click(screen.getByText(secondChat.title));
-    await screen.findByRole("heading", { name: secondChat.title });
+    await screen.findByRole("region", { name: secondChat.title });
     expect(screen.getByDisplayValue("Video")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
-    expect(screen.getByRole("spinbutton", { name: /Frames/ })).toHaveValue(81);
+    expect(await screen.findByRole("spinbutton", { name: /Frames/ })).toHaveValue(81);
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 
     fireEvent.click(screen.getByText(firstChat.title));
-    await screen.findByRole("heading", { name: firstChat.title });
+    await screen.findByRole("region", { name: firstChat.title });
     expect(screen.getByDisplayValue("Image")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(screen.getByRole("combobox", { name: "image preset" })).toHaveValue(imagePreset.id);
-    expect(screen.getByLabelText(/Negative prompt/)).toHaveValue("no fog");
+    expect(await screen.findByLabelText(/Negative prompt/)).toHaveValue("no fog");
   });
 
   it("shows message timestamps and quotes an answer into the composer", async () => {
@@ -6629,5 +6518,68 @@ describe("App", () => {
     await waitFor(() => expect(vi.mocked(api.upload)).toHaveBeenCalledWith(pasted));
     expect(await screen.findByRole("link", { name: "Preview clipboard.png" })).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("Only images can be pasted.");
+  });
+
+  it.each(["answer-one", "question-one"])("keeps search consent reachable with active branch %s", async (head) => {
+    const stamp = "2026-09-11T00:00:00Z";
+    localStorage.setItem("local-lm-chat", "chat-search");
+    let chat: ChatDetail = {
+      id: "chat-search", project_id: null, title: "Material search", pinned: false, archived: false,
+      routing_mode: "text", confirm_uncertain_media: false,
+      active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null,
+      active_head_message_id: head, created_at: stamp, updated_at: stamp,
+      messages: [
+        { id: "question-one", chat_id: "chat-search", parent_id: null, role: "user", status: "complete",
+          parts: [{ id: "question-part", position: 0, type: "text", text: "Compare metals",
+            artifact_id: null, metadata_json: {} }], created_at: stamp, updated_at: stamp },
+        { id: "answer-one", chat_id: "chat-search", parent_id: "question-one", role: "assistant", status: "pending",
+          parts: [], created_at: stamp, updated_at: stamp },
+      ],
+      web_searches: [{
+        run_id: "run-one", assistant_message_id: "answer-one", job_id: "job-one", revision: 3,
+        state: "awaiting_approval", query: "Compare copper and steel", provider: "CRW",
+        provider_endpoint: "https://search.example.test", dispatch_after: null,
+        results: [], result_count: 0, truncated: false, error_code: null,
+      }],
+    };
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockImplementation(async () => chat);
+    vi.mocked(api.decideSearch).mockImplementation(async () => {
+      const search = {
+        ...chat.web_searches![0]!, state: "complete" as const, job_id: null, revision: null,
+        results: [{ url: "https://materials.example.test/comparison", title: "Material comparison", snippet: "A neutral summary." }],
+        result_count: 1,
+      };
+      chat = { ...chat, web_searches: [search] };
+      return search;
+    });
+    renderApp();
+    expect(await screen.findByLabelText("Exact query")).toHaveValue("Compare copper and steel");
+    expect(screen.queryByText("Web access")).not.toBeInTheDocument();
+    expect(api.decideSearch).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => expect(api.decideSearch).toHaveBeenCalledWith("job-one", 3, "approve"));
+    if (head === "question-one") {
+      await waitFor(() => expect(screen.queryByLabelText("Exact query")).not.toBeInTheDocument());
+      expect(api.sendTurn).not.toHaveBeenCalled();
+      return;
+    }
+    const useSource = await screen.findByRole("button", { name: "Add source to message" });
+    const message = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(message, { target: { value: "Explain the comparison." } });
+    fireEvent.click(useSource);
+    expect(message).toHaveValue("Explain the comparison.\n\nhttps://materials.example.test/comparison");
+    expect(api.sendTurn).not.toHaveBeenCalled();
+    expect(api.decideSearch).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers CRW vault settings without enabling a chat or dispatching a search", async () => {
+    renderApp();
+    await openSettings("Advanced");
+    expect(await screen.findByRole("heading", { name: "Web search" })).toBeVisible();
+    expect(await screen.findByLabelText("CRW access token")).toHaveAttribute("type", "password");
+    expect(screen.getByText("Search provider: CRW at https://search.example.test")).toBeVisible();
+    expect(api.updateChat).not.toHaveBeenCalled();
+    expect(api.decideSearch).not.toHaveBeenCalled();
   });
 });

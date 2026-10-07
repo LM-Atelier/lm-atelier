@@ -8,6 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from local_lm.adapter_grammar_lookup import UNBOUND, stack_grammar
+from local_lm.adapter_grammars import StackGrammar
 from local_lm.db import Base
 from local_lm.models import AdapterPromptGrammar, ModelAssetInstall, WorkflowDependencyBinding
 from local_lm.prompt_grammar import canonical_grammar_digest, normalize_grammar
@@ -80,13 +81,13 @@ def _grammar(session: Session, install_id: str, **changes: object) -> None:
         "reviewed_at": datetime.now(UTC),
     }
     values.update(changes)
-    session.add(AdapterPromptGrammar(**values))  # type: ignore[arg-type]
+    session.add(AdapterPromptGrammar(**values))
     session.flush()
 
 
 def _resolve(
     session: Session, install_ids: list[str], *, automatic: bool = True, **changes: object
-):  # type: ignore[no-untyped-def]
+) -> StackGrammar:
     values: dict[str, object] = {
         "workflow_activation_id": ACTIVATION,
         "lora_settings": [{"asset_id": item, "enabled": True} for item in install_ids],

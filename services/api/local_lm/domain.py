@@ -133,7 +133,9 @@ class JobKind(StrEnum):
     ACTIVATE = "activate"
     DOWNLOAD = "download"
     REGISTRY_PREPARE = "registry_prepare"
+    WORKFLOW_INSTALL = "workflow_install"
     EXPORT = "export"
+    MEDIA_UTILITY = "media_utility"
 
 
 class JobStatus(StrEnum):

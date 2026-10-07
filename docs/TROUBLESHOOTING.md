@@ -14,6 +14,12 @@ means:
   the first time it is needed; **Install runtime** starts it now. Confirm free
   disk space first: ComfyUI needs about 2 GB to download and 8 GB free to
   install.
+- **The runtime installed by another version of LM Atelier is still in use.
+  Install this version's runtime to switch.** Another version of LM Atelier
+  installed a different runtime release, and this version still launches it, so
+  generation keeps working. **Install runtime** downloads the release this
+  version was tested with and switches to it. The runtime card in the
+  **Engines** section of **Settings > Advanced** names both releases.
 - **The required runtime did not start or install.** The download or extraction
   failed. Retry it. If it keeps failing, check free disk space and confirm that
   security software is not quarantining the extracted files.
@@ -188,6 +194,7 @@ asking for help.
 | `install_in_progress` | The model is being installed. |
 | `worker_starting` | The managed worker is starting. |
 | `generation_verification_running` | The local generation test is running. |
+| `generation_verification_queued` | The local generation test is waiting to start. |
 
 The first ComfyUI install expands to several gigabytes across tens of thousands
 of files, so "being installed" can legitimately last several minutes with no
@@ -198,12 +205,13 @@ visible change. Give it time before assuming it has hung.
 | Code | What you were shown |
 |---|---|
 | `runtime_missing` | The required runtime is not installed. |
+| `runtime_other_version` | The runtime installed by another version of LM Atelier is still in use. Install this version's runtime to switch. |
 | `runtime_failed` | The required runtime did not start or install. |
 | `runtime_unsupported` | Automatic setup for the required runtime is unavailable on this machine. |
 
-`runtime_missing` and `runtime_failed` both offer a button that installs or
-retries; a failed install is safe to retry, and a partial download is discarded
-rather than reused.
+`runtime_missing`, `runtime_other_version` and `runtime_failed` offer a button
+that installs or retries; a failed install is safe to retry, and a partial
+download is discarded rather than reused.
 
 `runtime_unsupported` deliberately offers **no** action. It means this machine
 cannot run that runtime - not that something went wrong - and the message
@@ -252,6 +260,8 @@ outside the ComfyUI core - it stays untrusted and needs review.
 | `activation_stale` | The model must be rechecked for the current runtime and hardware. |
 | `generation_verification_required` | Run one quick local generation test. |
 | `generation_verification_failed` | The local generation test did not complete. |
+| `generation_verification_paused` | Generation is paused, so the local test cannot start. Resume generation under View accepted work. |
+| `generation_verification_pausing` | Generation is finishing its current work and will then pause, so the local test cannot start. Resume generation under View accepted work. |
 
 `activation_stale` does not mean anything broke. Evidence records the runtime
 and the machine it was proven on, so a runtime update can require a recheck.
@@ -259,6 +269,12 @@ Activation is in-place and does not re-download the model.
 
 The generation test is the only step that proves the whole path works end to
 end, which is why setup is not finished without it.
+
+The two paused messages are not a fault, and nothing is retrying behind them.
+Generation dispatch is paused, so the test is sitting in the queue and will stay
+there until generation is resumed - which is deliberate, and setup will not
+finish on its own meanwhile. Open **View accepted work** and resume generation
+there; the test starts by itself once the queue is open again.
 
 ### The worker
 

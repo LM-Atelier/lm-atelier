@@ -1,30 +1,66 @@
-import { Download, Star, X } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useReducer, useState } from "react";
+import { Star } from "lucide-react";
+import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { GenerationIdentitySummary } from "./GenerationIdentitySummary";
 import { StudioOpenImage } from "./StudioOpenImage";
 import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
+import { StudioCloseButton } from "./StudioCloseButton";
+import { StudioCompare } from "./StudioCompare";
+import { StudioSideBySide } from "./StudioSideBySide";
+import { StudioExportLink } from "./StudioExportLink";
+import { StudioHideResult } from "./StudioHideResult";
+import { hideStudioStep, showStudioSteps, useStudioHiddenSteps } from "./studioHiddenSteps";
+import { StudioTryAnother } from "./StudioTryAnother";
+import { StudioUseInChat } from "./StudioUseInChat";
+import type { StudioPictureForChat } from "./useStudioPictureForChat";
 import { StudioExtendHandles } from "./StudioExtendHandles";
+import { StudioResultCount } from "./StudioResultCount";
+import { StudioRunningEdit } from "./StudioRunningEdit";
+import { StudioApplyFailure, type StudioSentWords } from "./StudioApplyFailure";
+import { studioApplyProgress } from "./studioApplyProgress";
 import { StudioRecipes } from "./StudioRecipes";
-import { StudioToolGuidance } from "./StudioToolGuidance";
+import { StudioSelectionControls } from "./StudioSelectionTool";
+import { StudioCapabilityCheck, StudioToolGuidance } from "./StudioToolGuidance";
+import { StudioToolOptions } from "./StudioToolOptions";
 import { StudioToolRail } from "./StudioToolRail";
 import { StudioWorkflowSelector } from "./StudioWorkflowSelector";
 import { artifactSource } from "./messageMedia";
-import { coverage, encodeMaskPng, isEmpty } from "./studioMasks";
+import { coverage } from "./studioMasks";
+import { studioApplyLabel, studioToolReady } from "./studioApplyPlan";
+import { applyStudioEdit } from "./studioApplyEdit";
+import { studioStepAncestors, studioStepOrigin } from "./studioStepOrigin";
+import { studioRecipeSource } from "./studioRecipeSource";
+import { readSourcePixels } from "./studioSourcePixels";
+import { useAdjustedPreview } from "./useAdjustedPreview";
+import { useCaptionPreview } from "./useCaptionPreview";
+import { useStraightenPreview } from "./useStraightenPreview";
+import { paintRgb } from "./studioPaint";
 import {
-  initialToolState,
   defaultInstruction,
+  initialToolState,
+  snapshotBeforeGesture,
   studioToolReducer,
   toolFor,
+  toolMarksPicture,
   toolUsesMask,
   type StudioToolKind,
 } from "./studioToolState";
+import { useStudioCompare } from "./useStudioCompare";
+import { SUBJECT_ELSEWHERE, useStudioSubjectSelection } from "./useStudioSubjectSelection";
+import { useStudioEnlargement } from "./useStudioEnlargement";
 import { useStudioImage } from "./useStudioImage";
 import { useStudioSession, type StudioStep } from "./useStudioSession";
-import { useConfirm } from "./useConfirm";
+import { useStudioDraft } from "./useStudioDraft";
+import { useStudioBackground } from "./useStudioBackground";
+import { useStudioSubjectPlace } from "./useStudioSubjectPlace";
 import type { EditTemplate, GenerationIdentity } from "./types";
+
+/** Tools that make their edit without a model, each from its own panel, so they have no Apply of the model's. */
+const EXACT_EDITS: readonly string[] = [
+  "transform", "perspective", "crop", "resize", "canvas", "adjust", "blur", "paint", "caption",
+];
 
 /** The Image Studio: a canvas-first editing surface, not a conversation.
  *
@@ -39,6 +75,7 @@ export function StudioView({
   onOpenArtifact,
   onOpenWorkflows,
   onClose,
+  onUseInChat,
 }: {
   sourceArtifactId: string | null;
   sourceChatId?: string | null;
@@ -47,12 +84,18 @@ export function StudioView({
   onOpenWorkflows: () => void;
   /** Put the picture down and go back to an empty studio. */
   onClose: () => void;
+  /** Attach the picture on screen to a chat's next message. */
+  onUseInChat?: (picture: StudioPictureForChat) => void;
 }) {
-  const { sessionId, steps, previewArtifactId, busy, error, apply } = useStudioSession(
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    heading.current?.focus();
+  }, [sourceArtifactId]);
+  const { sessionId, session, steps, previewArtifactId, busy: sessionBusy, error, apply, again, localEdit, stop, stopping } = useStudioSession(
     sourceArtifactId,
     sourceChatId,
   );
-  const [confirmDialog, confirm] = useConfirm();
+  const hidden = useStudioHiddenSteps(sessionId);
   // Every result is already an artifact in the library - the studio's turns
   // are ordinary turns. What was missing is a way to say "keep this one",
   // because a picture among hundreds is findable only in principle.
@@ -62,8 +105,22 @@ export function StudioView({
   // here or from the library - showed it as unmarked, and the control could
   // only ever mark, never take it back.
   const client = useQueryClient();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [instruction, setInstruction] = useState("");
+  const draft = useStudioDraft(sessionId);
+  // What this visit chose and typed, and until then what the session's draft had, which is known
+  // only once the session is: after a reload the Studio is open before a picture is chosen.
+  const [chosen, setSelectedId] = useState<string | null>();
+  const selectedId = chosen === undefined ? draft.selectedId : chosen;
+  const [typed, setInstruction] = useState<string>();
+  const instruction = typed ?? draft.instruction;
+  const [selectionError, setSelectionError] = useState<string | null>(null);
+  // Cleared from the box once an edit is taken, and offered back if it fails.
+  const [sentWords, setSentWords] = useState<StudioSentWords | null>(null);
+  const [results, setResults] = useState(1);
+  // Replacing a background or a subject takes several steps; the studio stays busy in between.
+  const cutoutEdit = useStudioBackground(sessionId, session, apply, setSelectionError);
+  const subjectEdit = useStudioSubjectPlace(sessionId, session, apply, localEdit, setSelectionError);
+  const replacing = cutoutEdit.busy || subjectEdit.busy;
+  const applyProgress = studioApplyProgress(session);
   // The recipe an apply should run under. Cleared whenever the instruction is
   // edited by hand: at that point the words are no longer the recipe's, and
   // running its workflow would attribute a result to something it did not do.
@@ -86,13 +143,6 @@ export function StudioView({
     ));
   }, [sessionId]);
   const [tools, dispatch] = useReducer(studioToolReducer, undefined, initialToolState);
-  // The pointer tool is rebuilt whenever the mode or brush changes; each one
-  // is a cheap wrapper over the shared raster, never a copy of it.
-  const pointerTool = useMemo(
-    () => toolFor(tools),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tools.kind, tools.brushRadius, tools.mask],
-  );
   const selectionCoverage = tools.mask ? coverage(tools.mask) : 0;
   // Asked once per visit rather than per apply: installing a workflow is not
   // something that happens while a picture is open.
@@ -106,12 +156,24 @@ export function StudioView({
     refetchOnMount: "always",
   });
   const activeTool = capabilities.data?.tools.find((tool) => tool.kind === tools.kind);
+  // Every cutout runs on the workflow Isolate is given.
+  const isolateTool = capabilities.data?.tools.find((tool) => tool.kind === "isolate");
   const unavailable = activeTool && !activeTool.available ? activeTool.reason : null;
+  // With no report yet, or none to be had, a model's tool waits rather than
+  // looking ready: the gap would otherwise be found only when the edit failed.
+  const unchecked = capabilities.data ? null : capabilities.isError ? "failed" : "checking";
   // Derived, never synced: with nothing chosen the studio shows the newest
-  // result, so a finished apply lands on the canvas without an effect.
-  const current = steps.find((step) => step.artifactId === selectedId) ?? steps.at(-1) ?? null;
+  // result not hidden, so a finished apply lands on the canvas without an effect.
+  const shown = steps.filter((step) => step.isSource || !hidden.has(step.artifactId));
+  const current = shown.find((step) => step.artifactId === selectedId) ?? shown.at(-1) ?? null;
 
   const currentArtifactId = current?.artifactId ?? null;
+  // Finding the subject is a cutout too, whose alpha becomes the selection of the picture it was found in.
+  const subjectSearch = useStudioSubjectSelection(sessionId, session, apply, setSelectionError, (artifactId, mask) =>
+    artifactId === currentArtifactId ? dispatch({ type: "select-subject", mask }) : setSelectionError(SUBJECT_ELSEWHERE));
+  const busy = sessionBusy || replacing || subjectSearch.busy;
+  // Offered where a workflow can cut a subject out, which the report names under Isolate.
+  const subjectWorkflow = isolateTool?.available ? isolateTool.workflow_revision_id : null;
   const artifact = useQuery({
     queryKey: ["artifact", currentArtifactId],
     queryFn: () => api.artifact(currentArtifactId!),
@@ -127,15 +189,47 @@ export function StudioView({
     },
   });
   const { bitmap, error: imageError, reload } = useStudioImage(currentArtifactId);
+  const compare = useStudioCompare(current, bitmap, Boolean(previewArtifactId), steps, hidden);
+  const enlargement = useStudioEnlargement({
+    sessionId, artifactId: currentArtifactId, active: tools.kind === "enhance" && !previewArtifactId,
+    words: defaultInstruction(tools), recipeRevisionId: recipe?.workflow_revision_id ?? undefined,
+  });
+  // Read for the wand and the light and color preview, from the picture on the canvas, and again for each new one.
+  const readsColors = tools.kind === "wand" || tools.kind === "adjust";
+  const sourcePixels = useMemo(() => (readsColors && bitmap ? readSourcePixels(bitmap) : null), [readsColors, bitmap]);
+  const adjustedPreview = useAdjustedPreview(bitmap, sourcePixels, tools.kind === "adjust" ? tools.adjustments : null);
+  const captionPreview = useCaptionPreview(bitmap, tools.kind === "caption" ? tools.caption : null);
+  const straightenPreview = useStraightenPreview(bitmap, tools.kind === "transform" ? tools.straightenDegrees : null);
+  const wordsWritten = tools.caption.text.trim() !== "";
+  // The pointer tool is rebuilt whenever the mode or brush changes; each one
+  // is a cheap wrapper over the shared raster, never a copy of it. A drag of
+  // the words is kept in the state, so moving them never rebuilds it.
+  const pointerTool = useMemo(
+    () => toolFor(tools, sourcePixels, (corners) => dispatch({ type: "set-perspective", corners }), {
+      hold: () => dispatch({ type: "hold-caption" }),
+      drag: (by) => dispatch({ type: "drag-caption", by }),
+      letGo: () => dispatch({ type: "let-go-caption" }),
+      cancel: () => dispatch({ type: "cancel-caption" }),
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tools.kind, tools.brushRadius, tools.cropShape, tools.perspective, tools.mask, tools.selectionMode,
+      tools.colorTolerance, sourcePixels, wordsWritten],
+  );
   useEffect(() => {
-    if (bitmap) {
-      dispatch({ type: "image-changed", width: bitmap.width, height: bitmap.height });
-    }
+    if (!bitmap) return;
+    // Back on the picture the Studio was left on: what was drawn there still fits it.
+    const kept = draft.take(currentArtifactId, bitmap);
+    dispatch(kept ? { type: "restore", state: kept.tools } : { type: "image-changed", width: bitmap.width, height: bitmap.height });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bitmap]);
+  useEffect(() => draft.track({ artifactId: currentArtifactId, tools, instruction, selectedId }));
+  const applyDisabled = unchecked !== null || busy || !current || Boolean(unavailable)
+    || !studioToolReady(tools, instruction, recipe, selectionCoverage, activeTool, isolateTool, workflowUnavailable,
+      enlargement.preview);
   if (!sourceArtifactId) {
     return (
       <div className="page-view studio-view">
-        <header className="page-header"><div><h1>Image Studio</h1></div></header>
+        <header className="page-header"><div><h1 ref={heading} tabIndex={-1}>Image Studio</h1></div></header>
         <StudioOpenImage onOpened={onOpenArtifact} />
       </div>
     );
@@ -144,10 +238,13 @@ export function StudioView({
   return (
     <div className="page-view studio-view">
       <header className="page-header">
-        <div><h1>Image Studio</h1></div>
+        <div><h1 ref={heading} tabIndex={-1}>Image Studio</h1></div>
         <div className="studio-header-actions">
           {current && !previewArtifactId && (
             <>
+              {compare.layer && (
+                <StudioCompare {...compare.controls} canSideBySide={compare.controls.canSideBySide && !pointerTool} />
+              )}
               {/* Every result is already in the library - the close dialog
                   beside this says so. What this does is mark one, which is
                   what makes it findable among hundreds, and it is named for
@@ -161,54 +258,28 @@ export function StudioView({
                 <Star size={14} aria-hidden="true" fill={isFavorite ? "currentColor" : "none"} />
                 {isFavorite ? "Favorited" : "Favorite"}
               </button>
-              <a
-                className="secondary compact-button"
-                href={artifactSource(current.artifactId) ?? undefined}
-                download
-              >
-                <Download size={14} aria-hidden="true" /> Export
-              </a>
+              <StudioTryAnother key={current.artifactId} session={session} current={current} busy={busy}
+                onTry={(replay) => again(replay, () => setSelectedId(null))} />
+              <StudioExportLink artifactId={current.artifactId} />
+              {sessionId && !current.isSource && <StudioHideResult onHide={() => { hideStudioStep(sessionId, current.artifactId); setSelectedId(null); }} />}
+              {onUseInChat && <StudioUseInChat ready={Boolean(artifact.data)} onUse={() => onUseInChat({ artifactId: current.artifactId, artifact: artifact.data ?? null, origin: current.isSource ? (artifact.data?.original_name ? "uploaded" : "generated") : "edited" })} />}
             </>
           )}
-          <button
-            className="secondary compact-button"
-            disabled={busy}
-            onClick={() => {
-              // Only the edits are at stake. The source picture is in the
-              // library either way, and every result is a durable artifact -
-              // what closing loses is the chain that got here, which is the
-              // part worth asking about.
-              const edited = steps.length > 1;
-              if (!edited) {
-                onClose();
-                return;
-              }
-              void confirm({
-                title: "Close this image?",
-                question: `This session has ${steps.length - 1} edit${
-                  steps.length === 2 ? "" : "s"
-                }. Closing puts the picture down and leaves the chain behind.`,
-                detail:
-                  "Every result is already in the media library; closing only "
-                  + "leaves this chain of edits behind.",
-                confirmLabel: "Close it",
-              }).then((ok) => ok && onClose());
-            }}
-          >
-            <X size={14} aria-hidden="true" /> Close
-          </button>
+          <StudioCloseButton halfway={replacing} onClose={onClose} />
         </div>
       </header>
-      {confirmDialog}
       {/* A save that fails must not look like a save that worked. The button
           only changes on success, so without this the picture silently stays
           unmarked while the label still invites the same press. */}
       {(error || keep.error) && (
         <ErrorCallout message={((error ?? keep.error) as Error).message} />
       )}
+      {/* One reason at a time: a cutout that failed says what it left as it was. */}
+      {selectionError ? <ErrorCallout message={selectionError} /> : <StudioApplyFailure session={session} sent={sentWords} onWordsBack={setInstruction} />}
       <div className="studio-layout">
         <StudioToolRail
           active={tools.kind}
+          selectionKind={tools.selectionKind}
           onSelect={(kind: StudioToolKind) => dispatch({ type: "select-tool", kind })}
           onUndo={() => dispatch({ type: "undo" })}
           onRedo={() => dispatch({ type: "redo" })}
@@ -220,26 +291,28 @@ export function StudioView({
         <div className="studio-stage">
           {previewArtifactId ? (
             <StudioGenerationPreview artifactId={previewArtifactId} />
+          ) : bitmap && compare.pair && !pointerTool ? (
+            <StudioSideBySide key={`${currentArtifactId}:${compare.controls.against ?? ""}`}
+              before={compare.pair.before} after={compare.pair.after} />
           ) : bitmap ? (
             <StudioCanvas
               image={bitmap}
+              shown={adjustedPreview ?? captionPreview ?? straightenPreview}
+              tint={tools.kind === "paint" ? { rgb: paintRgb(tools.paintColor), opacity: tools.paintOpacity / 100 } : null}
               mask={tools.mask}
               tool={pointerTool}
               maskVersion={tools.maskVersion}
-              onGestureStart={() => dispatch({ type: "gesture-start" })}
+              before={compare.layer}
+              onGestureStart={() => snapshotBeforeGesture(tools)}
               onStrokeEnd={() => dispatch({ type: "stroke-end" })}
+              // Over the picture and at its zoom: the frame is the control,
+              // so it has to be where the frame is.
+              overlay={tools.kind === "extend"
+                ? (shown) => <StudioExtendHandles tools={tools} dispatch={dispatch} picture={bitmap} shown={shown} />
+                : undefined}
             />
           ) : (
             <StudioStageLoading error={imageError} reload={reload} />
-          )}
-          {!previewArtifactId && bitmap && tools.kind === "extend" && (
-            // Over the picture rather than beside it: the frame is the
-            // control, so it has to be where the frame is.
-            <StudioExtendHandles
-              tools={tools}
-              dispatch={dispatch}
-              size={{ width: bitmap.width, height: bitmap.height }}
-            />
           )}
         </div>
         <aside className="studio-panel">
@@ -253,173 +326,85 @@ export function StudioView({
           ) : (
             <StudioWorkflowOpening selectorId={workflowSelectorId} />
           )}
-          {tools.kind !== "instruct" && (
-            <div className="studio-selection-controls">
-              <label>
-                Brush size
-                <input
-                  type="range"
-                  min={1}
-                  max={200}
-                  value={tools.brushRadius}
-                  onChange={(event) =>
-                    dispatch({ type: "set-brush-radius", radius: Number(event.target.value) })}
-                />
-              </label>
-              <div className="row-actions">
-                <button
-                  className="secondary compact-button"
-                  onClick={() => dispatch({ type: "invert" })}
-                >
-                  Invert
-                </button>
-                <button
-                  className="secondary compact-button"
-                  onClick={() => dispatch({ type: "feather" })}
-                >
-                  Soften edges
-                </button>
-                <button
-                  className="secondary compact-button"
-                  onClick={() => dispatch({ type: "clear" })}
-                >
-                  Clear
-                </button>
-              </div>
-              <small>
-                {selectionCoverage > 0
-                  ? `${(selectionCoverage * 100).toFixed(1)}% of the image selected`
-                  : "Nothing selected yet - paint over what you want to change."}
-              </small>
-            </div>
+          {toolMarksPicture(tools.kind) && (
+            <StudioSelectionControls tools={tools} dispatch={dispatch} coverage={selectionCoverage}
+              colorsUnreadable={readsColors && Boolean(bitmap) && !sourcePixels}
+              selectSubjectWaits={busy} findingSubject={subjectSearch.busy}
+              onSelectSubject={subjectWorkflow && current && bitmap ? () => {
+                setSelectionError(null);
+                // Kept on the canvas while the cutout joins the strip, so the subject is selected where it was asked for.
+                setSelectedId(current.artifactId);
+                subjectSearch.start(current.artifactId, { width: bitmap.width, height: bitmap.height }, subjectWorkflow);
+              } : undefined} />
           )}
-          {tools.kind === "extend" ? (
-            <div className="studio-tool-options">
-              <span>
-                <strong>Extend by</strong>
-              </span>
-              <small>
-                {Object.values(tools.margins).some(Boolean)
-                  ? (["top", "right", "bottom", "left"] as const)
-                      .filter((side) => tools.margins[side] > 0)
-                      .map((side) => `${side} ${Math.round(tools.margins[side] * 100)}%`)
-                      .join(", ")
-                  : "Drag an edge of the picture outward, or use the arrow keys on one."}
-              </small>
-              <button
-                className="secondary compact-button"
-                onClick={() => dispatch({ type: "clear-margins" })}
-              >
-                Reset edges
-              </button>
-            </div>
-          ) : tools.kind === "enhance" ? (
-            <label>
-              <span>
-                <strong>Enlarge by</strong> {tools.upscaleFactor}x
-              </span>
-              <input
-                type="range"
-                min={1}
-                max={8}
-                step={1}
-                value={tools.upscaleFactor}
-                onChange={(event) =>
-                  dispatch({ type: "set-upscale-factor", factor: Number(event.target.value) })
-                }
-              />
-            </label>
-          ) : (
-            <label>
-              <span>
-                <strong>
-                  {tools.kind === "instruct" ? "Describe the edit" : "Describe the change here"}
-                </strong>
-              </span>
-              <textarea
-                rows={4}
-                value={instruction}
-                placeholder="e.g. make it a watercolor painting"
-                onChange={(event) => {
-                  setInstruction(event.target.value);
-                  setRecipe(null);
-                }}
-              />
-            </label>
-          )}
+          <StudioToolOptions
+            tools={tools}
+            dispatch={dispatch}
+            instruction={instruction}
+            onInstructionChange={(value) => {
+              setInstruction(value);
+              setRecipe(null);
+            }}
+            busy={busy}
+            onLocalEdit={(operation, details) => current && localEdit(operation, current.artifactId, () => setSelectedId(null), details)}
+            pixels={sourcePixels}
+            enlargement={enlargement}
+          />
           <StudioRecipes
             disabled={busy || !current}
+            from={studioRecipeSource(session, current)}
             onApply={(chosen) => {
               setRecipe(chosen);
               setInstruction(chosen.instruction);
+              // Made on a selection, it needs one: select the way last used, as the rail's Select does.
+              if (chosen.mask_mode !== "none" && !toolUsesMask(tools.kind)) dispatch({ type: "select-tool", kind: tools.selectionKind });
             }}
           />
-          <StudioRecipeWorkflowNotice recipe={recipe} />
+          <StudioRecipeWorkflowNotice recipe={recipe} selected={selectionCoverage > 0} />
           {unavailable && (
             // Beside the button that would fail, and named by the tools that
             // cannot run, so the sentence arrives before the drawing does.
             <StudioToolGuidance reason={unavailable} onOpenWorkflows={onOpenWorkflows} />
           )}
-          <button
-            className="primary"
-            // Enhance asks for no words: the whole picture is the subject and
-            // the size is the whole instruction.
-            disabled={
-              (tools.kind === "extend" && !Object.values(tools.margins).some(Boolean)) ||
-              (tools.kind !== "enhance" && tools.kind !== "extend" && !instruction.trim()) ||
-              busy ||
-              !current ||
-              Boolean(unavailable) ||
-              Boolean(workflowUnavailable && !recipe?.workflow_revision_id)
-            }
-            onClick={() => {
-              if (!current) return;
-              const selection = toolUsesMask(tools.kind) && tools.mask && !isEmpty(tools.mask)
-                ? tools.mask
-                : null;
-              // Enhance and Extend ask for no words, and the turn requires
-              // some: both were reaching the server and being refused before
-              // anything ran. The user's words win whenever there are any.
-              const words = instruction.trim() || defaultInstruction(tools);
-              const send = (mask: Blob | null) => {
-                apply(
-                  words,
-                  current.artifactId,
-                  mask ? { blob: mask, featherPx: tools.featherPx, invert: false } : undefined,
-                  tools.kind === "enhance"
-                    ? { upscale_factor: tools.upscaleFactor }
-                    : tools.kind === "extend"
-                      ? { outpaint_margins: tools.margins }
-                      : recipe
-                        ? recipe.settings_json
-                        : undefined,
-                  recipe?.workflow_revision_id ?? undefined,
-                  () => {
+          {unchecked && !EXACT_EDITS.includes(tools.kind) && (
+            <StudioCapabilityCheck failed={unchecked === "failed"} onRetry={() => void capabilities.refetch()} />
+          )}
+          {!EXACT_EDITS.includes(tools.kind) && <StudioResultCount kind={tools.kind} value={results} onChange={setResults} />}
+          {!EXACT_EDITS.includes(tools.kind) && (
+            <button
+              className="primary"
+              aria-disabled={applyDisabled}
+              onClick={() => {
+                if (applyDisabled || !current) return;
+                applyStudioEdit({
+                  tools, instruction, recipe, activeTool, isolateTool, current, bitmap, results, apply,
+                  cutout: cutoutEdit,
+                  subject: subjectEdit,
+                  setError: setSelectionError,
+                  enlargement: enlargement.preview,
+                  // A refused enlargement may have been previewed on a workflow that has since changed.
+                  onRefused: enlargement.refresh,
+                  onAccepted: (accepted) => {
+                    // Read with care: an answer without its request cannot be offered back, and must not stop the rest.
+                    const requestId = accepted?.user_message?.id;
+                    if (requestId) setSentWords({ requestId, words: instruction });
                     setInstruction("");
                     setSelectedId(null);
                   },
-                );
-              };
-              if (selection) void encodeMaskPng(selection).then(send);
-              else send(null);
-            }}
-          >
-            {busy
-              ? "Applying…"
-              : tools.kind === "extend"
-                ? "Extend"
-                : tools.kind === "enhance"
-                  ? `Enlarge ${tools.upscaleFactor}x`
-                : tools.kind !== "instruct" && selectionCoverage > 0
-                  ? "Apply to selection"
-                  : "Apply edit"}
-          </button>
+                });
+              }}
+            >
+              {studioApplyLabel(tools, busy, selectionCoverage, enlargement.preview)}
+            </button>
+          )}
+          {applyProgress && <StudioRunningEdit part={applyProgress.part} place={applyProgress.place} stopping={stopping} onStop={stop} />}
         </aside>
       </div>
       <StudioFilmstrip
         steps={steps} generationIdentity={previewArtifactId ? null : current?.generationIdentity ?? artifact.data?.generation_identity}
         selectedId={previewArtifactId ? null : current?.artifactId ?? null}
         onSelect={setSelectedId}
+        hidden={hidden} onShowHidden={() => sessionId && showStudioSteps(sessionId)}
       />
     </div>
   );
@@ -461,12 +446,19 @@ function StudioStageLoading({
   );
 }
 
-function StudioRecipeWorkflowNotice({ recipe }: { recipe: EditTemplate | null }) {
-  if (!recipe?.workflow_revision_id) return null;
+function StudioRecipeWorkflowNotice({ recipe, selected }: { recipe: EditTemplate | null; selected: boolean }) {
+  // What the recipe was made on has to be there again before it can run.
+  const needs = recipe && recipe.mask_mode !== "none" && !selected
+    ? recipe.mask_mode === "inverse"
+      ? `${recipe.name} changes everything outside a selection. Select what to keep first.`
+      : `${recipe.name} changes only a selected part. Select it first.`
+    : null;
+  if (!recipe?.workflow_revision_id && !needs) return null;
   return (
-    <small role="status">
-      {recipe.name} supplies the workflow for this edit.
-    </small>
+    <>
+      {recipe?.workflow_revision_id && <small role="status">{recipe.name} supplies the workflow for this edit.</small>}
+      {needs && <small role="status">{needs}</small>}
+    </>
   );
 }
 
@@ -486,35 +478,55 @@ function StudioFilmstrip({
   selectedId,
   generationIdentity,
   onSelect,
+  hidden,
+  onShowHidden,
 }: {
   steps: StudioStep[];
   selectedId: string | null;
   generationIdentity?: GenerationIdentity | null;
   onSelect: (artifactId: string) => void;
+  /** Results taken out of the strip. They keep their numbers, so a branch still names the step it came from. */
+  hidden: ReadonlySet<string>;
+  onShowHidden: () => void;
 }) {
   if (steps.length === 0) return null;
+  const hiddenCount = steps.filter((step) => !step.isSource && hidden.has(step.artifactId)).length;
+  // The results the chosen one was made from, so its path back is visible among the branches.
+  const madeFrom = studioStepAncestors(steps, steps.findIndex((step) => step.artifactId === selectedId));
   // A group of buttons, not a listbox: a real listbox owns focus with a
   // roving tabindex and aria-activedescendant, and role="option" would
   // override the native button role so these stop announcing as activatable.
   return (
     <>
       <div className="studio-filmstrip" role="group" aria-label="Edit history">
-      {steps.map((step, index) => (
-        <button
-          key={`${step.messageId}-${step.artifactId}`}
-          aria-pressed={step.artifactId === selectedId}
-          className={step.artifactId === selectedId ? "selected" : ""}
-          onClick={() => onSelect(step.artifactId)}
-        >
-          <img
-            src={`/api/artifacts/${encodeURIComponent(step.artifactId)}/content`}
-            alt={step.isSource ? "The original image" : `Result of step ${index}`}
-            loading="lazy"
-          />
-          <small>{step.isSource ? "Original" : step.instruction || `Step ${index}`}</small>
-        </button>
-      ))}
+      {steps.map((step, index) => {
+        if (!step.isSource && hidden.has(step.artifactId)) return null;
+        const origin = studioStepOrigin(steps, index);
+        return (
+          <button
+            key={`${step.messageId}-${step.artifactId}`}
+            aria-pressed={step.artifactId === selectedId}
+            className={step.artifactId === selectedId ? "selected" : madeFrom.has(index) ? "made-from" : ""}
+            onClick={() => onSelect(step.artifactId)}
+            onFocus={(event) => event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" })}
+          >
+            <img
+              src={`/api/artifacts/${encodeURIComponent(step.artifactId)}/content`}
+              alt={step.isSource ? "The original image" : `Result of step ${index}`}
+              loading="lazy"
+            />
+            <small>{step.isSource ? "Original" : step.instruction || `Step ${index}`}</small>
+            {origin && <small className="studio-step-origin">{origin}</small>}
+            {madeFrom.has(index) && <small className="sr-only">Part of how the chosen result was made</small>}
+          </button>
+        );
+      })}
       </div>
+      {hiddenCount > 0 && (
+        <button type="button" className="secondary compact-button" onClick={onShowHidden}>
+          Show {hiddenCount} hidden {hiddenCount === 1 ? "result" : "results"}
+        </button>
+      )}
       <GenerationIdentitySummary identity={generationIdentity} />
     </>
   );

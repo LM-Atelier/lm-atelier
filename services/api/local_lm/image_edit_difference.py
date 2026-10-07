@@ -14,14 +14,22 @@ Deliberately narrow about what it proves:
 - Above the threshold means only **something changed** - not that the
   requested change happened, and not that unrelated content was preserved.
   Those remain questions for the verifier.
+
+An edit check measures locally, with compare_edit. A whole-picture average
+dilutes a small edit by everything that stayed, so however low its threshold,
+a small enough real change reads as none. compare_edit instead compares each
+part of the picture separately, only where the edit was asked, and calls the
+result unchanged only when every part is.
 """
 
 from __future__ import annotations
 
 import io
+import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageMath, UnidentifiedImageError
 
 # Small enough that re-encoding noise and one-pixel resampling differences
 # average away, large enough that a genuine local edit (a recoloured object,
@@ -31,23 +39,114 @@ COMPARISON_SIZE = (64, 64)
 # magnitude above observed re-encode noise (well under 1.0) and an order
 # below a real edit (typically 5+).
 UNCHANGED_THRESHOLD = 2.0
+#: A mask value above this counts as selected.
+SELECTED_LEVEL = 127
+#: An edit check works on the source reduced by a whole factor until its
+#: longer side is at most this, which keeps the reduction an exact average.
+WORKING_LONG_SIDE = 512
+#: The parts an edit check compares separately: this many across and down.
+LOCAL_GRID = 32
+
+#: How strongly some part of an area must have changed for the area to count as
+#: a change of its own. A model that redraws the whole picture to make one edit
+#: leaves faint differences scattered just past the unchanged threshold: on a
+#: synthetic scene, a requested recolour peaked at 142 while six stray areas
+#: peaked between 2.0 and 2.1, and counting those made an edit that did exactly
+#: what was asked look as if it had changed seven things. Twice the unchanged
+#: threshold keeps that scatter out and every real edit in.
+DISTINCT_AREA_THRESHOLD = 2 * UNCHANGED_THRESHOLD
+#: How finely a mask of another size is sampled per source pixel, so a
+#: selection that covers part of a pixel still counts that pixel.
+MASK_SAMPLES = 4
+#: The side of the mask a region comparison draws its boxes on. Eight times
+#: the comparison grid, so a box edge lands inside a part rather than
+#: rounding a whole part in or out.
+REGION_MASK_SIDE = 8 * LOCAL_GRID
+
+
+@dataclass(frozen=True)
+class ChangedArea:
+    """Where one connected run of changed parts sits, in fractions of the picture.
+
+    Fractions rather than pixels because the comparison works on a reduced grid
+    while a reader works on the original, and the two pictures are the same
+    shape by the time anything is compared. A reader that wants to look at one
+    area multiplies by that picture's own width and height.
+    """
+
+    left: float
+    top: float
+    right: float
+    bottom: float
+
+    def provenance(self) -> dict[str, float]:
+        return {
+            "left": round(self.left, 4),
+            "top": round(self.top, 4),
+            "right": round(self.right, 4),
+            "bottom": round(self.bottom, 4),
+        }
+
+    def widened(self, margin: float) -> ChangedArea:
+        """Grow this area by ``margin`` on every side, keeping it inside the picture."""
+        return ChangedArea(
+            left=max(0.0, self.left - margin),
+            top=max(0.0, self.top - margin),
+            right=min(1.0, self.right + margin),
+            bottom=min(1.0, self.bottom + margin),
+        )
+
+    def overlaps(self, other: ChangedArea) -> bool:
+        return (
+            self.left < other.right
+            and other.left < self.right
+            and self.top < other.bottom
+            and other.top < self.bottom
+        )
 
 
 @dataclass(frozen=True)
 class ImageDifference:
-    """How much two images differ, and whether that counts as a change."""
+    """How much two images differ, and whether that counts as a change.
+
+    `largest_local_difference` is set by compare_edit: the largest difference
+    any one part of the compared area showed, which is what decides `changed`
+    there. compare_images leaves it unset and decides on the whole average.
+    """
 
     mean_absolute_difference: float
     changed: bool
     comparable: bool
+    largest_local_difference: float | None = None
+    #: How many separate areas of the picture changed, counted by compare_edit
+    #: from its own grid. A reader that knows how many things were reported
+    #: changed can tell "everything that moved was named" from "something else
+    #: moved too"; an aggregate difference cannot say that. An area counts only
+    #: when some part of it passes DISTINCT_AREA_THRESHOLD, so a picture can be
+    #: `changed` by faint scatter alone and still hold no area of change.
+    changed_regions: int | None = None
+    #: Where each of those areas sits. Counting told a reader that something
+    #: unnamed moved; this says where to look, which is what lets a reader ask
+    #: what is in it rather than only how many there were.
+    changed_areas: tuple[ChangedArea, ...] | None = None
 
     def provenance(self) -> dict[str, object]:
-        return {
+        recorded: dict[str, object] = {
             "mean_absolute_difference": round(self.mean_absolute_difference, 4),
             "changed": self.changed,
             "comparable": self.comparable,
             "threshold": UNCHANGED_THRESHOLD,
         }
+        if self.largest_local_difference is not None:
+            recorded["largest_local_difference"] = round(self.largest_local_difference, 4)
+        if self.changed_regions is not None:
+            recorded["changed_regions"] = self.changed_regions
+        if self.changed_areas is not None:
+            recorded["changed_areas"] = [area.provenance() for area in self.changed_areas]
+        return recorded
+
+
+INCOMPARABLE = ImageDifference(mean_absolute_difference=0.0, changed=True, comparable=False)
 
 
 def compare_images(source: bytes, result: bytes) -> ImageDifference:
@@ -74,6 +173,251 @@ def compare_images(source: bytes, result: bytes) -> ImageDifference:
         changed=mean > UNCHANGED_THRESHOLD,
         comparable=True,
     )
+
+
+def compare_edit(
+    source: bytes, result: bytes, *, mask: bytes | None = None, invert: bool = False
+) -> ImageDifference:
+    """Measure an edit where it was asked, part by part.
+
+    The result is brought to the source's size, both are reduced by the same
+    whole factor, and the picture is divided into LOCAL_GRID parts across and
+    down. Each part compares the average colour of source and result over its
+    selected pixels only, weighted by how much of each pixel the selection
+    covers, so a change in pixels the selection excludes - outside it, or in a
+    hole inside it - never counts, and a pixel the selection only partly
+    covers still does. The result is unchanged only when every part holding
+    any selected pixel is under the threshold, so a small change is not
+    averaged away by the rest of the picture.
+
+    Without a mask the whole picture is selected. An unreadable image or mask,
+    or a mask that selects nothing, is incomparable rather than unchanged.
+    """
+
+    try:
+        before, after, weights = _working_pictures(source, result, mask, invert=invert)
+    except (OSError, UnidentifiedImageError, ValueError, Image.DecompressionBombError):
+        return INCOMPARABLE
+    grid = (min(LOCAL_GRID, weights.width), min(LOCAL_GRID, weights.height))
+    coverage = list(weights.resize(grid, Image.Resampling.BOX).get_flattened_data())
+    parts = [0.0] * len(coverage)
+    for before_band, after_band in zip(before.split(), after.split(), strict=True):
+        weighted = ImageMath.lambda_eval(
+            lambda names: (names["before"] - names["after"]) * names["weights"],
+            before=before_band.convert("F"),
+            after=after_band.convert("F"),
+            weights=weights,
+        )
+        if not isinstance(weighted, Image.Image):
+            return INCOMPARABLE
+        sums = weighted.resize(grid, Image.Resampling.BOX).get_flattened_data()
+        for index, (total, covered) in enumerate(zip(sums, coverage, strict=True)):
+            if isinstance(total, float) and isinstance(covered, float) and covered > 0:
+                # Signed first and averaged, then its size: noise cancels
+                # inside a part, a real change does not.
+                parts[index] += abs(total / covered) / 3
+    measured = [
+        part
+        for part, covered in zip(parts, coverage, strict=True)
+        if isinstance(covered, float) and covered > 0
+    ]
+    if not measured:
+        return INCOMPARABLE
+    largest = max(measured)
+    areas = _changed_areas(parts, coverage, grid)
+    return ImageDifference(
+        mean_absolute_difference=sum(measured) / len(measured),
+        changed=largest > UNCHANGED_THRESHOLD,
+        comparable=True,
+        largest_local_difference=largest,
+        changed_regions=len(areas),
+        changed_areas=areas,
+    )
+
+
+def compare_region(
+    source: bytes, result: bytes, box: ChangedArea, excluded: Sequence[ChangedArea] = ()
+) -> tuple[ImageDifference, float]:
+    """Measure the edit inside one box with others left out, and report what that left.
+
+    The comparison is compare_edit's, through a mask of the box minus every
+    excluded box. The second value is the fraction of the picture the mask
+    still selects, so a caller can tell a region too small to say anything
+    from one that measured nothing. A mask that selects nothing is
+    incomparable, as compare_edit makes any empty selection.
+    """
+
+    mask = Image.new("L", (REGION_MASK_SIDE, REGION_MASK_SIDE), 0)
+    drawing = ImageDraw.Draw(mask)
+    drawing.rectangle(_mask_box(box), fill=255)
+    for area in excluded:
+        drawing.rectangle(_mask_box(area), fill=0)
+    selected = mask.histogram()[255] / (REGION_MASK_SIDE * REGION_MASK_SIDE)
+    if not selected:
+        return INCOMPARABLE, 0.0
+    buffer = io.BytesIO()
+    mask.save(buffer, format="PNG")
+    return compare_edit(source, result, mask=buffer.getvalue()), selected
+
+
+def _mask_box(area: ChangedArea) -> tuple[int, int, int, int]:
+    # Pillow's rectangle includes both of its corners, so the far edge is the
+    # last pixel the area reaches rather than the first one past it.
+    side = REGION_MASK_SIDE
+    return (
+        int(area.left * side),
+        int(area.top * side),
+        max(int(area.left * side), math.ceil(area.right * side) - 1),
+        max(int(area.top * side), math.ceil(area.bottom * side) - 1),
+    )
+
+
+def _changed_areas(
+    parts: Sequence[float], coverage: Sequence[object], grid: tuple[int, int]
+) -> tuple[ChangedArea, ...]:
+    """Where each separate area of the grid changed, touching parts counted once.
+
+    Two things changed in two places is two areas; one thing spanning several
+    parts is still one. The count alone lets a reader ask whether every area
+    that moved was among the things reported changed; the bounds let it ask the
+    harder question, which is what is inside one.
+
+    Each area is returned as the box enclosing its parts, in fractions of the
+    picture, ordered from the top left so that two runs over the same picture
+    describe its areas in the same order. An area whose strongest part stays
+    under DISTINCT_AREA_THRESHOLD is left out: that is the scatter a redrawing
+    model leaves across a picture, not a thing that changed. Its parts still
+    trace the extent of an area that does count, so a real change keeps its
+    faint edges.
+    """
+
+    across, down = grid
+    changed = {
+        index
+        for index, (part, covered) in enumerate(zip(parts, coverage, strict=True))
+        if isinstance(covered, float) and covered > 0 and part > UNCHANGED_THRESHOLD
+    }
+    areas: list[ChangedArea] = []
+    while changed:
+        start = min(changed)
+        changed.remove(start)
+        members = [start]
+        frontier = [start]
+        while frontier:
+            index = frontier.pop()
+            row, column = divmod(index, across)
+            for neighbour_row, neighbour_column in (
+                (row - 1, column),
+                (row + 1, column),
+                (row, column - 1),
+                (row, column + 1),
+            ):
+                if 0 <= neighbour_row < down and 0 <= neighbour_column < across:
+                    neighbour = neighbour_row * across + neighbour_column
+                    if neighbour in changed:
+                        changed.remove(neighbour)
+                        frontier.append(neighbour)
+                        members.append(neighbour)
+        if max(parts[index] for index in members) <= DISTINCT_AREA_THRESHOLD:
+            continue
+        rows = [index // across for index in members]
+        columns = [index % across for index in members]
+        areas.append(
+            ChangedArea(
+                left=min(columns) / across,
+                top=min(rows) / down,
+                right=(max(columns) + 1) / across,
+                bottom=(max(rows) + 1) / down,
+            )
+        )
+    return tuple(sorted(areas, key=lambda area: (area.top, area.left)))
+
+
+def crop_changed_area(
+    content: bytes, area: ChangedArea, *, margin: float
+) -> tuple[bytes, ChangedArea]:
+    """The part of this picture one changed area covers, widened by ``margin``.
+
+    The area comes from a coarse grid, so a subject can sit a little outside the
+    box its changed parts made; the margin is what makes the crop show the thing
+    rather than its middle. It is a fraction of the whole picture, applied on
+    every side and clamped to the picture's own edges, so a change against a
+    border widens inward instead of falling off.
+
+    The crop is re-encoded as PNG because that is lossless: a question about
+    what is in a region should not be answered against compression artefacts
+    this code introduced.
+
+    Returns the crop and the extent it actually cut. That is not the widened
+    box: the box is rounded to whole pixels of this picture and clamped to its
+    edges, so the only truthful description of what a reader was shown is the
+    one measured back from those pixels. A caller recording provenance records
+    this, not the area it asked for.
+    """
+
+    if margin < 0:
+        raise ValueError("margin cannot be negative")
+    with Image.open(io.BytesIO(content)) as image:
+        picture = image.convert("RGB")
+    width, height = picture.size
+    left = max(0.0, area.left - margin)
+    top = max(0.0, area.top - margin)
+    right = min(1.0, area.right + margin)
+    bottom = min(1.0, area.bottom + margin)
+    box = (
+        int(left * width),
+        int(top * height),
+        max(int(left * width) + 1, min(width, int(round(right * width)))),
+        max(int(top * height) + 1, min(height, int(round(bottom * height)))),
+    )
+    cropped = picture.crop(box)
+    buffer = io.BytesIO()
+    cropped.save(buffer, format="PNG")
+    cut = ChangedArea(
+        left=box[0] / width,
+        top=box[1] / height,
+        right=box[2] / width,
+        bottom=box[3] / height,
+    )
+    return buffer.getvalue(), cut
+
+
+def _working_pictures(
+    source: bytes, result: bytes, mask: bytes | None, *, invert: bool
+) -> tuple[Image.Image, Image.Image, Image.Image]:
+    """Bring source, result and selection weights onto one grid, each reduced exactly."""
+
+    with Image.open(io.BytesIO(source)) as opened:
+        before = opened.convert("RGB")
+    with Image.open(io.BytesIO(result)) as opened:
+        after = opened.convert("RGB")
+    if after.size != before.size:
+        after = after.resize(before.size, Image.Resampling.BOX)
+    factor = max(1, math.ceil(max(before.size) / WORKING_LONG_SIDE))
+    if mask is None:
+        weights = Image.new("F", before.size, 1.0)
+    else:
+        weights = _selection_weights(mask, before.size, invert=invert)
+    return before.reduce(factor), after.reduce(factor), weights.reduce(factor)
+
+
+def _selection_weights(mask: bytes, size: tuple[int, int], *, invert: bool) -> Image.Image:
+    """Weigh each source pixel by how much of it the selection covers, from 0 to 1."""
+
+    with Image.open(io.BytesIO(mask)) as opened:
+        levels = opened.convert("L")
+    # 255 where selected. Inverting selects everything the mask leaves out.
+    selected = levels.point(lambda value: 0 if (value > SELECTED_LEVEL) == invert else 255)
+    if selected.size != size:
+        # Sample each source pixel at several points and average them, so a
+        # pixel the selection only partly covers keeps part of its weight
+        # instead of being assigned wholly in or out by its centre.
+        width, height = size
+        fine = selected.resize(
+            (width * MASK_SAMPLES, height * MASK_SAMPLES), Image.Resampling.NEAREST
+        )
+        selected = fine.reduce(MASK_SAMPLES)
+    return selected.convert("F").point(lambda value: value / 255.0)
 
 
 def _normalized(payload: bytes) -> list[int]:

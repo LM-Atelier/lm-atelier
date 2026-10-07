@@ -1,3 +1,4 @@
+import { installChatReadFixtures } from "./chatReadFixtures";
 import { createHash } from "node:crypto";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -8,16 +9,20 @@ import type { Chat, PromptBatch, PromptBatchCreateInput } from "./types";
 
 vi.mock("./api", () => ({
   api: {
+  searchConfiguration: vi.fn().mockResolvedValue({
+    installation_enabled: false, configured: false, provider: "CRW",
+    provider_endpoint: null, error_code: "search_not_configured",
+  }),
     setupReadiness: vi.fn(),
     projects: vi.fn(),
     chats: vi.fn(),
     chat: vi.fn(),
     workPlans: vi.fn(),
     engines: vi.fn(),
-    profiles: vi.fn(),
-    presets: vi.fn(),
+    profiles: vi.fn(), profilesPage: vi.fn(),
+    presets: vi.fn(), presetsPage: vi.fn(),
     workflows: vi.fn(),
-    workflowFamilies: vi.fn(),
+    workflowReadyRevisions: vi.fn(),
     chatWorkflowSelections: vi.fn(),
     projectWorkflowSelections: vi.fn(),
     classifyDraft: vi.fn(),
@@ -35,6 +40,7 @@ vi.mock("./api", () => ({
 }));
 
 beforeEach(() => {
+  installChatReadFixtures();
   localStorage.clear();
   sessionStorage.clear();
   vi.mocked(api.setupReadiness).mockResolvedValue({ version: 2, state: "ready", roles: [] });
@@ -43,7 +49,7 @@ beforeEach(() => {
   vi.mocked(api.profiles).mockResolvedValue([]);
   vi.mocked(api.presets).mockResolvedValue([]);
   vi.mocked(api.workflows).mockResolvedValue([]);
-  vi.mocked(api.workflowFamilies).mockResolvedValue([]);
+  vi.mocked(api.workflowReadyRevisions).mockResolvedValue([]);
   vi.mocked(api.chatWorkflowSelections).mockResolvedValue([]);
   vi.mocked(api.projectWorkflowSelections).mockResolvedValue([]);
   vi.mocked(api.classifyDraft).mockResolvedValue({ references_prior_visual: false });
@@ -75,6 +81,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.mocked(api.profilesPage).mockImplementation(async (options) => (await import("./test/modelLibraryPageFixtures")).profilePages(api, options));
+  vi.mocked(api.presetsPage).mockImplementation(async (options) => (await import("./test/modelLibraryPageFixtures")).presetPages(api, options));
 });
 
 function promptDigest(prompt: string): string {
@@ -149,6 +157,7 @@ it("queues template prompts from chat without changing the composer or generatio
         schema_version: 1,
         contract_sha256: revision.contract_sha256,
         codec_version: 2,
+    unfilled_ordinals: [],
         requested_count: payload.item_count,
         selection_seed: payload.selection_seed,
         plan_sha256: "d".repeat(64),
@@ -196,7 +205,7 @@ it("queues template prompts from chat without changing the composer or generatio
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
 
-  expect(await screen.findByRole("heading", { name: chat.title })).toBeVisible();
+  expect(await screen.findByRole("region", { name: chat.title })).toBeVisible();
   const composer = screen.getByRole("textbox", { name: "Message" });
   fireEvent.change(composer, { target: { value: "Keep this composer draft" } });
   const mode = screen.getByRole("combobox", { name: "Generation mode" });

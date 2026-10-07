@@ -116,6 +116,12 @@ _DIRECTORY_QUERY_BUFFER: Final = 64 * 1024
 #: this primitive walks what it returns, so an unbounded answer is an
 #: unbounded amount of someone else's work.
 _MAX_LISTED_ENTRIES: Final = 8192
+#: How many levels below its root a walk or a tree removal descends. Deeper
+#: than any tree this application writes; a deeper one refuses whole rather
+#: than being handled in part.
+_MAX_WALK_DEPTH: Final = 64
+#: How many entries one walk or tree removal handles in total.
+_MAX_WALKED_ENTRIES: Final = 200_000
 #: linkat flag: oldpath is ignored and olddirfd is the file itself.
 _AT_EMPTY_PATH: Final = 0x1000
 #: POSIX d_type values. Only the four that map to a distinct kind are named;
@@ -351,37 +357,128 @@ def directory_owned_by_current_user(anchor: AnchoredDirectory) -> bool:
             _refuse()
         if not api.security.IsValidSid(owner):
             _refuse()
-        # GetCurrentThreadEffectiveToken is an SDK inline returning HANDLE(-6).
-        # It selects an impersonation token when present, otherwise the process
-        # token. This query-only pseudo-handle must not be closed.
-        token = ctypes.c_void_p(-6)
-        needed = ctypes.c_ulong()
-        sized = api.security.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
-        if sized or api.ctypes.get_last_error() != 122:
-            _refuse()
-        minimum = ctypes.sizeof(api.TokenUser)
-        if not minimum <= needed.value <= 65536:
-            _refuse()
-        buffer = ctypes.create_string_buffer(needed.value)
-        if not api.security.GetTokenInformation(
-            token, 1, buffer, len(buffer), ctypes.byref(needed)
-        ):
-            _refuse()
-        if not minimum <= needed.value <= len(buffer):
-            _refuse()
-        user = api.TokenUser.from_buffer(buffer)
-        # TOKEN_USER's SID belongs to the returned buffer. Check its fixed
-        # header and variable subauthorities before passing it to native code.
-        start = ctypes.addressof(buffer)
-        sid = user.Sid
-        if not sid or not start + minimum <= sid <= start + needed.value - 8:
-            _refuse()
-        count = ctypes.c_ubyte.from_address(sid + 1).value
-        if sid + 8 + 4 * count > start + needed.value:
-            _refuse()
-        if not api.security.IsValidSid(ctypes.c_void_p(sid)):
-            _refuse()
+        _token_buffer, sid = _windows_effective_user(api)
         return bool(api.security.EqualSid(owner, ctypes.c_void_p(sid)))
+    finally:
+        if security_descriptor.value:
+            api.kernel.LocalFree(security_descriptor)
+
+
+def _windows_effective_user(api: Any) -> tuple[Any, int]:
+    # GetCurrentThreadEffectiveToken is an SDK inline returning HANDLE(-6).
+    # It selects an impersonation token when present, otherwise the process
+    # token. This query-only pseudo-handle must not be closed.
+    token = ctypes.c_void_p(-6)
+    needed = ctypes.c_ulong()
+    sized = api.security.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
+    if sized or api.ctypes.get_last_error() != 122:
+        _refuse()
+    minimum = ctypes.sizeof(api.TokenUser)
+    if not minimum <= needed.value <= 65536:
+        _refuse()
+    buffer = ctypes.create_string_buffer(needed.value)
+    if not api.security.GetTokenInformation(token, 1, buffer, len(buffer), ctypes.byref(needed)):
+        _refuse()
+    if not minimum <= needed.value <= len(buffer):
+        _refuse()
+    user = api.TokenUser.from_buffer(buffer)
+    # TOKEN_USER's SID belongs to the returned buffer. Check its fixed
+    # header and variable subauthorities before passing it to native code.
+    start = ctypes.addressof(buffer)
+    sid = user.Sid
+    if not sid or not start + minimum <= sid <= start + needed.value - 8:
+        _refuse()
+    count = ctypes.c_ubyte.from_address(sid + 1).value
+    if sid + 8 + 4 * count > start + needed.value:
+        _refuse()
+    if not api.security.IsValidSid(ctypes.c_void_p(sid)):
+        _refuse()
+    return buffer, sid
+
+
+def directory_private_to_current_user(anchor: AnchoredDirectory) -> bool:
+    """Observe current-user ownership and restrictive access on the held root.
+
+    Windows anchors require read_security=True. Ordinary allow ACEs may name
+    only the owner, SYSTEM, or built-in administrators; unsupported ACE forms
+    refuse qualification. This conservative ACL policy is not an effective-
+    permissions evaluator. POSIX group and other mode bits must all be clear.
+    No permissions are changed, and later security changes are not prevented.
+    """
+
+    descriptor = anchor.descriptor
+    if descriptor is not None and sys.platform != "win32":
+        try:
+            information = os.fstat(descriptor)
+            return information.st_uid == os.geteuid() and information.st_mode & 0o077 == 0
+        except OSError:
+            _refuse()
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    api = _windows_ownership_api()
+    owner = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    security_descriptor = ctypes.c_void_p()
+    try:
+        result = api.security.GetSecurityInfo(
+            ctypes.c_void_p(handle),
+            1,
+            1 | 4,
+            ctypes.byref(owner),
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(security_descriptor),
+        )
+        if result != 0 or not security_descriptor.value or not owner.value:
+            _refuse()
+        if not api.security.IsValidSid(owner):
+            _refuse()
+        _token_buffer, user_sid = _windows_effective_user(api)
+        if not api.security.EqualSid(owner, ctypes.c_void_p(user_sid)):
+            return False
+        if not dacl.value:
+            return False
+        if not api.security.IsValidAcl(dacl):
+            _refuse()
+        # GetSecurityInfo owns the allocation until the finally below. Validate
+        # each ACE's bounds within the native ACL before reading its SID.
+        acl_start = dacl.value
+        acl_size = ctypes.c_ushort.from_address(acl_start + 2).value
+        ace_count = ctypes.c_ushort.from_address(acl_start + 4).value
+        if acl_size < 8 or ace_count > (acl_size - 8) // 4:
+            _refuse()
+        for index in range(ace_count):
+            ace = ctypes.c_void_p()
+            if not api.security.GetAce(dacl, index, ctypes.byref(ace)):
+                _refuse()
+            if not ace.value or not acl_start + 8 <= ace.value <= acl_start + acl_size - 4:
+                _refuse()
+            ace_type = ctypes.c_ubyte.from_address(ace.value).value
+            ace_size = ctypes.c_ushort.from_address(ace.value + 2).value
+            if ace_size < 16 or ace_size % 4 or ace.value + ace_size > acl_start + acl_size:
+                _refuse()
+            # Ordinary deny entries cannot grant access. Object, callback and
+            # other forms are outside this policy, including inheritance-only.
+            if ace_type not in (0, 1):
+                return False
+            sid = ace.value + 8
+            count = ctypes.c_ubyte.from_address(sid + 1).value
+            if sid + 8 + 4 * count > ace.value + ace_size:
+                _refuse()
+            sid_pointer = ctypes.c_void_p(sid)
+            if not api.security.IsValidSid(sid_pointer):
+                _refuse()
+            if ace_type == 1:
+                continue
+            if not (
+                api.security.EqualSid(sid_pointer, ctypes.c_void_p(user_sid))
+                or api.security.IsWellKnownSid(sid_pointer, 22)
+                or api.security.IsWellKnownSid(sid_pointer, 26)
+            ):
+                return False
+        return True
     finally:
         if security_descriptor.value:
             api.kernel.LocalFree(security_descriptor)
@@ -416,6 +513,21 @@ def _windows_ownership_api() -> Any:
     security.IsValidSid.restype = ctypes.c_int
     security.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     security.EqualSid.restype = ctypes.c_int
+    security.IsValidAcl.argtypes = [ctypes.c_void_p]
+    security.IsValidAcl.restype = ctypes.c_int
+    security.GetAce.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_void_p)]
+    security.GetAce.restype = ctypes.c_int
+    security.IsWellKnownSid.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    security.IsWellKnownSid.restype = ctypes.c_int
+    security.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+    security.ConvertSidToStringSidW.restype = ctypes.c_int
+    security.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_ulong),
+    ]
+    security.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = ctypes.c_int
     kernel.LocalFree.argtypes = [ctypes.c_void_p]
     kernel.LocalFree.restype = ctypes.c_void_p
     return types.SimpleNamespace(
@@ -458,6 +570,68 @@ def open_child_directory(
     return _adopt(anchor.path / name, child, True)
 
 
+def create_private_directory(anchor: AnchoredDirectory, name: str) -> None:
+    """Create one child directory that only this account and the system can open.
+
+    Its access is set as it is created rather than inherited from the parent,
+    which may let other accounts read what is made inside: on POSIX mode
+    0o700, on Windows a protected access list naming only the current user,
+    who also owns it, and SYSTEM, both inherited by what is made inside. An
+    entry already there is left exactly as it is and raises
+    AnchoredEntryExists; nothing here changes an existing directory's access.
+    """
+
+    _require_entry_name(name)
+    if anchor.descriptor is not None:
+        try:
+            os.mkdir(name, 0o700, dir_fd=anchor.descriptor)
+        except FileExistsError:
+            raise AnchoredEntryExists(CONTAINMENT_REFUSED) from None
+        except OSError:
+            _refuse()
+        return
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    api = _windows_ownership_api()
+    # The SID points into this buffer, which is kept alive until it is used.
+    token_buffer, user_sid = _windows_effective_user(api)
+    sid_text = ctypes.c_wchar_p()
+    descriptor = ctypes.c_void_p()
+    try:
+        if (
+            not api.security.ConvertSidToStringSidW(
+                ctypes.c_void_p(user_sid), ctypes.byref(sid_text)
+            )
+            or not sid_text.value
+        ):
+            _refuse()
+        # O: the user owns it. D:P is a protected list, so nothing comes from
+        # the parent. OICI passes the same two entries to what is made inside.
+        sddl = f"O:{sid_text.value}D:P(A;OICI;FA;;;{sid_text.value})(A;OICI;FA;;;SY)"
+        if (
+            not api.security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl, 1, ctypes.byref(descriptor), None
+            )
+            or not descriptor.value
+        ):
+            _refuse()
+        child, status = _nt_try_open_relative(
+            handle, name, intent="create_private_dir", security_descriptor=descriptor.value
+        )
+    finally:
+        if descriptor.value:
+            api.kernel.LocalFree(descriptor)
+        if sid_text.value:
+            api.kernel.LocalFree(ctypes.cast(sid_text, ctypes.c_void_p))
+        del token_buffer
+    if status == _STATUS_OBJECT_NAME_COLLISION:
+        raise AnchoredEntryExists(CONTAINMENT_REFUSED) from None
+    if status != _STATUS_SUCCESS or not child:
+        _refuse()
+    _close_windows_handle(child)
+
+
 def create_entry(anchor: AnchoredDirectory, name: str) -> int:
     """Create a new entry inside the held directory and return a descriptor.
 
@@ -487,6 +661,39 @@ def create_entry(anchor: AnchoredDirectory, name: str) -> int:
         _refuse()
 
 
+def create_publishable_entry(anchor: AnchoredDirectory, name: str) -> int:
+    """Create a new file and return a descriptor publish_opened_file can move.
+
+    create_entry's descriptor is for writing only. Publishing moves that same
+    object, and on Windows the move right has to be on the handle from the
+    moment it is opened. Callers that will not publish keep using create_entry,
+    which does not hold delete rights.
+
+    The descriptor is readable as well as writable. When a host cannot hard-link
+    an open file, publication copies the bytes back from this descriptor, and a
+    write-only one has nothing to read.
+    """
+
+    _require_entry_name(name)
+    if anchor.descriptor is not None:
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            return os.open(name, flags, 0o600, dir_fd=anchor.descriptor)
+        except FileExistsError:
+            raise AnchoredEntryExists(CONTAINMENT_REFUSED) from None
+        except OSError:
+            _refuse()
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    created = _nt_open_relative(handle, name, intent="create_publishable_file")
+    try:
+        return _descriptor_from_handle(created)
+    except OSError:
+        _close_windows_handle(created)
+        _refuse()
+
+
 def open_entry(anchor: AnchoredDirectory, name: str) -> int | None:
     """Open an EXISTING entry through the held directory and hand back a descriptor.
 
@@ -502,6 +709,25 @@ def open_entry(anchor: AnchoredDirectory, name: str) -> int | None:
     The caller owns the descriptor and must close it.
     """
 
+    return _open_existing_entry(anchor, name, intent="open_file")
+
+
+def open_entry_unshared(anchor: AnchoredDirectory, name: str) -> int | None:
+    """Open an EXISTING entry as open_entry does, and on Windows keep it as it is while held.
+
+    On Windows the entry is opened without write or delete sharing: while the
+    descriptor is held, nothing else can open it to write, rename it, replace
+    it or delete it, and an entry something already holds open for writing
+    refuses. Readers can still open it. Other systems have no sharing modes,
+    so there it is opened exactly as open_entry opens it.
+
+    The caller owns the descriptor and must close it.
+    """
+
+    return _open_existing_entry(anchor, name, intent="open_unshared_file")
+
+
+def _open_existing_entry(anchor: AnchoredDirectory, name: str, *, intent: str) -> int | None:
     _require_entry_name(name)
     if anchor.descriptor is not None:
         # O_NONBLOCK matters as much as O_NOFOLLOW here: opening a named pipe
@@ -519,7 +745,7 @@ def open_entry(anchor: AnchoredDirectory, name: str) -> int | None:
     handle = anchor.handle
     if handle is None:
         _refuse()
-    opened, status = _nt_try_open_relative(handle, name, intent="open_file")
+    opened, status = _nt_try_open_relative(handle, name, intent=intent)
     if status in (_STATUS_OBJECT_NAME_NOT_FOUND, _STATUS_OBJECT_PATH_NOT_FOUND):
         return None
     if status != _STATUS_SUCCESS or not opened:
@@ -579,6 +805,43 @@ def take_regular_file(anchor: AnchoredDirectory, name: str) -> int | None:
     if handle is None:
         _refuse()
     opened, status = _nt_try_open_relative(handle, name, intent="rename_source")
+    if status in (_STATUS_OBJECT_NAME_NOT_FOUND, _STATUS_OBJECT_PATH_NOT_FOUND):
+        return None
+    if status != _STATUS_SUCCESS or not opened:
+        _refuse()
+    if _nt_is_reparse(opened):
+        _close_windows_handle(opened)
+        _refuse()
+    try:
+        descriptor = _descriptor_from_handle(opened)
+    except OSError:
+        _close_windows_handle(opened)
+        _refuse()
+    return _require_regular(descriptor)
+
+
+def open_publishable_entry(anchor: AnchoredDirectory, name: str) -> int | None:
+    """Open an existing regular file for reading, with move rights.
+
+    None means the name is absent. The descriptor is the object a later
+    publish_opened_file moves, so the bytes just read and the published file
+    are the same object. Windows cannot add move rights after the open.
+    """
+
+    _require_entry_name(name)
+    if anchor.descriptor is not None:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            descriptor = os.open(name, flags, dir_fd=anchor.descriptor)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            _refuse()
+        return _require_regular(descriptor)
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    opened, status = _nt_try_open_relative(handle, name, intent="open_publishable_file")
     if status in (_STATUS_OBJECT_NAME_NOT_FOUND, _STATUS_OBJECT_PATH_NOT_FOUND):
         return None
     if status != _STATUS_SUCCESS or not opened:
@@ -989,6 +1252,48 @@ def remove_directory_entry(anchor: AnchoredDirectory, name: str) -> None:
         _close_windows_handle(opened)
 
 
+def remove_link_entry(anchor: AnchoredDirectory, name: str) -> None:
+    """Remove one link inside the held directory.
+
+    The directory or file it names stays where it is. ``remove_entry`` opens
+    with ``FILE_NON_DIRECTORY_FILE``, so a directory junction never gets that
+    far, and ``remove_directory_entry`` refuses a reparse point. Absence is
+    success. A file or a plain directory refuses, and stays.
+    """
+
+    _require_entry_name(name)
+    if anchor.descriptor is not None:
+        try:
+            info = os.lstat(name, dir_fd=anchor.descriptor)
+        except FileNotFoundError:
+            return
+        except OSError:
+            _refuse()
+        if not stat.S_ISLNK(info.st_mode):
+            _refuse()
+        try:
+            os.unlink(name, dir_fd=anchor.descriptor)
+        except FileNotFoundError:
+            return
+        except OSError:
+            _refuse()
+        return
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    opened, status = _nt_try_open_relative(handle, name, intent="delete_link")
+    if status in (_STATUS_OBJECT_NAME_NOT_FOUND, _STATUS_OBJECT_PATH_NOT_FOUND):
+        return
+    if status != _STATUS_SUCCESS or not opened:
+        _refuse()
+    try:
+        if not _nt_reparse_attribute_is_set(opened):
+            _refuse()
+        _nt_mark_deleted(opened)
+    finally:
+        _close_windows_handle(opened)
+
+
 def discard_entry(anchor: AnchoredDirectory, name: str) -> None:
     """Best-effort removal, for use while a refusal is already propagating.
 
@@ -1161,6 +1466,253 @@ def _raise_if_listing_stopped(
 
     if should_stop is not None and should_stop():
         raise AnchoredListingStopped("directory listing stopped") from None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class WalkedEntry:
+    """One entry of a held tree, with the held directory it was listed in.
+
+    `parts` places the entry below the walk's root, one validated component per
+    level. This module never joins them into a pathname; they exist so a caller
+    can report or compare positions.
+
+    `parent` is held only while the walk is paused on this entry. Act through
+    it - read_entry, remove_entry, open_child_directory - before asking for the
+    next entry, and never keep it: the walk closes it on the way back up.
+    """
+
+    parent: AnchoredDirectory
+    parts: tuple[str, ...]
+    entry: AnchoredEntry
+
+
+class _WalkBudget:
+    """Count down the entries one walk may still take, shared by every level."""
+
+    __slots__ = ("remaining",)
+
+    def __init__(self, limit: int) -> None:
+        self.remaining = limit
+
+    def spend(self) -> None:
+        self.remaining -= 1
+        if self.remaining < 0:
+            _refuse()
+
+
+def walk_entries(
+    anchor: AnchoredDirectory,
+    *,
+    max_depth: int = _MAX_WALK_DEPTH,
+    limit: int = _MAX_WALKED_ENTRIES,
+    level_limit: int = _MAX_LISTED_ENTRIES,
+    breadth_first: bool = False,
+    include_metadata: bool = True,
+    should_stop: Callable[[], bool] | None = None,
+) -> Generator[WalkedEntry, None, None]:
+    """Walk a held tree top-down without ever entering a link.
+
+    Each level is listed through its held parent with list_entries, so an
+    entry's name and kind come from one enumeration record, and only a
+    DIRECTORY is entered - opened through that same parent by
+    open_child_directory, which refuses a link on both platforms. A link, an
+    unknown kind and anything else are yielded for the caller to judge and are
+    never entered.
+
+    os.walk cannot be made to do this. On Windows a junction is not a link to
+    the predicates `followlinks` consults, so os.walk and Path.rglob descend
+    into one and report the target's files as the tree's own.
+
+    A directory is yielded before its contents, so a caller can stop at the
+    first entry it will not accept. An entry that becomes a link between its
+    listing and its descent refuses instead of being entered. An entry more
+    than `max_depth` levels below the root, a directory holding more than
+    `level_limit` entries (list_entries' own bound unless raised), or a tree
+    holding more than `limit` entries, refuses rather than being walked in
+    part; so does a zero or negative bound. Each level is listed whole before
+    its first entry is yielded, so `level_limit` is what one directory may
+    hold; a caller that means `limit` to be the only bound sets `level_limit`
+    to match it. The refusal can come after earlier entries were yielded,
+    so a caller acting on entries as they arrive must treat it as the tree's
+    answer, not as the end of it.
+
+    By default a directory's contents follow it at once, depth first. With
+    `breadth_first`, every entry of one level is yielded before any entry of
+    the next, so a caller that stops at a count has seen the shallowest
+    entries first. Each directory of the next level is then reopened from the
+    root through held parents, one name at a time, so a component that has
+    become a link since it was listed refuses, as a descent does. Every bound
+    applies the same way in either order.
+    """
+
+    if max_depth < 1 or limit < 1 or level_limit < 1:
+        _refuse()
+    if breadth_first:
+        yield from _walk_breadth_first(
+            anchor,
+            _WalkBudget(limit),
+            max_depth=max_depth,
+            level_limit=level_limit,
+            include_metadata=include_metadata,
+            should_stop=should_stop,
+        )
+        return
+    yield from _walk_level(
+        anchor,
+        (),
+        _WalkBudget(limit),
+        max_depth=max_depth,
+        level_limit=level_limit,
+        include_metadata=include_metadata,
+        should_stop=should_stop,
+    )
+
+
+def _walk_level(
+    directory: AnchoredDirectory,
+    prefix: tuple[str, ...],
+    budget: _WalkBudget,
+    *,
+    max_depth: int,
+    level_limit: int,
+    include_metadata: bool,
+    should_stop: Callable[[], bool] | None,
+) -> Generator[WalkedEntry, None, None]:
+    entries = list_entries(
+        directory,
+        limit=level_limit,
+        include_metadata=include_metadata,
+        should_stop=should_stop,
+    )
+    if entries and len(prefix) >= max_depth:
+        _refuse()
+    for entry in entries:
+        # Observed before every entry, not only between levels: a caller that
+        # asks the walk to stop gets no further entry from a level already read.
+        _raise_if_listing_stopped(should_stop)
+        budget.spend()
+        parts = (*prefix, entry.name)
+        yield WalkedEntry(directory, parts, entry)
+        if entry.kind is not AnchoredEntryKind.DIRECTORY:
+            continue
+        _raise_if_listing_stopped(should_stop)
+        with open_child_directory(directory, entry.name) as child:
+            yield from _walk_level(
+                child,
+                parts,
+                budget,
+                max_depth=max_depth,
+                level_limit=level_limit,
+                include_metadata=include_metadata,
+                should_stop=should_stop,
+            )
+
+
+def _walk_breadth_first(
+    anchor: AnchoredDirectory,
+    budget: _WalkBudget,
+    *,
+    max_depth: int,
+    level_limit: int,
+    include_metadata: bool,
+    should_stop: Callable[[], bool] | None,
+) -> Generator[WalkedEntry, None, None]:
+    level: list[tuple[str, ...]] = [()]
+    while level:
+        below: list[tuple[str, ...]] = []
+        for prefix in level:
+            _raise_if_listing_stopped(should_stop)
+            with contextlib.ExitStack() as held:
+                # Only one directory's chain is held at a time, however wide the
+                # level, and each name in it is opened through its held parent.
+                directory = anchor
+                for name in prefix:
+                    directory = held.enter_context(open_child_directory(directory, name))
+                entries = list_entries(
+                    directory,
+                    limit=level_limit,
+                    include_metadata=include_metadata,
+                    should_stop=should_stop,
+                )
+                if entries and len(prefix) >= max_depth:
+                    _refuse()
+                for entry in entries:
+                    _raise_if_listing_stopped(should_stop)
+                    budget.spend()
+                    parts = (*prefix, entry.name)
+                    yield WalkedEntry(directory, parts, entry)
+                    if entry.kind is AnchoredEntryKind.DIRECTORY:
+                        below.append(parts)
+        level = below
+
+
+def remove_tree(
+    anchor: AnchoredDirectory,
+    name: str,
+    *,
+    max_depth: int = _MAX_WALK_DEPTH,
+    limit: int = _MAX_WALKED_ENTRIES,
+) -> None:
+    """Remove one child directory and everything below it, through held parents.
+
+    The contained counterpart of shutil.rmtree. Every level is emptied through
+    its own held handle - files with remove_entry, directories with
+    remove_directory_entry once they are empty - so no pathname is rebuilt at
+    any depth and nothing reached through a link is touched.
+
+    It fails closed rather than choosing for its caller. The whole tree is
+    walked first, and a link, an unknown kind or anything else anywhere in it
+    refuses before anything is removed; so does `name` itself being a link or
+    a file. A link that a listing sees is neither entered nor removed. Each
+    level is listed again before it is touched, so a link planted since the
+    first walk refuses where it is met; what was already removed stays removed.
+
+    No check closes the moment between listing a file and removing it. A file
+    is removed by its name, which removes whatever entry holds that name at
+    that moment, so a link put in a listed file's place just then is itself
+    unlinked. Its target is never reached, and nothing outside the tree is
+    written or removed, on either platform. A caller must not rely on a link
+    inside a tree it removes surviving the removal.
+
+    Absence of `name` is success, matching remove_directory_entry. A file that
+    cannot be removed - held open elsewhere, or read-only on Windows - refuses;
+    no attribute is changed to force it.
+    """
+
+    _require_entry_name(name)
+    if max_depth < 1 or limit < 1:
+        _refuse()
+    found = [entry for entry in list_entries(anchor, include_metadata=False) if entry.name == name]
+    if not found:
+        return
+    if found[0].kind is not AnchoredEntryKind.DIRECTORY:
+        _refuse()
+    with open_child_directory(anchor, name) as directory:
+        for walked in walk_entries(
+            directory, max_depth=max_depth, limit=limit, include_metadata=False
+        ):
+            if not walked.entry.is_safe:
+                _refuse()
+        _empty_directory(directory, 1, _WalkBudget(limit), max_depth=max_depth)
+    remove_directory_entry(anchor, name)
+
+
+def _empty_directory(
+    directory: AnchoredDirectory, depth: int, budget: _WalkBudget, *, max_depth: int
+) -> None:
+    entries = list_entries(directory, include_metadata=False)
+    # Checked again at every level, before this level is touched: the first
+    # walk proved the tree safe, but only as it was then.
+    if any(not entry.is_safe for entry in entries) or (entries and depth > max_depth):
+        _refuse()
+    for entry in entries:
+        budget.spend()
+        if entry.kind is AnchoredEntryKind.FILE:
+            remove_entry(directory, entry.name)
+            continue
+        with open_child_directory(directory, entry.name) as child:
+            _empty_directory(child, depth + 1, budget, max_depth=max_depth)
+        remove_directory_entry(directory, entry.name)
 
 
 def _iter_anchored_entries(
@@ -1854,7 +2406,9 @@ def _nt_open_relative(parent: int | None, name: str, *, intent: str) -> int:
     return handle
 
 
-def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tuple[int, int]:
+def _nt_try_open_relative(
+    parent: int | None, name: str, *, intent: str, security_descriptor: int | None = None
+) -> tuple[int, int]:
     """Open or create one entry relative to a held handle, reporting status.
 
     The status is returned rather than raised so callers can distinguish an
@@ -1862,8 +2416,10 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
     does not need that distinction goes through _nt_open_relative.
 
     `intent` is one of open_dir, create_dir, open_security_dir, create_security_dir,
-    open_file, create_file,
-    delete_directory or rename_source. It is spelled out rather than inferred from a flag because
+    create_private_dir (a new directory only, with the given security descriptor),
+    open_file, open_unshared_file, open_publishable_file, create_file, create_publishable_file,
+    delete_directory, delete_source, delete_link or rename_source. It is spelled out rather
+    than inferred from a flag because
     the access mask and the disposition have to agree, and getting that pair
     wrong fails in ways that look like a filesystem problem rather than a
     coding one.
@@ -1881,7 +2437,9 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
     attributes.RootDirectory = api.ctypes.c_void_p(parent) if parent else None
     attributes.ObjectName = api.ctypes.pointer(unicode_name)
     attributes.Attributes = _OBJ_CASE_INSENSITIVE
-    attributes.SecurityDescriptor = None
+    attributes.SecurityDescriptor = (
+        api.ctypes.c_void_p(security_descriptor) if security_descriptor else None
+    )
     attributes.SecurityQualityOfService = None
 
     access = _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
@@ -1894,12 +2452,30 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
         disposition = (
             _FILE_OPEN_IF if intent in ("create_dir", "create_security_dir") else _FILE_OPEN
         )
+    elif intent == "create_private_dir":
+        # FILE_CREATE, never open-if: the access list is set only on a new
+        # directory, so one already there is a collision, not something reused.
+        access |= _FILE_LIST_DIRECTORY | _FILE_TRAVERSE
+        options |= _FILE_DIRECTORY_FILE
+        disposition = _FILE_CREATE
     elif intent == "create_file":
         access |= _FILE_WRITE_DATA
         options |= _FILE_NON_DIRECTORY_FILE
         disposition = _FILE_CREATE
-    elif intent == "open_file":
+    elif intent == "create_publishable_file":
+        # Delete is what lets publication rename this handle. It stays off
+        # create_file: a caller that only writes has no business moving the name.
+        access |= _FILE_READ_DATA | _FILE_WRITE_DATA | _DELETE
+        options |= _FILE_NON_DIRECTORY_FILE
+        disposition = _FILE_CREATE
+    elif intent in ("open_file", "open_unshared_file"):
         access |= _FILE_READ_DATA
+        options |= _FILE_NON_DIRECTORY_FILE
+        disposition = _FILE_OPEN
+    elif intent == "open_publishable_file":
+        # Read so the caller can hash this object, and delete so publication
+        # can rename the same handle. open_file stays without delete rights.
+        access |= _FILE_READ_DATA | _DELETE
         options |= _FILE_NON_DIRECTORY_FILE
         disposition = _FILE_OPEN
     elif intent == "delete_directory":
@@ -1916,6 +2492,12 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
         access |= _DELETE
         options |= _FILE_NON_DIRECTORY_FILE
         disposition = _FILE_OPEN
+    elif intent == "delete_link":
+        # A junction carries the directory attribute. FILE_NON_DIRECTORY_FILE
+        # refuses it, and FILE_DIRECTORY_FILE refuses a symlink to a file.
+        # FILE_OPEN_REPARSE_POINT, already set above, opens the link itself.
+        access |= _DELETE
+        disposition = _FILE_OPEN
     else:  # pragma: no cover - the caller set is closed
         _refuse()
 
@@ -1928,7 +2510,13 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
         api.ctypes.byref(status_block),
         None,
         api.ctypes.c_ulong(0),
-        api.ctypes.c_ulong(_FILE_SHARE_READ | _FILE_SHARE_WRITE),
+        # Without write or delete sharing, nothing can change an unshared file
+        # while it is held, and one already open for writing refuses to open.
+        api.ctypes.c_ulong(
+            _FILE_SHARE_READ
+            if intent == "open_unshared_file"
+            else _FILE_SHARE_READ | _FILE_SHARE_WRITE
+        ),
         api.ctypes.c_ulong(disposition),
         api.ctypes.c_ulong(options),
         None,
@@ -1940,6 +2528,29 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
     if not handle.value:
         return 0, _STATUS_UNEXPECTED
     return int(handle.value), _STATUS_SUCCESS
+
+
+def _nt_reparse_attribute_is_set(handle: int) -> bool:
+    """True only when the reparse attribute was read and is set.
+
+    A failed query answers False. Deleting on a failed read would remove an
+    entry this function could not classify.
+    """
+
+    api = _windows_api()
+    information = api.FileBasicInformation()
+    status_block = api.IoStatusBlock()
+    status = api.ntdll.NtQueryInformationFile(
+        api.ctypes.c_void_p(handle),
+        api.ctypes.byref(status_block),
+        api.ctypes.byref(information),
+        api.ctypes.c_ulong(api.ctypes.sizeof(api.FileBasicInformation)),
+        api.ctypes.c_ulong(_FILE_BASIC_INFORMATION_CLASS),
+    )
+    if status & 0xFFFFFFFF != _STATUS_SUCCESS:
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(information.FileAttributes & reparse_flag)
 
 
 def _nt_is_reparse(handle: int) -> bool:

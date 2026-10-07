@@ -4,10 +4,11 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.orm import Session
 
+from .comfy_registry import ComfyNodeResolution
 from .comfy_registry_archives import (
     ComfyRegistryArchiveError,
     capture_staged_comfy_registry_runtime_files,
@@ -16,14 +17,20 @@ from .comfy_registry_archives import (
     snapshot_staged_comfy_registry_files,
 )
 from .comfy_registry_installs import trusted_comfy_registry_launch_contract
+from .comfy_registry_launch_verification import VerifiedComfyRegistryLaunch
 from .domain import utcnow
 from .models import ComfyRegistryInstall
+from .registry_trust_policy import POLICY_ID, RegistryTrustDecision, decide_registry_trust
 from .source_omission_proof import (
     OmissionProofError,
     evidence_digest,
     pending_omission_requirement,
     prove_omission,
 )
+
+if TYPE_CHECKING:
+    from .comfy_registry_target_verification import ComfyRegistryVerificationTarget
+
 
 MediaStarter = Callable[[], Awaitable[object]]
 #: Reads the running worker's loaded node types. Injected rather than imported
@@ -55,6 +62,7 @@ def review_comfy_registry_install(
     custom_node_root: Path,
     environment_root: Path,
     media_worker_stopped: bool,
+    verified_launch: VerifiedComfyRegistryLaunch | None = None,
 ) -> ComfyRegistryActivationState:
     """Record an explicit local trust decision after exact stopped-worker verification."""
     _require_stopped(media_worker_stopped)
@@ -65,6 +73,7 @@ def review_comfy_registry_install(
             install,
             custom_node_root=custom_node_root,
             environment_root=environment_root,
+            verified_launch=verified_launch,
         )
         install.trusted = True
     else:
@@ -72,13 +81,137 @@ def review_comfy_registry_install(
         install.active = False
     reviewed_at = utcnow().isoformat()
     install.review_json = {
-        **install.review_json,
+        **_without_trust_provenance(install.review_json),
         "reviewed_at": reviewed_at,
         "trusted_by_local_user": trusted,
+        "trust_authority": "local_user",
     }
     session.commit()
     session.refresh(install)
     return _state(install)
+
+
+def record_registry_policy_trust(
+    session: Session,
+    *,
+    install_id: str,
+    resolution: ComfyNodeResolution,
+    expected_archive_sha256: str,
+    expected_manifest_sha256: str,
+    custom_node_root: Path,
+    environment_root: Path,
+    media_worker_stopped: bool,
+    verified_launch: VerifiedComfyRegistryLaunch | None = None,
+) -> ComfyRegistryActivationState:
+    """Commit the exact Registry policy grant after stopped-worker verification."""
+    _require_stopped(media_worker_stopped)
+    already_trusted = _install(session, install_id).trusted
+    state = stage_registry_policy_trust(
+        session,
+        install_id=install_id,
+        resolution=resolution,
+        expected_archive_sha256=expected_archive_sha256,
+        expected_manifest_sha256=expected_manifest_sha256,
+        custom_node_root=custom_node_root,
+        environment_root=environment_root,
+        media_worker_stopped=media_worker_stopped,
+        verified_launch=verified_launch,
+    )
+    if not already_trusted:
+        session.commit()
+    return state
+
+
+def stage_registry_policy_trust(
+    session: Session,
+    *,
+    install_id: str,
+    resolution: ComfyNodeResolution,
+    expected_archive_sha256: str,
+    expected_manifest_sha256: str,
+    custom_node_root: Path,
+    environment_root: Path,
+    media_worker_stopped: bool,
+    verified_launch: VerifiedComfyRegistryLaunch | None = None,
+) -> ComfyRegistryActivationState:
+    """Record the trust the Registry policy grants, under the verification a person's grant gets.
+
+    A ComfyUI Registry package that passes the existing review installs without
+    asking. This records that grant, and nothing wider: the same
+    `_verify_install` an explicit review runs, the same stopped-worker
+    requirement, and a record that names the policy rather than a person.
+
+    Bound to exact bytes. The caller passes the archive and manifest digests it
+    verified when the package was staged; a stored install whose digests differ
+    is refused before the policy is even asked, so a stale or constructed
+    resolution cannot vouch for a different installed package.
+
+    The caller commits the grant. This does not stop or start the media worker
+    and grants no trust to any workflow graph that uses the package.
+    """
+
+    _require_stopped(media_worker_stopped)
+    install = _install(session, install_id)
+    if (
+        install.archive_sha256 != expected_archive_sha256
+        or install.manifest_sha256 != expected_manifest_sha256
+    ):
+        raise ComfyRegistryActivationError(
+            "registry_policy_identity_mismatch",
+            "The installed Registry package is not the one that was verified",
+        )
+    decision = decide_registry_trust(resolution, install)
+    if decision.outcome == "already_trusted":
+        # Leave an existing grant - a person's or the policy's - exactly as it is.
+        return _state(install)
+    if decision.outcome != "auto_trust":
+        raise ComfyRegistryActivationError(
+            f"registry_policy_{decision.reason}",
+            decision.explanation or "This Registry package cannot be trusted automatically",
+        )
+    _verify_install(
+        session,
+        install,
+        custom_node_root=custom_node_root,
+        environment_root=environment_root,
+        verified_launch=verified_launch,
+    )
+    _apply_registry_policy_trust(install, decision)
+    return _state(install)
+
+
+def _apply_registry_policy_trust(
+    install: ComfyRegistryInstall, decision: RegistryTrustDecision
+) -> None:
+    """Apply an automatic grant after the caller verifies the complete transaction's inputs."""
+    if decision.outcome != "auto_trust":
+        raise ComfyRegistryActivationError(
+            "registry_policy_grant_invalid", "The Registry policy did not grant this package trust"
+        )
+    install.trusted = True
+    install.review_json = {
+        **_without_trust_provenance(install.review_json),
+        "reviewed_at": utcnow().isoformat(),
+        "trusted_by_local_user": False,
+        "trust_authority": POLICY_ID,
+        "policy_notices": list(decision.notices),
+    }
+
+
+_TRUST_PROVENANCE_KEYS = frozenset({"trust_authority", "policy_notices"})
+
+
+def _without_trust_provenance(review: object) -> dict[str, Any]:
+    """The review record minus whichever authority wrote the last trust decision.
+
+    Both writers replace the authority rather than merging over it, because a
+    merge is how a revoked policy grant would go on claiming the policy trusted
+    the package.
+    """
+
+    if not isinstance(review, dict):
+        return {}
+    return {key: value for key, value in review.items() if key not in _TRUST_PROVENANCE_KEYS}
 
 
 async def activate_comfy_registry_install(
@@ -90,6 +223,10 @@ async def activate_comfy_registry_install(
     media_worker_stopped: bool,
     start_media: MediaStarter,
     read_node_inventory: NodeInventoryReader | None = None,
+    verification_target: ComfyRegistryVerificationTarget | None = None,
+    write_guard: Callable[[Session], None] | None = None,
+    cleanup_guard: Callable[[Session], None] | None = None,
+    restore_media: MediaStarter | None = None,
 ) -> ComfyRegistryActivationState:
     """Activate one trusted package and restore the prior runtime if startup fails.
 
@@ -100,6 +237,33 @@ async def activate_comfy_registry_install(
     afterwards, and a runtime that cannot show them is rolled back like any
     other failed activation.
     """
+    if verification_target is not None:
+        from .comfy_registry_verified_activation import activate_verified_comfy_registry_install
+
+        if (
+            verification_target.custom_node_root != custom_node_root
+            or verification_target.environment_root != environment_root
+        ):
+            raise ComfyRegistryActivationError(
+                "registry_install_verification_failed", "Registry activation roots changed"
+            )
+        return await activate_verified_comfy_registry_install(
+            session,
+            install_id=install_id,
+            target=verification_target,
+            media_worker_stopped=media_worker_stopped,
+            start_media=start_media,
+            read_node_inventory=read_node_inventory,
+            write_guard=write_guard,
+            cleanup_guard=cleanup_guard,
+            restore_media=restore_media,
+        )
+    if write_guard is not None or cleanup_guard is not None:
+        raise ComfyRegistryActivationError(
+            "registry_install_verification_failed",
+            "Claimed Registry activation requires a verification target",
+        )
+    restore_start = restore_media or start_media
     _require_stopped(media_worker_stopped)
     install = _install(session, install_id)
     if not install.trusted:
@@ -132,12 +296,12 @@ async def activate_comfy_registry_install(
         await start_media()
     except asyncio.CancelledError:
         _deactivate(session, install_id, failure_code="activation_cancelled")
-        await _restore_after_cancellation(start_media)
+        await _restore_after_cancellation(restore_start)
         raise
     except Exception as exc:
         _deactivate(session, install_id, failure_code="activation_start_failed")
         try:
-            await start_media()
+            await restore_start()
         except (Exception, asyncio.CancelledError) as restore_exc:
             raise ComfyRegistryActivationError(
                 "activation_restore_failed",
@@ -161,7 +325,7 @@ async def activate_comfy_registry_install(
     except (ComfyRegistryArchiveError, OSError, ValueError) as exc:
         _deactivate(session, install_id, failure_code="activation_runtime_files_failed")
         try:
-            await start_media()
+            await restore_start()
         except (Exception, asyncio.CancelledError) as restore_exc:
             raise ComfyRegistryActivationError(
                 "activation_restore_failed",
@@ -178,7 +342,7 @@ async def activate_comfy_registry_install(
         # After startup and after the file contract, because both of those
         # can restore on their own terms; this one restores the same way.
         if read_node_inventory is None:
-            await _roll_back(session, install_id, start_media, "omission_unverifiable")
+            await _roll_back(session, install_id, restore_start, "omission_unverifiable")
             raise ComfyRegistryActivationError(
                 "omission_unverifiable",
                 "An omitted source dependency cannot be proven unnecessary without "
@@ -191,7 +355,7 @@ async def activate_comfy_registry_install(
             # A reader that fails is not a proof either, and it fails the same
             # way a refused proof does rather than leaving the trial standing.
             code = exc.code if isinstance(exc, OmissionProofError) else "omission_unverifiable"
-            await _roll_back(session, install_id, start_media, code)
+            await _roll_back(session, install_id, restore_start, code)
             raise ComfyRegistryActivationError(
                 code,
                 f"{exc} - the prior media runtime was restored",
@@ -264,7 +428,23 @@ def _verify_install(
     *,
     custom_node_root: Path,
     environment_root: Path,
+    verified_launch: VerifiedComfyRegistryLaunch | None = None,
 ) -> None:
+    if verified_launch is not None:
+        try:
+            verified_launch.require_install(
+                session,
+                install,
+                custom_node_root=custom_node_root,
+                environment_root=environment_root,
+            )
+        except ValueError as exc:
+            session.rollback()
+            raise ComfyRegistryActivationError(
+                "registry_install_verification_failed",
+                f"Registry package files or dependencies failed verification: {exc}",
+            ) from exc
+        return
     original_trusted = install.trusted
     original_active = install.active
     install.trusted = True
@@ -298,8 +478,16 @@ def _verify_install(
     install.active = original_active
 
 
-def _deactivate(session: Session, install_id: str, *, failure_code: str) -> None:
+def _deactivate(
+    session: Session,
+    install_id: str,
+    *,
+    failure_code: str,
+    write_guard: Callable[[Session], None] | None = None,
+) -> None:
     session.rollback()
+    if write_guard is not None:
+        write_guard(session)
     install = _install(session, install_id)
     install.active = False
     install.review_json = {

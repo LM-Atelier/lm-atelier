@@ -20,13 +20,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import __version__
 from .adapters.comfyui import ComfyUIAdapter
 from .api import (
-    recover_model_delete_quarantines,
+    recover_registry_preparations,
     router,
     shutdown_registry_preparations,
 )
@@ -34,6 +35,7 @@ from .api_errors import register_api_error_handler
 from .artifacts import (
     RETENTION_BATCH_DELETIONS,
     RETENTION_BATCH_SECONDS,
+    RETENTION_UNTIMED_BATCH_DELETIONS,
     ArtifactStore,
     RetentionCleanupSummary,
 )
@@ -53,8 +55,15 @@ from .events import EventBroker
 from .exports import ProjectExporter
 from .instance_identity import INSTANCE_ID_HEADER, load_or_create_instance_identity
 from .instance_lock import DataDirectoryLock
+from .media_organization_batch_api import router as media_organization_batch_router
+from .model_quarantine import recover_model_delete_quarantines
 from .orchestrator import ConversationOrchestrator
+from .power_inhibition import PowerInhibitor, default_power_backend
 from .processes import ProcessSupervisor
+from .project_archive_encryption import sweep_staging
+from .queue_lane_policy import recover_queue_lanes
+from .recovery_maintenance import maintain_recovery_expiry
+from .retention_policy import windows_for
 from .runtime_provisioning import RuntimeProvisioner
 from .scheduler import ResourceScheduler
 from .security import (
@@ -64,8 +73,23 @@ from .security import (
     UploadBodyLimitMiddleware,
 )
 from .seed import seed_defaults
+from .video_utilities import VideoUtilityManager
 from .worker_startup import restore_configured_workers
 from .workflow_editor_sessions import WorkflowEditorSessions
+from .workflow_selection_errors import register_workflow_selection_error_handler
+from .workspace_lock import (
+    LOCK_EPOCH_HEADER,
+    LOCKED_CLOSE_CODE,
+    WorkspaceLock,
+    WorkspaceLockMiddleware,
+    lock_when_idle,
+)
+from .workspace_lock_policy import (
+    SavedWorkspaceLock,
+    WorkspaceLockSettingInvalid,
+    clear_policy,
+    read_policy,
+)
 
 logger = logging.getLogger("local_lm")
 AUTOMATIC_BACKUP_CHECK_INTERVAL_SECONDS = 60 * 60
@@ -73,6 +97,8 @@ API_LOG_MAX_BYTES = 2 * 1024 * 1024
 API_LOG_BACKUP_COUNT = 3
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 STARTUP_STAGE_WARN_SECONDS = 30.0
+#: The API paths answered without a session, and so also while locked.
+PUBLIC_API_PATHS = frozenset({"/api/session", "/api/health", "/api/ready"})
 
 
 def _request_hostname(authority: str) -> str | None:
@@ -216,11 +242,29 @@ async def _wait_for_websocket_disconnect(websocket: WebSocket) -> None:
             return
 
 
-async def _stream_events(websocket: WebSocket, broker: EventBroker, *, after: int) -> None:
+async def _stream_events(
+    websocket: WebSocket,
+    broker: EventBroker,
+    *,
+    after: int,
+    closing: asyncio.Event | None = None,
+) -> None:
+    """Send the broker's events until the client leaves or `closing` is set.
+
+    `closing` is set when the workspace locks. It is checked first after every
+    wait, so a lock wins over an event that is already waiting and nothing
+    more is sent once it lands.
+    """
+
     disconnect_task = asyncio.create_task(
         _wait_for_websocket_disconnect(websocket),
         name="event-websocket-disconnect",
     )
+    watched: set[asyncio.Task[Any]] = {disconnect_task}
+    closing_task: asyncio.Task[Any] | None = None
+    if closing is not None:
+        closing_task = asyncio.create_task(closing.wait(), name="event-websocket-lock")
+        watched.add(closing_task)
     event_task: asyncio.Task[Any] | None = None
     send_task: asyncio.Task[Any] | None = None
     try:
@@ -228,9 +272,14 @@ async def _stream_events(websocket: WebSocket, broker: EventBroker, *, after: in
             while True:
                 event_task = asyncio.create_task(queue.get(), name="event-websocket-next-event")
                 done, _ = await asyncio.wait(
-                    {disconnect_task, event_task},
+                    {*watched, event_task},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                if closing is not None and closing.is_set():
+                    await _cancel_task(event_task)
+                    event_task = None
+                    await websocket.close(code=LOCKED_CLOSE_CODE, reason="workspace-locked")
+                    return
                 if disconnect_task in done:
                     await _cancel_task(event_task)
                     event_task = None
@@ -244,9 +293,14 @@ async def _stream_events(websocket: WebSocket, broker: EventBroker, *, after: in
                     name="event-websocket-send",
                 )
                 done, _ = await asyncio.wait(
-                    {disconnect_task, send_task},
+                    {*watched, send_task},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                if closing is not None and closing.is_set():
+                    await _cancel_task(send_task)
+                    send_task = None
+                    await websocket.close(code=LOCKED_CLOSE_CODE, reason="workspace-locked")
+                    return
                 if disconnect_task in done:
                     await _cancel_task(send_task)
                     send_task = None
@@ -257,6 +311,7 @@ async def _stream_events(websocket: WebSocket, broker: EventBroker, *, after: in
     finally:
         await _cancel_task(event_task)
         await _cancel_task(send_task)
+        await _cancel_task(closing_task)
         await _cancel_task(disconnect_task)
 
 
@@ -279,6 +334,9 @@ class Services:
     custom_nodes: CustomNodeManager
     credentials: CredentialStore
     workflow_editor_sessions: WorkflowEditorSessions
+    workspace_lock: WorkspaceLock
+    power: PowerInhibitor
+    video_utilities: VideoUtilityManager
 
     @property
     def catalog(self) -> HuggingFaceCatalog:
@@ -293,15 +351,19 @@ def build_services(settings: Settings) -> Services:
         environment_tokens={
             "huggingface": settings.hf_token,
             "civitai": settings.civitai_token,
-        }
+            "crw": settings.crw_token,
+        },
+        service=settings.credential_namespace,
     )
     settings.hf_token = credentials.token("huggingface")
     settings.civitai_token = credentials.token("civitai")
+    settings.crw_token = credentials.token("crw")
     events = EventBroker(settings.event_history_size)
     artifacts = ArtifactStore(settings)
     runtimes = RuntimeProvisioner(settings)
     engines = EngineRegistry(settings)
-    scheduler = ResourceScheduler(events)
+    power = PowerInhibitor(default_power_backend(), enabled=settings.keep_awake_during_work)
+    scheduler = ResourceScheduler(events, power=power)
     processes = ProcessSupervisor(settings, runtimes, events)
     orchestrator = ConversationOrchestrator(engines, artifacts, events, scheduler, processes)
     catalog = HuggingFaceCatalog(settings)
@@ -327,12 +389,39 @@ def build_services(settings: Settings) -> Services:
         runtimes=runtimes,
         backups=BackupManager(settings),
         exports=ProjectExporter(settings, artifacts),
-        diagnostics=DiagnosticBundleBuilder(settings, artifacts, processes),
+        diagnostics=DiagnosticBundleBuilder(settings, artifacts, processes, power=power),
         custom_nodes=CustomNodeManager(settings),
         credentials=credentials,
         workflow_editor_sessions=WorkflowEditorSessions(),
+        # Built locked; the lifespan settles it from the saved setting.
+        workspace_lock=WorkspaceLock(),
+        power=power,
+        video_utilities=VideoUtilityManager(artifacts, scheduler),
     )
     return services
+
+
+def _settle_workspace_lock(session: Session, lock: WorkspaceLock, settings: Settings) -> None:
+    """Start locked or unlocked as the saved setting says, before anything is served."""
+
+    if settings.reset_workspace_lock:
+        clear_policy(session)
+        session.commit()
+        logger.warning(
+            "The workspace lock and its PIN were cleared because "
+            "LOCAL_LM_RESET_WORKSPACE_LOCK is set. Unset it so the next start keeps "
+            "the lock you choose."
+        )
+    saved: SavedWorkspaceLock | None
+    try:
+        saved = read_policy(session)
+    except WorkspaceLockSettingInvalid:
+        saved = None
+        logger.warning(
+            "The saved workspace lock setting cannot be read, so the workspace stays "
+            "locked. Start once with LOCAL_LM_RESET_WORKSPACE_LOCK=true to clear it."
+        )
+    lock.settle(saved)
 
 
 async def ensure_automatic_recovery_backup(backups: BackupManager) -> None:
@@ -483,12 +572,13 @@ async def sweep_artifact_retention(
 
     def run_batch(*, deletions: int, seconds: float | None) -> RetentionCleanupSummary:
         deadline: float | None = None
+        deletion_phase = False
 
         def should_stop() -> bool:
             nonlocal deadline
             if stop.is_set():
                 return True
-            if seconds is None:
+            if not deletion_phase or seconds is None:
                 return False
             if deadline is None:
                 # The complete graph and validity scan are fixed work. Charge
@@ -497,15 +587,26 @@ async def sweep_artifact_retention(
             return time.monotonic() >= deadline
 
         with _retention_batch_progress() as progress, SessionLocal(bind=bind) as session:
+
+            def report_phase(name: str) -> None:
+                nonlocal deletion_phase
+                if name == "examine-artifacts":
+                    deletion_phase = True
+                progress.phase(name)
+
             try:
                 summary = artifacts.cleanup_retention(
                     session,
-                    retention_days=settings.artifact_retention_days,
-                    temporary_hours=settings.temporary_retention_hours,
+                    windows_from=lambda held: windows_for(held, settings),
                     dry_run=False,
                     max_deletions=deletions,
                     should_stop=should_stop,
-                    report_phase=progress.phase,
+                    report_phase=report_phase,
+                    # The walk of the store's files keeps a clock even when the
+                    # rows' comes off, and goes on next batch from where it
+                    # stopped: walking every shard of a large store at once
+                    # held the writer past every other writer's patience.
+                    walk_seconds=batch_seconds,
                 )
                 progress.phase("commit")
                 session.commit()
@@ -518,10 +619,12 @@ async def sweep_artifact_retention(
                 progress.transaction_finished()
                 raise
         logger.info(
-            "Artifact retention batch committed: %s row(s) examined, %s item(s) removed; "
+            "Artifact retention batch committed: %s row(s) examined, "
+            "%s artifact row(s), %s unindexed file(s) removed; "
             "elapsed %.3fs; writer reservation %.3fs",
             summary.examined_count,
-            summary.removed_count,
+            summary.removed_row_count,
+            summary.removed_orphan_file_count,
             time.monotonic() - progress.started,
             progress.writer_seconds,
         )
@@ -531,7 +634,8 @@ async def sweep_artifact_retention(
     logger.info("Artifact retention sweep started")
     batches = 0
     examined = 0
-    removed = 0
+    removed_rows = 0
+    removed_orphan_files = 0
     passes = 0
     locked_out = 0
     single = False
@@ -540,9 +644,14 @@ async def sweep_artifact_retention(
             deletions = batch_deletions
             seconds: float | None = batch_seconds
             if single:
-                # A zero or exhausted deletion budget cannot make progress.
-                # Fall back to one deletion while still honoring shutdown.
-                deletions = 1
+                # A batch removed nothing inside its budget, so the clock
+                # comes off: one that cannot spend a budget cannot make progress
+                # under it either. The count stays, because it is what bounds
+                # the rows a batch removes while it holds the writer. One
+                # deletion here would pay a whole reference snapshot per row,
+                # which is how a backlog turns into minutes of holding the
+                # writer and failing everything else that writes.
+                deletions = min(batch_deletions, RETENTION_UNTIMED_BATCH_DELETIONS)
                 seconds = None
             operation = asyncio.create_task(
                 asyncio.to_thread(run_batch, deletions=deletions, seconds=seconds),
@@ -559,7 +668,8 @@ async def sweep_artifact_retention(
                     summary = await operation
                     batches += 1
                     examined += summary.examined_count
-                    removed += summary.removed_count
+                    removed_rows += summary.removed_row_count
+                    removed_orphan_files += summary.removed_orphan_file_count
                 raise
             except OperationalError as exc:
                 # A user transaction held the writer for longer than
@@ -583,21 +693,25 @@ async def sweep_artifact_retention(
             locked_out = 0
             batches += 1
             examined += summary.examined_count
-            removed += summary.removed_count
+            removed_rows += summary.removed_row_count
+            removed_orphan_files += summary.removed_orphan_file_count
             if summary.truncated:
                 if summary.removed_count == 0 and not single:
                     single = True
                     logger.info(
-                        "Artifact retention batch %s made no progress within %.1fs; "
-                        "continuing one deletion per batch",
+                        "Artifact retention batch %s removed nothing within %.1fs; "
+                        "continuing without the clock, up to %s deletion(s) a batch",
                         batches,
                         batch_seconds,
+                        min(batch_deletions, RETENTION_UNTIMED_BATCH_DELETIONS),
                     )
                 else:
                     logger.info(
-                        "Artifact retention batch %s removed %s artifact(s); more remain",
+                        "Artifact retention batch %s removed %s artifact row(s), "
+                        "%s unindexed file(s); more remain",
                         batches,
-                        summary.removed_count,
+                        summary.removed_row_count,
+                        summary.removed_orphan_file_count,
                     )
                 await asyncio.sleep(pause_seconds)
                 continue
@@ -610,10 +724,12 @@ async def sweep_artifact_retention(
             await asyncio.sleep(pause_seconds)
     except asyncio.CancelledError:
         logger.info(
-            "Artifact retention sweep stopped after %s batch(es), %s removed; "
+            "Artifact retention sweep stopped after %s batch(es), "
+            "%s artifact row(s), %s unindexed file(s) removed; "
             "elapsed %.3fs; it resumes at the next start",
             batches,
-            removed,
+            removed_rows,
+            removed_orphan_files,
             time.monotonic() - started,
         )
         raise
@@ -626,10 +742,12 @@ async def sweep_artifact_retention(
         )
         return
     logger.info(
-        "Artifact retention sweep complete: %s batch(es), %s artifact(s) removed; "
+        "Artifact retention sweep complete: %s batch(es), "
+        "%s artifact row(s), %s unindexed file(s) removed; "
         "%s row examination(s); elapsed %.3fs",
         batches,
-        removed,
+        removed_rows,
+        removed_orphan_files,
         examined,
         time.monotonic() - started,
     )
@@ -655,6 +773,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with _api_file_logging(active_settings):
             with _startup_stage("database-migrations"):
                 upgrade_database(active_settings)
+            with _startup_stage("archive-staging-cleanup"):
+                sweep_staging(active_settings.export_dir)
             with SessionLocal() as session:
                 with _startup_stage("model-delete-quarantine-recovery"):
                     recover_model_delete_quarantines(
@@ -665,10 +785,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     seed_defaults(session, active_settings)
                 with _startup_stage("session-commit"):
                     session.commit()
+            with _startup_stage("workspace-lock"), SessionLocal() as session:
+                _settle_workspace_lock(session, services.workspace_lock, active_settings)
             with _startup_stage("orchestrator-recovery"):
                 services.orchestrator.recover_interrupted()
             with _startup_stage("download-recovery"):
                 services.downloads.recover_interrupted()
+            with _startup_stage("registry-preparation-recovery"):
+                recover_registry_preparations(services)
+            with _startup_stage("video-utility-recovery"):
+                services.video_utilities.recover()
+            with _startup_stage("generation-queue-recovery"), SessionLocal() as session:
+                recover_queue_lanes(session)
+                session.commit()
             logger.info(
                 "LM Atelier %s started on %s:%s",
                 __version__,
@@ -694,7 +823,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Exposed so a caller that needs the sweep's result - a test, or a
             # later readiness view - can await it instead of polling the store.
             app.state.retention_sweep = retention_sweep
-            background = (worker_restore, backup_maintenance, retention_sweep)
+            recovery_maintenance = asyncio.create_task(
+                maintain_recovery_expiry(services), name="recovery-expiry-maintenance"
+            )
+            app.state.recovery_maintenance = recovery_maintenance
+            idle_lock = asyncio.create_task(
+                lock_when_idle(services.workspace_lock), name="workspace-idle-lock"
+            )
+            background = (
+                worker_restore,
+                backup_maintenance,
+                retention_sweep,
+                recovery_maintenance,
+                idle_lock,
+            )
             try:
                 yield
             finally:
@@ -705,6 +847,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     with suppress(asyncio.CancelledError):
                         await task
                 await shutdown_registry_preparations()
+                await services.video_utilities.close()
                 services.workflow_editor_sessions.clear()
                 await services.downloads.close()
                 await services.orchestrator.close()
@@ -728,6 +871,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         artifact_max_bytes=active_settings.max_upload_bytes,
         project_max_bytes=active_settings.max_project_import_bytes,
     )
+    # Added after the body limits and before the host and session checks, so
+    # it runs inside the session checks and refuses before any body is read.
+    app.add_middleware(
+        WorkspaceLockMiddleware, lock=services.workspace_lock, public_paths=PUBLIC_API_PATHS
+    )
     app.add_middleware(LocalHostMiddleware, allow_test_hosts=active_settings.dev)
     if active_settings.dev:
         app.add_middleware(
@@ -740,8 +888,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def local_session(request: Request, call_next):  # type: ignore[no-untyped-def]
-        public = {"/api/session", "/api/health", "/api/ready"}
-
         def refusal(exc: Exception, fallback_status: int, fallback_detail: str) -> JSONResponse:
             """Answer a refused request the same way the rest of the API does.
 
@@ -765,7 +911,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 services.security.validate_origin(request.headers.get("origin"))
             except Exception as exc:
                 return refusal(exc, 403, "untrusted browser origin")
-        if request.url.path.startswith("/api") and request.url.path not in public:
+        if request.url.path.startswith("/api") and request.url.path not in PUBLIC_API_PATHS:
             try:
                 services.security.validate_request(request)
             except Exception as exc:
@@ -778,16 +924,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Register this last so it wraps host, session, and body-limit rejections too.
     app.add_middleware(SecurityHeadersMiddleware)
     register_api_error_handler(app)
+    register_workflow_selection_error_handler(app)
     app.include_router(router)
+    app.include_router(media_organization_batch_router, prefix="/api")
 
     @app.websocket("/api/events")
     async def events_socket(websocket: WebSocket, after: int = 0) -> None:
         if not await services.security.validate_websocket(websocket):
             await websocket.close(code=4401)
             return
+        # Taken and checked with no await between, so a lock either lands
+        # before this check or sets the very signal the stream then watches.
+        # A page that names an epoch from before the latest lock is refused
+        # too, as its requests are. Refused before accept, a page sees a failed
+        # connection rather than an open one, which would send it to refetch
+        # everything it shows.
+        lock = services.workspace_lock
+        closing = lock.lock_signal()
+        claimed = [
+            epoch
+            for epoch in (
+                websocket.query_params.get("lock_epoch"),
+                websocket.headers.get(LOCK_EPOCH_HEADER),
+            )
+            if epoch
+        ]
+        if closing.is_set() or any(lock.refusal_code(epoch) for epoch in claimed):
+            await websocket.close(code=LOCKED_CLOSE_CODE)
+            return
         await websocket.accept()
         try:
-            await _stream_events(websocket, services.events, after=after)
+            await _stream_events(websocket, services.events, after=after, closing=closing)
         except WebSocketDisconnect:
             return
 
@@ -821,6 +988,14 @@ def _create_default_app() -> tuple[FastAPI, DataDirectoryLock]:
 app, _default_instance_lock = _create_default_app()
 
 
+#: The loop factory uvicorn imports on Windows, where the standard proactor
+#: loop closes the listening socket over an error that belongs to one
+#: incoming connection, and can leave a finished connection holding up every
+#: later shutdown. Uvicorn takes this as an import string and calls it for
+#: each process it serves from.
+_LISTENER_PRESERVING_LOOP = "local_lm.windows_listener:listener_preserving_loop"
+
+
 def run() -> None:
     settings = get_settings()
     if settings.dev:
@@ -832,4 +1007,8 @@ def run() -> None:
         host=settings.host,
         port=settings.port,
         reload=settings.dev,
+        # Named rather than passed, because in development the reload
+        # supervisor serves from a separate process that builds its own loop,
+        # and an import string survives that where a function object would not.
+        loop=_LISTENER_PRESERVING_LOOP if sys.platform == "win32" else "auto",
     )

@@ -139,6 +139,58 @@ describe("studio filmstrip", () => {
     ]))).toBeNull();
   });
 
+  it("remembers which picture each result was made from", () => {
+    const steps = studioSteps(
+      session([
+        message({
+          id: "user-1",
+          role: "user",
+          parts: [
+            part({ id: "t1", type: "text", text: "brighter sky" }),
+            part({ id: "in1", position: 1, type: "image", artifact_id: "art-source" }),
+          ],
+        }),
+        message({ id: "answer-1", parts: [part({ id: "i1", type: "image", artifact_id: "art-1" })] }),
+        // The source again, with a second picture after it that is only read.
+        message({
+          id: "user-2",
+          role: "user",
+          parts: [
+            part({ id: "t2", type: "text", text: "swap the subject" }),
+            part({ id: "in2", position: 1, type: "image", artifact_id: "art-source" }),
+            part({ id: "in3", position: 2, type: "image", artifact_id: "art-reference" }),
+          ],
+        }),
+        message({ id: "answer-2", parts: [part({ id: "i2", type: "image", artifact_id: "art-2" })] }),
+        // Continued from the first result rather than from the one before it.
+        message({
+          id: "user-3",
+          role: "user",
+          parts: [
+            part({ id: "t3", type: "text", text: "warmer light" }),
+            part({ id: "in4", position: 1, type: "image", artifact_id: "art-1" }),
+          ],
+        }),
+        message({ id: "answer-3", parts: [part({ id: "i3", type: "image", artifact_id: "art-3" })] }),
+      ]),
+      "art-source",
+    );
+
+    expect(steps.map((step) => step.beforeArtifactId)).toEqual([null, "art-source", "art-source", "art-1"]);
+  });
+
+  it("knows no earlier picture for a turn that recorded none", () => {
+    const steps = studioSteps(
+      session([
+        message({ id: "user-1", role: "user", parts: [part({ type: "text", text: "a new picture" })] }),
+        message({ id: "answer-1", parts: [part({ type: "image", artifact_id: "art-1" })] }),
+      ]),
+      "art-source",
+    );
+
+    expect(steps[1].beforeArtifactId).toBeNull();
+  });
+
   it("works before any edit and without a known source", () => {
     expect(studioSteps(session([]), "art-source")).toHaveLength(1);
     expect(studioSteps(session([]), null)).toEqual([]);
@@ -165,5 +217,21 @@ describe("studio mask upload", () => {
     expect(sendTurn).not.toHaveBeenCalled();
     upload.mockRestore();
     sendTurn.mockRestore();
+  });
+
+  it("says when a selection is placed back after the edit rather than given to the workflow", async () => {
+    const { api } = await import("./api");
+    const upload = vi.spyOn(api, "upload").mockResolvedValue({ id: "sha256:mask" } as never);
+
+    const { uploadMaskForTest } = await import("./useStudioSession");
+    const setting = await uploadMaskForTest({
+      blob: new Blob([new Uint8Array([1, 2])], { type: "image/png" }),
+      featherPx: 4,
+      invert: false,
+      apply: "blend",
+    });
+
+    expect(setting).toEqual({ artifact_id: "sha256:mask", feather_px: 4, invert: false, apply: "blend" });
+    upload.mockRestore();
   });
 });

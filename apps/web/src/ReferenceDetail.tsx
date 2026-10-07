@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ShieldedMedia } from "./ShieldedMedia";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ImageIcon, Plus, Trash2 } from "lucide-react";
 import { api } from "./api";
@@ -131,7 +132,10 @@ export function ReferenceDetail({
     },
     onError: fail,
   });
-  const save = () => details.mutate();
+  const save = () => {
+    if (!edited || details.isPending) return;
+    details.mutate();
+  };
 
   // Invalidates the subject list rather than the asset list: the cover lives on
   // the subject, and this view reads the subject from the list it was opened
@@ -245,7 +249,7 @@ export function ReferenceDetail({
             onChange={(event) => setDraft({ ...draft, tags: event.target.value })}
           />
         </label>
-        <button className="secondary" disabled={!edited || details.isPending} onClick={save}>
+        <button className="secondary" aria-disabled={!edited || details.isPending} onClick={save}>
           Save details
         </button>
       </div>
@@ -268,11 +272,13 @@ export function ReferenceDetail({
       <ul className="reference-asset-grid">
         {items.map((asset) => (
           <li key={asset.id}>
-            <img
-              src={artifactSource(asset.artifact_id) ?? undefined}
-              alt={asset.caption ?? `${subject.name}, ${asset.purpose}`}
-              loading="lazy"
-            />
+            <ShieldedMedia kind="image">
+              <img
+                src={artifactSource(asset.artifact_id) ?? undefined}
+                alt={asset.caption ?? `${subject.name}, ${asset.purpose}`}
+                loading="lazy"
+              />
+            </ShieldedMedia>
             <div className="detail-title">
               <span className="badge">{asset.purpose}</span>
               {/* Unchecked is not a synonym for usable: an image nobody has

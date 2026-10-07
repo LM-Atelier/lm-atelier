@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 import { useAppearance, type Appearance } from "./theme";
 
 /** How wide the sidebar is, and whether it is there at all.
@@ -7,6 +7,9 @@ import { useAppearance, type Appearance } from "./theme";
  * custom property on the document so the grid needs no conditional rules.
  * Collapsing sets the width to zero rather than unmounting: the tree keeps
  * its state, so reopening does not lose which projects were expanded.
+ *
+ * Stored rather than held in component state, so Settings can put the
+ * sidebar back without reaching into the workspace that draws it.
  */
 export const SIDEBAR_WIDTH_KEY = "local-lm-sidebar-width";
 export const SIDEBAR_COLLAPSED_KEY = "local-lm-sidebar-collapsed";
@@ -28,6 +31,49 @@ function storedCollapsed(): boolean {
   return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
 }
 
+const listeners = new Set<() => void>();
+
+function changed(): void {
+  for (const listener of listeners) listener();
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  // Another window resizing or resetting the sidebar moves this one too.
+  const onStorage = (event: StorageEvent) => {
+    if (event.key === null || event.key === SIDEBAR_WIDTH_KEY || event.key === SIDEBAR_COLLAPSED_KEY) listener();
+  };
+  window.addEventListener("storage", onStorage);
+  return () => {
+    listeners.delete(listener);
+    window.removeEventListener("storage", onStorage);
+  };
+}
+
+function setSidebarWidth(next: number): void {
+  localStorage.setItem(SIDEBAR_WIDTH_KEY, String(clampSidebarWidth(next)));
+  changed();
+}
+
+function toggleSidebar(): void {
+  localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(!storedCollapsed()));
+  changed();
+}
+
+/** Put the sidebar back as a new workspace has it: shown, at its usual width. */
+export function resetSidebarLayout(): void {
+  localStorage.removeItem(SIDEBAR_WIDTH_KEY);
+  localStorage.removeItem(SIDEBAR_COLLAPSED_KEY);
+  changed();
+}
+
+/** The sidebar's width and whether it is hidden, for a reader that changes neither. */
+export function useSidebarState(): { width: number; collapsed: boolean } {
+  const width = useSyncExternalStore(subscribe, storedWidth, () => DEFAULT_SIDEBAR_WIDTH);
+  const collapsed = useSyncExternalStore(subscribe, storedCollapsed, () => false);
+  return { width, collapsed };
+}
+
 export interface SidebarLayout {
   width: number;
   collapsed: boolean;
@@ -36,8 +82,7 @@ export interface SidebarLayout {
 }
 
 export function useSidebarLayout(): SidebarLayout {
-  const [width, setWidthState] = useState<number>(storedWidth);
-  const [collapsed, setCollapsed] = useState<boolean>(storedCollapsed);
+  const { width, collapsed } = useSidebarState();
 
   useEffect(() => {
     // Zero when collapsed, so the grid column closes without a second rule.
@@ -48,21 +93,7 @@ export function useSidebarLayout(): SidebarLayout {
     document.documentElement.dataset.sidebar = collapsed ? "collapsed" : "open";
   }, [width, collapsed]);
 
-  const setWidth = useCallback((next: number) => {
-    const clamped = clampSidebarWidth(next);
-    setWidthState(clamped);
-    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(clamped));
-  }, []);
-
-  const toggle = useCallback(() => {
-    setCollapsed((current) => {
-      const next = !current;
-      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(next));
-      return next;
-    });
-  }, []);
-
-  return { width, collapsed, setWidth, toggle };
+  return { width, collapsed, setWidth: setSidebarWidth, toggle: toggleSidebar };
 }
 
 /** Everything about the shape of the workspace, in one call.

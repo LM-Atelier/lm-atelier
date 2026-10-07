@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from local_lm.search_cursor_v1 import (
@@ -165,6 +167,20 @@ def test_require_int_text_refuses_empty_non_string_and_non_digits() -> None:
         require_int_text("1" * (MAX_INT_DIGITS + 1), maximum=MAX_OFFSET)
 
 
+def test_require_int_text_refuses_an_over_long_digit_string_inside_the_value_ceiling() -> None:
+    """The length bound is not the same fact as the value ceiling.
+
+    An eleven-digit string of ones is larger than MAX_OFFSET, so the existing
+    over-long case is still refused by the ceiling after the length check is
+    removed. The same spelling with a ceiling above that integer is inside
+    the value bound and is refused only by the length check. Mutating that
+    check left require_int_text returning 11111111111.
+    """
+    over_long = "1" * (MAX_INT_DIGITS + 1)
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        require_int_text(over_long, maximum=10**20)
+
+
 def test_require_int_text_refuses_a_value_above_its_ceiling() -> None:
     """The digit string can be legal and still name a place past the bound.
 
@@ -249,14 +265,14 @@ def test_decode_refuses_wrong_prefix_and_wrong_part_count() -> None:
             query_digest=DIGEST,
         )
     with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
-        encode_search_cursor(object())
+        encode_search_cursor(cast(Any, object()))
 
 
 def test_public_constructor_cannot_mint_query_text() -> None:
     with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
         SearchCursorV1()
     with pytest.raises(TypeError):
-        SearchCursorV1(
+        cast(Any, SearchCursorV1)(
             schema="lm-atelier-search-cursor-v1",
             schema_version=1,
             index_generation=1,

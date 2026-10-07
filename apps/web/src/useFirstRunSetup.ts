@@ -11,7 +11,9 @@ export function useFirstRunSetup(): [boolean, () => void] {
     new URLSearchParams(window.location.search).get("firstRunSetup") === "1"
   ));
   return [active, () => {
-    window.history.replaceState(null, "", window.location.pathname);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("firstRunSetup");
+    window.history.replaceState(window.history.state, "", url);
     setActive(false);
   }];
 }

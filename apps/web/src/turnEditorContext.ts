@@ -6,16 +6,40 @@ export function activeBranchMessages(chat: ChatDetail): Message[] {
     (message) => message.transcript_visible !== false,
   );
   if (!chat.active_head_message_id) return visibleMessages;
-  const byId = new Map(visibleMessages.map((message) => [message.id, message]));
+  const byId = new Map(chat.messages.map((message) => [message.id, message]));
   const lineage: Message[] = [];
   const visited = new Set<string>();
   let current = byId.get(chat.active_head_message_id);
   while (current && !visited.has(current.id)) {
     visited.add(current.id);
-    lineage.unshift(current);
+    if (current.transcript_visible !== false) lineage.unshift(current);
     current = current.parent_id ? byId.get(current.parent_id) : undefined;
   }
-  return lineage.length > 0 ? lineage : visibleMessages;
+  return visited.size > 0 ? lineage : visibleMessages;
+}
+
+/** The exact revision this turn would use, or null when nothing pins one.
+ *
+ * `workflowSchemaForTurn` already works this out and then keeps only the schema
+ * it resolved from. The geometry endpoints are addressed by revision, so the
+ * caller needs the id itself; deriving it here rather than at the call site
+ * keeps the two answers reading the same selections.
+ */
+export function workflowRevisionForTurn(
+  mode: RoutingMode,
+  hasAttachments: boolean,
+  families: WorkflowFamily[] = [],
+  chatSelection: WorkflowSelection | null | undefined = null,
+  projectSelection: WorkflowSelection | null | undefined = null,
+): string | null {
+  if (mode !== "image" && mode !== "video") return null;
+  return revisionForTurn(
+    families,
+    mode,
+    chatSelection,
+    projectSelection,
+    operationForTurn(mode, hasAttachments),
+  );
 }
 
 export function workflowSchemaForTurn(

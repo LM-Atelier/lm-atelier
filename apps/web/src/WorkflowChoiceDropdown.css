@@ -1,0 +1,11 @@
+.workflow-choice-dropdown { position: relative; min-width: 0; }
+.workflow-choice-input { display: flex; position: relative; align-items: center; }
+.workflow-choice-input input { width: 100%; min-width: 0; border: 1px solid var(--line-control); border-radius: 10px; background: var(--surface-2); color: var(--ink-primary); padding: calc(6px * var(--spacing-scale, 1)) calc(34px * var(--spacing-scale, 1)) calc(6px * var(--spacing-scale, 1)) calc(8px * var(--spacing-scale, 1)); font: inherit; font-size: calc(12px * var(--text-scale, 1)); text-overflow: ellipsis; }
+.workflow-choice-input .icon-button { position: absolute; right: 0; }
+.workflow-choice-popup { position: absolute; bottom: calc(100% + 6px); inset-inline: 0; z-index: 30; max-height: min(40vh, 320px); overflow: auto; padding: calc(6px * var(--spacing-scale, 1)); background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 24px var(--shadow); }
+.workflow-choice-popup p { color: var(--ink-secondary); font-size: 12px; }
+.workflow-choice-list { display: grid; gap: 0; }
+.workflow-choice-option { display: block; width: 100%; padding: calc(8px * var(--spacing-scale, 1)); border: 0; border-radius: 6px; background: transparent; color: var(--ink-primary); text-align: left; font: inherit; cursor: pointer; overflow-wrap: anywhere; }
+.workflow-choice-option:hover, .workflow-choice-option.active { background: var(--panel-3); }
+.workflow-choice-option[aria-selected="true"] { font-weight: 600; }
+.workflow-choice-option[aria-disabled="true"] { color: var(--ink-muted); cursor: default; }

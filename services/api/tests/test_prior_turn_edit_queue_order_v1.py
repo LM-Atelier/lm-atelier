@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from local_lm.prior_turn_edit_queue_order_v1 import (
@@ -34,8 +36,9 @@ def test_refuses_unbounded_ids() -> None:
 def test_public_constructor_cannot_authorize_reorder() -> None:
     with pytest.raises(PriorTurnEditQueueOrderError, match=INVALID_QUEUE_ORDER):
         PriorTurnEditQueueOrderV1()
+    constructor: Callable[..., object] = PriorTurnEditQueueOrderV1
     with pytest.raises(TypeError):
-        PriorTurnEditQueueOrderV1(
+        constructor(
             schema="lm-atelier-prior-turn-edit-queue-order-v1",
             schema_version=1,
             chat_id="c1",

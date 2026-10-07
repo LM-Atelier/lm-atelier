@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -304,6 +306,72 @@ def test_template_discovery_prefers_the_configured_interpreter(tmp_path: Path) -
     assert [path.name for path in discovered] == ["from_interpreter.json"]
 
 
+def _make_link_dir(link: Path, target: Path) -> bool:
+    """Create a directory-shaped redirection, or False without privileges."""
+
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            check=False,
+        )
+        return completed.returncode == 0
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError:
+        return False
+    return True
+
+
+def test_a_linked_template_directory_is_not_listed(tmp_path: Path) -> None:
+    settings = _discovery_settings(tmp_path, "portable")
+    executable = settings.comfy_executable
+    assert executable is not None
+    templates = (
+        executable.parent
+        / "Lib"
+        / "site-packages"
+        / "comfyui_workflow_templates_json"
+        / "templates"
+    )
+    real = templates.with_name("templates-real")
+    templates.rename(real)
+    if not _make_link_dir(templates, real):
+        pytest.skip("directory links are unavailable")
+
+    discovered = ComfyTemplateRegistry(settings)._template_files()
+
+    assert discovered == []
+    assert (real / "example.json").is_file()
+
+
+def test_a_linked_template_file_is_not_listed(tmp_path: Path) -> None:
+    settings = _discovery_settings(tmp_path, "portable")
+    executable = settings.comfy_executable
+    assert executable is not None
+    templates = (
+        executable.parent
+        / "Lib"
+        / "site-packages"
+        / "comfyui_workflow_templates_json"
+        / "templates"
+    )
+    outside = tmp_path / "outside.json"
+    outside.write_text("A neutral fixture.", encoding="utf-8")
+    linked = templates / "example.json"
+    linked.unlink()
+    try:
+        linked.symlink_to(outside)
+    except OSError:
+        pytest.skip("file symlinks are unavailable")
+
+    discovered = ComfyTemplateRegistry(settings)._template_files()
+
+    assert discovered == []
+    assert outside.read_text(encoding="utf-8") == "A neutral fixture."
+    assert linked.is_symlink()
+
+
 def test_registry_requires_the_exact_backend_declared_repository(tmp_path: Path) -> None:
     registry = _registry(tmp_path)
 
@@ -552,7 +620,7 @@ def test_performance_contract_uses_metadata_graph_and_runtime_evidence() -> None
         },
         "SaveImage": {"output_node": True},
     }
-    input_schema = {
+    input_schema: dict[str, Any] = {
         "type": "object",
         "properties": {"steps": {"type": "integer", "default": 4}},
     }
@@ -745,6 +813,96 @@ def test_native_edit_loaders_bind_ordered_runtime_images(
     assert compiled.api_graph["3"]["inputs"]["ckpt_name"] == "model.safetensors"
     assert compiled.input_schema["properties"]["input_image_0"] == {"type": "string"}
     assert compiled.input_schema["properties"]["input_image_1"] == {"type": "string"}
+
+
+def test_a_template_that_loads_a_picture_installs_as_an_edit(tmp_path: Path) -> None:
+    """An outpainting template is named for what it does, not "edit". Offered
+    as text-to-image, its LoadImage kept the sample picture it was authored
+    with, which no runtime holds, so the install refused after every model
+    file had been downloaded."""
+    registry = _registry(tmp_path)
+    revision = "b" * 40
+    template = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "LoadImage",
+                "inputs": [],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [1]}],
+                "properties": {"cnr_id": "comfy-core"},
+                "widgets_values": ["authored-sample.png", "image"],
+            },
+            {
+                "id": 2,
+                "type": "CheckpointLoaderSimple",
+                "inputs": [],
+                "outputs": [],
+                "properties": {
+                    "cnr_id": "comfy-core",
+                    "models": [
+                        {
+                            "directory": "checkpoints",
+                            "name": "fill.safetensors",
+                            "url": (
+                                "https://huggingface.co/owner/fill/resolve/"
+                                f"{revision}/fill.safetensors"
+                            ),
+                        }
+                    ],
+                },
+                "widgets_values": ["fill.safetensors"],
+            },
+            {
+                "id": 3,
+                "type": "SaveImage",
+                "inputs": [{"name": "images", "type": "IMAGE", "link": 1}],
+                "outputs": [],
+                "properties": {"cnr_id": "comfy-core"},
+                "widgets_values": ["outpainted"],
+            },
+        ],
+        "links": [[1, 1, 0, 3, 0, "IMAGE"]],
+    }
+    (_installed_templates(registry) / "image_fill_outpaint_example.json").write_text(
+        json.dumps(template),
+        encoding="utf-8",
+    )
+    object_info = {
+        "LoadImage": {
+            "input": {"required": {"image": [["available.png"], {"image_upload": True}]}},
+            "input_order": {"required": ["image"]},
+        },
+        "CheckpointLoaderSimple": {
+            "input": {"required": {"ckpt_name": [["fill.safetensors"]]}},
+            "input_order": {"required": ["ckpt_name"]},
+        },
+        "SaveImage": {
+            "input": {
+                "required": {
+                    "images": ["IMAGE"],
+                    "filename_prefix": ["STRING", {"default": "ComfyUI"}],
+                }
+            },
+            "input_order": {"required": ["images", "filename_prefix"]},
+            "output_node": True,
+        },
+    }
+
+    offered = {item.id: item.operation for item in registry.available("image")}
+    compiled = registry.compile(
+        "image_fill_outpaint_example",
+        "image",
+        object_info,
+        remote_id="owner/fill",
+        revision=revision,
+        selected_files=["fill.safetensors"],
+        comfy_paths={"checkpoints": "."},
+    )
+
+    assert offered["image_fill_outpaint_example"] == "image_to_image"
+    assert compiled.template.operation == "image_to_image"
+    assert compiled.api_graph["1"]["inputs"]["image"] == "${input_image}"
+    assert compiled.input_schema["properties"]["input_image"] == {"type": "string"}
 
 
 def test_native_image_conditioning_keeps_authored_denoise_constant() -> None:
@@ -1859,6 +2017,277 @@ def test_operation_classification_reads_compact_variant_markers() -> None:
     assert _operation_for_template("image_sdxl_base", "image") == "text_to_image"
 
 
+def test_an_image_template_edits_when_a_running_picture_loader_feeds_a_picture_output() -> None:
+    from local_lm.comfy_templates import _operation_for_template
+
+    def graph(*nodes: tuple[str, int]) -> dict[str, Any]:
+        return {
+            "nodes": [
+                {"id": index, "type": kind, "mode": mode}
+                for index, (kind, mode) in enumerate(nodes)
+            ]
+        }
+
+    template = "image_fill_outpaint_example"
+    assert (
+        _operation_for_template(template, "image", graph(("LoadImage", 0), ("SaveImage", 0)))
+        == "image_to_image"
+    )
+    assert (
+        _operation_for_template(template, "image", graph(("LoadImage", 0), ("PreviewImage", 0)))
+        == "image_to_image"
+    )
+    nested = {
+        "nodes": [{"id": 1, "type": "SaveImage"}],
+        "definitions": {"subgraphs": [graph(("LoadImage", 0))]},
+    }
+    assert _operation_for_template(template, "image", nested) == "image_to_image"
+    # A loader that is muted or bypassed never reads a picture.
+    assert (
+        _operation_for_template(template, "image", graph(("LoadImage", 2), ("SaveImage", 0)))
+        == "text_to_image"
+    )
+    assert (
+        _operation_for_template(template, "image", graph(("LoadImage", 4), ("SaveImage", 0)))
+        == "text_to_image"
+    )
+    # A graph that answers with a video is not an image edit, whatever its id's prefix.
+    assert (
+        _operation_for_template(template, "image", graph(("LoadImage", 0), ("SaveVideo", 0)))
+        == "text_to_image"
+    )
+    assert _operation_for_template(template, "image", graph(("SaveImage", 0))) == "text_to_image"
+
+
+def test_a_video_template_animates_a_picture_it_loads_and_needs_no_audio_or_video() -> None:
+    """First-frame, first-and-last-frame and camera workflows are named for
+    what they do, so a picture they load kept its authored sample and the
+    install refused after the download; templates that read an audio or video
+    file need an input no turn supplies, and are not offered."""
+    from local_lm.comfy_templates import _operation_for_template
+
+    def graph(*nodes: tuple[str, int]) -> dict[str, Any]:
+        return {
+            "nodes": [
+                {"id": index, "type": kind, "mode": mode}
+                for index, (kind, mode) in enumerate(nodes)
+            ]
+        }
+
+    template = "video_first_frame_example"
+    animated = graph(("LoadImage", 0), ("CreateVideo", 0), ("SaveVideo", 0))
+    assert _operation_for_template(template, "video", animated) == "image_to_video"
+    assert (
+        _operation_for_template(template, "video", graph(("LoadImage", 0), ("SaveWEBM", 0)))
+        == "image_to_video"
+    )
+    # A loader that does not run reads nothing; a picture answer is not a video.
+    assert (
+        _operation_for_template(template, "video", graph(("LoadImage", 4), ("SaveVideo", 0)))
+        == "text_to_video"
+    )
+    assert (
+        _operation_for_template(template, "video", graph(("LoadImage", 0), ("SaveImage", 0)))
+        == "text_to_video"
+    )
+    for loader in ("LoadAudio", "LoadVideo"):
+        needs = graph(("LoadImage", 0), (loader, 0), ("SaveVideo", 0))
+        assert _operation_for_template(template, "video", needs) is None, loader
+        assert (
+            _operation_for_template(
+                "image_i2i_example", "image", graph((loader, 0), ("SaveImage", 0))
+            )
+            is None
+        )
+        muted = graph(("LoadImage", 0), (loader, 2), ("SaveVideo", 0))
+        assert _operation_for_template(template, "video", muted) == "image_to_video", loader
+    # Without a graph, the id alone still decides.
+    assert _operation_for_template("video_wan2_2_14B_i2v", "video") == "image_to_video"
+    assert _operation_for_template("video_wan2_2_14B_t2v", "video") == "text_to_video"
+
+
+def test_a_video_template_that_loads_a_picture_installs_as_image_to_video(tmp_path: Path) -> None:
+    registry = _registry(tmp_path)
+    revision = "c" * 40
+    model = {
+        "directory": "checkpoints",
+        "name": "motion.safetensors",
+        "url": f"https://huggingface.co/owner/motion/resolve/{revision}/motion.safetensors",
+    }
+
+    def template(*extra: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "LoadImage",
+                    "inputs": [],
+                    "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+                    "properties": {"cnr_id": "comfy-core"},
+                    "widgets_values": ["authored-first-frame.png", "image"],
+                },
+                {
+                    "id": 2,
+                    "type": "CheckpointLoaderSimple",
+                    "inputs": [],
+                    "outputs": [],
+                    "properties": {"cnr_id": "comfy-core", "models": [model]},
+                    "widgets_values": ["motion.safetensors"],
+                },
+                {
+                    "id": 3,
+                    "type": "SaveVideo",
+                    "inputs": [],
+                    "outputs": [],
+                    "properties": {"cnr_id": "comfy-core"},
+                    "widgets_values": ["h264"],
+                },
+                *extra,
+            ],
+            "links": [],
+        }
+
+    templates = _installed_templates(registry)
+    (templates / "video_first_frame_example.json").write_text(
+        json.dumps(template()), encoding="utf-8"
+    )
+    (templates / "video_sound_driven_example.json").write_text(
+        json.dumps(
+            template(
+                {
+                    "id": 4,
+                    "type": "LoadAudio",
+                    "inputs": [],
+                    "outputs": [],
+                    "properties": {"cnr_id": "comfy-core"},
+                    "widgets_values": ["authored-sound.wav"],
+                }
+            )
+        ),
+        encoding="utf-8",
+    )
+    object_info = {
+        "LoadImage": {
+            "input": {"required": {"image": [["available.png"], {"image_upload": True}]}},
+            "input_order": {"required": ["image"]},
+        },
+        "CheckpointLoaderSimple": {
+            "input": {"required": {"ckpt_name": [["motion.safetensors"]]}},
+            "input_order": {"required": ["ckpt_name"]},
+        },
+        "SaveVideo": {
+            "input": {"required": {"codec": ["COMBO", {"options": ["h264", "vp9"]}]}},
+            "input_order": {"required": ["codec"]},
+            "output_node": True,
+        },
+    }
+
+    offered = {item.id: item.operation for item in registry.available("video")}
+    compiled = registry.compile(
+        "video_first_frame_example",
+        "video",
+        object_info,
+        remote_id="owner/motion",
+        revision=revision,
+        selected_files=["motion.safetensors"],
+        comfy_paths={"checkpoints": "."},
+    )
+
+    assert offered == {"video_first_frame_example": "image_to_video"}
+    assert compiled.template.operation == "image_to_video"
+    assert compiled.api_graph["1"]["inputs"]["image"] == "${input_image}"
+
+
+def test_a_template_role_follows_what_its_graph_saves_before_its_id() -> None:
+    """Some catalog templates break the id convention: an image editing template
+    with a "video_" prefix was offered for video, and a first-frame video template
+    with an "image_" prefix for pictures, so each installed as the wrong kind."""
+    from local_lm.comfy_templates import _role_for_template
+
+    def graph(*nodes: tuple[str, int]) -> dict[str, Any]:
+        return {
+            "nodes": [
+                {"id": index, "type": kind, "mode": mode}
+                for index, (kind, mode) in enumerate(nodes)
+            ]
+        }
+
+    picture = graph(("LoadImage", 0), ("SaveImage", 0))
+    video = graph(("LoadImage", 0), ("CreateVideo", 0), ("SaveVideo", 0))
+    assert _role_for_template("video_example_image_editing", picture) == "image"
+    assert (
+        _role_for_template("Example_image_edit", graph(("TextEncodeVideo", 0), ("SaveImage", 0)))
+        == "image"
+    )
+    assert _role_for_template("image_example_first_frame", video) == "video"
+    assert _role_for_template("example_preview", graph(("PreviewImage", 0))) == "image"
+    assert _role_for_template("example_animation", graph(("SaveAnimatedWEBP", 0))) == "video"
+    # A save that does not run says nothing about what the template makes.
+    assert _role_for_template("image_example", graph(("SaveImage", 0), ("SaveVideo", 4))) == "image"
+    # Without a save to read, the id prefix and the node names still decide.
+    assert _role_for_template("video_example_unsaved", graph(("LoadImage", 0))) == "video"
+    assert _role_for_template("image_example_unsaved", graph(("LoadImage", 0))) == "image"
+    assert _role_for_template("example_unsaved", graph(("VideoSampler", 0))) == "video"
+    assert _role_for_template("image_example") == "image"
+
+
+def test_templates_are_offered_under_the_role_their_graph_saves(tmp_path: Path) -> None:
+    registry = _registry(tmp_path)
+    revision = "d" * 40
+    model = {
+        "directory": "checkpoints",
+        "name": "either.safetensors",
+        "url": f"https://huggingface.co/owner/either/resolve/{revision}/either.safetensors",
+    }
+
+    def template(save: str) -> dict[str, Any]:
+        return {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "LoadImage",
+                    "inputs": [],
+                    "outputs": [],
+                    "properties": {"cnr_id": "comfy-core"},
+                    "widgets_values": ["authored-sample.png", "image"],
+                },
+                {
+                    "id": 2,
+                    "type": "CheckpointLoaderSimple",
+                    "inputs": [],
+                    "outputs": [],
+                    "properties": {"cnr_id": "comfy-core", "models": [model]},
+                    "widgets_values": ["either.safetensors"],
+                },
+                {
+                    "id": 3,
+                    "type": save,
+                    "inputs": [],
+                    "outputs": [],
+                    "properties": {"cnr_id": "comfy-core"},
+                    "widgets_values": [],
+                },
+            ],
+            "links": [],
+        }
+
+    templates = _installed_templates(registry)
+    (templates / "video_example_image_editing.json").write_text(
+        json.dumps(template("SaveImage")), encoding="utf-8"
+    )
+    (templates / "image_example_first_frame.json").write_text(
+        json.dumps(template("SaveVideo")), encoding="utf-8"
+    )
+
+    images = {item.id: item.operation for item in registry.available("image")}
+    videos = {item.id: item.operation for item in registry.available("video")}
+
+    assert images.get("video_example_image_editing") == "image_to_image"
+    assert "video_example_image_editing" not in videos
+    assert videos.get("image_example_first_frame") == "image_to_video"
+    assert "image_example_first_frame" not in images
+
+
 def test_declared_acceleration_ignores_non_media_operations() -> None:
     subgraph = _four_step_edit_graph()
     ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
@@ -2496,3 +2925,216 @@ def test_video_workflow_without_binding_hides_each_unsupported_control() -> None
     keys = {field.key for field in workflow_settings(VIDEO_SETTINGS, schema)}
     assert "steps" in keys
     assert keys.isdisjoint({"cfg", "guidance", "codec", "motion_strength"})
+
+
+def _wiring_object_info() -> dict[str, Any]:
+    return {
+        "LoadImage": {
+            "input": {"required": {"image": [["source.png"], {"image_upload": True}]}},
+            "input_order": {"required": ["image"]},
+        },
+        "ImageScale": {
+            "input": {"required": {"image": ["IMAGE"], "scale": ["FLOAT", {"default": 1.0}]}},
+            "input_order": {"required": ["image", "scale"]},
+        },
+        "Finish": {
+            "input": {
+                "required": {"image": ["IMAGE"], "blend": ["FLOAT", {"default": 1.0}]},
+                "optional": {"reference": ["IMAGE"]},
+            },
+            "input_order": {"required": ["image", "blend"], "optional": ["reference"]},
+        },
+    }
+
+
+def _loader(node_id: int, links: list[int], **extra: Any) -> dict[str, Any]:
+    return {
+        "id": node_id,
+        "type": "LoadImage",
+        "inputs": [],
+        "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": links}],
+        "widgets_values": ["source.png", "image"],
+        **extra,
+    }
+
+
+def _finish(image_link: int | None, reference_link: int | None = None) -> dict[str, Any]:
+    return {
+        "id": 3,
+        "type": "Finish",
+        "inputs": [
+            {"name": "image", "type": "IMAGE", "link": image_link},
+            {"name": "blend", "type": "FLOAT", "widget": {"name": "blend"}, "link": None},
+            {"name": "reference", "type": "IMAGE", "link": reference_link},
+        ],
+        "outputs": [],
+        "widgets_values": [1.0],
+    }
+
+
+def _links_to_missing_nodes(graph: dict[str, Any]) -> list[tuple[str, str]]:
+    return [
+        (node_id, name)
+        for node_id, node in graph.items()
+        for name, value in node["inputs"].items()
+        if isinstance(value, list) and len(value) == 2 and str(value[0]) not in graph
+    ]
+
+
+def test_a_reroute_chain_carries_the_connection_that_feeds_it() -> None:
+    reroute = {"type": "Reroute", "outputs": [{"name": "", "type": "*"}]}
+    ui_graph = {
+        "nodes": [
+            _loader(1, [1]),
+            {**reroute, "id": 5, "inputs": [{"name": "", "type": "*", "link": 1}]},
+            {**reroute, "id": 6, "inputs": [{"name": "", "type": "*", "link": 2}]},
+            _finish(3),
+        ],
+        "links": [[1, 1, 0, 5, 0, "IMAGE"], [2, 5, 0, 6, 0, "IMAGE"], [3, 6, 0, 3, 0, "IMAGE"]],
+    }
+
+    graph, _ = _compile_ui_graph(ui_graph, _wiring_object_info(), operation="text_to_image")
+
+    assert set(graph) == {"1", "3"}
+    assert graph["3"]["inputs"]["image"] == ["1", 0]
+
+
+def test_a_bypassed_node_passes_its_matching_input_through() -> None:
+    ui_graph = {
+        "nodes": [
+            _loader(1, [1]),
+            {
+                "id": 2,
+                "type": "ImageScale",
+                "mode": 4,
+                "inputs": [
+                    {"name": "image", "type": "IMAGE", "link": 1},
+                    {"name": "scale", "type": "FLOAT", "widget": {"name": "scale"}, "link": None},
+                ],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [2]}],
+                "widgets_values": [0.5],
+            },
+            _finish(2),
+        ],
+        "links": [[1, 1, 0, 2, 0, "IMAGE"], [2, 2, 0, 3, 0, "IMAGE"]],
+    }
+
+    graph, _ = _compile_ui_graph(ui_graph, _wiring_object_info(), operation="text_to_image")
+
+    assert set(graph) == {"1", "3"}
+    assert graph["3"]["inputs"]["image"] == ["1", 0]
+
+
+@pytest.mark.parametrize("mode", [2, 4], ids=["muted", "bypassed"])
+def test_an_input_fed_by_a_node_that_does_not_run_is_left_out(mode: int) -> None:
+    # The second loader has nothing a bypass could pass through, and a muted
+    # node passes nothing at all, so the optional input goes unconnected.
+    ui_graph = {
+        "nodes": [_loader(1, [1]), _loader(4, [2], mode=mode), _finish(1, 2)],
+        "links": [[1, 1, 0, 3, 0, "IMAGE"], [2, 4, 0, 3, 2, "IMAGE"]],
+    }
+
+    graph, _ = _compile_ui_graph(ui_graph, _wiring_object_info(), operation="text_to_image")
+
+    assert "4" not in graph
+    assert "reference" not in graph["3"]["inputs"]
+    assert graph["3"]["inputs"]["image"] == ["1", 0]
+    assert _links_to_missing_nodes(graph) == []
+
+
+def test_a_primitive_node_puts_its_value_into_the_widget_it_drives() -> None:
+    finish = _finish(1)
+    finish["inputs"][1]["link"] = 2
+    ui_graph = {
+        "nodes": [
+            _loader(1, [1]),
+            {
+                "id": 7,
+                "type": "PrimitiveNode",
+                "inputs": [],
+                "outputs": [
+                    {"name": "FLOAT", "type": "FLOAT", "widget": {"name": "blend"}, "links": [2]}
+                ],
+                "widgets_values": [0.35, "fixed"],
+            },
+            finish,
+        ],
+        "links": [[1, 1, 0, 3, 0, "IMAGE"], [2, 7, 0, 3, 1, "FLOAT"]],
+    }
+
+    graph, _ = _compile_ui_graph(ui_graph, _wiring_object_info(), operation="text_to_image")
+
+    assert set(graph) == {"1", "3"}
+    assert graph["3"]["inputs"]["blend"] == 0.35
+    assert _links_to_missing_nodes(graph) == []
+
+
+def test_a_subgraph_instance_input_feeds_the_definition_input_of_the_same_name() -> None:
+    # The instance shows only the image socket; the definition declares the
+    # loader's model name first. Matching slot numbers would feed the picture
+    # to the loader.
+    ui_graph = {
+        "nodes": [
+            _loader(1, [1]),
+            {
+                "id": 10,
+                "type": "edit-subgraph",
+                "inputs": [{"name": "image", "type": "IMAGE", "link": 1}],
+                "outputs": [],
+                "widgets_values": [],
+            },
+        ],
+        "links": [[1, 1, 0, 10, 0, "IMAGE"]],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": "edit-subgraph",
+                    "inputs": [
+                        {"name": "model_name", "type": "COMBO"},
+                        {"name": "image", "type": "IMAGE"},
+                    ],
+                    "nodes": [
+                        {
+                            "id": 2,
+                            "type": "ModelLoader",
+                            "inputs": [
+                                {
+                                    "name": "model_name",
+                                    "type": "COMBO",
+                                    "widget": {"name": "model_name"},
+                                }
+                            ],
+                            "outputs": [],
+                            "widgets_values": ["model.safetensors"],
+                        },
+                        {
+                            "id": 3,
+                            "type": "ImageScale",
+                            "inputs": [
+                                {"name": "image", "type": "IMAGE"},
+                                {"name": "scale", "type": "FLOAT", "widget": {"name": "scale"}},
+                            ],
+                            "outputs": [],
+                            "widgets_values": [0.5],
+                        },
+                    ],
+                    "links": [
+                        [20, -10, 0, 2, 0, "COMBO"],
+                        [21, -10, 1, 3, 0, "IMAGE"],
+                    ],
+                }
+            ]
+        },
+    }
+    object_info = {
+        **_wiring_object_info(),
+        "ModelLoader": {
+            "input": {"required": {"model_name": [["model.safetensors"]]}},
+            "input_order": {"required": ["model_name"]},
+        },
+    }
+
+    graph, _ = _compile_ui_graph(ui_graph, object_info, operation="text_to_image")
+
+    assert graph["10:3"]["inputs"]["image"] == ["1", 0]
+    assert graph["10:2"]["inputs"]["model_name"] == "model.safetensors"

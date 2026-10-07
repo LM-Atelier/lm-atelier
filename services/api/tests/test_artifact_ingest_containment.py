@@ -5,8 +5,10 @@ import io
 import os
 import subprocess
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
+from sqlalchemy.orm import Session
 
 from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
@@ -75,6 +77,10 @@ class _Session:
         return None
 
 
+def _session() -> Session:
+    return Mock(spec_set=Session, wraps=_Session())
+
+
 def _make_link_dir(link: Path, target: Path) -> bool:
     """Point `link` at `target`, or report that this host will not allow it."""
 
@@ -127,7 +133,7 @@ def test_an_ordinary_ingest_still_lands_where_the_record_says(tmp_path: Path) ->
     payload, digest = _payload()
 
     artifact = store.ingest_stream(
-        _Session(),
+        _session(),
         io.BytesIO(payload),
         kind=ArtifactKind.IMAGE,
         media_type="image/png",
@@ -169,7 +175,7 @@ def test_a_link_at_any_digest_directory_is_refused(tmp_path: Path, depth: int) -
 
     with pytest.raises(ValueError):
         store.ingest_stream(
-            _Session(),
+            _session(),
             io.BytesIO(payload),
             kind=ArtifactKind.IMAGE,
             media_type="image/png",
@@ -195,7 +201,7 @@ def test_a_planted_staging_name_cannot_be_published(tmp_path: Path) -> None:
     (root / "ingest-0000000000000000.tmp").write_bytes(b"planted, not ours")
 
     store.ingest_stream(
-        _Session(),
+        _session(),
         io.BytesIO(payload),
         kind=ArtifactKind.IMAGE,
         media_type="image/png",
@@ -231,7 +237,7 @@ def test_a_link_at_the_artifact_name_is_replaced_not_followed(tmp_path: Path) ->
         pytest.skip("this host cannot create a file symlink unprivileged")
 
     store.ingest_stream(
-        _Session(),
+        _session(),
         io.BytesIO(payload),
         kind=ArtifactKind.IMAGE,
         media_type="image/png",

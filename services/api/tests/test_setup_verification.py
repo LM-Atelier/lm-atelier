@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS, wait_until
 from sqlalchemy import select
 
 from local_lm.adapters.base import ChatEvent, ChatRequest, MediaEvent, MediaRequest
@@ -35,6 +36,7 @@ from local_lm.setup_verification import (
     setup_verification_settings,
     synthetic_setup_image,
 )
+from local_lm.verified_setup import local_identifiers_in
 
 pytestmark = pytest.mark.asyncio
 
@@ -115,14 +117,18 @@ async def wait_for_role(
     role: str,
     *states: str,
 ) -> dict:  # type: ignore[type-arg]
-    deadline = asyncio.get_running_loop().time() + 8
-    while asyncio.get_running_loop().time() < deadline:
+    async def read() -> dict:  # type: ignore[type-arg]
         payload = (await client.get("/api/setup/readiness")).json()
-        current = next(item for item in payload["roles"] if item["role"] == role)
-        if current["state"] in states:
-            return current
-        await asyncio.sleep(0.03)
-    raise AssertionError(f"{role} did not reach {states}")
+        role_state: dict = next(  # type: ignore[type-arg]
+            item for item in payload["roles"] if item["role"] == role
+        )
+        return role_state
+
+    return await wait_until(
+        read,
+        lambda current: bool(current["state"] in states),
+        what=f"the {role} role reaching {states}",
+    )
 
 
 @pytest.mark.parametrize(
@@ -313,7 +319,7 @@ async def test_setup_verification_cancellation_cleans_transient_state(
 
     monkeypatch.setattr(app.state.services.engines.media, "generate", slow_generate)
     assert (await client.post("/api/setup/verify/image")).status_code == 202
-    await asyncio.wait_for(started.wait(), timeout=2)
+    await asyncio.wait_for(started.wait(), timeout=PATIENCE_SECONDS)
     running = await wait_for_role(client, "image", "in_progress")
     assert running["job_id"]
     assert (await client.post(f"/api/jobs/{running['job_id']}/cancel")).status_code == 200
@@ -439,11 +445,11 @@ async def test_restart_recovery_removes_unclaimed_hidden_verification(
         session.commit()
 
     with SessionLocal() as session:
-        verification = session.scalar(select(SetupVerification))
-        assert verification is not None
-        assert verification.state == "failed"
-        assert verification.failure_code == "application_restarted"
-        assert verification.chat_id is None
+        recovered = session.scalar(select(SetupVerification))
+        assert recovered is not None
+        assert recovered.state == "failed"
+        assert recovered.failure_code == "application_restarted"
+        assert recovered.chat_id is None
         assert session.scalars(select(Artifact)).all() == []
         assert session.scalars(select(Job)).all() == []
         assert (
@@ -483,3 +489,57 @@ async def test_setup_verification_settings_and_input_are_bounded_and_unique() ->
     assert first.startswith(b"\x89PNG\r\n\x1a\n")
     assert second.startswith(b"\x89PNG\r\n\x1a\n")
     assert first != second
+
+
+@pytest.mark.parametrize(
+    ("role", "operation"),
+    [("chat", None), ("image", "text_to_image"), ("video", "image_to_video")],
+)
+async def test_a_completed_generation_verification_can_export_its_setup(
+    client: AsyncClient,
+    settings: Settings,
+    role: str,
+    operation: str | None,
+) -> None:
+    seed_ready_role(settings, role, operation=operation)
+    assert (await client.get(f"/api/setup/verified-setup/{role}")).status_code == 409
+    assert (await client.post(f"/api/setup/verify/{role}")).status_code == 202
+    ready = await wait_for_role(client, role, "ready")
+    assert ready["verification_level"] == "generation_probe"
+
+    exported = await client.get(f"/api/setup/verified-setup/{role}")
+
+    assert exported.status_code == 200
+    payload = exported.json()
+    assert payload["role"] == role
+    assert payload["attestation"]["generated_output"] is True
+    assert payload["attestation"]["verified_at"] is not None
+    assert local_identifiers_in(payload) == []
+    with SessionLocal() as session:
+        verification = session.scalar(select(SetupVerification))
+        assert verification is not None
+        assert verification.state == "ready"
+        assert verification.chat_id is None
+        assert verification.job_id is None
+        assert session.scalars(select(Job)).all() == []
+
+
+@pytest.mark.parametrize("state", ["queued", "running", "failed", "verified"])
+async def test_only_a_successful_verification_state_can_export(
+    client: AsyncClient,
+    settings: Settings,
+    state: str,
+) -> None:
+    seed_ready_role(settings, "image", operation="text_to_image")
+    assert (await client.post("/api/setup/verify/image")).status_code == 202
+    await wait_for_role(client, "image", "ready")
+    with SessionLocal() as session:
+        verification = session.scalar(select(SetupVerification))
+        assert verification is not None
+        verification.state = state
+        session.commit()
+
+    exported = await client.get("/api/setup/verified-setup/image")
+
+    assert exported.status_code == 409
+    assert exported.json()["code"] == "setup-not-verified"

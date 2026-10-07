@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import hashlib
 import json
 import re
@@ -15,7 +16,8 @@ from .catalog_cache import CatalogCacheStore
 from .config import Settings
 from .domain import CompatibilityLevel
 from .gguf import automatic_mmproj_selection, gguf_identity_tokens
-from .network import shared_tls_context
+from .network import OutboundPolicy, shared_tls_context
+from .provider_descriptions import MAX_PROVIDER_DESCRIPTION_CHARS, normalize_provider_description
 from .schemas import CatalogModel, CatalogPage
 
 SORTS = {
@@ -41,7 +43,10 @@ _FILENAME_QUANTIZATION = re.compile(
 )
 _PARAMETERS = re.compile(r"(?:^|[-_ ])(\d+(?:\.\d+)?)\s*([bmk])(?:$|[-_ ])", re.I)
 _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_CACHE_VERSION = 5
+_CACHE_VERSION = 7
+# Hugging Face answers on its own name and sends a file's bytes from hosts
+# below its two domains, where its content delivery and storage live.
+_HUGGING_FACE_DOMAINS = frozenset({"huggingface.co", "hf.co"})
 
 
 class HuggingFaceCatalog:
@@ -59,6 +64,18 @@ class HuggingFaceCatalog:
             timeout=30,
             follow_redirects=True,
             verify=shared_tls_context(),
+            # Every request, each redirect included, is asked of the outbound
+            # policy before its host is looked up or a proxy is reached, and
+            # goes nowhere but Hugging Face's own hosts. A refusal is one of
+            # httpx's request errors, so it is handled as a request that did
+            # not get through: saved results where there are any.
+            event_hooks={
+                "request": [
+                    OutboundPolicy.from_settings(settings).request_check(
+                        "model-catalog", domains=_HUGGING_FACE_DOMAINS
+                    )
+                ]
+            },
         )
         self._cache = CatalogCacheStore(settings.catalog_cache_dir)
 
@@ -220,7 +237,11 @@ class HuggingFaceCatalog:
     ) -> dict[str, Any]:
         if not self._valid_remote_id(remote_id):
             raise ValueError("remote_id must be in owner/model form")
-        cache = self._cache_path("detail", remote_id, revision, requested_role)
+        # Keyed apart from entries cached before the revision moved into the
+        # request path: those hold the default branch's answer under the pinned
+        # revision that was asked for, and reusing one, fresh or as a fallback
+        # while the hub is unavailable, would keep planning the wrong revision.
+        cache = self._cache_path("revision-detail", remote_id, revision, requested_role)
         fresh = self._read_detail_cache(
             cache,
             max_age_seconds=self._cache.policy.fresh_seconds,
@@ -228,9 +249,13 @@ class HuggingFaceCatalog:
         if fresh is not None:
             return fresh
         try:
+            # The revision belongs in the path. Hugging Face ignores a revision
+            # query parameter and answers for the default branch, so a pinned
+            # commit would be planned against whatever main has become. A
+            # branch name can contain "/", so it is encoded as one segment.
             response = await self._client.get(
-                f"/api/models/{remote_id}",
-                params={"revision": revision, "blobs": "true"},
+                f"/api/models/{remote_id}/revision/{quote(revision, safe='')}",
+                params={"blobs": "true"},
             )
             response.raise_for_status()
             payload = response.json()
@@ -255,10 +280,33 @@ class HuggingFaceCatalog:
                     or None,
                 }
             )
+        resolved_revision = str(payload.get("sha") or revision)
+        description = ""
+        if re.fullmatch(r"[0-9a-fA-F]{40}", resolved_revision) and any(
+            item["filename"] == "README.md" for item in siblings
+        ):
+            try:
+                async with asyncio.timeout(2):
+                    card = await self.inspect_file_prefix(
+                        remote_id,
+                        resolved_revision,
+                        "README.md",
+                        max_bytes=MAX_PROVIDER_DESCRIPTION_CHARS * 4,
+                    )
+                text = codecs.getincrementaldecoder("utf-8")().decode(
+                    card, final=len(card) < MAX_PROVIDER_DESCRIPTION_CHARS * 4
+                )
+                description = normalize_provider_description(text)
+            except (httpx.HTTPError, ValueError, TimeoutError):
+                # Optional card text must not prevent inspecting installable files.
+                pass
+        if description:
+            for item in siblings:
+                item["metadata"] = {"description": description}
         model = self._normalize(payload, requested_role)
         result = {
             "model": model.model_dump(mode="json"),
-            "revision": str(payload.get("sha") or revision),
+            "revision": resolved_revision,
             "files": siblings,
         }
         self._write_cache(cache, json.dumps(result, default=str))

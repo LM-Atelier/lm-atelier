@@ -29,8 +29,37 @@ from local_lm.schemas import (
     CatalogPage,
     CatalogPreflightRequest,
     DownloadRequest,
+    PlatformAssessment,
     SystemInfo,
 )
+
+
+def _catalog_system() -> SystemInfo:
+    return SystemInfo(
+        platform="linux",
+        platform_release="fixture",
+        distribution="Fixture Linux",
+        distribution_version="1",
+        architecture="x86_64",
+        python_version="3.12.10",
+        cpu_model="Fixture CPU",
+        cpu_count=8,
+        memory_total_bytes=16 * 1024**3,
+        memory_available_bytes=16 * 1024**3,
+        disk_total_bytes=100 * 1024**3,
+        disk_free_bytes=100 * 1024**3,
+        ffmpeg_available=False,
+        devices=[],
+        support=PlatformAssessment(
+            platform_status="target",
+            platform_label="Fixture Linux",
+            accelerator_status="cpu-only",
+            accelerator_label="CPU",
+            certification_status="hardware-pending",
+            chat_ready=True,
+            reference_media_ready=False,
+        ),
+    )
 
 
 class Sibling:
@@ -197,11 +226,7 @@ def test_preflight_uses_the_exact_civitai_variant_through_every_file_lookup(
         revision="201",
         files=[first, second],
     )
-    system = SystemInfo.model_construct(
-        memory_total_bytes=16 * 1024**3,
-        disk_free_bytes=100 * 1024**3,
-        devices=[],
-    )
+    system = _catalog_system()
 
     result = assess_catalog_install(
         detail,
@@ -472,11 +497,7 @@ def test_chat_preflight_selects_and_hashes_multimodal_projector(tmp_path: Path) 
             },
         ],
     )
-    system = SystemInfo.model_construct(
-        memory_total_bytes=16 * 1024**3,
-        disk_free_bytes=100 * 1024**3,
-        devices=[],
-    )
+    system = _catalog_system()
 
     result = assess_catalog_install(
         detail,
@@ -522,11 +543,7 @@ def test_chat_preflight_preserves_external_projector_provenance(tmp_path: Path) 
             },
         ],
     )
-    system = SystemInfo.model_construct(
-        memory_total_bytes=16 * 1024**3,
-        disk_free_bytes=100 * 1024**3,
-        devices=[],
-    )
+    system = _catalog_system()
 
     result = assess_catalog_install(
         detail,
@@ -640,14 +657,10 @@ def test_preflight_pins_the_catalog_resolved_revision_for_every_role(
     )
     request = CatalogPreflightRequest(
         revision="main",
-        role=role,  # type: ignore[arg-type]
+        role=role,
         engine=engine,
     )
-    system = SystemInfo.model_construct(
-        memory_total_bytes=16 * 1024**3,
-        disk_free_bytes=100 * 1024**3,
-        devices=[],
-    )
+    system = _catalog_system()
 
     result = assess_catalog_install(
         detail,
@@ -877,7 +890,7 @@ def test_catalog_filters_and_rejects_external_cursors() -> None:
     )
 
 
-async def test_catalog_uses_hugging_face_trending_order_and_update_age(tmp_path) -> None:
+async def test_catalog_uses_hugging_face_trending_order_and_update_age(tmp_path: Path) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -899,7 +912,7 @@ async def test_catalog_uses_hugging_face_trending_order_and_update_age(tmp_path)
     assert requests[0].url.params["direction"] == "-1"
 
 
-async def test_catalog_uses_filtered_saved_results_during_an_outage(tmp_path) -> None:
+async def test_catalog_uses_filtered_saved_results_during_an_outage(tmp_path: Path) -> None:
     online = [True]
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -935,7 +948,7 @@ async def test_catalog_uses_filtered_saved_results_during_an_outage(tmp_path) ->
     assert saved.next_cursor is None
 
 
-async def test_catalog_detail_requests_live_blob_metadata(tmp_path) -> None:
+async def test_catalog_detail_requests_live_blob_metadata(tmp_path: Path) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -969,7 +982,8 @@ async def test_catalog_detail_requests_live_blob_metadata(tmp_path) -> None:
         await catalog.close()
 
     assert len(requests) == 1
-    assert requests[0].url.params["revision"] == "main"
+    assert requests[0].url.path == "/api/models/owner/Model-8B-GGUF/revision/main"
+    assert "revision" not in requests[0].url.params
     assert requests[0].url.params["blobs"] == "true"
     assert "files_metadata" not in requests[0].url.params
     assert detail["revision"] == "resolved-commit"
@@ -980,6 +994,120 @@ async def test_catalog_detail_requests_live_blob_metadata(tmp_path) -> None:
             "sha256": "a" * 64,
         }
     ]
+
+
+async def test_catalog_detail_answers_for_the_requested_revision(tmp_path: Path) -> None:
+    """A pinned revision must not be planned against whatever main has become.
+
+    The handler answers the way Hugging Face does: a bare model path answers for
+    the default branch whatever query it carries, and a revision path answers
+    for that revision. A branch name containing "/" travels as one segment.
+    """
+
+    requests: list[httpx.Request] = []
+    commits = {"a" * 40: "a" * 40, "refs%2Fpr%2F7": "c" * 40}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        path = request.url.raw_path.split(b"?", 1)[0].decode()
+        model, _, revision = path.removeprefix("/api/models/").partition("/revision/")
+        if model != "owner/model" or (revision and revision not in commits):
+            return httpx.Response(404)
+        return httpx.Response(
+            200,
+            json={
+                "id": model,
+                "sha": commits[revision] if revision else "b" * 40,
+                "pipeline_tag": "text-generation",
+                "tags": ["gguf"],
+                "siblings": [],
+            },
+        )
+
+    catalog = HuggingFaceCatalog(Settings(data_dir=tmp_path))
+    await catalog.close()
+    catalog._client = httpx.AsyncClient(
+        base_url="https://huggingface.co",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        pinned = await catalog.inspect("owner/model", "a" * 40, "chat")
+        branch = await catalog.inspect("owner/model", "refs/pr/7", "chat")
+    finally:
+        await catalog.close()
+
+    assert pinned["revision"] == "a" * 40
+    assert branch["revision"] == "c" * 40
+    assert [request.url.raw_path for request in requests] == [
+        b"/api/models/owner/model/revision/" + b"a" * 40 + b"?blobs=true",
+        b"/api/models/owner/model/revision/refs%2Fpr%2F7?blobs=true",
+    ]
+
+
+@pytest.mark.parametrize("hub_available", [True, False])
+async def test_catalog_detail_ignores_entries_cached_by_the_earlier_request(
+    tmp_path: Path, hub_available: bool
+) -> None:
+    """Entries cached before the fix hold the default branch's answer under a pinned revision.
+
+    The earlier request stored whatever the hub answered under the revision it
+    asked for, so an entry for a pinned commit can hold the default branch's
+    commit. Reusing it, fresh or as the fallback while the hub is unavailable,
+    would keep planning the wrong revision after an upgrade.
+    """
+
+    pinned = "a" * 40
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if not hub_available:
+            return httpx.Response(503)
+        return httpx.Response(
+            200,
+            json={
+                "id": "owner/model",
+                "sha": pinned,
+                "pipeline_tag": "text-generation",
+                "tags": ["gguf"],
+                "siblings": [],
+            },
+        )
+
+    catalog = HuggingFaceCatalog(Settings(data_dir=tmp_path))
+    await catalog.close()
+    default_branch_answer = {
+        "id": "owner/model",
+        "sha": "b" * 40,
+        "pipeline_tag": "text-generation",
+        "tags": ["gguf"],
+        "siblings": [],
+    }
+    catalog._write_cache(
+        catalog._cache_path("detail", "owner/model", pinned, "chat"),
+        json.dumps(
+            {
+                "model": catalog._normalize(default_branch_answer, "chat").model_dump(mode="json"),
+                "revision": "b" * 40,
+                "files": [],
+            }
+        ),
+    )
+    catalog._client = httpx.AsyncClient(
+        base_url="https://huggingface.co",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        if hub_available:
+            detail = await catalog.inspect("owner/model", pinned, "chat")
+            assert detail["revision"] == pinned
+        else:
+            with pytest.raises(httpx.HTTPStatusError):
+                await catalog.inspect("owner/model", pinned, "chat")
+    finally:
+        await catalog.close()
+
+    assert len(requests) == 1
 
 
 async def test_catalog_file_prefix_is_bounded_and_cached_by_revision(tmp_path: Path) -> None:
@@ -1129,7 +1257,7 @@ async def test_catalog_search_ignores_entries_with_unsafe_remote_ids(tmp_path: P
     assert [item.remote_id for item in page.items] == ["owner/model"]
 
 
-async def test_maximum_size_filter_hydrates_live_file_sizes(tmp_path) -> None:
+async def test_maximum_size_filter_hydrates_live_file_sizes(tmp_path: Path) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1152,12 +1280,13 @@ async def test_maximum_size_filter_hydrates_live_file_sizes(tmp_path) -> None:
                     },
                 ],
             )
-        size = 5_000_000_000 if request.url.path.endswith("Small-1B-GGUF") else 15_000_000_000
+        remote_id = request.url.path.removeprefix("/api/models/").partition("/revision/")[0]
+        size = 5_000_000_000 if remote_id.endswith("Small-1B-GGUF") else 15_000_000_000
         name = "small.gguf" if size < 10_000_000_000 else "large.gguf"
         return httpx.Response(
             200,
             json={
-                "id": request.url.path.removeprefix("/api/models/"),
+                "id": remote_id,
                 "tags": ["gguf"],
                 "siblings": [{"rfilename": name, "size": size}],
             },
@@ -1178,9 +1307,9 @@ async def test_maximum_size_filter_hydrates_live_file_sizes(tmp_path) -> None:
     assert page.items[0].total_size_bytes == 5_000_000_000
     detail_requests = [request for request in requests if request.url.path != "/api/models"]
     assert len(detail_requests) == 2
-    assert {request.url.params["revision"] for request in detail_requests} == {
-        "small-commit",
-        "large-commit",
+    assert {request.url.path for request in detail_requests} == {
+        "/api/models/owner/Small-1B-GGUF/revision/small-commit",
+        "/api/models/owner/Large-2B-GGUF/revision/large-commit",
     }
     assert all(request.url.params["blobs"] == "true" for request in detail_requests)
 
@@ -1234,7 +1363,7 @@ async def test_catalog_reuses_fresh_exact_responses_without_network(tmp_path: Pa
     assert token_scoped_page == first_page
     assert [request.url.path for request in requests] == [
         "/api/models",
-        "/api/models/owner/cached-model",
+        "/api/models/owner/cached-model/revision/main",
         "/api/models",
     ]
 

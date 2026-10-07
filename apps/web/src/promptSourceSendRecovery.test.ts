@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ComposerDraft, ComposerPromptSource } from "./composerPromptSource";
 import { recoverPromptSourceSend } from "./promptSourceSendRecovery";
+import { initialTurnEditorState } from "./useTurnEditorState";
 
 const source: ComposerPromptSource = {
   version: 1,
@@ -49,6 +50,13 @@ describe("Prompt Library send recovery", () => {
     expect(result.invalidateQueries).toHaveBeenCalledWith({
       queryKey: ["prompt-batch", "prompt-batch"],
     });
+  });
+
+  it("restores the words beside whatever else the chat's draft holds", () => {
+    const editor = initialTurnEditorState("image", { outputCount: 1 });
+    const result = recovery({ chat: { text: "", promptSource: null, editor } });
+
+    expect(result.current().chat).toEqual({ text: "the rejected draft", promptSource: source, editor });
   });
 
   it("does not clobber text typed while the rejected send was in flight", () => {

@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { docsLink, supportLinks } from "./format";
+import { FONT_CREDITS, docsLink, supportLinks } from "./format";
 
 const REPOSITORY_ROOT = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -52,6 +52,11 @@ describe("supportLinks", () => {
     expect(issues?.[1]).toBe("https://github.com/LM-Atelier/lm-atelier/issues");
   });
 
+  it("links the licence the workspace is released under", () => {
+    const licence = supportLinks("0.1.8").find(([label]) => label === "License");
+    expect(licence?.[1]).toBe("https://github.com/LM-Atelier/lm-atelier/blob/v0.1.8/LICENSE");
+  });
+
   it("only offers documents this repository actually has", () => {
     // Every help destination but the issue tracker is a document in this
     // repository, linked by exact path. Rename or remove one and the menu
@@ -66,5 +71,18 @@ describe("supportLinks", () => {
 
     expect(documents).not.toHaveLength(0);
     expect(documents.filter((path) => !tracked.has(path))).toEqual([]);
+  });
+});
+
+describe("FONT_CREDITS", () => {
+  it("credits every typeface the web app ships, with a licence file it ships beside it", () => {
+    // A font added without its licence, or a licence renamed, would leave the
+    // acknowledgement pointing at nothing; the served path is the public folder's.
+    const tracked = trackedPaths();
+    const fonts = [...tracked].filter((path) => /^apps\/web\/public\/fonts\/.*\.woff2$/.test(path));
+    expect(FONT_CREDITS).toHaveLength(fonts.length);
+    for (const { licence } of FONT_CREDITS) {
+      expect(tracked.has(`apps/web/public${licence}`)).toBe(true);
+    }
   });
 });

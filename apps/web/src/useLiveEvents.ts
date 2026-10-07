@@ -2,17 +2,20 @@ import { useEffect, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { QueryClient } from "@tanstack/react-query";
 import { connectEvents } from "./api";
-import type { AppEvent, Job, WorkPlan, WorkPlanStatus, WorkStepStatus } from "./types";
+import type { AppEvent, Job, JobActivity, WorkPlan, WorkPlanStatus, WorkStepStatus } from "./types";
+import { notifyRunFinished } from "./completionNotifications";
 
 const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "about",
   "artifact-storage",
+  "artifact-library-v1",
   "artifacts",
   "backups",
   "catalog",
   "chats",
   "chat",
   "credential",
+  "web-search",
   "custom-nodes",
   "engines",
   "edited-branches",
@@ -23,11 +26,18 @@ const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "profiles",
   "projects",
   "recipes",
+  "recovery-items",
   "runtimes",
   "setup-readiness",
   "system",
   "workers",
   "workflow-catalog-models",
+  "workflow-families",
+  "workflow-family",
+  "workflow-install-progress",
+  "studio-capabilities",
+  // Which workflow an enlargement runs may have changed while the link was down.
+  "studio-enlargement",
   "workflows",
 ]);
 
@@ -55,6 +65,10 @@ export function useLiveEvents(
   const [connected, setConnected] = useState(true);
   useEffect(() => {
     let dispose: (() => void) | undefined;
+    // Set when the effect is torn down. Connecting waits on the session first,
+    // so it can finish after the page that asked for it has gone; its socket
+    // and retry loop are then closed at once rather than left running.
+    let cancelled = false;
     // The newest attempt heard per assistant message. A delta names the
     // attempt that produced it; an older attempt's word arriving after a
     // newer attempt has spoken is dropped, and a newer attempt starts its
@@ -72,14 +86,38 @@ export function useLiveEvents(
     // newer attempt had already produced. The job list carries each job's
     // attempt and is already here, so the answer does not have to be waited
     // for.
-    for (const job of client.getQueryData<Job[]>(["jobs"]) ?? []) {
+    const activityJobs = client.getQueriesData<JobActivity>({ queryKey: ["jobs", "activity"] })
+      .flatMap(([, activity]) => activity ? [...activity.active, ...activity.recent_issues] : []);
+    for (const job of [...(client.getQueryData<Job[]>(["jobs"]) ?? []), ...activityJobs]) {
       if (job.id && typeof job.attempt === "number") {
-        latestAttemptByJob.set(job.id, job.attempt);
+        latestAttemptByJob.set(job.id, Math.max(latestAttemptByJob.get(job.id) ?? 0, job.attempt));
       }
     }
     const latestAttempt = new Map<string, number>();
     let mediaRefresh: number | undefined;
     let authoritativeRefresh: number | undefined;
+    let activityRefresh: number | undefined;
+    let queueRefresh: number | undefined;
+    const queueKeys = [["jobs", "queue"], ["jobs", "queue-steps"]] as const;
+    const scheduleQueueRefresh = () => {
+      if (queueRefresh !== undefined
+        || !queueKeys.some(queryKey => client.getQueryCache().findAll({ queryKey }).length)) return;
+      queueRefresh = window.setTimeout(() => {
+        queueRefresh = undefined;
+        for (const queryKey of queueKeys) {
+          if (client.getQueryCache().findAll({ queryKey }).length) {
+            void client.invalidateQueries({ queryKey });
+          }
+        }
+      }, 2_000);
+    };
+    const scheduleActivityRefresh = () => {
+      if (activityRefresh !== undefined) return;
+      activityRefresh = window.setTimeout(() => {
+        activityRefresh = undefined;
+        void client.invalidateQueries({ queryKey: ["jobs", "activity"] });
+      }, 100);
+    };
     const scheduleMediaRefresh = () => {
       if (mediaRefresh !== undefined) return;
       mediaRefresh = window.setTimeout(() => {
@@ -103,6 +141,11 @@ export function useLiveEvents(
           scheduleAuthoritativeRefresh();
           return;
         }
+        if (event.type === "recovery.updated") {
+          for (const key of ["recovery-items", "artifact-library-v1", "artifacts", "artifact-storage"])
+            void client.invalidateQueries({ queryKey: [key] });
+          return;
+        }
         if (event.type === "text.delta") {
           const messageId = String(event.payload.assistant_message_id ?? "");
           const text = String(event.payload.text ?? "");
@@ -124,6 +167,10 @@ export function useLiveEvents(
           setLiveText((current) => ({ ...current, [messageId]: `${current[messageId] ?? ""}${text}` }));
           return;
         }
+        if (event.type === "queue.control") {
+          scheduleQueueRefresh();
+          return;
+        }
         if (event.type === "job.progress") {
           const snapshot = event.payload.job as Job | undefined;
           if (snapshot?.id && typeof snapshot.attempt === "number") {
@@ -139,6 +186,33 @@ export function useLiveEvents(
               if (index < 0) return [snapshot, ...current];
               return current.map((job) => job.id === snapshot.id ? snapshot : job);
             });
+            if (snapshot.kind === "media_utility" && snapshot.status === "complete") {
+              // A saved frame or a trimmed video is a new library item, wherever it was started.
+              for (const key of ["artifact-library-v1", "artifacts", "artifact-storage"])
+                void client.invalidateQueries({ queryKey: [key] });
+            }
+            if (snapshot.kind !== "edit_verify") {
+              scheduleQueueRefresh();
+              const active = ["queued", "running", "paused"].includes(snapshot.status);
+              for (const [key, activity] of client.getQueriesData<JobActivity>({ queryKey: ["jobs", "activity"] })) {
+                if (!activity) continue;
+                const prior = activity.active.find((job) => job.id === snapshot.id)
+                  ?? activity.recent_issues.find((job) => job.id === snapshot.id);
+                if (prior && (snapshot.attempt < prior.attempt
+                  || (snapshot.attempt === prior.attempt
+                    && Date.parse(snapshot.updated_at) < Date.parse(prior.updated_at)))) continue;
+                if (active && activity.active.some((job) => job.id === snapshot.id)) {
+                  client.setQueryData<JobActivity>(key, {
+                    ...activity,
+                    active: activity.active.map((job) => job.id === snapshot.id ? snapshot : job),
+                  });
+                } else if (prior || !active || activity.active_count === activity.active.length) {
+                  // The bounded list cannot establish a new total or refill a
+                  // vacated row. Coalesce membership changes into a server read.
+                  scheduleActivityRefresh();
+                }
+              }
+            }
             if (snapshot.work_plan_id) {
               client.setQueriesData<WorkPlan[]>(
                 { queryKey: ["work-plans"] },
@@ -187,6 +261,11 @@ export function useLiveEvents(
         if (event.type.includes("progress") || event.type.startsWith("download.")) void client.invalidateQueries({ queryKey: ["jobs"] });
         if (event.type.startsWith("download.") || event.type.startsWith("worker.") || event.type.startsWith("runtime.") || event.type.startsWith("setup.verification")) void client.invalidateQueries({ queryKey: ["setup-readiness"] });
         if (event.type === "run.progress") void client.invalidateQueries({ queryKey: ["chat"] });
+        if (event.type === "web.search.changed") {
+          void client.invalidateQueries({ queryKey: ["chat"] });
+          void client.invalidateQueries({ queryKey: ["jobs"] });
+          void client.invalidateQueries({ queryKey: ["work-plans"] });
+        }
         if (event.type === "chat.updated") {
           void client.invalidateQueries({ queryKey: ["chat"] });
           void client.invalidateQueries({ queryKey: ["chats"] });
@@ -195,6 +274,16 @@ export function useLiveEvents(
           void client.invalidateQueries({ queryKey: ["chat"] });
           void client.invalidateQueries({ queryKey: ["artifacts"] });
         }
+        if (event.type === "workflow.updated") {
+          for (const key of ["workflow-families", "workflow-family", "workflows", "workflow-revision", "workflow-ready-revisions", "studio-capabilities"])
+            void client.invalidateQueries({ queryKey: [key] });
+        }
+        if (event.type.startsWith("workflow.install.")
+            || ["download.completed", "download.failed", "download.cancelled", "download.paused", "download.retrying"].includes(event.type)) {
+          for (const key of ["workflow-install-progress", "workflow-families", "workflow-family", "workflows", "studio-capabilities"]) {
+            void client.invalidateQueries({ queryKey: [key] });
+          }
+        }
         if (event.type === "download.completed") {
           void client.invalidateQueries({ queryKey: ["models"] });
           void client.invalidateQueries({ queryKey: ["profiles"] });
@@ -202,6 +291,11 @@ export function useLiveEvents(
         }
         if (["generation.progress", "generation.preview"].includes(event.type)) {
           scheduleMediaRefresh();
+        }
+        if (event.type === "run.retrying") {
+          for (const key of ["chat", "chats", "jobs", "work-plans"]) {
+            void client.invalidateQueries({ queryKey: [key] });
+          }
         }
         if (["run.completed", "run.failed", "run.cancelled"].includes(event.type)) {
           if (mediaRefresh !== undefined) window.clearTimeout(mediaRefresh);
@@ -212,14 +306,21 @@ export function useLiveEvents(
           void client.invalidateQueries({ queryKey: ["artifacts"] });
           void client.invalidateQueries({ queryKey: ["artifact-storage"] });
           window.setTimeout(() => setLiveText({}), 200);
+          notifyRunFinished(event);
         }
       },
       setConnected,
       scheduleAuthoritativeRefresh,
-    ).then((cleanup) => { dispose = cleanup; });
+    ).then((cleanup) => {
+      if (cancelled) cleanup();
+      else dispose = cleanup;
+    });
     return () => {
+      cancelled = true;
       if (mediaRefresh !== undefined) window.clearTimeout(mediaRefresh);
       if (authoritativeRefresh !== undefined) window.clearTimeout(authoritativeRefresh);
+      if (activityRefresh !== undefined) window.clearTimeout(activityRefresh);
+      if (queueRefresh !== undefined) window.clearTimeout(queueRefresh);
       dispose?.();
     };
   }, [client, setLiveText]);

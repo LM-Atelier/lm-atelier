@@ -4,10 +4,16 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Never, cast
 
+from .h3_video_output_chain_v1 import (
+    H3VideoOutputChain,
+    H3VideoOutputChainError,
+    recognize_h3_video_output_chain,
+)
 from .model_planner import workflow_artifact_contract
 from .output_geometry import (
     MAX_DIMENSION,
     MAX_PIXELS,
+    PRESET_RATIOS,
     OutputGeometryCapability,
     OutputGeometryError,
     ResolvedOutputGeometry,
@@ -15,7 +21,10 @@ from .output_geometry import (
     output_geometry_capability_payload,
     resolve_output_geometry,
 )
-from .settings_registry import IMAGE_SETTINGS, workflow_settings
+from .settings_registry import IMAGE_SETTINGS, VIDEO_SETTINGS, workflow_settings
+from .video_length import VIDEO_LENGTH_SCHEMA_KEY
+from .workflow_graph_settings import generated_workflow_setting_paths
+from .workflow_graph_settings_v1 import GRAPH_SETTINGS_SCHEMA_KEY
 
 WORKFLOW_OUTPUT_GEOMETRY_VERSION: Literal[1] = 1
 WORKFLOW_OUTPUT_GEOMETRY_UNAVAILABLE = "unsupported_workflow_geometry"
@@ -28,6 +37,17 @@ _MAX_TEXT_LENGTH = 100_000
 _MAX_IDENTIFIER_LENGTH = 256
 _SHA256_CHARS = frozenset("0123456789abcdef")
 _LATENT_ROOTS = frozenset({"EmptyLatentImage", "EmptySD3LatentImage"})
+
+#: What a proof can be about. A picture is proven through the image output chain,
+#: a video through the MiniMax H3 chain; nothing else has a proof at all.
+GeometryOperation = Literal["text_to_image", "text_to_video", "image_to_video"]
+_VIDEO_OPERATIONS: Final = frozenset({"text_to_video", "image_to_video"})
+
+#: The size grid of an H3 root. Each root declares width and height in steps of
+#: 32, and builds a latent of height // 16 by width // 16 - so on this grid the
+#: frames decode to exactly the size the root declares, and off it the division
+#: would silently round a requested size down to a different one.
+_H3_DIMENSION_STEP: Final = 32
 _PROOF_TOKEN = object()
 _RESOLUTION_TOKEN = object()
 
@@ -51,12 +71,15 @@ class WorkflowOutputGeometryProof:
     workflow_id: str
     revision_id: str
     artifact_sha256: str
-    operation: Literal["text_to_image"]
+    operation: GeometryOperation
     engine: Literal["comfyui"]
     latent_node_id: str
     sampler_node_ids: tuple[str, ...]
     decode_node_ids: tuple[str, ...]
     save_node_ids: tuple[str, ...]
+    #: The whole recognized chain for a video, including the nodes the flat id
+    #: lists above have no place for; None for a picture.
+    video_chain: H3VideoOutputChain | None
     width: WorkflowGeometryInputBinding
     height: WorkflowGeometryInputBinding
     capability: OutputGeometryCapability
@@ -94,7 +117,7 @@ class WorkflowOutputGeometryResolution:
     workflow_id: str
     revision_id: str
     artifact_sha256: str
-    operation: Literal["text_to_image"]
+    operation: GeometryOperation
     engine: Literal["comfyui"]
     geometry: ResolvedOutputGeometry
     graph_binding_verified: Literal[True] = field(default=True, init=False)
@@ -128,6 +151,11 @@ def prove_workflow_output_geometry(
 ) -> WorkflowOutputGeometryResult:
     """Prove exact width/height support for one stored trusted ComfyUI revision.
 
+    A text-to-image revision is proven through its image output chain, and a
+    text-to-video or image-to-video revision through the MiniMax H3 video chain.
+    The operation decides which chain is required, so a graph of one kind never
+    earns a proof under the other's name.
+
     Refusal is deliberately non-diagnostic. The graph may be user-authored, and
     capability discovery must not turn its contents into an error oracle.
     """
@@ -153,6 +181,53 @@ def prove_workflow_output_geometry(
     return WorkflowOutputGeometryResult(available=True, reason=None, proof=proof)
 
 
+def executed_graph_carries_the_proof(proof: object, executed_graph: object) -> bool:
+    """Does the graph that actually ran still carry the binding that was proven?
+
+    The proof is over the STORED revision. What executes is not always that: a
+    run with a LoRA stack active is dispatched with a rewritten graph, and other
+    transforms may follow. So a proof, on its own, is evidence about a document
+    rather than about a generation, and anything that reasons from it to "the
+    size that was asked for reached the output" needs this gap closed first.
+
+    Closed by re-walking the executed graph with the same requirement the proof
+    was granted under, and demanding the SAME node identities back. Equality of
+    the whole spine is the point: a relocated latent, a node inserted between the
+    sampler and the decode, an extra SaveImage on a scaled branch - each changes
+    the answer even where the walk still succeeds, and each is a real way for a
+    run to produce something other than the pair it declared.
+
+    A bool rather than a reason. Nothing here can say WHY a graph diverged in
+    terms a caller could act on, and inventing a vocabulary for it would invite
+    exactly the false precision this area keeps having to refuse. It answers one
+    question and refuses everything it cannot establish, including a proof it
+    did not mint itself.
+    """
+
+    if type(proof) is not WorkflowOutputGeometryProof:
+        return False
+    if type(executed_graph) is not dict:
+        return False
+    if proof.video_chain is not None:
+        # The whole chain, not the flat id lists: sound decoded from another
+        # sampling pass, or a second video mux, can leave those lists unchanged
+        # while the run is no longer the one that was proven.
+        try:
+            return recognize_h3_video_output_chain(executed_graph) == proof.video_chain
+        except H3VideoOutputChainError:
+            return False
+    try:
+        binding = _graph_binding(cast(dict[str, Any], executed_graph))
+    except WorkflowOutputGeometryError:
+        return False
+    return binding == (
+        proof.latent_node_id,
+        proof.sampler_node_ids,
+        proof.decode_node_ids,
+        proof.save_node_ids,
+    )
+
+
 def workflow_output_geometry_payload(result: WorkflowOutputGeometryResult) -> dict[str, object]:
     if type(result) is not WorkflowOutputGeometryResult:
         _refuse()
@@ -168,6 +243,7 @@ def workflow_output_geometry_payload(result: WorkflowOutputGeometryResult) -> di
             "operation": None,
             "engine": None,
             "size_modes": [],
+            "preset_ids": [],
             "width": None,
             "height": None,
             "latent_node_id": None,
@@ -187,7 +263,11 @@ def workflow_output_geometry_payload(result: WorkflowOutputGeometryResult) -> di
         "artifact_sha256": proof.artifact_sha256,
         "operation": proof.operation,
         "engine": proof.engine,
-        "size_modes": ["exact"],
+        # Read from the proven capability rather than restated, so a workflow
+        # whose bounds admit no ratio never advertises presets it would then
+        # refuse.
+        "size_modes": [item.size_mode for item in proof.capability.combinations],
+        "preset_ids": list(proof.capability.allowed_preset_ids),
         "width": _binding_payload(proof.width),
         "height": _binding_payload(proof.height),
         "latent_node_id": proof.latent_node_id,
@@ -244,6 +324,46 @@ def resolve_workflow_output_geometry(
     return resolution
 
 
+def match_source_output_geometry(
+    result: WorkflowOutputGeometryResult, source_width: object, source_height: object
+) -> WorkflowOutputGeometryResolution | None:
+    """This revision's own size in the exact shape of a source picture, or None.
+
+    The picture's reduced ratio names the shape, and the pair is chosen the way a
+    preset's is: the legal one whose area sits closest to the size the workflow
+    already defaults to. A shape the workflow's bounds and multiples cannot make
+    exactly is refused rather than snapped to a near one, for the reason a preset
+    it cannot make is never offered. The pair is then resolved as an exact size,
+    so the capability that will check the turn checks the answer first.
+    """
+
+    if type(result) is not WorkflowOutputGeometryResult:
+        _refuse()
+    proof = result.proof
+    if not result.available or type(proof) is not WorkflowOutputGeometryProof:
+        return None
+    if not all(
+        type(value) is int and 1 <= value <= MAX_DIMENSION
+        for value in (source_width, source_height)
+    ):
+        return None
+    across, down = cast(int, source_width), cast(int, source_height)
+    exact = next(
+        (item for item in proof.capability.combinations if item.size_mode == "exact"), None
+    )
+    if exact is None:
+        return None
+    divisor = math.gcd(across, down)
+    pair = _ratio_dimensions(
+        proof.width, proof.height, exact.max_pixels, across // divisor, down // divisor
+    )
+    if pair is None:
+        return None
+    return resolve_workflow_output_geometry(
+        result, {"mode": exact.mode, "size_mode": "exact", "width": pair[0], "height": pair[1]}
+    )
+
+
 def workflow_output_geometry_resolution_payload(
     resolution: WorkflowOutputGeometryResolution,
 ) -> dict[str, object]:
@@ -259,6 +379,7 @@ def workflow_output_geometry_resolution_payload(
         "engine": resolution.engine,
         "mode": geometry.mode,
         "size_mode": geometry.size_mode,
+        "preset_id": geometry.preset_id,
         "width": geometry.width,
         "height": geometry.height,
         "graph_binding_verified": True,
@@ -269,7 +390,13 @@ def workflow_output_geometry_resolution_payload(
 def _prove(**values: object) -> WorkflowOutputGeometryProof:
     workflow_id = _identifier(values["workflow_id"])
     revision_id = _identifier(values["revision_id"])
-    if values["operation"] != "text_to_image" or type(values["operation"]) is not str:
+    if type(values["operation"]) is not str:
+        _refuse()
+    if values["operation"] == "text_to_image":
+        operation: GeometryOperation = "text_to_image"
+    elif values["operation"] in _VIDEO_OPERATIONS:
+        operation = cast(GeometryOperation, values["operation"])
+    else:
         _refuse()
     if values["engine"] != "comfyui" or type(values["engine"]) is not str:
         _refuse()
@@ -285,8 +412,10 @@ def _prove(**values: object) -> WorkflowOutputGeometryProof:
         or type(dependencies) is not dict
     ):
         _refuse()
+    # The operation is part of what the digest covers, so a revision stored as
+    # a picture workflow cannot be re-proven as a video one, or the reverse.
     calculated = workflow_artifact_contract(
-        operation="text_to_image",
+        operation=operation,
         engine="comfyui",
         api_graph=api_graph,
         input_schema=input_schema,
@@ -294,14 +423,39 @@ def _prove(**values: object) -> WorkflowOutputGeometryProof:
     )
     if calculated != artifact_sha256:
         _refuse()
+    generated_workflow_setting_paths(input_schema, api_graph)
 
-    width, height, capability = _schema_capability(input_schema)
-    (
-        latent_node_id,
-        sampler_node_ids,
-        decode_node_ids,
-        save_node_ids,
-    ) = _graph_binding(api_graph)
+    video_chain: H3VideoOutputChain | None = None
+    if operation == "text_to_image":
+        width, height, capability = _schema_capability(input_schema, "image")
+        (
+            latent_node_id,
+            sampler_node_ids,
+            decode_node_ids,
+            save_node_ids,
+        ) = _graph_binding(api_graph)
+    else:
+        width, height, capability = _schema_capability(input_schema, "video")
+        # The chain is H3's own vocabulary, so the size grid is too: a workflow
+        # that admits sizes off the root's grid would be offering pixels the
+        # root cannot deliver exactly.
+        if width.multiple_of % _H3_DIMENSION_STEP or height.multiple_of % _H3_DIMENSION_STEP:
+            _refuse()
+        try:
+            chain = recognize_h3_video_output_chain(api_graph)
+        except H3VideoOutputChainError:
+            _refuse()
+        video_chain = chain
+        latent_node_id = chain.root_id
+        sampler_node_ids = (chain.sampler_id,)
+        decode_node_ids = tuple(
+            sorted(
+                node_id
+                for node_id in (chain.video_decode_id, chain.audio_decode_id)
+                if node_id is not None
+            )
+        )
+        save_node_ids = chain.save_ids
     width = WorkflowGeometryInputBinding(
         "width",
         latent_node_id,
@@ -326,12 +480,13 @@ def _prove(**values: object) -> WorkflowOutputGeometryProof:
     object.__setattr__(proof, "workflow_id", workflow_id)
     object.__setattr__(proof, "revision_id", revision_id)
     object.__setattr__(proof, "artifact_sha256", artifact_sha256)
-    object.__setattr__(proof, "operation", "text_to_image")
+    object.__setattr__(proof, "operation", operation)
     object.__setattr__(proof, "engine", "comfyui")
     object.__setattr__(proof, "latent_node_id", latent_node_id)
     object.__setattr__(proof, "sampler_node_ids", sampler_node_ids)
     object.__setattr__(proof, "decode_node_ids", decode_node_ids)
     object.__setattr__(proof, "save_node_ids", save_node_ids)
+    object.__setattr__(proof, "video_chain", video_chain)
     object.__setattr__(proof, "width", width)
     object.__setattr__(proof, "height", height)
     object.__setattr__(proof, "capability", capability)
@@ -375,14 +530,21 @@ _UNDERSTOOD_SCHEMA_KEYWORDS: Final = frozenset(
 
 def _schema_capability(
     schema: dict[str, Any],
+    mode: Literal["image", "video"],
 ) -> tuple[WorkflowGeometryInputBinding, WorkflowGeometryInputBinding, OutputGeometryCapability]:
     if schema.get("type") != "object" or type(schema.get("properties")) is not dict:
         _refuse()
     # Anything at the top level that is not understood can narrow width or height
     # without changing their own bounds - a composition, or a whole-object const
     # or enum - so the advertised range would stop being a subset of what the
-    # workflow accepts.
-    if set(schema) - _UNDERSTOOD_SCHEMA_KEYWORDS - _HARMLESS_ANNOTATION_KEYWORDS:
+    # workflow accepts. Generated settings have already been checked against the
+    # graph. A video's length contract is validated when its settings are read.
+    understood = (
+        _UNDERSTOOD_SCHEMA_KEYWORDS
+        | ({VIDEO_LENGTH_SCHEMA_KEY} if mode == "video" else set())
+        | {GRAPH_SETTINGS_SCHEMA_KEY}
+    )
+    if set(schema) - understood - _HARMLESS_ANNOTATION_KEYWORDS:
         _refuse()
     properties = cast(dict[str, object], schema["properties"])
     for key in ("width", "height"):
@@ -402,7 +564,7 @@ def _schema_capability(
         if unevaluated - _HARMLESS_ANNOTATION_KEYWORDS:
             _refuse()
     try:
-        fields = workflow_settings(IMAGE_SETTINGS, schema)
+        fields = workflow_settings(IMAGE_SETTINGS if mode == "image" else VIDEO_SETTINGS, schema)
     except ValueError:
         _refuse()
     by_key = {field.key: field for field in fields}
@@ -411,32 +573,135 @@ def _schema_capability(
     max_pixels = min(MAX_PIXELS, width.maximum * height.maximum)
     if width.default * height.default > max_pixels:
         _refuse()
-    capability = declare_output_geometry(
+    bounds: dict[str, object] = {
+        "mode": mode,
+        "min_width": width.minimum,
+        "max_width": width.maximum,
+        "min_height": height.minimum,
+        "max_height": height.maximum,
+        "width_multiple": width.multiple_of,
+        "height_multiple": height.multiple_of,
+        "max_pixels": max_pixels,
+        "min_aspect": [1, MAX_DIMENSION],
+        "max_aspect": [MAX_DIMENSION, 1],
+        "default_width": width.default,
+        "default_height": height.default,
+    }
+    exact = {
+        **bounds,
+        "size_mode": "exact",
+        "buckets": [[width.default, height.default]],
+    }
+    # The exact sizes are what this workflow could always do, and they are built
+    # from values _field_binding has already validated. Declaring them on their
+    # own first means the presets are an addition rather than a condition: a
+    # derived bucket the validator refuses costs the presets and cannot take the
+    # workflow's own width and height away with it, which is what would happen
+    # if both were declared together - declare_output_geometry raises an
+    # OutputGeometryError, prove_workflow_output_geometry catches ValueError,
+    # and the whole revision reports no geometry at all.
+    sizes = declare_output_geometry(
         {
             "version": 1,
-            "allowed_modes": ["image"],
+            "allowed_modes": [mode],
             "allowed_preset_ids": [],
-            "combinations": [
-                {
-                    "mode": "image",
-                    "size_mode": "exact",
-                    "min_width": width.minimum,
-                    "max_width": width.maximum,
-                    "min_height": height.minimum,
-                    "max_height": height.maximum,
-                    "width_multiple": width.multiple_of,
-                    "height_multiple": height.multiple_of,
-                    "max_pixels": max_pixels,
-                    "min_aspect": [1, MAX_DIMENSION],
-                    "max_aspect": [MAX_DIMENSION, 1],
-                    "default_width": width.default,
-                    "default_height": height.default,
-                    "buckets": [[width.default, height.default]],
-                }
-            ],
+            "combinations": [exact],
         }
     )
-    return width, height, capability
+    presets = _preset_dimensions(width, height, max_pixels)
+    if not presets:
+        return width, height, sizes
+    # Every combination must carry the workflow's own default among its buckets,
+    # so the preset list is unioned with it rather than replacing it. That costs
+    # nothing: a preset always resolves to the pair whose ratio matches it
+    # exactly, and no other bucket can tie.
+    pairs = sorted({(width.default, height.default)} | set(presets.values()))
+    try:
+        with_presets = declare_output_geometry(
+            {
+                "version": 1,
+                "allowed_modes": [mode],
+                "allowed_preset_ids": sorted(presets),
+                "combinations": [
+                    exact,
+                    {
+                        **bounds,
+                        "size_mode": "preset",
+                        "buckets": [[item[0], item[1]] for item in pairs],
+                    },
+                ],
+            }
+        )
+    except OutputGeometryError:
+        return width, height, sizes
+    return width, height, with_presets
+
+
+def _preset_dimensions(
+    width: WorkflowGeometryInputBinding,
+    height: WorkflowGeometryInputBinding,
+    max_pixels: int,
+) -> dict[str, tuple[int, int]]:
+    """The exact pixels each ratio preset means for this workflow, if any.
+
+    A preset states a shape, not a pixel count, so the pair chosen for a ratio
+    is the legal one whose area sits closest to the size the workflow already
+    defaults to: asking for 16:9 changes what the render is, never what it
+    costs. A ratio this workflow's own bounds and multiples cannot express
+    exactly is not offered at all, because snapping it to a nearby shape would
+    hand back an image of a ratio nobody asked for.
+    """
+
+    resolved: dict[str, tuple[int, int]] = {}
+    for preset_id, (across, down) in PRESET_RATIOS.items():
+        pair = _ratio_dimensions(width, height, max_pixels, across, down)
+        if pair is not None:
+            resolved[preset_id] = pair
+    return resolved
+
+
+def _ratio_dimensions(
+    width: WorkflowGeometryInputBinding,
+    height: WorkflowGeometryInputBinding,
+    max_pixels: int,
+    across: int,
+    down: int,
+) -> tuple[int, int] | None:
+    """The legal pair of the reduced ratio across:down nearest the default area, if any."""
+
+    default_area = width.default * height.default
+    # A reduced ratio across:down admits exactly the pairs across*count by
+    # down*count, and the counts that land both sides on their own multiple
+    # grids are exactly the multiples of step.
+    step = math.lcm(
+        width.multiple_of // math.gcd(across, width.multiple_of),
+        height.multiple_of // math.gcd(down, height.multiple_of),
+    )
+    lowest = max(
+        -(-width.minimum // (across * step)),
+        -(-height.minimum // (down * step)),
+        1,
+    )
+    area_step = across * down * step * step
+    highest = min(
+        width.maximum // (across * step),
+        height.maximum // (down * step),
+        math.isqrt(max_pixels // area_step),
+    )
+    if lowest > highest:
+        return None
+    # Area grows with the count, so the closest legal area to the default is
+    # at one of the two counts around the ideal, clamped into range.
+    ideal = math.isqrt(default_area // area_step)
+    count = min(
+        {min(max(value, lowest), highest) for value in (ideal, ideal + 1)},
+        key=lambda value: (
+            abs(area_step * value * value - default_area),
+            0 if area_step * value * value >= default_area else 1,
+            value,
+        ),
+    )
+    return (across * step * count, down * step * count)
 
 
 def _field_binding(key: Literal["width", "height"], value: object) -> WorkflowGeometryInputBinding:

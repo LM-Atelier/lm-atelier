@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from email.parser import BytesParser
@@ -26,7 +27,7 @@ _BRIDGE_ASSET_DIRECTORY = Path(__file__).with_name("comfy_editor_bridge_assets")
 _BRIDGE_ASSET_HASHES = {
     "__init__.py": "a236d9d2e96f0857dc38192fef58927b9592886b7d2c7c9e05a941b253887df8",
     "js/lm_atelier_workflow_editor.js": (
-        "7df5bd55f11c89bd15eeb8b85f01809f51c04096f611d49ad9cb52d13c8b6fd1"
+        "f18f163fa5f878ccdc38c9bc835e622c85d464f7bec6e4142dcfe4433a3361e6"
     ),
 }
 BRIDGE_COORDINATOR_CONFIG = "js/lm_atelier_workflow_editor_config.js"
@@ -169,6 +170,14 @@ def prepare_comfy_editor_bridge(
     )
 
 
+#: Windows refuses to rename a directory while another process - a virus
+#: scanner or the search indexer, typically - still holds a file just written
+#: into it. That passes in moments, so the rename is tried a few more times,
+#: waiting a little longer each time, before staging is called failed.
+_RENAME_ATTEMPTS = 5
+_RENAME_FIRST_WAIT_SECONDS = 0.05
+
+
 def bridge_directory_name(coordinator_origins: Iterable[str]) -> str:
     config = _coordinator_config(coordinator_origins)
     digest = hashlib.sha256(config).hexdigest()
@@ -212,7 +221,7 @@ def stage_comfy_editor_bridge(
                 handle.write(content)
         _verified_asset_files(staging, expected_hashes=staged_hashes)
         try:
-            os.rename(staging, destination)
+            _rename_into_place(staging, destination)
         except FileExistsError:
             _verified_asset_files(destination, expected_hashes=staged_hashes)
         except OSError:
@@ -230,6 +239,25 @@ def stage_comfy_editor_bridge(
     finally:
         if os.path.lexists(staging):
             shutil.rmtree(staging, ignore_errors=True)
+
+
+def _rename_into_place(staging: Path, destination: Path) -> None:
+    """Rename the staged directory into place, waiting out a brief hold on it.
+
+    Only a refusal of access is tried again, and only while nothing has taken
+    the destination: any other failure, or a destination that appeared, is
+    the caller's to judge at once.
+    """
+
+    for attempt in range(_RENAME_ATTEMPTS):
+        try:
+            os.rename(staging, destination)
+        except PermissionError:
+            if attempt + 1 == _RENAME_ATTEMPTS or os.path.lexists(destination):
+                raise
+            time.sleep(_RENAME_FIRST_WAIT_SECONDS * 2**attempt)
+        else:
+            return
 
 
 def _read_comfyui_version(directory: Path) -> str:
@@ -466,5 +494,5 @@ def _is_link_or_reparse(path: Path) -> bool:
     return is_link_or_reparse(
         path,
         missing="assume_regular",
-        unreadable="assume_regular",
+        unreadable="assume_link",
     )

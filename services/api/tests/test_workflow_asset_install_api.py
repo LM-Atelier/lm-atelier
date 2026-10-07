@@ -8,11 +8,11 @@ client-supplied evidence and that queueing honors the reviewed hash.
 
 from __future__ import annotations
 
-import hashlib
 from typing import Any
 
 import pytest
 from httpx2 import AsyncClient
+from install_plan_fixture import bind_install_plan_identity
 
 from local_lm.model_planner import INSTALL_RESOLVER_VERSION
 
@@ -63,35 +63,36 @@ def _seed_plan(plan_id: str = "plan_lora", *, artifact_path: str | None = None) 
 
     with SessionLocal() as session:
         session.add(
-            InstallPlan(
-                id=plan_id,
-                provider="civitai",
-                remote_id="101",
-                revision="202",
-                role="image",
-                engine="comfyui",
-                plan_hash=hashlib.sha256(plan_id.encode()).hexdigest(),
-                resolver_version=INSTALL_RESOLVER_VERSION,
-                compatibility="supported",
-                artifacts_json=[
-                    {
-                        "path": artifact_path or "styles/detail.safetensors",
-                        "kind": "lora",
-                        "target_folder": "loras",
-                        "size_bytes": 17,
-                        "sha256": DIGEST,
-                        "required": True,
-                        "reuse": "download",
-                        "source_version_id": "202",
-                        "source_file_id": "301",
-                    }
-                ],
-                runtime_contract_json={
-                    "auxiliary_kind": "lora",
-                    "comfy_paths": {"loras": "styles"},
-                },
-                activation_probe_json={},
-                status="planned",
+            bind_install_plan_identity(
+                InstallPlan(
+                    id=plan_id,
+                    provider="civitai",
+                    remote_id="101",
+                    revision="202",
+                    role="image",
+                    engine="comfyui",
+                    resolver_version=INSTALL_RESOLVER_VERSION,
+                    compatibility="supported",
+                    artifacts_json=[
+                        {
+                            "path": artifact_path or "styles/detail.safetensors",
+                            "kind": "lora",
+                            "target_folder": "loras",
+                            "size_bytes": 17,
+                            "sha256": DIGEST,
+                            "required": True,
+                            "reuse": "download",
+                            "source_version_id": "202",
+                            "source_file_id": "301",
+                        }
+                    ],
+                    runtime_contract_json={
+                        "auxiliary_kind": "lora",
+                        "comfy_paths": {"loras": "styles"},
+                    },
+                    activation_probe_json={},
+                    status="planned",
+                )
             )
         )
         session.commit()
@@ -197,32 +198,33 @@ async def test_review_materializes_a_provider_filename_as_the_workflow_runtime_n
     source_plan_id = "plan_provider_checkpoint"
     with SessionLocal() as session:
         session.add(
-            InstallPlan(
-                id=source_plan_id,
-                provider="civitai",
-                remote_id="101",
-                revision="202",
-                role="image",
-                engine="comfyui",
-                plan_hash="b" * 64,
-                resolver_version=INSTALL_RESOLVER_VERSION,
-                compatibility="supported",
-                artifacts_json=[
-                    {
-                        "path": source_path,
-                        "kind": "checkpoint",
-                        "target_folder": "checkpoints",
-                        "size_bytes": 29,
-                        "sha256": DIGEST,
-                        "required": True,
-                        "reuse": "download",
-                        "source_version_id": "202",
-                        "source_file_id": "301",
-                    }
-                ],
-                runtime_contract_json={},
-                activation_probe_json={},
-                status="planned",
+            bind_install_plan_identity(
+                InstallPlan(
+                    id=source_plan_id,
+                    provider="civitai",
+                    remote_id="101",
+                    revision="202",
+                    role="image",
+                    engine="comfyui",
+                    resolver_version=INSTALL_RESOLVER_VERSION,
+                    compatibility="supported",
+                    artifacts_json=[
+                        {
+                            "path": source_path,
+                            "kind": "checkpoint",
+                            "target_folder": "checkpoints",
+                            "size_bytes": 29,
+                            "sha256": DIGEST,
+                            "required": True,
+                            "reuse": "download",
+                            "source_version_id": "202",
+                            "source_file_id": "301",
+                        }
+                    ],
+                    runtime_contract_json={},
+                    activation_probe_json={},
+                    status="planned",
+                )
             )
         )
         session.commit()

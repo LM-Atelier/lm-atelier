@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import pytest
 
+from local_lm import prompt_model_values as model_values
 from local_lm.prompt_model_values import (
     MAX_PROMPT_MODEL_ITEMS,
     PROMPT_MODEL_VALUES_INVALID,
@@ -558,3 +559,153 @@ def test_scope_swaps_in_a_hand_built_contract_refuse() -> None:
     )
     with pytest.raises(PromptModelValuesError):
         prompt_model_values_tool(swapped)
+
+
+def test_partial_result_preserves_requested_count_and_reports_every_unfilled_ordinal() -> None:
+    payload = _payload(
+        items=[
+            {"ordinal": 1, "values": {"lighting": "soft window light"}},
+            {"ordinal": 3, "values": {"lighting": "hard rim light"}},
+        ]
+    )
+    result = model_values.parse_prompt_model_values_result(
+        payload, contract=_contract(item_count=4)
+    )
+    assert result.requested_item_count == 4
+    assert tuple(item.ordinal for item in result.items) == (1, 3)
+    assert result.unfilled_ordinals == (2, 4)
+    assert not result.complete
+    assert result.batch_values == (("style", "oil paint"),)
+    assert not isinstance(result, PromptModelValues)
+    assert "oil paint" not in repr(result)
+    assert "soft window light" not in repr(result)
+    with pytest.raises(PromptModelValuesError, match=PROMPT_MODEL_VALUES_INVALID):
+        parse_prompt_model_values(payload, contract=_contract(item_count=4))
+
+
+def test_complete_result_has_no_unfilled_ordinals_and_preserves_exact_values() -> None:
+    result = model_values.parse_prompt_model_values_result(_payload(), contract=_contract())
+    full = parse_prompt_model_values(_payload(), contract=_contract())
+    assert result.complete
+    assert result.requested_item_count == 2
+    assert result.unfilled_ordinals == ()
+    assert result.batch_values == full.batch_values
+    assert result.items == full.items
+
+
+@pytest.mark.parametrize("ordinals", [[], [1, 1], [2, 1], [0], [-1], [5], [True], [1.0]])
+def test_partial_result_refuses_empty_duplicate_unordered_or_out_of_range_items(
+    ordinals: list[object],
+) -> None:
+    payload = _payload(
+        items=[
+            {"ordinal": ordinal, "values": {"lighting": "soft window light"}}
+            for ordinal in ordinals
+        ]
+    )
+    with pytest.raises(PromptModelValuesError) as caught:
+        model_values.parse_prompt_model_values_result(payload, contract=_contract(item_count=4))
+    assert str(caught.value) == PROMPT_MODEL_VALUES_INVALID
+
+
+@pytest.mark.parametrize("values", [{}, {"lighting": ""}, {"lighting": "soft", "extra": "value"}])
+def test_partial_result_requires_all_exact_values_for_each_supplied_item(
+    values: dict[str, str],
+) -> None:
+    payload = _payload(items=[{"ordinal": 2, "values": values}])
+    with pytest.raises(PromptModelValuesError) as caught:
+        model_values.parse_prompt_model_values_result(payload, contract=_contract(item_count=4))
+    assert str(caught.value) == PROMPT_MODEL_VALUES_INVALID
+
+
+def test_partial_result_requires_batch_values_and_detaches_model_payload() -> None:
+    payload = _payload(items=[{"ordinal": 2, "values": {"lighting": "soft window light"}}])
+    result = model_values.parse_prompt_model_values_result(
+        payload, contract=_contract(item_count=4)
+    )
+    payload["items"] = []
+    payload["batch_values"] = {}
+    assert result.items[0].values == (("lighting", "soft window light"),)
+    assert result.unfilled_ordinals == (1, 3, 4)
+    with pytest.raises(PromptModelValuesError):
+        model_values.parse_prompt_model_values_result(
+            _payload(batch_values={}, items=[{"ordinal": 2, "values": {"lighting": "soft"}}]),
+            contract=_contract(item_count=4),
+        )
+
+
+def test_result_receipt_round_trip_binds_requested_count_and_unfilled_ordinals() -> None:
+    contract = _contract(item_count=4)
+    payload = _payload(
+        items=[
+            {"ordinal": 1, "values": {"lighting": "soft window light"}},
+            {"ordinal": 3, "values": {"lighting": "hard rim light"}},
+        ]
+    )
+    result = model_values.parse_prompt_model_values_result(payload, contract=contract)
+    receipt = model_values.prompt_model_values_result_payload(result, contract=contract)
+    assert receipt == {**payload, "requested_item_count": 4, "unfilled_ordinals": [2, 4]}
+    assert (
+        model_values.parse_prompt_model_values_result_payload(receipt, contract=contract) == result
+    )
+    digest = model_values.prompt_model_values_result_sha256(result, contract=contract)
+    extended = model_values.parse_prompt_model_values_result(
+        payload, contract=_contract(item_count=5)
+    )
+    assert digest != model_values.prompt_model_values_result_sha256(
+        extended,
+        contract=_contract(item_count=5),
+    )
+    assert len(digest) == 64
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"requested_item_count": 3},
+        {"requested_item_count": True},
+        {"unfilled_ordinals": [2, 3]},
+        {"unfilled_ordinals": [2, 2]},
+        {"unfilled_ordinals": [True, 4]},
+        {"unfilled_ordinals": []},
+        {"unexpected": 0},
+        {"version": 2},
+    ],
+)
+def test_result_receipt_refuses_false_count_missing_ordinals_or_unknown_fields(
+    change: dict[str, object],
+) -> None:
+    receipt = {
+        **_payload(
+            items=[
+                {"ordinal": 1, "values": {"lighting": "soft window light"}},
+                {"ordinal": 3, "values": {"lighting": "hard rim light"}},
+            ]
+        ),
+        "requested_item_count": 4,
+        "unfilled_ordinals": [2, 4],
+        **change,
+    }
+    with pytest.raises(PromptModelValuesError) as caught:
+        model_values.parse_prompt_model_values_result_payload(
+            receipt, contract=_contract(item_count=4)
+        )
+    assert str(caught.value) == PROMPT_MODEL_VALUES_INVALID
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"requested_item_count": 3},
+        {"unfilled_ordinals": (1, 4)},
+    ],
+)
+def test_result_receipt_refuses_a_forged_dataclass_before_hashing(change: dict[str, Any]) -> None:
+    contract = _contract(item_count=4)
+    result = model_values.parse_prompt_model_values_result(
+        _payload(items=[{"ordinal": 2, "values": {"lighting": "soft window light"}}]),
+        contract=contract,
+    )
+    with pytest.raises(PromptModelValuesError) as caught:
+        model_values.prompt_model_values_result_sha256(replace(result, **change), contract=contract)
+    assert str(caught.value) == PROMPT_MODEL_VALUES_INVALID

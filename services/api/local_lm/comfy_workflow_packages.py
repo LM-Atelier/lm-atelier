@@ -26,6 +26,7 @@ MAX_ASSET_REFERENCE_CHARACTERS = 1_000
 SUPPORTED_MODEL_SUFFIXES = frozenset({".safetensors", ".gguf", ".json"})
 BLOCKED_MODEL_SUFFIXES = frozenset({".bin", ".ckpt", ".pickle", ".pkl", ".pt", ".pth"})
 KNOWN_MODEL_SUFFIXES = SUPPORTED_MODEL_SUFFIXES | BLOCKED_MODEL_SUFFIXES | frozenset({".onnx"})
+BACKGROUND_REMOVAL_LOADER_NODES = frozenset({"LoadBackgroundRemovalModel"})
 
 # These definitions live in the ComfyUI frontend rather than /object_info.
 #
@@ -786,6 +787,8 @@ def _asset_references(
 
 
 def _asset_kind(node_type: str, suffix: str) -> AssetKind:
+    if node_type in BACKGROUND_REMOVAL_LOADER_NODES:
+        return "background_removal"
     lowered = node_type.casefold()
     if "lora" in lowered:
         return "lora"

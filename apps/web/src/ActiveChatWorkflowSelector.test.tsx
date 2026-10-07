@@ -8,6 +8,13 @@ vi.mock("./useActiveChatWorkflowSelection", () => ({
   useActiveChatWorkflowSelection: vi.fn(),
 }));
 
+const browse = {
+  search: "", setSearch: vi.fn(),
+  pages: { error: null, isPending: false, isFetchingNextPage: false,
+    isFetchNextPageError: false, hasNextPage: false,
+    fetchNextPage: vi.fn(), refetch: vi.fn() },
+};
+
 function family(overrides: Partial<WorkflowFamily> = {}): WorkflowFamily {
   return {
     id: "family-1",
@@ -65,6 +72,7 @@ describe("ActiveChatWorkflowSelector", () => {
     const choose = vi.fn();
     vi.mocked(useActiveChatWorkflowSelection).mockReturnValue({
       kind: "ready",
+      browse,
       capability: "image",
       choiceKind: "default",
       current: undefined,
@@ -79,11 +87,12 @@ describe("ActiveChatWorkflowSelector", () => {
     render(<ActiveChatWorkflowSelector chatId="chat-1" routingMode="image" />);
     const selector = screen.getByRole("combobox", { name: "Workflow for this request type" });
     expect(screen.getAllByRole("combobox")).toHaveLength(1);
+    fireEvent.click(selector);
     expect(screen.getByRole("option", { name: "Default" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Auto" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Portrait workflow" })).toBeInTheDocument();
 
-    fireEvent.change(selector, { target: { value: "family-1" } });
+    fireEvent.click(screen.getByRole("option", { name: "Portrait workflow" }));
     expect(choose).toHaveBeenCalledWith({
       mode: "family",
       workflow_family_id: "family-1",
@@ -101,8 +110,8 @@ describe("ActiveChatWorkflowSelector", () => {
 
     render(<ActiveChatWorkflowSelector chatId="chat-1" routingMode="image" />);
 
-    expect(screen.getByRole("combobox")).toBeDisabled();
-    expect(screen.getByRole("combobox")).toHaveValue("");
+    expect(screen.getByRole("combobox")).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("combobox")).toHaveValue("Cannot read the current choice");
     expect(screen.queryByRole("option", { name: "Default" })).toBeNull();
     const retryButton = screen.getByRole("button", { name: "Try again" });
     expect(retryButton.closest("label")).toBeNull();
@@ -114,6 +123,7 @@ describe("ActiveChatWorkflowSelector", () => {
     const choose = vi.fn();
     vi.mocked(useActiveChatWorkflowSelection).mockReturnValue({
       kind: "ready",
+      browse,
       capability: "image",
       choiceKind: "compatibility",
       current: {
@@ -133,7 +143,7 @@ describe("ActiveChatWorkflowSelector", () => {
 
     render(<ActiveChatWorkflowSelector chatId="chat-1" routingMode="image" />);
 
-    expect(screen.getByRole("combobox")).toHaveValue("compatibility:legacy");
+    expect(screen.getByRole("combobox")).toHaveValue("Existing model setup");
     expect(screen.getByText(/replaces the existing model setup/)).toBeInTheDocument();
     expect(choose).not.toHaveBeenCalled();
   });
@@ -141,6 +151,7 @@ describe("ActiveChatWorkflowSelector", () => {
   it("keeps an unavailable selected family visible", () => {
     vi.mocked(useActiveChatWorkflowSelection).mockReturnValue({
       kind: "ready",
+      browse,
       capability: "image",
       choiceKind: "explicit",
       current: {
@@ -159,7 +170,8 @@ describe("ActiveChatWorkflowSelector", () => {
     });
 
     render(<ActiveChatWorkflowSelector chatId="chat-1" routingMode="image" />);
-    expect(screen.getByRole("combobox")).toHaveValue("family-gone");
+    expect(screen.getByRole("combobox")).toHaveValue("Selected workflow (unavailable)");
+    fireEvent.click(screen.getByRole("combobox"));
     expect(screen.getByRole("option", { name: "Selected workflow (unavailable)" }))
       .toBeInTheDocument();
   });
@@ -167,6 +179,7 @@ describe("ActiveChatWorkflowSelector", () => {
   it("explains when every variant in the chosen family is blocked", () => {
     vi.mocked(useActiveChatWorkflowSelection).mockReturnValue({
       kind: "ready",
+      browse,
       capability: "image",
       choiceKind: "explicit",
       current: {
@@ -210,6 +223,7 @@ describe("ActiveChatWorkflowSelector", () => {
     };
     vi.mocked(useActiveChatWorkflowSelection).mockReturnValue({
       kind: "ready",
+      browse,
       capability: "image",
       choiceKind: "explicit",
       current: {
@@ -237,6 +251,7 @@ describe("ActiveChatWorkflowSelector", () => {
   it("reports a family with no variant for the active capability", () => {
     vi.mocked(useActiveChatWorkflowSelection).mockReturnValue({
       kind: "ready",
+      browse,
       capability: "image",
       choiceKind: "explicit",
       current: {

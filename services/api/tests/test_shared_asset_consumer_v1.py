@@ -3,14 +3,19 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import secrets
 import subprocess
 import threading
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
+from run_waits import PATIENCE_SECONDS
 
 from local_lm import filesystem_links as links
 from local_lm import shared_asset_consumer_v1 as consumer
+from local_lm.instance_identity import InstanceIdentityError, instance_identity_from_directory
 from local_lm.shared_asset_consumer_v1 import (
     INVALID_CONSUMER,
     SharedAssetConsumerError,
@@ -116,7 +121,7 @@ def test_instance_failures_surface_only_the_fixed_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def explode(_anchor: object) -> str:
-        raise consumer.InstanceIdentityError(r"secret C:\private\seed path")
+        raise InstanceIdentityError(r"secret C:\private\seed path")
 
     monkeypatch.setattr(consumer, "instance_identity_from_directory", explode)
     with pytest.raises(SharedAssetConsumerError) as caught:
@@ -140,15 +145,15 @@ def test_derivation_runs_against_the_directory_that_was_validated(
     data_dir.mkdir()
     received: list[object] = []
     held_at_call: list[bool] = []
-    real = consumer.instance_identity_from_directory
+    real = instance_identity_from_directory
 
-    def record(anchor: object) -> str:
+    def record(anchor: links.AnchoredDirectory) -> str:
         received.append(anchor)
         # Sampled HERE, while the call is in flight: the anchor is released
         # when the consumer's with-block exits, so inspecting it afterwards
         # would assert against a closed object and prove nothing.
         held_at_call.append(anchor.descriptor is not None or anchor.handle is not None)
-        return real(anchor)  # type: ignore[arg-type]
+        return real(anchor)
 
     monkeypatch.setattr(consumer, "instance_identity_from_directory", record)
     derived = _derive(data_dir)
@@ -187,7 +192,7 @@ def test_a_held_data_root_cannot_be_swapped_underneath_the_derivation(
             data_dir.rename(moved)
         except OSError:
             # Windows: the held directory cannot be renamed at all.
-            identity = consumer.instance_identity_from_directory(anchor)
+            identity = instance_identity_from_directory(anchor)
             assert re.fullmatch(r"[0-9a-f]{64}", identity)
             assert (data_dir / "state" / "desktop-instance-seed").is_file()
             return
@@ -195,7 +200,7 @@ def test_a_held_data_root_cannot_be_swapped_underneath_the_derivation(
         # the original name. The derivation must ignore it entirely.
         replacement = tmp_path / "data"
         replacement.mkdir()
-        identity = consumer.instance_identity_from_directory(anchor)
+        identity = instance_identity_from_directory(anchor)
         assert re.fullmatch(r"[0-9a-f]{64}", identity)
         assert (moved / "state" / "desktop-instance-seed").is_file()
         assert not (replacement / "state").exists(), "wrote through the replacement"
@@ -288,11 +293,11 @@ def test_reading_an_existing_seed_repairs_its_permissions(
     seed.chmod(0o666)
 
     opened: list[object] = []
-    real = instance_identity.open_entry
+    real = links.open_entry
 
-    def record(anchor: object, name: str) -> object:
+    def record(anchor: links.AnchoredDirectory, name: str) -> int | None:
         opened.append(name)
-        return real(anchor, name)  # type: ignore[arg-type]
+        return real(anchor, name)
 
     # The fix IS the single open: type, contents and mode are settled on one
     # descriptor rather than by looking the name up again. That happens on
@@ -382,21 +387,19 @@ def test_an_oversized_seed_is_refused_without_reading_all_of_it(
     pulled into memory.
     """
 
-    from local_lm import instance_identity
-
     data_dir = tmp_path / "data"
     state = data_dir / "state"
     state.mkdir(parents=True)
     (state / "desktop-instance-seed").write_bytes(b"a" * (4 * 1024 * 1024))
 
     sizes: list[int] = []
-    real_read = instance_identity.os.read
+    real_read = os.read
 
     def record(descriptor: int, count: int) -> bytes:
         sizes.append(count)
         return real_read(descriptor, count)
 
-    monkeypatch.setattr(instance_identity.os, "read", record)
+    monkeypatch.setattr(os, "read", record)
     with pytest.raises(SharedAssetConsumerError) as caught:
         _derive(data_dir)
     assert str(caught.value) == INVALID_CONSUMER
@@ -442,15 +445,13 @@ def test_a_failure_before_the_seed_is_written_leaves_no_staging_entry(
 ) -> None:
     """Every pre-publication failure cleans up after itself."""
 
-    from local_lm import instance_identity
-
     data_dir = tmp_path / "data"
     data_dir.mkdir()
 
     def explode(*_args: object, **_kwargs: object) -> object:
         raise OSError("no descriptor for you")
 
-    monkeypatch.setattr(instance_identity.os, "fdopen", explode)
+    monkeypatch.setattr(os, "fdopen", explode)
     with pytest.raises(SharedAssetConsumerError):
         _derive(data_dir)
     leftover = sorted(p.name for p in (data_dir / "state").iterdir())
@@ -474,18 +475,18 @@ def test_two_concurrent_first_starts_converge_on_one_identity(
     data_dir.mkdir()
     inside = threading.Event()
     release = threading.Event()
-    real_create = instance_identity.create_entry
+    real_create = links.create_entry
     first = threading.current_thread().name
 
-    def pause_after_create(*args: object, **kwargs: object) -> object:
-        descriptor = real_create(*args, **kwargs)  # type: ignore[arg-type]
+    def pause_after_create(anchor: links.AnchoredDirectory, name: str) -> int:
+        descriptor = real_create(anchor, name)
         if threading.current_thread().name == first:
             # Held between CREATE and WRITE - the interval where the old code
             # left the FINAL name existing and empty. Pausing at the rename
             # instead would prove nothing, because by then the bytes are
             # already written under either design.
             inside.set()
-            release.wait(timeout=10)
+            release.wait(timeout=PATIENCE_SECONDS)
         return descriptor
 
     monkeypatch.setattr(instance_identity, "create_entry", pause_after_create)
@@ -495,7 +496,7 @@ def test_two_concurrent_first_starts_converge_on_one_identity(
 
     def second() -> None:
         try:
-            inside.wait(timeout=10)
+            inside.wait(timeout=PATIENCE_SECONDS)
             results["second"] = _derive(data_dir)
         except BaseException as error:  # noqa: BLE001 - reported, not swallowed
             errors.append(error)
@@ -535,7 +536,7 @@ def test_open_entry_refuses_a_named_pipe_without_hanging(tmp_path: Path) -> None
     pins the absence of a hang as much as the refusal.
     """
 
-    os.mkfifo(tmp_path / "a-pipe")  # type: ignore[attr-defined]
+    cast(Callable[[Path], None], vars(os)["mkfifo"])(tmp_path / "a-pipe")
     with (
         links.AnchoredDirectory(tmp_path) as anchor,
         pytest.raises(links.AnchoredDirectoryError),
@@ -553,14 +554,12 @@ def test_a_short_first_read_still_measures_the_overflow_byte(
     against a number never measured.
     """
 
-    from local_lm import instance_identity
-
     data_dir = tmp_path / "data"
     state = data_dir / "state"
     state.mkdir(parents=True)
     (state / "desktop-instance-seed").write_bytes(b"a" * 64 + b"trailing rubbish")
 
-    real_read = instance_identity.os.read
+    real_read = os.read
     first = {"done": False}
 
     def short_first(descriptor: int, count: int) -> bytes:
@@ -573,7 +572,7 @@ def test_a_short_first_read_still_measures_the_overflow_byte(
             return real_read(descriptor, 64)
         return real_read(descriptor, count)
 
-    monkeypatch.setattr(instance_identity.os, "read", short_first)
+    monkeypatch.setattr(os, "read", short_first)
     with pytest.raises(SharedAssetConsumerError) as caught:
         _derive(data_dir)
     assert str(caught.value) == INVALID_CONSUMER
@@ -590,14 +589,12 @@ def test_a_pre_existing_staging_entry_does_not_block_a_start(
     was.
     """
 
-    from local_lm import instance_identity
-
     data_dir = tmp_path / "data"
     state = data_dir / "state"
     state.mkdir(parents=True)
 
     names = iter(["collides", "collides", "free"])
-    monkeypatch.setattr(instance_identity.secrets, "token_hex", lambda _n: next(names))
+    monkeypatch.setattr(secrets, "token_hex", lambda _n: next(names))
     (state / "desktop-instance-seed.collides.tmp").write_text("abandoned", encoding="ascii")
 
     identity = _derive(data_dir)
