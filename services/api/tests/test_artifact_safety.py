@@ -6,6 +6,7 @@ import subprocess
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Protocol, cast
 
 import pytest
 from sqlalchemy import create_engine
@@ -17,6 +18,10 @@ from local_lm.config import Settings
 from local_lm.db import Base
 from local_lm.domain import ArtifactKind
 from local_lm.models import Artifact, ArtifactLibraryEntry
+
+
+class _WindowsError(Protocol):
+    winerror: int
 
 
 @pytest.fixture
@@ -137,7 +142,7 @@ def test_temporary_preview_delete_defers_windows_locked_files(
     def locked_replace(source: str | Path, destination: str | Path) -> None:
         if Path(source) == path:
             error = OSError(13, "file is in use")
-            error.winerror = 32
+            cast(_WindowsError, error).winerror = 32
             raise error
         real_replace(source, destination)
 

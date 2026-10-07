@@ -101,7 +101,7 @@ def test_the_network_name_error_the_standard_loop_dies_on_is_recognised() -> Non
 def _proactor_class() -> Any:
     """The Windows proactor under test, which exists only on Windows."""
 
-    return windows_listener.ListenerPreservingProactor
+    return vars(windows_listener)["ListenerPreservingProactor"]
 
 
 def _serving(loop: asyncio.AbstractEventLoop, accept: Any) -> tuple[bool, int]:
