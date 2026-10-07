@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from run_waits import PATIENCE_SECONDS
 from test_downloads import FakeProbeAdapter
 from test_scheduler_claim_hold import _until
 
@@ -66,7 +67,9 @@ async def test_activation_input_write_finishes_before_cancellation_removes_it(
             await asyncio.sleep(0.04)
         assert not task.done() and not finished.is_set()
         release.set()
-        outcome = await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=2)
+        outcome = await asyncio.wait_for(
+            asyncio.gather(task, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         assert finished.is_set() and len(paths) == 1 and not paths[0].exists()
         if disposition == "owned":
             assert len(outcome) == 1 and outcome[0] is None

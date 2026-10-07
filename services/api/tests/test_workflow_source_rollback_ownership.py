@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import select
 from test_activation_worker_replacement import _ControlledProcess, _ObservedLock
 from test_workflow_offer_packages import _setup
@@ -214,7 +215,9 @@ async def test_source_batch_rollback_keeps_a_replacement_worker_after_waiting_fo
                 session.commit()
             before = _state(offer_id, job_id)
             lock.release()
-            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=6)
+            await asyncio.wait_for(
+                asyncio.gather(task, return_exceptions=True), timeout=PATIENCE_SECONDS
+            )
             process = replacement.process
             assert isinstance(process, _ControlledProcess)
             if disposition in {"cleared", "replaced"}:

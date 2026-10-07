@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from test_activation_claim_ownership import _move_claim, _state
 from test_activation_worker_replacement import _ControlledProcess
 from test_runtime_provisioning import _write_manifest, _zip_bytes
@@ -286,10 +287,12 @@ async def test_media_activation_runtime_publication_requires_the_same_claim(
             assert shared_task is not None and not shared_task.cancelling()
         runtime_release.set()
         await _until(runtime_finished.is_set)
-        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=6)
+        await asyncio.wait_for(
+            asyncio.gather(task, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         if shared:
             assert shared_task is not None
-            await asyncio.wait_for(asyncio.shield(shared_task), timeout=6)
+            await asyncio.wait_for(asyncio.shield(shared_task), timeout=PATIENCE_SECONDS)
             assert shared_task.done() and not shared_task.cancelled()
             assert shared_task.exception() is None
             assert settings.comfy_executable is not None and settings.comfy_directory is not None

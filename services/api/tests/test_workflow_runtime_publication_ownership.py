@@ -14,6 +14,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import select
 from test_runtime_provisioning import _write_manifest, _zip_bytes
 from test_scheduler_claim_hold import _until
@@ -205,7 +206,9 @@ async def test_fresh_runtime_publication_requires_the_same_claim_after_installat
             assert not heartbeat.done()
             release.set()
             await _until(finished.is_set)
-            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=6)
+            await asyncio.wait_for(
+                asyncio.gather(task, return_exceptions=True), timeout=PATIENCE_SECONDS
+            )
             assert len(requests) == 1
             if disposition in {"cleared", "replaced"}:
                 assert saved_config.read_bytes() == sentinel

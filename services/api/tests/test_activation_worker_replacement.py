@@ -9,6 +9,7 @@ from typing import Literal
 
 import pytest
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from test_activation_claim_ownership import _move_claim, _state
 
 from local_lm.adapters.base import ChatEvent, ChatRequest
@@ -154,7 +155,9 @@ async def test_waiting_activation_cleanup_checks_the_claim_after_the_worker_lock
             _move_claim(disposition)
         before = _state()
         lock.release()
-        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=2)
+        await asyncio.wait_for(
+            asyncio.gather(task, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         if disposition == "owned":
             assert process.terminated
             assert "chat" not in supervisor._workers

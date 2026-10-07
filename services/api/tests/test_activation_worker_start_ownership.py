@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from test_activation_claim_ownership import _move_claim, _state
 from test_activation_worker_replacement import _ControlledProcess, _ObservedLock
 
@@ -132,7 +133,9 @@ async def test_waiting_activation_start_checks_the_claim_after_the_worker_lock(
             settings.chat_engine = "vllm"
         before = _state()
         lock.release()
-        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=2)
+        await asyncio.wait_for(
+            asyncio.gather(task, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         if disposition == "owned":
             assert replacement.terminated
             assert len(created) == 1 and created[0].terminated

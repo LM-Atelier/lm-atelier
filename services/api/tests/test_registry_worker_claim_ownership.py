@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from test_activation_worker_replacement import _ControlledProcess, _ObservedLock
 from test_install_queue_registry import accept
 from test_install_queue_registry import configured_registry as configured_registry
@@ -112,7 +113,9 @@ async def test_registry_setup_preserves_a_replacement_worker_after_waiting_for_i
                 session.commit()
         before = _snapshot(job_id)
         lock.release()
-        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=3)
+        await asyncio.wait_for(
+            asyncio.gather(task, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         process = replacement.process
         assert isinstance(process, _ControlledProcess)
         if disposition == "owned":
