@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 import pytest
+from run_waits import PATIENCE_SECONDS
 
 from local_lm.adapters.base import MediaRequest
 from local_lm.adapters.comfyui import ComfyUIAdapter
@@ -81,10 +82,10 @@ async def test_cancelled_execution_stops_only_its_accepted_prompt(
 
     execution = asyncio.create_task(collect())
     try:
-        await asyncio.wait_for(receiving.wait(), timeout=2)
+        await asyncio.wait_for(receiving.wait(), timeout=PATIENCE_SECONDS)
         execution.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(execution, timeout=2)
+            await asyncio.wait_for(execution, timeout=PATIENCE_SECONDS)
     finally:
         if not execution.done():
             execution.cancel()
@@ -193,14 +194,14 @@ async def test_older_execution_teardown_keeps_replacement_cancellation_state(
     older = asyncio.create_task(collect())
     newer: asyncio.Task[None] | None = None
     try:
-        await asyncio.wait_for(receiving[0].wait(), timeout=2)
+        await asyncio.wait_for(receiving[0].wait(), timeout=PATIENCE_SECONDS)
         newer = asyncio.create_task(collect())
-        await asyncio.wait_for(receiving[1].wait(), timeout=2)
+        await asyncio.wait_for(receiving[1].wait(), timeout=PATIENCE_SECONDS)
         newer_event = adapter._cancel_events[request.run_id]
         assert adapter._jobs[request.run_id] == prompts[1]
         older.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(older, timeout=2)
+            await asyncio.wait_for(older, timeout=PATIENCE_SECONDS)
 
         assert adapter._jobs.get(request.run_id) == prompts[1]
         assert adapter._cancel_events.get(request.run_id) is newer_event
