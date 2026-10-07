@@ -64,7 +64,7 @@ pytest_temp="$root/temp/verify-pytest-$$"
 # of the data directory, so one inside the other cannot both survive.
 export LOCAL_LM_DATA_DIR="${LOCAL_LM_DATA_DIR:-$root/temp/verify-data-$$}"
 run_checked "API tests" \
-  "$python_tools/pytest" services/api/tests -q \
+  "$python_tools/pytest" services/api/tests -q --durations=20 \
     "--basetemp=$pytest_temp" -p no:cacheprovider -n auto --dist loadfile
 run_checked "Web lint" npm run lint
 run_checked "Web typecheck" npm run typecheck
