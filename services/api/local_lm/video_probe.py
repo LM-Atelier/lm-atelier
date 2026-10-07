@@ -71,6 +71,16 @@ _CONTAINERS: Final[dict[str, Container]] = {
 VIDEO_CODECS: Final = frozenset({"h264", "hevc", "vp8", "vp9", "av1", "mpeg4"})
 #: Audio codecs a trim can copy unchanged into the same container.
 AUDIO_CODECS: Final = frozenset({"aac", "mp3", "opus", "vorbis", "flac", "alac", "ac3", "eac3"})
+#: What a trim copies into a new file of each kind without re-encoding. Matroska
+#: takes every codec above; an MP4 takes fewer, and never Vorbis.
+COPY_VIDEO_CODECS: Final[dict[Container, frozenset[str]]] = {
+    "mp4": frozenset({"h264", "hevc", "av1", "vp9", "mpeg4"}),
+    "matroska": VIDEO_CODECS,
+}
+COPY_AUDIO_CODECS: Final[dict[Container, frozenset[str]]] = {
+    "mp4": frozenset({"aac", "mp3", "opus", "alac", "ac3", "eac3"}),
+    "matroska": AUDIO_CODECS,
+}
 
 _ENTRIES: Final = (
     "format=format_name,duration,start_time,nb_streams"
@@ -147,7 +157,8 @@ class VideoProbe(BaseModel):
     omitted_streams: int
     can_save_frame: bool
     can_trim: bool
-    #: Whether a trim can keep every audio stream as it is; dropping audio is always possible.
+    #: Whether a trim can copy every audio stream unchanged into a file of the
+    #: same kind; dropping audio is always possible.
     can_keep_audio: bool
     limits: list[LimitCode]
     #: The ffprobe found on the system path, by its reported version and file digest.
@@ -252,6 +263,11 @@ def describe(payload: object, artifact: Artifact, ffprobe: MediaTool) -> VideoPr
     omitted = len(entries) - 1 - len(audio)
 
     duration = _seconds(container_format.get("duration")) or _seconds(pictures[0].get("duration"))
+    start = _offset(container_format.get("start_time"))
+    if container == "matroska" and duration is not None and start > 0:
+        # Matroska states where the video ends rather than how long it runs;
+        # every time a utility takes is counted from the start.
+        duration = duration - start if duration > start else None
     limits: list[LimitCode] = []
     if video.codec not in VIDEO_CODECS:
         limits.append("video-codec-unsupported")
@@ -264,7 +280,7 @@ def describe(payload: object, artifact: Artifact, ffprobe: MediaTool) -> VideoPr
     if _rotation(pictures[0]) is None:
         limits.append("video-rotation-unsupported")
     can_save_frame = not limits
-    can_keep_audio = all(stream.codec in AUDIO_CODECS for stream in audio)
+    can_keep_audio = all(stream.codec in COPY_AUDIO_CODECS[container] for stream in audio)
     if not can_keep_audio:
         limits.append("audio-codec-unsupported")
 
@@ -273,7 +289,7 @@ def describe(payload: object, artifact: Artifact, ffprobe: MediaTool) -> VideoPr
         artifact_sha256=artifact.sha256,
         container=container,
         duration_seconds=duration,
-        start_seconds=_offset(container_format.get("start_time")),
+        start_seconds=start,
         video=video,
         audio=audio,
         omitted_streams=omitted,
@@ -283,6 +299,22 @@ def describe(payload: object, artifact: Artifact, ffprobe: MediaTool) -> VideoPr
         limits=limits,
         tool=ffprobe.record(),
     )
+
+
+def container_named(format_name: object) -> Container | None:
+    """The kind of file ffprobe's format name describes, when it is one the utilities read."""
+
+    return _CONTAINERS.get(str(format_name))
+
+
+def stream_facts(stream: dict[str, Any]) -> VideoStreamFacts | AudioStreamFacts | None:
+    """One stream of ffprobe's answer as the probe reads it, or None when no utility keeps it."""
+
+    if stream.get("codec_type") == "video" and not _attached_picture(stream):
+        return _video_facts(stream)
+    if stream.get("codec_type") == "audio":
+        return _audio_facts(stream)
+    return None
 
 
 def _video_facts(stream: dict[str, Any]) -> VideoStreamFacts:

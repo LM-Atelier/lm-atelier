@@ -928,6 +928,37 @@ it("keeps an encrypted backup's passphrase out of the address, and sends the fil
   expect(headers.get("x-local-lm-csrf")).toBe("csrf");
 });
 
+it("checks a trim with a read of the stored video's preview, and queues one with the checked start", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ keeps_whole_video: false }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ keeps_whole_video: false }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ id: "job-trim" }), { status: 202 }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  const controller = new AbortController();
+  await api.videoTrimPreview("sha256:clip/one", 1.43, 2, true, controller.signal);
+  await api.videoTrimPreview("sha256:clip/one", 0, 0.5, false);
+  const body = { start_seconds: 1.43, end_seconds: 2, keep_audio: true, shown_start_seconds: 1 };
+  await expect(api.trimVideo("sha256:clip/one", body)).resolves.toEqual({ id: "job-trim" });
+
+  const [[withSound, withSoundInit], [silent, silentInit], [trim, trimInit]] = fetchMock.mock.calls.slice(1);
+  expect(withSound).toBe(
+    "/api/artifacts/sha256%3Aclip%2Fone/video-trim-preview?start_seconds=1.43&end_seconds=2&keep_audio=true",
+  );
+  expect(withSoundInit?.method).toBeUndefined();
+  expect(withSoundInit?.signal).toBe(controller.signal);
+  expect(silent).toBe(
+    "/api/artifacts/sha256%3Aclip%2Fone/video-trim-preview?start_seconds=0&end_seconds=0.5&keep_audio=false",
+  );
+  expect(silentInit?.method).toBeUndefined();
+  expect([trim, trimInit?.method]).toEqual(["/api/artifacts/sha256%3Aclip%2Fone/video-trims", "POST"]);
+  expect(JSON.parse(String(trimInit?.body))).toEqual(body);
+  expect(new Headers(trimInit?.headers).get("content-type")).toBe("application/json");
+  expect(new Headers(trimInit?.headers).get("x-local-lm-csrf")).toBe("csrf");
+});
+
 it("requests transactional profile cleanup when deleting an installed model", async () => {
   const fetchMock = vi.fn()
     .mockResolvedValueOnce(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import mimetypes
 import os
 import re
@@ -12,9 +13,9 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from collections.abc import Set as AbstractSet
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -54,6 +55,7 @@ from .filesystem_links import (
     list_entries,
     open_child_directory,
     open_entry,
+    open_entry_unshared,
     remove_directory_entry,
     remove_entry,
     remove_link_entry,
@@ -89,6 +91,8 @@ _MAX_VIDEO_POSTER_BYTES = 16 * 1024 * 1024
 _TOOL_INPUT_PREFIX: Final = "tool-input-"
 #: Exactly the names the copy below makes, and so the only ones the sweep may remove.
 _TOOL_INPUT_NAME: Final = re.compile(r"tool-input-[0-9a-f]{32}\.tmp")
+_TOOL_OUTPUT_PREFIX: Final = "tool-output-"
+_TOOL_OUTPUT_NAME: Final = re.compile(r"tool-output-[0-9a-f]{32}\.tmp")
 _COPY_READ: Final = 1024 * 1024
 #: Room a private copy must leave free on the store's volume, so that making it
 #: never fills the volume other writes, the database's among them, depend on.
@@ -100,7 +104,8 @@ def _is_temporary_name(name: str) -> bool:
 
     `ingest_bytes` stages as `ingest-<hex>.tmp`, the proxy encoder uses
     `mkstemp(prefix="video-proxy-", suffix=".mp4")`, and a copy made for a tool
-    to read is `tool-input-` with 32 lowercase hex digits and `.tmp`, matched
+    to read is `tool-input-` and a file made for a tool to write into is
+    `tool-output-`, each with 32 lowercase hex digits and `.tmp`, matched
     exactly. Reading the shapes the store WRITES on the way back out means a
     pass can only ever delete something this store could have left behind.
     """
@@ -109,6 +114,7 @@ def _is_temporary_name(name: str) -> bool:
         name.startswith("ingest-")
         or (name.startswith("video-proxy-") and name.endswith(".mp4"))
         or _TOOL_INPUT_NAME.fullmatch(name) is not None
+        or _TOOL_OUTPUT_NAME.fullmatch(name) is not None
     )
 
 
@@ -289,6 +295,127 @@ class _CopyAbandoned(Exception):
 
 class ArtifactCopyUnavailable(OSError):
     """A private copy of a stored file could not be made: no room, or the store refused it."""
+
+
+class ToolOutputChanged(Exception):
+    """A tool's output is no longer the file that was measured, so it is not kept."""
+
+
+@dataclass(frozen=True)
+class ToolOutput:
+    """A file the store made for one tool to write its result into.
+
+    ``path`` is the name the tool is told to write over; ``maximum_bytes`` is
+    the most the store keeps from it.
+    """
+
+    path: Path
+    maximum_bytes: int
+
+
+@dataclass(frozen=True)
+class ToolOutputSeal:
+    """A tool's output as it was sealed: its bytes' digest and the file it was.
+
+    Whatever measures the output reads it by name, so keeping it is bound to
+    this: the file kept must still be the same file, unchanged since, and the
+    bytes kept must have this digest.
+    """
+
+    sha256: str
+    size: int
+    identity: tuple[int, ...]
+
+
+# How long a seal may take to show that a file system's change time moves.
+_CHANGE_TIME_PROOF_SECONDS: Final = 3.0
+
+
+def _identity(status: os.stat_result) -> tuple[int, ...]:
+    identity = (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
+    if os.name == "nt":
+        return identity
+    # Outside Windows the seal shows first that this file's change time moves;
+    # any change to the file, to its bytes, times, mode or names, then moves it,
+    # and nothing a program does can set it back.
+    return (*identity, status.st_ctime_ns)
+
+
+def _proven_change_time(
+    descriptor: int, status: os.stat_result, stop: threading.Event
+) -> os.stat_result:
+    """Show that a held file's change time moves, then wait out one step of its clock.
+
+    Outside Windows nothing keeps others from writing the file, so the seal
+    rests on its change time. Not every file system keeps one apart: on FAT it
+    is the modification time, which a program can set back, and a change to
+    nothing else leaves it where it was. The file's mode is set to itself, a
+    change to nothing else, until the change time has moved twice; a file
+    system where it does not move, or that refuses the change, is refused. The
+    two moves show how long one step of its clock is, and the seal waits that
+    long past the second, so no later change can share its step. Returns the
+    file's state after the last move, which the seal then binds.
+    """
+
+    change = getattr(os, "fchmod", None)
+    mode = stat.S_IMODE(status.st_mode)
+    moves = [status]
+    deadline = time.monotonic() + _CHANGE_TIME_PROOF_SECONDS
+    while len(moves) < 3:
+        if stop.is_set():
+            raise _CopyAbandoned
+        if change is None or time.monotonic() > deadline:
+            raise ToolOutputChanged("this file system keeps no change time to hold the output by")
+        try:
+            change(descriptor, mode)
+        except OSError as exc:
+            raise ToolOutputChanged("a tool's output could not be held unchanged") from exc
+        current = os.fstat(descriptor)
+        if (current.st_size, current.st_mtime_ns) != (status.st_size, status.st_mtime_ns):
+            raise ToolOutputChanged("a tool's output changed while it was sealed")
+        if current.st_ctime_ns > moves[-1].st_ctime_ns:
+            moves.append(current)
+        else:
+            time.sleep(0.005)
+    step = moves[2].st_ctime_ns - moves[1].st_ctime_ns
+    settle = moves[2].st_ctime_ns + step - time.time_ns()
+    if settle > 0:
+        time.sleep(settle / 1_000_000_000)
+    return moves[2]
+
+
+class _BoundedRead(io.RawIOBase):
+    """A tool's output read through one held descriptor, never past its bound.
+
+    Given the digest it was sealed with, the end of the read is refused with
+    ``ToolOutputChanged`` unless the bytes read have that digest, so whatever
+    consumes the stream fails before it can keep other bytes.
+    """
+
+    def __init__(self, source: io.FileIO, limit: int, sealed_sha256: str | None = None) -> None:
+        self._source = source
+        self._remaining = limit
+        self._sealed_sha256 = sealed_sha256
+        self._digest = hashlib.sha256()
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        count = self._source.readinto(buffer) or 0
+        self._remaining -= count
+        if self._remaining < 0:
+            raise ArtifactCopyUnavailable("a tool wrote more than the store keeps")
+        if self._sealed_sha256 is not None:
+            if count:
+                self._digest.update(memoryview(buffer)[:count])
+            elif self._digest.hexdigest() != self._sealed_sha256:
+                raise ToolOutputChanged("a tool's output is not the bytes that were sealed")
+        return count
+
+    def close(self) -> None:
+        self._source.close()
+        super().close()
 
 
 @dataclass(frozen=True)
@@ -568,6 +695,191 @@ class ArtifactStore:
                 with suppress(OSError):
                     os.close(descriptor)
         return name
+
+    @asynccontextmanager
+    async def tool_output(self, *, maximum_bytes: int) -> AsyncIterator[ToolOutput]:
+        """An empty file of the store's own for a tool to write its result into.
+
+        The file is created exclusively, under a new unpredictable name in the
+        store root, before the tool runs. The tool opens it by name, as a tool
+        opens a private copy; what it wrote is read back only through the held
+        store root. Room is checked once, up front, for the most the tool may
+        write and for the store's own copy of it should it be kept, leaving the
+        same headroom a private copy leaves. The file is removed when the block
+        ends, kept or not, and a caller cancelled while it is being created
+        waits for it and removes it too; one a crash leaves behind has a
+        temporary name, so the orphan sweep removes it.
+        """
+
+        if maximum_bytes < 0:
+            raise ValueError("maximum tool output size is invalid")
+        creating = asyncio.ensure_future(asyncio.to_thread(self._create_tool_output, maximum_bytes))
+        try:
+            name = await outlast_cancellation(creating)
+            yield ToolOutput(self.root / name, maximum_bytes)
+        finally:
+            if creating.done() and not creating.cancelled() and creating.exception() is None:
+                # Best effort: a file this cannot remove is left for the orphan sweep.
+                with (
+                    suppress(AnchoredDirectoryError, OSError),
+                    AnchoredDirectory(self.root) as root,
+                ):
+                    discard_entry(root, creating.result())
+
+    def _create_tool_output(self, maximum_bytes: int) -> str:
+        name = f"{_TOOL_OUTPUT_PREFIX}{secrets.token_hex(16)}.tmp"
+        try:
+            with AnchoredDirectory(self.root) as root:
+                if available_bytes(root) < 2 * maximum_bytes + _COPY_HEADROOM:
+                    raise ArtifactCopyUnavailable("there is no room for a tool's output")
+                os.close(create_entry(root, name))
+        except AnchoredDirectoryError as exc:
+            raise ArtifactCopyUnavailable("a tool's output file could not be created") from exc
+        return name
+
+    def tool_output_size(self, output: ToolOutput) -> int:
+        """How many bytes a tool wrote, measured through the held store root."""
+
+        with self._held_tool_output(output) as descriptor:
+            return os.fstat(descriptor).st_size
+
+    @asynccontextmanager
+    async def sealed_tool_output(self, output: ToolOutput) -> AsyncIterator[ToolOutputSeal]:
+        """What a tool wrote, sealed, and held unchanged until the block ends.
+
+        The output is opened through the held store root and read once, never
+        past ``output.maximum_bytes``, for its digest and identity; a file that
+        changed while it was read is refused. Whatever measures it inside the
+        block reads it by name, so it is held unchanged until the block ends.
+        On Windows the sealing descriptor stays open without write or delete
+        sharing, so nothing can write, replace, rename or delete the file, and
+        one something still holds open for writing is refused. Elsewhere the
+        seal first shows that the file's change time moves, refusing a file
+        system that keeps none apart, and carries it, so keeping the file
+        refuses one changed and then changed back. A caller cancelled while it
+        is sealed stops the read and waits for it.
+        """
+
+        stop = threading.Event()
+        sealing = asyncio.ensure_future(asyncio.to_thread(self._seal_tool_output, output, stop))
+        try:
+            descriptor, seal = await outlast_cancellation(sealing, on_cancel=stop.set)
+        except BaseException:
+            if sealing.done() and not sealing.cancelled() and sealing.exception() is None:
+                with suppress(OSError):
+                    os.close(sealing.result()[0])
+            raise
+        try:
+            yield seal
+        finally:
+            with suppress(OSError):
+                os.close(descriptor)
+
+    def _seal_tool_output(
+        self, output: ToolOutput, stop: threading.Event
+    ) -> tuple[int, ToolOutputSeal]:
+        descriptor = self._open_tool_output(output, unshared=True)
+        try:
+            before = os.fstat(descriptor)
+            if before.st_size > output.maximum_bytes:
+                raise ArtifactCopyUnavailable("a tool wrote more than the store keeps")
+            digest = hashlib.sha256()
+            size = 0
+            duplicate = os.dup(descriptor)
+            with io.BufferedReader(
+                _BoundedRead(os.fdopen(duplicate, "rb", buffering=0), output.maximum_bytes)
+            ) as source:
+                while chunk := source.read(1024 * 1024):
+                    if stop.is_set():
+                        raise _CopyAbandoned
+                    digest.update(chunk)
+                    size += len(chunk)
+            if size != before.st_size or _identity(os.fstat(descriptor)) != _identity(before):
+                raise ToolOutputChanged("a tool's output changed while it was sealed")
+            if os.name != "nt":
+                before = _proven_change_time(descriptor, before, stop)
+            return descriptor, ToolOutputSeal(digest.hexdigest(), size, _identity(before))
+        except BaseException:
+            with suppress(OSError):
+                os.close(descriptor)
+            raise
+
+    def ingest_tool_output(
+        self,
+        session: Session,
+        output: ToolOutput,
+        *,
+        seal: ToolOutputSeal,
+        kind: ArtifactKind,
+        media_type: str,
+        original_name: str,
+        metadata: dict[str, object],
+    ) -> Artifact:
+        """Keep what a tool wrote as an artifact, only if it is what was sealed.
+
+        The output is opened through the held store root, which refuses a link
+        or anything but a regular file, and read through that one descriptor
+        and never past ``output.maximum_bytes``. It is never opened again by
+        name, so what is kept is the file the store made. That file must still
+        be the one sealed, unchanged since, and the bytes read from it must
+        have the sealed digest, checked at the end of the read and so before
+        anything is published; otherwise nothing is kept and
+        ``ToolOutputChanged`` is raised.
+        """
+
+        with self._held_tool_output(output) as descriptor:
+            status = os.fstat(descriptor)
+            if status.st_size > output.maximum_bytes:
+                raise ArtifactCopyUnavailable("a tool wrote more than the store keeps")
+            if _identity(status) != seal.identity:
+                raise ToolOutputChanged("a tool's output changed after it was sealed")
+            duplicate = os.dup(descriptor)
+            with io.BufferedReader(
+                _BoundedRead(
+                    os.fdopen(duplicate, "rb", buffering=0), output.maximum_bytes, seal.sha256
+                )
+            ) as source:
+                return self.ingest_stream(
+                    session,
+                    source,
+                    kind=kind,
+                    media_type=media_type,
+                    original_name=original_name,
+                    metadata=metadata,
+                )
+
+    @contextmanager
+    def _held_tool_output(self, output: ToolOutput) -> Iterator[int]:
+        descriptor = self._open_tool_output(output)
+        try:
+            yield descriptor
+        finally:
+            with suppress(OSError):
+                os.close(descriptor)
+
+    def _open_tool_output(self, output: ToolOutput, *, unshared: bool = False) -> int:
+        name = output.path.name
+        if output.path.parent != self.root or _TOOL_OUTPUT_NAME.fullmatch(name) is None:
+            raise ValueError("this is not a file the store made for a tool")
+        descriptor: int | None = None
+        try:
+            with AnchoredDirectory(self.root) as root:
+                if not unshared:
+                    descriptor = open_entry(root, name)
+                else:
+                    try:
+                        descriptor = open_entry_unshared(root, name)
+                    except AnchoredDirectoryError as exc:
+                        # Something still holds it open for writing, as a tool
+                        # that has not finished with it would.
+                        raise ToolOutputChanged(
+                            "a tool's output could not be held unchanged"
+                        ) from exc
+        except AnchoredDirectoryError as exc:
+            raise ArtifactCopyUnavailable("a tool's output could not be held for reading") from exc
+        if descriptor is None:
+            raise ArtifactCopyUnavailable("a tool's output is missing")
+        return descriptor
 
     def delivery_metadata(self, artifact: Artifact) -> tuple[Path, str, str]:
         path = self.verified_path(artifact)
