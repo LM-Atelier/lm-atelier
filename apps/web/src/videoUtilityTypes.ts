@@ -162,14 +162,16 @@ export interface ExactTrimEncoding {
 /** What a finished trim made, as its job's result holds it.
  *
  * The requested and actual start and end are on the original's timeline. The
- * video and audio entries are measured on the new video's own timeline.
+ * video and audio entries are measured on the new video's own timeline. A
+ * finished job names the new video and its source without holding either, so
+ * deleting them frees their space.
  */
 export interface VideoTrimResult {
-  result_artifact_id: string;
+  made_artifact_id: string;
   in_library: boolean;
   action: "trim";
   mode: VideoTrimMode;
-  source_artifact_id: string;
+  from_artifact_id: string;
   source_sha256: string;
   requested_start_seconds: number;
   requested_end_seconds: number;

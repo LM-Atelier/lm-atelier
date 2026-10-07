@@ -244,7 +244,7 @@ async def test_an_exact_cut_holds_exactly_the_frames_shown_and_records_how_close
     assert job["status"] == "complete", (job["result_json"], job["error"])
     assert job["phase"] == "Video trimmed"
     result = job["result_json"]
-    made = _path(app, result["result_artifact_id"])
+    made = _path(app, result["made_artifact_id"])
     [video, sound] = _streams(made)
     assert (video["codec_name"], sound["codec_name"]) == ("h264", "aac")
     # Thirteen frames, a tenth of a second apart from zero, as the source had them.
@@ -287,7 +287,7 @@ async def test_an_exact_cut_holds_exactly_the_frames_shown_and_records_how_close
     assert set(result["encoding"]) == _browser_fields("ExactTrimEncoding")
     assert result["in_library"] is True
     with SessionLocal() as session:
-        trimmed = session.get(Artifact, result["result_artifact_id"])
+        trimmed = session.get(Artifact, result["made_artifact_id"])
         assert trimmed is not None
         assert (trimmed.media_type, trimmed.original_name) == (
             "video/mp4",
@@ -311,7 +311,7 @@ async def test_a_lossless_exact_cut_holds_the_source_frames_bit_for_bit(
 
     assert fired, "the encode was not made lossless"
     assert job["status"] == "complete", (job["result_json"], job["error"])
-    made = _path(app, job["result_json"]["result_artifact_id"])
+    made = _path(app, job["result_json"]["made_artifact_id"])
     assert _frames(made, count=14) == _frames(tmp_path / "walk.mp4", 1.4, 13)
     # Identical frames measure as identical, which PSNR states as infinite.
     assert job["result_json"]["quality"]["psnr_lowest_db"] is None
@@ -342,7 +342,7 @@ async def test_the_sound_is_cut_at_the_same_moments_as_the_picture(
     job = await _cut(client, source, 1.43, 2.7, True)
 
     assert job["status"] == "complete", (job["result_json"], job["error"])
-    made = _path(app, job["result_json"]["result_artifact_id"])
+    made = _path(app, job["result_json"]["made_artifact_id"])
     answer = subprocess.run(
         [
             _tool("ffmpeg"),
@@ -394,7 +394,7 @@ async def test_a_late_matroska_video_with_b_frames_is_cut_on_its_own_frames(
     assert job["status"] == "complete", (job["result_json"], job["error"])
     frames = job["result_json"]["frames"]
     assert (frames["decoded_from_seconds"], frames["checked_from_seconds"]) == (1.0, 2.0)
-    made = _path(app, job["result_json"]["result_artifact_id"])
+    made = _path(app, job["result_json"]["made_artifact_id"])
     assert _frames(made, count=7) == _frames(tmp_path / "late.mkv", 2.4, 6)
 
 
@@ -421,7 +421,7 @@ async def test_a_part_that_starts_on_an_open_keyframe_is_cut_whole(
     job = await _cut(client, source, 2.43, 3.5, False)
 
     assert job["status"] == "complete", (job["result_json"], job["error"])
-    made = _path(app, job["result_json"]["result_artifact_id"])
+    made = _path(app, job["result_json"]["made_artifact_id"])
     assert _frames(made, count=12) == _frames(tmp_path / "open.mkv", 2.4, 11)
 
 
@@ -478,7 +478,7 @@ async def test_an_mp4_of_open_keyframes_is_cut_on_its_own_frames(
         checked,
     )
     count = round((3.0 - first) * 10)
-    made = _path(app, job["result_json"]["result_artifact_id"])
+    made = _path(app, job["result_json"]["made_artifact_id"])
     # The source decoded from its very beginning: a seek into it would meet the same keyframes.
     shown = _frames(tmp_path / name, count=40)
     assert _frames(made, count=count + 1) == shown[round(first * 10) : round(first * 10) + count]
@@ -523,7 +523,7 @@ async def test_a_stream_copy_that_began_between_keyframes_is_cut_from_its_first_
     job = await _cut(client, source, 0.0, 1.0, False)
 
     assert job["status"] == "complete", (job["result_json"], job["error"])
-    made = _path(app, job["result_json"]["result_artifact_id"])
+    made = _path(app, job["result_json"]["made_artifact_id"])
     assert _frames(made, count=11) == _frames(tmp_path / "copied.mp4", count=10)
 
 
@@ -554,7 +554,7 @@ async def test_a_variable_frame_rate_mp4_is_checked_from_its_own_keyframe(
     frames = job["result_json"]["frames"]
     assert frames["checked_from_seconds"] == pytest.approx(1.04, abs=0.001), frames
     assert frames["decoded_from_seconds"] < frames["checked_from_seconds"]
-    made = _path(app, job["result_json"]["result_artifact_id"])
+    made = _path(app, job["result_json"]["made_artifact_id"])
     assert _frames(made, count=frames["count"] + 1) == _frames(
         tmp_path / "uneven.mp4", frames["first_seconds"], frames["count"]
     )
@@ -592,7 +592,7 @@ async def test_exact_cuts_begin_and_end_on_the_frames_at_their_times(
         first,
         count,
     )
-    made = _path(app, job["result_json"]["result_artifact_id"])
+    made = _path(app, job["result_json"]["made_artifact_id"])
     assert _frames(made, count=count + 1) == _frames(tmp_path / "walk.mp4", first, count)
 
 
@@ -643,7 +643,7 @@ async def test_a_start_before_the_first_picture_starts_on_it_and_leaves_earlier_
     job = await _cut(client, source, 0.0, 1.5, True)
     assert job["status"] == "complete", (job["result_json"], job["error"])
     assert job["result_json"]["frames"]["began_at_first_picture"] is True
-    [video, sound] = _streams(_path(app, job["result_json"]["result_artifact_id"]))
+    [video, sound] = _streams(_path(app, job["result_json"]["made_artifact_id"]))
     assert float(sound["start_time"]) >= float(video["start_time"]) - 0.001
 
 
@@ -802,7 +802,7 @@ async def test_pcm_sound_a_copy_cannot_keep_is_re_encoded_by_an_exact_cut(
     job = await _cut(client, source, 1.0, 2.0, True)
 
     assert job["status"] == "complete", (job["result_json"], job["error"])
-    [_video, sound] = _streams(_path(app, job["result_json"]["result_artifact_id"]))
+    [_video, sound] = _streams(_path(app, job["result_json"]["made_artifact_id"]))
     assert sound["codec_name"] == "aac"
 
 

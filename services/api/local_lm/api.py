@@ -792,6 +792,7 @@ from .user_queue_activity import (
 )
 from .verified_setup import build_verified_setup, resolve_verified_setup
 from .video_length import video_length_reaches_graph, workflow_video_length
+from .video_utilities import SourceNotStored
 from .video_utility_api import router as video_utility_router
 from .web_search import CrwSearchProvider, WebSearchError
 from .web_search_configuration import configured_search_provider, search_provider_revision
@@ -6692,7 +6693,11 @@ async def retry_job(
         return _retry_registry_preparation(session, _services(request), job_id)
     if job.kind == JobKind.MEDIA_UTILITY.value:
         utilities = _services(request).video_utilities
-        utilities.stage_retry(job)
+        try:
+            utilities.stage_retry(session, job)
+        except SourceNotStored as exc:
+            session.rollback()
+            raise api_error(409, exc.code, str(exc)) from exc
         session.commit()
         utilities.start(job.id)
         session.refresh(job)
