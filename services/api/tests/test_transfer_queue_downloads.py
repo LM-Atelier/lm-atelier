@@ -8,6 +8,7 @@ from typing import Never
 
 import pytest
 from fastapi import FastAPI
+from run_waits import PATIENCE_SECONDS
 
 from local_lm.db import SessionLocal
 from local_lm.downloads import DownloadManager
@@ -47,7 +48,7 @@ def create(manager: DownloadManager, name: str) -> str:
 
 
 async def wait_queued(*job_ids: str) -> None:
-    async with asyncio.timeout(10):
+    async with asyncio.timeout(PATIENCE_SECONDS):
         while True:
             with SessionLocal() as session:
                 jobs = [session.get(Job, job_id) for job_id in job_ids]
@@ -93,7 +94,7 @@ async def test_new_and_individually_resumed_downloads_wait_for_lane_resume(
         await manager.scheduler.queue_control_changed("transfer")
         # Waited on without cancelling, so a download still running at the bound is described
         # as it stands: whether the time went before it started or after it failed.
-        _finished, running = await asyncio.wait(tasks, timeout=10)
+        _finished, running = await asyncio.wait(tasks, timeout=PATIENCE_SECONDS)
         if running:
             with SessionLocal() as session:
                 stored = [session.get(Job, job_id) for job_id in (accepted, resumed)]
@@ -137,12 +138,12 @@ async def test_download_controller_releases_the_last_draining_claim(
     try:
         job_id = create(manager, "active")
         task = manager._tasks[job_id]
-        await asyncio.wait_for(entered.wait(), timeout=10)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         policy = control("pause_after_current", 0)
         assert policy.dispatch_state == "draining" and policy.running_jobs == 1
         if ending == "failure":
             release.set()
-            await asyncio.wait_for(task, timeout=10)
+            await asyncio.wait_for(task, timeout=PATIENCE_SECONDS)
             expected = "failed"
         elif ending == "cancel":
             assert await manager.cancel(job_id)
@@ -199,5 +200,5 @@ async def test_application_restart_recovers_downloads_under_the_durable_pause(
         task = manager._tasks["recovered-download"]
         control("resume", policy.revision)
         await manager.scheduler.queue_control_changed("transfer")
-        await asyncio.wait_for(task, timeout=10)
+        await asyncio.wait_for(task, timeout=PATIENCE_SECONDS)
         assert entered == ["example/recovered"]

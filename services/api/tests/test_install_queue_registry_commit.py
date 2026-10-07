@@ -16,6 +16,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import select
 from test_comfy_registry_lifecycle import _closure
 from test_install_queue_registry import accept, state
@@ -172,7 +173,7 @@ async def test_registry_preparation_rechecks_its_claim_before_persisting(
                 if replacement == "review"
                 else client.post(f"/api/workflows/packages/installs/{install_id}/renew")
             )
-            await asyncio.wait_for(waiting.wait(), timeout=10)
+            await asyncio.wait_for(waiting.wait(), timeout=PATIENCE_SECONDS)
             assert not acquired.is_set() and not request_task.done()
             assert old_environment is not None and old_environment.is_dir()
             with SessionLocal() as session:

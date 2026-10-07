@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session, sessionmaker
 from test_queue_control import job_audit, make_queue_app, seed_plan
@@ -244,7 +245,7 @@ async def test_paused_generation_does_not_claim_but_the_same_resource_install_ca
 
     task = asyncio.create_task(generate())
     try:
-        await asyncio.wait_for(attempted.wait(), timeout=5)
+        await asyncio.wait_for(attempted.wait(), timeout=PATIENCE_SECONDS)
         async with scheduler.job_lease("install", resource="media_compute", group="primary"):
             assert not generation_started.is_set()
             with sessions() as session:
@@ -252,7 +253,7 @@ async def test_paused_generation_does_not_claim_but_the_same_resource_install_ca
                 assert session.scalar(select(Job.status).where(Job.id == "install")) == "running"
         assert not generation_started.is_set()
         await command(client, "resume", revision=1, key="resume-generation")
-        await asyncio.wait_for(generation_started.wait(), timeout=5)
+        await asyncio.wait_for(generation_started.wait(), timeout=PATIENCE_SECONDS)
         await task
     finally:
         task.cancel()
@@ -480,7 +481,7 @@ async def test_concurrent_generation_commands_have_one_durable_transition(
         many: bool,
     ) -> None:
         if statement == "BEGIN IMMEDIATE":
-            ready.wait(timeout=5)
+            ready.wait(timeout=PATIENCE_SECONDS)
 
     def post(key: str) -> tuple[int, object]:
         async def request() -> tuple[int, object]:

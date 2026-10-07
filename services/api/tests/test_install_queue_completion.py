@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy.exc import OperationalError
 from test_workflow_completion_jobs import _accept, _settled, _state
 from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
@@ -93,7 +94,7 @@ async def test_restart_clears_a_claim_retained_by_a_queued_source_retry(
             assert policy.dispatch_state == "paused" and policy.running_jobs == 0
         control("resume", policy.revision)
         await manager.scheduler.queue_control_changed("install")
-        await asyncio.wait_for(manager._offer_recovery_task, timeout=10)
+        await asyncio.wait_for(manager._offer_recovery_task, timeout=PATIENCE_SECONDS)
         assert _state(offer_id)[0:2] == ("completed", "complete")
         assert _state(offer_id)[4] == 2
     finally:
@@ -122,7 +123,7 @@ async def test_source_completion_keeps_its_claim_until_old_work_releases(
     monkeypatch.setattr(app.state.services.engines.media, "validate_workflow", validate)
     manager.start_workflow_installation(offer_id)
     try:
-        await asyncio.wait_for(entered.wait(), timeout=10)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         task = manager._offer_tasks[offer_id]
         with SessionLocal() as session:
             job = session.get(Job, job_id)
@@ -138,7 +139,7 @@ async def test_source_completion_keeps_its_claim_until_old_work_releases(
         policy = control("pause_after_current", 0)
         assert policy.dispatch_state == "draining" and policy.running_jobs == 1
         release.set()
-        await asyncio.wait_for(asyncio.shield(task), timeout=10)
+        await asyncio.wait_for(asyncio.shield(task), timeout=PATIENCE_SECONDS)
         with SessionLocal() as session:
             policy = read_lane_policy(session, "install")
             assert policy.dispatch_state == "paused" and policy.running_jobs == 0
@@ -171,7 +172,7 @@ async def test_failed_source_preflight_cannot_mark_a_newer_execution_for_attenti
 
     def fail_preflight(_offer_id: str) -> str | None:
         entered.set()
-        assert release.wait(timeout=10)
+        assert release.wait(timeout=PATIENCE_SECONDS)
         raise OperationalError("neutral preflight", {}, RuntimeError("database unavailable"))
 
     monkeypatch.setattr(workflow_source_completion, "prepare_source_completion", fail_preflight)
@@ -196,7 +197,7 @@ async def test_failed_source_preflight_cannot_mark_a_newer_execution_for_attenti
                 assert (await client.post(f"/api/jobs/{job_id}/cancel")).status_code == 200
                 assert (await client.post(f"/api/jobs/{job_id}/retry")).status_code == 200
         release.set()
-        await asyncio.wait_for(task, timeout=10)
+        await asyncio.wait_for(task, timeout=PATIENCE_SECONDS)
         with SessionLocal() as session:
             offer = session.get(WorkflowInstallOffer, offer_id)
             job = session.get(Job, job_id)
@@ -275,7 +276,7 @@ async def test_source_preflight_finishes_before_its_dispatcher_exits(
         release.set()
         outcomes = await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=30)
         if closing is not None:
-            await asyncio.wait_for(closing, timeout=10)
+            await asyncio.wait_for(closing, timeout=PATIENCE_SECONDS)
         assert finished.is_set()
         if ending == "complete":
             assert list(outcomes) == [None]
