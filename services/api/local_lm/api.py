@@ -1994,7 +1994,7 @@ def export_verified_setup(
             409, "setup-evidence-missing", "This setup has no current activation evidence."
         )
     verification = current_setup_verification(session, role, install, profile, workflow, evidence)
-    if not verification or verification.state != "verified":
+    if not verification or verification.state != "ready":
         raise api_error(
             409,
             "setup-not-verified",

@@ -36,6 +36,7 @@ from local_lm.setup_verification import (
     setup_verification_settings,
     synthetic_setup_image,
 )
+from local_lm.verified_setup import local_identifiers_in
 
 pytestmark = pytest.mark.asyncio
 
@@ -488,3 +489,57 @@ async def test_setup_verification_settings_and_input_are_bounded_and_unique() ->
     assert first.startswith(b"\x89PNG\r\n\x1a\n")
     assert second.startswith(b"\x89PNG\r\n\x1a\n")
     assert first != second
+
+
+@pytest.mark.parametrize(
+    ("role", "operation"),
+    [("chat", None), ("image", "text_to_image"), ("video", "image_to_video")],
+)
+async def test_a_completed_generation_verification_can_export_its_setup(
+    client: AsyncClient,
+    settings: Settings,
+    role: str,
+    operation: str | None,
+) -> None:
+    seed_ready_role(settings, role, operation=operation)
+    assert (await client.get(f"/api/setup/verified-setup/{role}")).status_code == 409
+    assert (await client.post(f"/api/setup/verify/{role}")).status_code == 202
+    ready = await wait_for_role(client, role, "ready")
+    assert ready["verification_level"] == "generation_probe"
+
+    exported = await client.get(f"/api/setup/verified-setup/{role}")
+
+    assert exported.status_code == 200
+    payload = exported.json()
+    assert payload["role"] == role
+    assert payload["attestation"]["generated_output"] is True
+    assert payload["attestation"]["verified_at"] is not None
+    assert local_identifiers_in(payload) == []
+    with SessionLocal() as session:
+        verification = session.scalar(select(SetupVerification))
+        assert verification is not None
+        assert verification.state == "ready"
+        assert verification.chat_id is None
+        assert verification.job_id is None
+        assert session.scalars(select(Job)).all() == []
+
+
+@pytest.mark.parametrize("state", ["queued", "running", "failed", "verified"])
+async def test_only_a_successful_verification_state_can_export(
+    client: AsyncClient,
+    settings: Settings,
+    state: str,
+) -> None:
+    seed_ready_role(settings, "image", operation="text_to_image")
+    assert (await client.post("/api/setup/verify/image")).status_code == 202
+    await wait_for_role(client, "image", "ready")
+    with SessionLocal() as session:
+        verification = session.scalar(select(SetupVerification))
+        assert verification is not None
+        verification.state = state
+        session.commit()
+
+    exported = await client.get("/api/setup/verified-setup/image")
+
+    assert exported.status_code == 409
+    assert exported.json()["code"] == "setup-not-verified"

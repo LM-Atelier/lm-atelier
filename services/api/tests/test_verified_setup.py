@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.hardware import hardware_envelope
@@ -61,7 +63,7 @@ def _parts(install_id: str) -> dict[str, Any]:
     return {
         "verification": SimpleNamespace(
             role="image",
-            state="verified",
+            state="ready",
             completed_at=datetime(2026, 7, 31, tzinfo=UTC),
         ),
         "profile": SimpleNamespace(
@@ -130,12 +132,13 @@ def test_the_attestation_says_a_generation_actually_happened(settings: Settings)
         session.rollback()
 
 
-def test_an_unverified_setup_does_not_claim_a_generation(settings: Settings) -> None:
+@pytest.mark.parametrize("state", ["queued", "running", "failed", "verified"])
+def test_an_unverified_setup_does_not_claim_a_generation(settings: Settings, state: str) -> None:
     """A record that only says "this ought to work" must not say more than that."""
     with SessionLocal() as session:
         install = _install(session, f"case{next(_COUNTER)}")
         parts = _parts(install.id)
-        parts["verification"] = SimpleNamespace(role="image", state="failed", completed_at=None)
+        parts["verification"] = SimpleNamespace(role="image", state=state, completed_at=None)
 
         payload = build_verified_setup(session, install=install, **parts)
 
