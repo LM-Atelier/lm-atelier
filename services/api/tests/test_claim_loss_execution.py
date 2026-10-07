@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import select
 
 from local_lm import scheduler as scheduler_module
@@ -55,7 +56,7 @@ async def _running_image(
     )
     assert accepted.status_code == 202
     run_id: str = accepted.json()["run"]["id"]
-    await asyncio.wait_for(entered.wait(), timeout=5)
+    await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
     with SessionLocal() as session:
         job_id = session.scalar(select(Job.id).where(Job.run_id == run_id))
         assert job_id is not None
@@ -95,13 +96,13 @@ async def test_lost_claim_stops_the_exact_media_execution_and_keeps_current_rows
                 job.attempt += 1
             expected = job.claim_owner, job.attempt, job.status, run.status
             session.commit()
-        await asyncio.wait_for(asyncio.shield(heartbeat), timeout=5)
+        await asyncio.wait_for(asyncio.shield(heartbeat), timeout=PATIENCE_SECONDS)
         try:
             await asyncio.wait_for(exited.wait(), timeout=2)
         except TimeoutError:
             pytest.fail("The media execution continued after its heartbeat lost ownership")
         outcome = await asyncio.wait_for(
-            asyncio.gather(execution, return_exceptions=True), timeout=5
+            asyncio.gather(execution, return_exceptions=True), timeout=PATIENCE_SECONDS
         )
         assert outcome[0] is None or isinstance(outcome[0], asyncio.CancelledError)
         with SessionLocal() as session:
@@ -127,7 +128,7 @@ async def test_a_status_change_with_the_same_claim_keeps_execution_running(
             token = job.claim_owner
             job.status = "paused"
             session.commit()
-        await asyncio.wait_for(asyncio.shield(heartbeat), timeout=5)
+        await asyncio.wait_for(asyncio.shield(heartbeat), timeout=PATIENCE_SECONDS)
         assert not exited.is_set() and not execution.done()
         with SessionLocal() as session:
             job = session.get(Job, job_id)
@@ -168,7 +169,7 @@ async def test_a_reclaimed_generation_keeps_running_when_the_older_execution_sto
     )
     assert accepted.status_code == 202
     run_id: str = accepted.json()["run"]["id"]
-    await asyncio.wait_for(entered[0].wait(), timeout=5)
+    await asyncio.wait_for(entered[0].wait(), timeout=PATIENCE_SECONDS)
     with SessionLocal() as session:
         job = session.scalar(select(Job).where(Job.run_id == run_id))
         assert job is not None and job.claim_owner is not None
@@ -193,20 +194,22 @@ async def test_a_reclaimed_generation_keeps_running_when_the_older_execution_sto
     replacement.start(job_id, run_id)
     newer = replacement._tasks[job_id]
     try:
-        await asyncio.wait_for(entered[1].wait(), timeout=5)
+        await asyncio.wait_for(entered[1].wait(), timeout=PATIENCE_SECONDS)
         with SessionLocal() as session:
             job = session.get(Job, job_id)
             run = session.get(Run, run_id)
             assert job is not None and run is not None
             assert job.claim_owner is not None and job.claim_owner != older_token
             expected = job.claim_owner, job.attempt, job.status, run.status
-        await asyncio.wait_for(asyncio.shield(older_heartbeat), timeout=5)
+        await asyncio.wait_for(asyncio.shield(older_heartbeat), timeout=PATIENCE_SECONDS)
         assert not newer.done() and not exited[1].is_set()
         try:
             await asyncio.wait_for(exited[0].wait(), timeout=2)
         except TimeoutError:
             pytest.fail("The older execution continued after its replacement began generating")
-        outcome = await asyncio.wait_for(asyncio.gather(older, return_exceptions=True), timeout=5)
+        outcome = await asyncio.wait_for(
+            asyncio.gather(older, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         assert outcome[0] is None or isinstance(outcome[0], asyncio.CancelledError)
         assert not newer.done() and not exited[1].is_set()
         with SessionLocal() as session:

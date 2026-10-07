@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 import pytest
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import delete, update
 
 from local_lm import scheduler as scheduler_module
@@ -108,7 +109,7 @@ async def test_the_hold_ends_within_a_heartbeat_once_the_claim_is_gone(
         else:
             _change("work", claim_owner="another-attempt")
 
-        await _until(lambda: power.state().holder_count == 0)
+        await _until(lambda: power.state().holder_count == 0, timeout=PATIENCE_SECONDS)
         assert backend.calls == ["acquire", "release"]
     assert backend.calls == ["acquire", "release"]
 

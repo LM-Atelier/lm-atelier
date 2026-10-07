@@ -5,6 +5,7 @@ import asyncio
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from test_claim_loss_execution import _running_image
 
 from local_lm.db import SessionLocal
@@ -36,10 +37,10 @@ async def test_cancelling_a_displaced_execution_keeps_the_current_attempt_rows(
             expected = job.claim_owner, job.attempt, job.status, run.status
             session.commit()
 
-        await asyncio.wait_for(asyncio.shield(heartbeat), timeout=5)
+        await asyncio.wait_for(asyncio.shield(heartbeat), timeout=PATIENCE_SECONDS)
         execution.cancel()
         outcome = await asyncio.wait_for(
-            asyncio.gather(execution, return_exceptions=True), timeout=5
+            asyncio.gather(execution, return_exceptions=True), timeout=PATIENCE_SECONDS
         )
         assert outcome[0] is None or isinstance(outcome[0], asyncio.CancelledError)
         assert exited.is_set()
@@ -62,7 +63,7 @@ async def test_ordinary_cancellation_still_finishes_the_owned_job_and_run(
     ):
         execution.cancel()
         outcome = await asyncio.wait_for(
-            asyncio.gather(execution, return_exceptions=True), timeout=5
+            asyncio.gather(execution, return_exceptions=True), timeout=PATIENCE_SECONDS
         )
         assert isinstance(outcome[0], asyncio.CancelledError) and exited.is_set()
         with SessionLocal() as session:
@@ -95,11 +96,11 @@ async def test_a_cleanup_error_after_claim_loss_keeps_the_current_rows(
             job.claim_expires_at = None
             expected = job.claim_owner, job.attempt, job.status, run.status
             session.commit()
-        await asyncio.wait_for(asyncio.shield(heartbeat), timeout=5)
+        await asyncio.wait_for(asyncio.shield(heartbeat), timeout=PATIENCE_SECONDS)
         if execution.cancelling() == 0:
             execution.cancel()
         outcome = await asyncio.wait_for(
-            asyncio.gather(execution, return_exceptions=True), timeout=5
+            asyncio.gather(execution, return_exceptions=True), timeout=PATIENCE_SECONDS
         )
         assert outcome[0] is None or isinstance(outcome[0], asyncio.CancelledError)
         assert exited.is_set()

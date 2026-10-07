@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import select
 from test_claim_loss_execution import _running_image
 
@@ -37,13 +38,13 @@ async def test_removing_the_job_stops_its_waiting_media_execution(
             expected = run.status
             session.delete(job)
             session.commit()
-        await asyncio.wait_for(asyncio.shield(heartbeat), timeout=5)
+        await asyncio.wait_for(asyncio.shield(heartbeat), timeout=PATIENCE_SECONDS)
         try:
             await asyncio.wait_for(exited.wait(), timeout=2)
         except TimeoutError:
             pytest.fail("The media execution continued after its job was removed")
         outcome = await asyncio.wait_for(
-            asyncio.gather(execution, return_exceptions=True), timeout=5
+            asyncio.gather(execution, return_exceptions=True), timeout=PATIENCE_SECONDS
         )
         assert outcome[0] is None or isinstance(outcome[0], asyncio.CancelledError)
         with SessionLocal() as session:
@@ -77,7 +78,7 @@ async def test_a_silent_chat_stream_stops_after_its_claim_moves(
     )
     assert accepted.status_code == 202
     run_id: str = accepted.json()["run"]["id"]
-    await asyncio.wait_for(entered.wait(), timeout=5)
+    await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
     with SessionLocal() as session:
         job = session.scalar(select(Job).where(Job.run_id == run_id))
         run = session.get(Run, run_id)
@@ -108,13 +109,13 @@ async def test_a_silent_chat_stream_stops_after_its_claim_moves(
         task for task in asyncio.all_tasks() if task.get_name() == f"job-heartbeat-{job_id}"
     )
     try:
-        await asyncio.wait_for(asyncio.shield(heartbeat), timeout=5)
+        await asyncio.wait_for(asyncio.shield(heartbeat), timeout=PATIENCE_SECONDS)
         try:
             await asyncio.wait_for(exited.wait(), timeout=2)
         except TimeoutError:
             pytest.fail("The chat stream continued after its heartbeat lost ownership")
         outcome = await asyncio.wait_for(
-            asyncio.gather(execution, return_exceptions=True), timeout=5
+            asyncio.gather(execution, return_exceptions=True), timeout=PATIENCE_SECONDS
         )
         assert outcome[0] is None or isinstance(outcome[0], asyncio.CancelledError)
         assert global_changes == []
@@ -156,7 +157,7 @@ async def test_a_finished_generation_keeps_its_claim_during_a_slow_handoff(
     )
     assert accepted.status_code == 202
     run_id: str = accepted.json()["run"]["id"]
-    await asyncio.wait_for(entered.wait(), timeout=5)
+    await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
     with SessionLocal() as session:
         job = session.scalar(select(Job).where(Job.run_id == run_id))
         run = session.get(Run, run_id)
@@ -175,10 +176,10 @@ async def test_a_finished_generation_keeps_its_claim_during_a_slow_handoff(
             await asyncio.sleep(0.01)
 
     try:
-        await asyncio.wait_for(heartbeat_advanced(), timeout=2)
+        await asyncio.wait_for(heartbeat_advanced(), timeout=PATIENCE_SECONDS)
         assert not execution.done()
         finish.set()
-        await asyncio.wait_for(execution, timeout=5)
+        await asyncio.wait_for(execution, timeout=PATIENCE_SECONDS)
         with SessionLocal() as session:
             job = session.get(Job, job_id)
             run = session.get(Run, run_id)

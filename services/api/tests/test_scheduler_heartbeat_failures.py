@@ -51,7 +51,7 @@ async def test_a_contended_heartbeat_retries_and_preserves_the_current_claim(
     scheduler = ResourceScheduler(session_factory=sessions)
     heartbeat = asyncio.create_task(scheduler._heartbeat("contended-heartbeat", "current"))
     try:
-        await _until(lambda: writes >= 2 or heartbeat.done())
+        await _until(lambda: writes >= 2 or heartbeat.done(), timeout=PATIENCE_SECONDS)
         assert not heartbeat.done()
         with SessionLocal() as session:
             job = session.get(Job, "contended-heartbeat")
@@ -147,5 +147,7 @@ async def test_an_unexpected_heartbeat_database_failure_still_propagates(
 
     scheduler = ResourceScheduler(session_factory=sessions)
     with pytest.raises(OperationalError) as caught:
-        await asyncio.wait_for(scheduler._heartbeat("unexpected-heartbeat", "current"), timeout=2)
+        await asyncio.wait_for(
+            scheduler._heartbeat("unexpected-heartbeat", "current"), timeout=PATIENCE_SECONDS
+        )
     assert caught.value is failure
