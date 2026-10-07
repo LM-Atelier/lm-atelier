@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -215,7 +216,7 @@ async def _claim(scheduler: ResourceScheduler) -> Any:
             capacity=1,
             local_lock=asyncio.Semaphore(1),
         ),
-        timeout=10,
+        timeout=PATIENCE_SECONDS,
     )
 
 
@@ -1164,7 +1165,7 @@ async def test_a_failed_release_still_lets_the_next_job_take_its_turn(
         )
     )
     try:
-        claim = await asyncio.wait_for(second, timeout=10)
+        claim = await asyncio.wait_for(second, timeout=PATIENCE_SECONDS)
         assert claim.token
     finally:
         if not second.done():

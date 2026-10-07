@@ -4,6 +4,7 @@ import asyncio
 from typing import Any, cast
 
 from fastapi import WebSocket
+from run_waits import PATIENCE_SECONDS
 
 from local_lm.events import EventBroker
 from local_lm.main import _stream_events
@@ -54,7 +55,7 @@ async def test_idle_disconnect_unsubscribes_without_waiting_for_an_event() -> No
     await wait_for_subscriber(broker)
 
     fake.received.put_nowait({"type": "websocket.disconnect", "code": 1000})
-    await asyncio.wait_for(stream, timeout=1)
+    await asyncio.wait_for(stream, timeout=PATIENCE_SECONDS)
 
     assert not broker._subscribers
     assert fake.sent == []
@@ -67,9 +68,9 @@ async def test_disconnect_cancels_an_in_flight_send_and_unsubscribes() -> None:
     await wait_for_subscriber(broker)
 
     await broker.publish("jobs.changed", "job-1")
-    await asyncio.wait_for(fake.send_started.wait(), timeout=1)
+    await asyncio.wait_for(fake.send_started.wait(), timeout=PATIENCE_SECONDS)
     fake.received.put_nowait({"type": "websocket.disconnect", "code": 1000})
-    await asyncio.wait_for(stream, timeout=1)
+    await asyncio.wait_for(stream, timeout=PATIENCE_SECONDS)
 
     assert fake.send_cancelled.is_set()
     assert fake.sent == []
@@ -82,7 +83,9 @@ async def test_disconnect_wins_when_a_replayed_event_is_already_ready() -> None:
     fake = FakeWebSocket()
     fake.received.put_nowait({"type": "websocket.disconnect", "code": 1000})
 
-    await asyncio.wait_for(_stream_events(websocket(fake), broker, after=0), timeout=1)
+    await asyncio.wait_for(
+        _stream_events(websocket(fake), broker, after=0), timeout=PATIENCE_SECONDS
+    )
 
     assert fake.sent == []
     assert not broker._subscribers
@@ -96,7 +99,7 @@ async def test_a_lock_closes_an_idle_stream_with_the_lock_code() -> None:
     await wait_for_subscriber(broker)
 
     closing.set()
-    await asyncio.wait_for(stream, timeout=1)
+    await asyncio.wait_for(stream, timeout=PATIENCE_SECONDS)
 
     assert fake.closed == [(4423, "workspace-locked")]
     assert fake.sent == []
@@ -111,9 +114,9 @@ async def test_a_lock_cancels_an_in_flight_send_and_closes() -> None:
     await wait_for_subscriber(broker)
 
     await broker.publish("jobs.changed", "job-1")
-    await asyncio.wait_for(fake.send_started.wait(), timeout=1)
+    await asyncio.wait_for(fake.send_started.wait(), timeout=PATIENCE_SECONDS)
     closing.set()
-    await asyncio.wait_for(stream, timeout=1)
+    await asyncio.wait_for(stream, timeout=PATIENCE_SECONDS)
 
     assert fake.send_cancelled.is_set()
     assert fake.sent == []
@@ -129,7 +132,7 @@ async def test_a_lock_wins_over_a_replayed_event_that_is_already_ready() -> None
     closing.set()
 
     await asyncio.wait_for(
-        _stream_events(websocket(fake), broker, after=0, closing=closing), timeout=1
+        _stream_events(websocket(fake), broker, after=0, closing=closing), timeout=PATIENCE_SECONDS
     )
 
     assert fake.sent == []

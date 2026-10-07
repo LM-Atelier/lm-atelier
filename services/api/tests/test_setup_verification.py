@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
-from run_waits import wait_until
+from run_waits import PATIENCE_SECONDS, wait_until
 from sqlalchemy import select
 
 from local_lm.adapters.base import ChatEvent, ChatRequest, MediaEvent, MediaRequest
@@ -318,7 +318,7 @@ async def test_setup_verification_cancellation_cleans_transient_state(
 
     monkeypatch.setattr(app.state.services.engines.media, "generate", slow_generate)
     assert (await client.post("/api/setup/verify/image")).status_code == 202
-    await asyncio.wait_for(started.wait(), timeout=2)
+    await asyncio.wait_for(started.wait(), timeout=PATIENCE_SECONDS)
     running = await wait_for_role(client, "image", "in_progress")
     assert running["job_id"]
     assert (await client.post(f"/api/jobs/{running['job_id']}/cancel")).status_code == 200

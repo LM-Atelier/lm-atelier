@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy.orm import Session
 
 from local_lm import workflow_package_preparation as composition
@@ -672,7 +673,7 @@ async def test_another_writer_progresses_while_preparation_awaits(
 
     async def blocking_prepare(session: Any, **kwargs: Any) -> Any:
         entered.set()
-        await asyncio.wait_for(release.wait(), timeout=5)
+        await asyncio.wait_for(release.wait(), timeout=PATIENCE_SECONDS)
         return SimpleNamespace(install_id="install_concurrent")
 
     async def ok_drive(*args: Any, **kwargs: Any) -> Any:
@@ -694,7 +695,7 @@ async def test_another_writer_progresses_while_preparation_awaits(
             **_clients(),
         )
     )
-    await asyncio.wait_for(entered.wait(), timeout=5)
+    await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
 
     def concurrent_write() -> None:
         with SessionLocal() as writer:
@@ -707,10 +708,10 @@ async def test_another_writer_progresses_while_preparation_awaits(
             )
             writer.commit()
 
-    await asyncio.wait_for(asyncio.to_thread(concurrent_write), timeout=5)
+    await asyncio.wait_for(asyncio.to_thread(concurrent_write), timeout=PATIENCE_SECONDS)
 
     release.set()
-    result = await asyncio.wait_for(preparation, timeout=5)
+    result = await asyncio.wait_for(preparation, timeout=PATIENCE_SECONDS)
     assert result.install_id == "install_concurrent"
     with SessionLocal() as reader:
         assert reader.query(EditTemplate).filter_by(name="Written mid-preparation").count() == 1

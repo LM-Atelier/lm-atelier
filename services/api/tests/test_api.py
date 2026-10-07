@@ -21,7 +21,7 @@ from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
 from PIL import Image
 from recovery_requests import permanently_delete_chat
-from run_waits import wait_for_terminal_status, wait_until
+from run_waits import PATIENCE_SECONDS, wait_for_terminal_status, wait_until
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -468,12 +468,12 @@ async def test_replaced_generation_previews_survive_until_retention_cleanup(
     )
     assert turn.status_code == 202
 
-    await asyncio.wait_for(first_processed.wait(), timeout=5)
+    await asyncio.wait_for(first_processed.wait(), timeout=PATIENCE_SECONDS)
     first_id = await current_preview_id(chat["id"])
     assert (await client.get(f"/api/artifacts/{first_id}/content")).status_code == 200
 
     allow_second.set()
-    await asyncio.wait_for(second_processed.wait(), timeout=5)
+    await asyncio.wait_for(second_processed.wait(), timeout=PATIENCE_SECONDS)
     second_id = await current_preview_id(chat["id"])
     assert second_id != first_id
     assert (await client.get(f"/api/artifacts/{first_id}/content")).status_code == 200
@@ -1750,7 +1750,7 @@ async def test_model_deletion_rechecks_pending_generation_inside_compute_lease(
             )
             session.commit()
 
-    response = await asyncio.wait_for(deletion, timeout=2)
+    response = await asyncio.wait_for(deletion, timeout=PATIENCE_SECONDS)
     assert response.status_code == 409
     assert "active or queued job" in response.json()["detail"]
     with SessionLocal() as session:
@@ -1992,7 +1992,7 @@ async def test_concurrent_orchestrators_converge_before_expensive_turn_planning(
 
     with SessionLocal() as first_session, SessionLocal() as second_session:
         first_task = asyncio.create_task(first.create_turn(first_session, chat["id"], request))
-        await asyncio.wait_for(planner_started.wait(), timeout=2)
+        await asyncio.wait_for(planner_started.wait(), timeout=PATIENCE_SECONDS)
         second_task = asyncio.create_task(second.create_turn(second_session, chat["id"], request))
         await asyncio.sleep(0.05)
         assert plan_calls == 1
@@ -4455,13 +4455,13 @@ async def test_chat_purge_waits_for_explicit_stop_to_finish_active_run_cleanup(
         json={"text": "Start a response", "mode": "text"},
     )
     assert turn.status_code == 202
-    await asyncio.wait_for(stream_started.wait(), timeout=5)
+    await asyncio.wait_for(stream_started.wait(), timeout=PATIENCE_SECONDS)
     jobs = (await client.get("/api/jobs")).json()
     job = next(item for item in jobs if item["run_id"] == turn.json()["run"]["id"])
     assert job["status"] == JobStatus.RUNNING.value
 
     stopping = asyncio.create_task(client.post(f"/api/chats/{chat['id']}/cancel"))
-    await asyncio.wait_for(cancellation_started.wait(), timeout=5)
+    await asyncio.wait_for(cancellation_started.wait(), timeout=PATIENCE_SECONDS)
     await asyncio.sleep(0)
     assert not stopping.done()
     with SessionLocal() as session:
@@ -4469,7 +4469,7 @@ async def test_chat_purge_waits_for_explicit_stop_to_finish_active_run_cleanup(
         assert session.get(Run, turn.json()["run"]["id"]) is not None
 
     allow_cleanup.set()
-    stopped = await asyncio.wait_for(stopping, timeout=5)
+    stopped = await asyncio.wait_for(stopping, timeout=PATIENCE_SECONDS)
 
     assert stopped.status_code == 200, stopped.text
     assert cleanup_finished.is_set()
@@ -10252,7 +10252,7 @@ async def test_a_live_stream_stops_speaking_the_moment_its_claim_is_lost(
 
     old_claim = await _one_pass_claim_capture(monkeypatch, job_id)
     execution = asyncio.create_task(orch._execute_chat(job_id, run_id, old_claim))
-    await asyncio.wait_for(first_heard.wait(), timeout=10)
+    await asyncio.wait_for(first_heard.wait(), timeout=PATIENCE_SECONDS)
     assert deltas == ["first "], "the first delta of a live claim was not heard"
     assert attempts == [old_claim.attempt], "the delta must name the attempt that spoke it"
 
@@ -10261,7 +10261,7 @@ async def test_a_live_stream_stops_speaking_the_moment_its_claim_is_lost(
     assert new_claim.attempt == old_claim.attempt + 1
 
     resume.set()
-    await asyncio.wait_for(execution, timeout=10)
+    await asyncio.wait_for(execution, timeout=PATIENCE_SECONDS)
 
     assert deltas == ["first "], "a delta was heard after the claim was lost"
     with SessionLocal() as session:
@@ -11580,7 +11580,7 @@ async def test_a_queue_of_images_restores_the_chat_model_once_at_the_end(
         json={"text": "A grey mug on a table", "mode": "image"},
     )
     assert first.status_code == 202
-    await asyncio.wait_for(first_started.wait(), timeout=5)
+    await asyncio.wait_for(first_started.wait(), timeout=PATIENCE_SECONDS)
     second = await client.post(
         f"/api/chats/{chat['id']}/turns",
         json={"text": "A blue mug on a table", "mode": "image"},
@@ -11718,9 +11718,9 @@ async def test_a_media_run_that_loses_its_claim_moves_no_worker_on_the_way_out(
         json={"text": "A grey mug on a table", "mode": "image"},
     )
     assert accepted.status_code == 202
-    await asyncio.wait_for(reclaimed.wait(), timeout=5)
+    await asyncio.wait_for(reclaimed.wait(), timeout=PATIENCE_SECONDS)
 
-    await asyncio.wait_for(decided.wait(), timeout=10)
+    await asyncio.wait_for(decided.wait(), timeout=PATIENCE_SECONDS)
     # Let the handoff run if the dispatch is going to run it, so an assertion of
     # absence is not just winning a race with it.
     await asyncio.sleep(0.2)

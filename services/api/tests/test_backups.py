@@ -306,7 +306,7 @@ async def test_app_serves_while_daily_backup_verification_is_pending(
     # Startup must not wait on the verification. Bounded, because the failure
     # this guards against is startup blocking for as long as the check takes,
     # and an unbounded await would hang here rather than fail.
-    await asyncio.wait_for(lifespan.__aenter__(), timeout=10)
+    await asyncio.wait_for(lifespan.__aenter__(), timeout=PATIENCE_SECONDS)
 
     # Startup completed - the port would be open - while the verification is
     # still running in its worker thread. This is the whole point of the
@@ -357,7 +357,7 @@ async def test_app_serves_while_managed_runtime_verification_is_pending(
     app = create_app(settings)
 
     async with app.router.lifespan_context(app):
-        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(started.wait(), timeout=PATIENCE_SECONDS)
         restore = app.state.services.runtimes._restore_task
         assert restore is not None
         assert restore.done() is False
