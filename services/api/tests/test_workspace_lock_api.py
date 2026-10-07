@@ -15,6 +15,7 @@ import pytest
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
 from run_waits import wait_for_terminal_status
+from starlette.types import Message as ASGIMessage
 
 from local_lm import workspace_lock_api
 from local_lm.config import Settings
@@ -482,7 +483,7 @@ async def test_work_accepted_before_a_lock_finishes_and_is_there_after_unlocking
     # The API is shut, so the wait reads the database directly.
     def stored_status(model: type[Run] | type[Message], key: str) -> dict[str, str] | None:
         with SessionLocal() as session:
-            row = session.get(model, key)
+            row = session.get(Run, key) if model is Run else session.get(Message, key)
             return None if row is None else {"status": str(row.status)}
 
     async def read_run() -> dict[str, str] | None:
@@ -605,7 +606,7 @@ class _EventSocket:
     ) -> None:
         cookie = f"local_lm_session={client.cookies['local_lm_session']}".encode()
         self.inbound: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        self.outbound: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self.outbound: asyncio.Queue[ASGIMessage] = asyncio.Queue()
         self.inbound.put_nowait({"type": "websocket.connect"})
         scope = {
             "type": "websocket",
@@ -623,7 +624,7 @@ class _EventSocket:
         }
         self.task = asyncio.create_task(app(scope, self.inbound.get, self.outbound.put))
 
-    async def next_sent(self) -> dict[str, Any]:
+    async def next_sent(self) -> ASGIMessage:
         return await asyncio.wait_for(self.outbound.get(), timeout=10)
 
     async def ended(self) -> None:

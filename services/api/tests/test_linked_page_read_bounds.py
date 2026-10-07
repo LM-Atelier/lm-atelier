@@ -16,6 +16,7 @@ from test_api import _claimed_text_job
 from local_lm import orchestrator as orchestrator_module
 from local_lm.db import SessionLocal
 from local_lm.models import Job
+from local_lm.network import outbound_client
 from local_lm.web_lookup import LookupRequest
 from local_lm.web_retrieval import MAX_CONTENT_BYTES, WebRetrievalError, bounded_request
 
@@ -137,7 +138,7 @@ async def _read_through_the_page_reader(
     def public(host: object, *args: object, **kwargs: object) -> list[tuple[Any, ...]]:
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
 
-    real_client = orchestrator_module.outbound_client
+    real_client = outbound_client
 
     def served(lease: Any, **kwargs: Any) -> httpx.AsyncClient:
         return real_client(lease, transport=_page(body), **kwargs)

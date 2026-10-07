@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
-from httpx import AsyncClient
+from httpx2 import AsyncClient
 from sqlalchemy import select
 from test_chat_recovery_replay import _change
 from test_generation_experiment_preflight import PREFLIGHT, _arm, _request

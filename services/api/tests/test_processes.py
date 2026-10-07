@@ -11,7 +11,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -64,6 +64,13 @@ from local_lm.workflow_activations import (
     WorkflowModelLaunchBinding,
     WorkflowRegistryLaunchBinding,
 )
+
+
+def _windows_creation_flags() -> int:
+    value = vars(subprocess)["CREATE_NO_WINDOW"]
+    assert isinstance(value, int)
+    return value
+
 
 # Reproduced from CPython 3.12 by making the socket teardown inside
 # `_ProactorBasePipeTransport._call_connection_lost` raise. asyncio composes the
@@ -572,7 +579,7 @@ async def test_worker_subprocess_does_not_inherit_application_or_cloud_secrets(
     assert "GITHUB_TOKEN" not in environment
     assert "AWS_SECRET_ACCESS_KEY" not in environment
     if os.name == "nt":
-        assert captured["creationflags"] == subprocess.CREATE_NO_WINDOW
+        assert captured["creationflags"] == _windows_creation_flags()
     else:
         assert "creationflags" not in captured
     await supervisor.close()
@@ -828,7 +835,7 @@ def test_persisted_worker_identity_reaps_only_matching_process(
     settings: Settings,
 ) -> None:
     settings.prepare()
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    creationflags = _windows_creation_flags() if os.name == "nt" else 0
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         creationflags=creationflags,
@@ -866,7 +873,7 @@ def test_persisted_worker_identity_does_not_kill_reused_pid(
     settings: Settings,
 ) -> None:
     settings.prepare()
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    creationflags = _windows_creation_flags() if os.name == "nt" else 0
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         creationflags=creationflags,
@@ -1621,7 +1628,9 @@ def test_ready_and_external_media_workers_stay_unavailable(
     ready_supervisor = ProcessSupervisor(settings)
     ready_supervisor._workers["media"] = WorkerRecord(
         name="media",
-        process=FakeRunningProcess(987_654_320, terminate_code=-15),
+        process=cast(
+            asyncio.subprocess.Process, FakeRunningProcess(987_654_320, terminate_code=-15)
+        ),
         command=["worker"],
         log=_RotatingWorkerLog(settings.log_dir / "ready-media.log"),
         state="ready",
@@ -3245,7 +3254,7 @@ async def test_stopping_a_worker_with_no_live_record_still_stops_its_process(
     """
 
     settings.prepare()
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    creationflags = _windows_creation_flags() if os.name == "nt" else 0
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         creationflags=creationflags,
@@ -3284,7 +3293,7 @@ async def test_stopping_a_worker_with_no_record_does_not_kill_a_reused_pid(
     """
 
     settings.prepare()
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    creationflags = _windows_creation_flags() if os.name == "nt" else 0
     stranger = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         creationflags=creationflags,
@@ -3330,7 +3339,7 @@ async def test_a_port_held_by_our_own_child_is_reclaimed_without_any_identity(
 
     settings.prepare()
     port = _free_port()
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    creationflags = _windows_creation_flags() if os.name == "nt" else 0
     holder = subprocess.Popen(
         [
             sys.executable,
@@ -3464,7 +3473,7 @@ async def test_replace_reclaims_the_port_before_it_judges_the_port(
 def _listener_child(address: str, port: int) -> subprocess.Popen[bytes]:
     """A child of this process that holds one listening socket and then waits."""
 
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    creationflags = _windows_creation_flags() if os.name == "nt" else 0
     return subprocess.Popen(
         [
             sys.executable,

@@ -50,16 +50,16 @@ async def test_unpreviewed_chat_delete_never_cancels_accepted_work(
     chat_id = await _chat(client)
     exchange = await _text_exchange(client, chat_id, "Keep these garden notes")
     with SessionLocal() as session:
-        job = Job(
+        created_job = Job(
             kind="edit_verify" if runless else "chat",
             status=status,
             phase=status,
             run_id=None if runless else exchange["run"]["id"],
             payload_json={"chat_id": chat_id, "source_run_id": exchange["run"]["id"]},
         )
-        session.add(job)
+        session.add(created_job)
         session.commit()
-        job_id = job.id
+        job_id = created_job.id
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         assert job is not None

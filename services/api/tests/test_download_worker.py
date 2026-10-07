@@ -13,7 +13,13 @@ import pytest
 
 import local_lm.https_transfer as transfer_module
 from local_lm import download_worker
-from local_lm.filesystem_links import AnchoredDirectory, open_child_directory, open_entry
+from local_lm.filesystem_links import (
+    AnchoredDirectory,
+    open_child_directory,
+    open_entry,
+    publish_opened_file,
+    rename_entry,
+)
 from local_lm.https_transfer import (
     HttpsArtifactRequest,
     HttpsTransferError,
@@ -458,8 +464,8 @@ def test_a_complete_partial_publishes_the_verified_bytes_when_its_name_is_replac
         except OSError:
             pass
 
-    real_rename = transfer_module.rename_entry
-    real_publish = transfer_module.publish_opened_file
+    real_rename = rename_entry
+    real_publish = publish_opened_file
 
     def rename_after_swap(*args: Any, **kwargs: Any) -> None:
         swap()

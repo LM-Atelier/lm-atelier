@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import FastAPI
-from httpx import AsyncClient
+from httpx2 import AsyncClient
 from test_generation_experiment_preflight import PREFLIGHT, _arm, _profile, _request, _revision
 from test_generation_experiment_records import CREATE
 from test_generation_experiment_start import _accepted, _start

@@ -11,9 +11,10 @@ import threading
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, BinaryIO
 
 import pytest
+from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from directory_security import create_owned_directory
 from httpx2 import AsyncClient
 
@@ -28,14 +29,16 @@ from local_lm.filesystem_links import (
     directory_private_to_current_user,
 )
 from local_lm.main import create_app
-from local_lm.portable_archive_v1 import MAGIC, ArchiveKind, open_archive
-from local_lm.project_archive_encryption import STAGING_FOLDER, STAGING_PREFIX
+from local_lm.portable_archive_v1 import MAGIC, ArchiveKind, open_archive, write_archive
+from local_lm.project_archive_encryption import STAGING_FOLDER, STAGING_PREFIX, encrypt_export
 
 PASSPHRASE = "correct horse battery staple"
 
 
 async def _project(client: AsyncClient) -> dict[str, object]:
-    project = (await client.post("/api/projects", json={"name": "Garden notes"})).json()
+    project: dict[str, object] = (
+        await client.post("/api/projects", json={"name": "Garden notes"})
+    ).json()
     chat = await client.post("/api/chats", json={"title": "Seed plan", "project_id": project["id"]})
     assert chat.status_code == 201, chat.text
     return project
@@ -193,7 +196,7 @@ async def test_a_check_without_memory_is_not_called_an_unverified_export(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch, settings: Settings
 ) -> None:
     project = await _project(client)
-    real = portable_archive_v1.Argon2id
+    real = Argon2id
     derivations: list[int] = []
 
     class _CheckWithoutMemory:
@@ -222,7 +225,7 @@ async def test_an_encrypted_export_leaves_the_application_answering(
 ) -> None:
     project = await _project(client)
     started, release = threading.Event(), threading.Event()
-    real = exports_module.encrypt_export
+    real = encrypt_export
 
     def held(plaintext: Path, directory: Path, passphrase: bytes) -> Path:
         started.set()
@@ -294,9 +297,9 @@ async def test_an_export_that_does_not_open_again_is_not_kept(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch, settings: Settings
 ) -> None:
     project = await _project(client)
-    real = project_archive_encryption.write_archive
+    real = write_archive
 
-    def damaging(source: Any, destination: Any, **kwargs: Any) -> int:
+    def damaging(source: BinaryIO, destination: BinaryIO, **kwargs: Any) -> int:
         # A byte past the end, which no honest archive has.
         return real(source, destination, **kwargs) + destination.write(b"\x00")
 

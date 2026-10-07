@@ -21,7 +21,6 @@ from httpx2 import ASGITransport, AsyncClient
 from keyring.errors import KeyringError
 
 from local_lm import archive_key_store, db
-from local_lm import backups as backups_module
 from local_lm.backups import BackupManager
 from local_lm.config import Settings
 from local_lm.main import create_app
@@ -189,8 +188,8 @@ async def test_the_waiting_file_is_on_disk_before_it_is_put_in_place(
         await _chat(client, "Kept plan")
         backup = await _encrypted_backup(client)
         with monkeypatch.context() as watching:
-            watching.setattr(backups_module.os, "fsync", synced)
-            watching.setattr(backups_module.os, "replace", moved)
+            watching.setattr(os, "fsync", synced)
+            watching.setattr(os, "replace", moved)
             scheduled = await _restore(client, backup)
 
         assert scheduled.status_code == 200, scheduled.text
@@ -412,7 +411,7 @@ async def test_a_restore_whose_live_log_cannot_be_put_back_keeps_its_file_and_ke
             raise PermissionError("the file is in use")
         real_replace(source, target)
 
-    monkeypatch.setattr(backups_module.os, "replace", refusing)
+    monkeypatch.setattr(os, "replace", refusing)
 
     with pytest.raises(OSError):
         BackupManager(settings).apply_pending_restore()

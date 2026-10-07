@@ -46,7 +46,9 @@ async def test_permanent_bulk_deletion_scrubs_labels_and_retains_exact_retry_res
     elif kind == "workflow":
         family_id, _definition_id, _revision_id, _graph = _workflow()
         with SessionLocal() as session:
-            session.get(WorkflowFamily, family_id).name = marker
+            family = session.get(WorkflowFamily, family_id)
+            assert family is not None
+            family.name = marker
             session.commit()
         path = f"/api/workflow-families/{family_id}"
     else:

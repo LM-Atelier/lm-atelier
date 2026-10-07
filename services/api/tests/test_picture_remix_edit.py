@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
+from httpx2 import AsyncClient as CurrentAsyncClient
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 from sqlalchemy import func, select
@@ -73,7 +74,7 @@ def _picture(
     return output.getvalue()
 
 
-async def _uploaded(client: AsyncClient, content: bytes) -> str:
+async def _uploaded(client: AsyncClient | CurrentAsyncClient, content: bytes) -> str:
     """A picture added to the Media Library, as its own upload adds one."""
 
     response = await client.post(

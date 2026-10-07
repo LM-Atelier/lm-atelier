@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 from httpx2 import AsyncClient
 
-from local_lm import backups as backups_module
 from local_lm.backups import BackupManager
 from local_lm.config import Settings
 from local_lm.database_migrations import DatabaseVersionError, upgrade_database
@@ -151,7 +150,7 @@ def test_a_replace_that_fails_keeps_the_live_write_ahead_log(
             raise PermissionError("the database file is in use")
         real_replace(source, target)
 
-    monkeypatch.setattr(backups_module.os, "replace", refusing)
+    monkeypatch.setattr(os, "replace", refusing)
 
     with pytest.raises(PermissionError):
         manager.apply_pending_restore()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import time as _real_time
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -1199,7 +1200,9 @@ async def test_a_failed_heartbeat_still_releases_the_slot_and_the_claim(
 
     scheduler = ResourceScheduler(session_factory=SessionLocal)
 
-    async def failing_heartbeat(job_id: str, token: str) -> None:
+    async def failing_heartbeat(
+        job_id: str, token: str, *, on_claim_lost: Callable[[], None] | None = None
+    ) -> None:
         raise RuntimeError("database is locked")
 
     scheduler._heartbeat = failing_heartbeat  # type: ignore[method-assign]

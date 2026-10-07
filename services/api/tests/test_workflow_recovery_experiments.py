@@ -1,6 +1,7 @@
 """A deleted workflow retains accepted comparison history but refuses another choice."""
 
 import copy
+from typing import Any
 
 import pytest
 from httpx2 import AsyncClient
@@ -12,19 +13,24 @@ from test_generation_experiment_records import CREATE, _accept, _records
 
 from local_lm import generation_experiment_api
 from local_lm.db import SessionLocal
+from local_lm.generation_experiment_preflight import (
+    ExperimentResolution,
+    resolve_generation_experiment,
+)
 from local_lm.models import GenerationExperimentArm, WorkflowDefinition, WorkflowRevision
 
 
 def _family_id(revision_id: str) -> str:
     with SessionLocal() as session:
-        return session.scalar(
+        family_id: str = session.scalar(
             select(WorkflowDefinition.family_id)
             .join(WorkflowRevision, WorkflowRevision.workflow_id == WorkflowDefinition.id)
             .where(WorkflowRevision.id == revision_id)
         )
+        return family_id
 
 
-async def _trash(client: AsyncClient, revision_id: str) -> dict:
+async def _trash(client: AsyncClient, revision_id: str) -> dict[str, Any]:
     family_id = _family_id(revision_id)
     preview = await _impact(client, f"/api/workflow-families/{family_id}/deletion-impact")
     assert preview["available_actions"] == ["trash"]
@@ -33,7 +39,8 @@ async def _trash(client: AsyncClient, revision_id: str) -> dict:
         json=_command(preview, "trash-compared-workflow"),
     )
     assert response.status_code == 200, response.text
-    return response.json()
+    deleted: dict[str, Any] = response.json()
+    return deleted
 
 
 @pytest.mark.parametrize("operation", ["insert", "change", "missing"])
@@ -101,9 +108,9 @@ async def test_a_workflow_trashed_after_comparison_resolution_returns_a_coded_re
     body = _request(first, second)
     preflight = await client.post(PREFLIGHT, json=body)
     assert preflight.status_code == 200 and preflight.json()["outcome"] == "compatible"
-    original_resolve = generation_experiment_api.resolve_generation_experiment
+    original_resolve = resolve_generation_experiment
 
-    async def resolve_then_trash(*args, **kwargs):
+    async def resolve_then_trash(*args: Any, **kwargs: Any) -> ExperimentResolution:
         resolution = await original_resolve(*args, **kwargs)
         assert resolution.compatible
         await _trash(client, first["workflow_revision_id"])

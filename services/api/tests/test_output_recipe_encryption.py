@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
 
 import pytest
 from fastapi import FastAPI
@@ -153,9 +153,9 @@ async def test_an_encrypted_record_that_does_not_open_again_is_not_sent(
     app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_id, artifact_id, shown = await _shown(app, client)
-    real = project_archive_encryption.write_archive
+    real = write_archive
 
-    def damaging(source: Any, destination: Any, **kwargs: Any) -> int:
+    def damaging(source: BinaryIO, destination: BinaryIO, **kwargs: Any) -> int:
         # A byte past the end, which no honest archive has.
         return real(source, destination, **kwargs) + destination.write(b"\x00")
 
