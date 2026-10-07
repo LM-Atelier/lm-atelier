@@ -9,6 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import func, select
 from test_activation_claim_ownership import _Activation, _move_claim, _state
 from test_scheduler_claim_hold import _until
@@ -107,7 +108,7 @@ async def _probe(
     manager.start_activation("activation-claim")
     task = manager._tasks["activation-claim"]
     try:
-        await asyncio.wait_for(entered.wait(), timeout=2)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         heartbeat = next(
             task
             for task in asyncio.all_tasks()
@@ -129,9 +130,11 @@ async def test_a_displaced_chat_probe_keeps_current_rows_and_capability_evidence
     try:
         _move_claim(disposition)
         before = _state()
-        await _until(work.heartbeat.done)
+        await _until(work.heartbeat.done, timeout=PATIENCE_SECONDS)
         work.gate.set()
-        await asyncio.wait_for(asyncio.gather(work.task, return_exceptions=True), timeout=2)
+        await asyncio.wait_for(
+            asyncio.gather(work.task, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         with SessionLocal() as session:
             install = session.get(ModelInstall, "activation-model")
             assert install is not None and not install.active
@@ -150,9 +153,11 @@ async def test_a_displaced_chat_probe_does_not_stop_the_current_worker(
     work, processes = await _probe(settings, monkeypatch)
     try:
         _move_claim(disposition)
-        await _until(work.heartbeat.done)
+        await _until(work.heartbeat.done, timeout=PATIENCE_SECONDS)
         work.gate.set()
-        await asyncio.wait_for(asyncio.gather(work.task, return_exceptions=True), timeout=2)
+        await asyncio.wait_for(
+            asyncio.gather(work.task, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         assert processes.stopped == []
     finally:
         work.gate.set()
@@ -166,7 +171,7 @@ async def test_an_owned_chat_probe_records_evidence_and_stops_its_worker(
     work, processes = await _probe(settings, monkeypatch)
     try:
         work.gate.set()
-        await asyncio.wait_for(work.task, timeout=2)
+        await asyncio.wait_for(work.task, timeout=PATIENCE_SECONDS)
         with SessionLocal() as session:
             install = session.get(ModelInstall, "activation-model")
             assert install is not None and install.active

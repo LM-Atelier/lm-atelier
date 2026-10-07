@@ -10,6 +10,7 @@ import pytest
 import test_activation_probe_ownership as probe_module
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from test_activation_job_cancellation import _managed_probe
 from test_scheduler_claim_hold import _until
 
@@ -37,7 +38,7 @@ async def test_cancelling_an_activation_preserves_the_installed_model(
     try:
         response = await client.post("/api/jobs/activation-claim/cancel")
         assert response.status_code == 200
-        await _until(work.task.done, timeout=1)
+        await _until(work.task.done, timeout=PATIENCE_SECONDS)
         await asyncio.gather(work.task, return_exceptions=True)
         cleanup.assert_not_awaited()
         discard.assert_not_called()
@@ -102,7 +103,7 @@ async def test_cancelling_an_owned_probe_restores_the_previous_chat_worker(
             assert response.status_code == 200
         else:
             work.task.cancel()
-        await _until(work.task.done, timeout=1)
+        await _until(work.task.done, timeout=PATIENCE_SECONDS)
         await asyncio.gather(work.task, return_exceptions=True)
         assert loaded[-1] == "previous-profile"
         with SessionLocal() as session:

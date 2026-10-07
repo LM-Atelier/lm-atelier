@@ -8,6 +8,7 @@ import pytest
 import test_activation_probe_ownership as probe_module
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from test_activation_claim_ownership import _Activation, _state
 from test_activation_probe_ownership import _probe
 from test_scheduler_claim_hold import _until
@@ -43,7 +44,7 @@ async def test_cancelling_an_activation_stops_its_manager_task(
         response = await client.post("/api/jobs/activation-claim/cancel")
         assert response.status_code == 200
         assert response.json()["status"] == "cancelled"
-        await _until(work.task.done, timeout=1)
+        await _until(work.task.done, timeout=PATIENCE_SECONDS)
         await asyncio.gather(work.task, return_exceptions=True)
         snapshots = [
             event.payload["job"]
@@ -67,7 +68,9 @@ async def test_a_cancelled_activation_cannot_publish_a_late_success(
         assert response.json()["status"] == "cancelled"
         before = _state()
         work.gate.set()
-        await asyncio.wait_for(asyncio.gather(work.task, return_exceptions=True), timeout=2)
+        await asyncio.wait_for(
+            asyncio.gather(work.task, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         assert _state() == before
     finally:
         work.gate.set()
