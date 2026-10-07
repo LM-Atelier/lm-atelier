@@ -128,7 +128,7 @@ def build_verified_setup(
         # Requirements, not a fingerprint. See `hardware_envelope`.
         "hardware": evidence.hardware_envelope_json,
         "attestation": {
-            "generated_output": verification.state == "verified",
+            "generated_output": verification.state == "ready",
             "verified_at": (
                 verification.completed_at.isoformat() if verification.completed_at else None
             ),
