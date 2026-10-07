@@ -548,6 +548,8 @@ html[data-text-size="larger"] { --text-scale: 1.25; font-size: 125%; }
 .attachment-summary { min-width: 0; display: grid; gap: calc(2px * var(--spacing-scale, 1)); font-size: calc(11px * var(--text-scale, 1)); }
 .attachment-summary strong { color: var(--cream); font-size: calc(11px * var(--text-scale, 1)); }
 .attachment-summary small { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.attachment-purpose { min-width: 0; display: grid; gap: calc(2px * var(--spacing-scale, 1)); color: var(--muted); }
+.attachment-purpose select { width: 100%; min-width: 0; }
 .attachment-actions { display: flex; align-items: center; gap: calc(2px * var(--spacing-scale, 1)); }
 .attachment-actions button { min-width: 28px; min-height: 28px; border: 0; border-radius: 6px; background: transparent; padding: 0; color: var(--ink-secondary); display: grid; place-items: center; cursor: pointer; }
 .attachment-actions button:hover { background: var(--edge-light); color: var(--cream); }

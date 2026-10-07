@@ -145,7 +145,14 @@ ROW_COLUMNS = {
         "created_at",
         "updated_at",
     ),
-    "chat_composer_draft_attachments": ("chat_id", "position", "artifact_id", "kind", "origin"),
+    "chat_composer_draft_attachments": (
+        "chat_id",
+        "position",
+        "artifact_id",
+        "kind",
+        "origin",
+        "image_role",
+    ),
     "chat_workflow_selections": (
         "id",
         "chat_id",

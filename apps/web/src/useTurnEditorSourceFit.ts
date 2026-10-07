@@ -1,22 +1,29 @@
 import type { Dispatch, SetStateAction } from "react";
 import type { SendFromComposer } from "./chatComposerContracts";
+import { attachmentImageRoles, editSourceId, IMAGE_PURPOSE_ERROR } from "./composerImageRoles";
 import type { composerSubmission } from "./composerSubmission";
 import { sourceCanvasSettings, type SourceFitSelection } from "./sourceFit";
 import { buildTurnRequest } from "./turnRequest";
-import type { RoutingMode, WorkflowFamily, WorkflowSelection } from "./types";
+import type { ImageInputRole, RoutingMode, WorkflowFamily, WorkflowSelection } from "./types";
 import type { ComposerAttachment } from "./useComposerUploads";
 import { useSourceFitCanvas, type SourceFitPreviewContext } from "./useSourceFitCanvas";
 import type { TurnEditorState } from "./useTurnEditorState";
 
 export const SOURCE_FIT_PREVIEW_REQUIRED = "Preview the selected source canvas before sending.";
 
-/** The canvas a composer's first picture can be fitted to, and what a send may carry from it.
+type CanvasSend = { error: string } | {
+  sourceFit: SourceFitSelection | null | undefined;
+  imageRoles: ImageInputRole[] | undefined;
+  settings: Record<string, unknown>;
+  inputArtifactIds: string[];
+};
+
+/** The canvas a composer's selected source can be fitted to, and what a send may carry from it.
 
 A chosen canvas is only sent once its preview is current, and only in a mode that
 can draw it; the settings it would override are dropped from the send so the two
-cannot disagree about the output size. The picture the preview was fitted to goes
-first among the send's inputs, so a picture the server chose from the chat is the
-one the turn is admitted with. */
+cannot disagree about the output size. Explicit purposes preserve attachment
+order; automatic selection places the fitted picture first. */
 export function useTurnEditorSourceFit({
   mode, attachments, value, families, sourceCanvasRevisionId, workflowSelection, selections, projectSelections,
   previewContext, updateState, setAcceptanceError,
@@ -34,7 +41,7 @@ export function useTurnEditorSourceFit({
   updateState: (update: SetStateAction<TurnEditorState>) => void;
   setAcceptanceError: Dispatch<SetStateAction<string>>;
 }) {
-  const primarySourceId = attachments[0]?.kind === "image" ? attachments[0].id : null;
+  const primarySourceId = editSourceId(attachments);
   const canvas = useSourceFitCanvas({
     mode, sourceId: primarySourceId, value, families: families ?? [], sourceCanvasRevisionId, previewContext,
     workflowSelection: workflowSelection ?? selections?.find((one) => one.selector_capability === "image"),
@@ -45,14 +52,18 @@ export function useTurnEditorSourceFit({
     },
   });
   const shown = Boolean(((mode === "image" || mode === "auto") && primarySourceId) || value);
-  const forSend = (selectedMode: RoutingMode, settings: Record<string, unknown>, inputArtifactIds: string[]) => {
+  const forSend = (selectedMode: RoutingMode, settings: Record<string, unknown>, inputArtifactIds: string[]): CanvasSend => {
+    let imageRoles: ImageInputRole[] | undefined;
+    try { imageRoles = attachmentImageRoles(attachments); }
+    catch { return { error: IMAGE_PURPOSE_ERROR }; }
     const sourceFit = value ? canvas.selection : value;
-    if (value && (!sourceFit || (selectedMode !== "image" && selectedMode !== "auto"))) return null;
+    if (value && (!sourceFit || (selectedMode !== "image" && selectedMode !== "auto"))) return { error: SOURCE_FIT_PREVIEW_REQUIRED };
     const source = sourceFit?.sourceArtifactId;
     return {
       sourceFit,
+      imageRoles,
       settings: sourceCanvasSettings(settings, sourceFit),
-      inputArtifactIds: source && inputArtifactIds[0] !== source
+      inputArtifactIds: source && !attachments.some((item) => item.imageRole !== undefined) && inputArtifactIds[0] !== source
         ? [source, ...inputArtifactIds.filter((id) => id !== source)] : inputArtifactIds,
     };
   };
@@ -69,6 +80,9 @@ export function turnPreviewContext(
   value: SourceFitSelection | null | undefined,
 ): SourceFitPreviewContext | undefined {
   if (mode !== "image" && mode !== "auto") return undefined;
+  let inputImageRoles: ImageInputRole[] | undefined;
+  try { inputImageRoles = attachmentImageRoles(attachments); }
+  catch { return undefined; }
   return {
     kind: "turn",
     id: chatId,
@@ -76,6 +90,7 @@ export function turnPreviewContext(
       text: text.trim(),
       mode,
       inputArtifactIds: attachments.map((item) => item.id),
+      inputImageRoles,
       settings: sourceCanvasSettings(submission.settings, value),
       references: submission.references,
       outputCount: submission.requestedOutputCount,
@@ -89,7 +104,9 @@ export function sendWithSourceFit(
   send: SendFromComposer,
   [text, mode, artifacts, settings, references, outputCount, promptSource]: Parameters<SendFromComposer>,
   sourceFit: SourceFitSelection | null | undefined,
+  imageRoles?: ImageInputRole[],
 ) {
+  if (imageRoles !== undefined) { send(text, mode, artifacts, settings, references, outputCount, promptSource, sourceFit ?? undefined, imageRoles); return; }
   if (sourceFit) send(text, mode, artifacts, settings, references, outputCount, promptSource, sourceFit);
   else send(text, mode, artifacts, settings, references, outputCount, promptSource);
 }

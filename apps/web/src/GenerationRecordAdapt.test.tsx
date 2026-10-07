@@ -136,6 +136,14 @@ it("says why the choices were refused, and removes the empty chat it made", asyn
   expect(onStarted).not.toHaveBeenCalled();
 });
 
+it("names a record's pictures by the purposes they were chosen for", () => {
+  show(plan(["replay-input-missing"], "image_to_image"),
+    [requirement("input", "missing", "edit_source"), requirement("input", "missing", "reference")]);
+
+  expect(screen.getByText("The picture it started from: not here")).toBeInTheDocument();
+  expect(screen.getByText("Reference picture 2: not here")).toBeInTheDocument();
+});
+
 it("stands a library picture in for each input picture that is not here", async () => {
   vi.mocked(api.artifacts).mockResolvedValue([
     { id: `sha256:${"c".repeat(64)}`, kind: "image", original_name: "harbor.png" },

@@ -19,6 +19,7 @@ import { buildTurnRequest, SOURCE_FIT_BINDING_ERROR, type TurnRequestPayload } f
 import { defaultOutputShapes } from "./outputShapePreferences";
 export { buildTurnRequest } from "./turnRequest";
 import type { SourceFitCapability, SourceFitIntent, SourceFitPreviewResult, SourceFitSelection } from "./sourceFit";
+import type { ImageInputRole } from "./types";
 import type { TurnReference } from "./mentionDraft";
 import type { ComposerPromptSource } from "./composerPromptSource";
 import type { InstallQueueAction, InstallQueuePolicy } from "./installationQueueTypes";
@@ -774,10 +775,11 @@ export const api = {
     confirmTurn?: TurnConfirmationHandler,
     sourceFit?: SourceFitSelection,
     upscale?: boolean,
+    inputImageRoles?: ImageInputRole[],
   ) => {
     const payload = buildTurnRequest({
       text, mode, inputArtifactIds, settings, idempotencyKey, workflowRevisionId,
-      references, outputCount, promptSource, sourceFit,
+      references, outputCount, promptSource, sourceFit, inputImageRoles,
       defaultOutputShapes: defaultOutputShapes(),
       upscale,
     });
@@ -808,6 +810,7 @@ export const api = {
     promptSource?: ComposerPromptSource,
     confirmTurn?: TurnConfirmationHandler,
     sourceFit?: SourceFitSelection,
+    inputImageRoles?: ImageInputRole[],
   ) => api.sendTurn(
     chatId,
     text,
@@ -822,6 +825,8 @@ export const api = {
     promptSource,
     confirmTurn,
     sourceFit,
+    undefined,
+    inputImageRoles,
   ),
   regenerateMessage: (messageId: string, settings: Record<string, unknown>, idempotencyKey?: string) =>
     request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {

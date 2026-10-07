@@ -1,4 +1,5 @@
 import type { ComposerDraft, ComposerPromptSource } from "./composerPromptSource";
+import { attachmentImageRoles, imageRoleVectorShape } from "./composerImageRoles";
 import { artifactOrigin } from "./messageMedia";
 import { survivingMentions, turnReferences } from "./mentionDraft";
 import type { TurnEditorSubmission } from "./TurnEditor";
@@ -52,9 +53,10 @@ function canonical(value: unknown): unknown {
 /** Copy source values once; later query refreshes must not reset this draft. */
 export function initializePriorTurnEditDraft(source: PriorTurnEditSource): PriorTurnEditDraft {
   const saved = snapshot(source);
+  if (!imageRoleVectorShape(saved.input_image_roles, saved.input_artifact_ids)) throw new Error("The source picture purposes are unavailable.");
   const role = saved.settings_role;
   const sourceFit = saved.source_fit ? {
-    sourceArtifactId: saved.input_artifact_ids[0],
+    sourceArtifactId: saved.input_artifact_ids[saved.input_image_roles?.indexOf("edit_source") ?? 0],
     workflowRevisionId: saved.workflow_revision_id,
     request: snapshot(saved.source_fit),
   } : undefined;
@@ -68,10 +70,11 @@ export function initializePriorTurnEditDraft(source: PriorTurnEditSource): Prior
     editor: {
       requestId: crypto.randomUUID(), mode: saved.original_mode ?? saved.mode,
       ...(sourceFit ? { sourceFit } : {}),
-      attachments: saved.input_artifact_ids.map((id) => {
+      attachments: saved.input_artifact_ids.map((id, index) => {
         const artifact = saved.input_artifacts.find((item) => item.id === id);
         if (!artifact) throw new Error("A source attachment is unavailable.");
-        return { id, artifact, kind: artifact.media_type.startsWith("video/") ? "video" : "image", origin: artifactOrigin(artifact) ?? "uploaded" };
+        return { id, artifact, kind: artifact.media_type.startsWith("video/") ? "video" : "image", origin: artifactOrigin(artifact) ?? "uploaded",
+          ...(saved.input_image_roles ? { imageRole: saved.input_image_roles[index] } : {}) };
       }),
       attachmentIntent: "inherit",
       mentions: saved.references.filter((reference) => reference.source === "mention")
@@ -164,7 +167,11 @@ function buildLegacyPriorTurnEditRequest(draft: PriorTurnEditDraft, submission?:
     output_count: submission?.outputCount ?? editor.outputCount,
   };
   const inputs = submission ? submission.inputArtifactIds : editor.attachmentIntent === "inherit" ? undefined : editor.attachments.map((item) => item.id);
-  if (inputs !== undefined) request.input_artifact_ids = inputs;
+  if (inputs !== undefined) {
+    request.input_artifact_ids = inputs;
+    const roles = submission ? submission.inputImageRoles : attachmentImageRoles(editor.attachments);
+    if (roles !== undefined || source.input_image_roles != null) request.input_image_roles = roles ?? null;
+  }
   const removed = new Set(draft.removedReferenceSubjectIds ?? []);
   if (references !== undefined || removed.size > 0) {
     const selected = references ?? turnReferences(mentions);
@@ -192,7 +199,8 @@ function buildLegacyPriorTurnEditRequest(draft: PriorTurnEditDraft, submission?:
   if (fit === null) request.source_fit = null;
   else if (fit !== undefined) {
     const inputs = request.input_artifact_ids ?? source.input_artifact_ids;
-    if (!sourceFitShape(fit) || (request.mode !== "image" && request.mode !== "auto") || inputs[0] !== fit.sourceArtifactId) {
+    const roles = request.input_image_roles === undefined ? source.input_image_roles : request.input_image_roles;
+    if (!sourceFitShape(fit) || (request.mode !== "image" && request.mode !== "auto") || inputs[roles?.indexOf("edit_source") ?? 0] !== fit.sourceArtifactId) {
       throw new Error("The source or workflow changed. Preview the canvas again before sending.");
     }
     request.source_fit = { ...fit.request };
@@ -307,6 +315,7 @@ function sourceShape(value: Record<string, unknown>, chatId: string, messageId: 
     && nonempty(value.source_snapshot_sha256) && record(value.settings) && record(value.resolved_settings)
     && mode(value.mode) && count(value.output_count) && typeof value.text === "string"
     && ["chat", "image", "video"].includes(String(value.settings_role)) && strings(value.input_artifact_ids)
+    && imageRoleVectorShape(value.input_image_roles, value.input_artifact_ids)
     && Array.isArray(value.input_artifacts) && value.input_artifacts.every((item) => record(item) && nonempty(item.id) && nonempty(item.media_type))
     && Array.isArray(value.references) && value.references.every(sourceReference)
     && Array.isArray(value.context_messages) && value.context_messages.every((item) => record(item) && typeof item.role === "string" && typeof item.content === "string");
@@ -324,7 +333,9 @@ function editorShape(value: Record<string, unknown>): boolean {
     && (value.sourceFit === undefined || value.sourceFit === null || sourceFitShape(value.sourceFit))
     && ["inherit", "replace"].includes(String(value.attachmentIntent)) && ["inherit", "replace"].includes(String(value.referenceIntent))
     && Array.isArray(value.attachments) && value.attachments.every((item) => record(item) && nonempty(item.id)
-      && (item.kind === "image" || item.kind === "video") && ["uploaded", "generated", "edited"].includes(String(item.origin)))
+      && (item.kind === "image" || item.kind === "video") && ["uploaded", "generated", "edited"].includes(String(item.origin))
+      && (item.imageRole === undefined || (item.kind === "image" && (item.imageRole === "edit_source" || item.imageRole === "reference"))))
+    && value.attachments.filter((item) => record(item) && item.imageRole === "edit_source").length <= 1
     && Array.isArray(value.mentions) && value.mentions.every((item) => record(item) && nonempty(item.referenceSubjectId) && nonempty(item.mentionSlug))
     && (value.templateSettings === null || (record(value.templateSettings) && typeof value.templateSettings.name === "string" && record(value.templateSettings.settings)))
     && (value.submittedFingerprint === undefined || typeof value.submittedFingerprint === "string");

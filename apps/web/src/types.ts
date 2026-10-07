@@ -253,10 +253,13 @@ export interface Chat {
 }
 
 /** One file attached to an unsent draft, as the workspace keeps it. */
+export type ImageInputRole = "edit_source" | "reference";
+
 export interface ChatComposerDraftAttachment {
   artifact_id: string;
   kind: "image" | "video";
   origin: "uploaded" | "generated" | "edited";
+  image_role?: ImageInputRole | null;
 }
 
 /** One Reference mentioned in an unsent draft, and the text that names it. */
@@ -396,6 +399,7 @@ export interface PriorTurnEditSource extends PriorTurnEditConfiguration {
   plan_kind?: "single" | "ordered";
   steps?: PriorTurnEditStepSource[];
   input_artifact_ids: string[];
+  input_image_roles?: ImageInputRole[] | null;
   input_artifacts: Artifact[];
   references: MessageReference[];
   context_messages: Record<string, string>[];
@@ -648,6 +652,7 @@ export interface EngineCapabilities {
   formats: string[];
   devices: string[];
   input_modalities?: string[];
+  image_slot_bindings?: boolean;
   streaming: boolean;
   tool_calling: boolean;
   settings: SettingField[];

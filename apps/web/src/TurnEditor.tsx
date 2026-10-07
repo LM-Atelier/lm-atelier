@@ -2,7 +2,7 @@ import { SourceFitControl } from "./SourceFitControl";
 import { useSensitiveMediaChoice } from "./sensitiveMedia";
 import { ShieldedThumbnail } from "./ShieldedThumbnail";
 import { useComposerClearance } from "./composerClearance";
-import { SOURCE_FIT_PREVIEW_REQUIRED, sendWithSourceFit, turnPreviewContext, useTurnEditorSourceFit } from "./useTurnEditorSourceFit";
+import { sendWithSourceFit, turnPreviewContext, useTurnEditorSourceFit } from "./useTurnEditorSourceFit";
 import type { SourceFitPreviewContext } from "./useSourceFitCanvas";
 import type { SourceFitSelection } from "./sourceFit";
 import { useCallback, useEffect, useRef, useState, type ReactNode, type SetStateAction, type ComponentType } from "react";
@@ -23,6 +23,8 @@ import type { ComposerProps } from "./chatComposerContracts";
 import { composerDraftWithText, detachedComposerDraft, type ComposerPromptSource } from "./composerPromptSource";
 import { artifactSource, mediaOriginLabel } from "./messageMedia";
 import { composerSubmission } from "./composerSubmission";
+import { editSourceId, withImagePurpose } from "./composerImageRoles";
+import { ImagePurposeControl } from "./ImagePurposeControl";
 import { normalizeSettingsForFields, resolveCapabilitySettings, resolveWorkflowSettings } from "./settings";
 import { activeBranchMessages, workflowRevisionForTurn } from "./turnEditorContext";
 import type { TurnReference } from "./mentionDraft";
@@ -36,7 +38,7 @@ import { usePagedShapeAlternatives } from "./usePagedShapeAlternatives";
 import { useWorkflowResolutionFamilies, workflowFamilyTarget, workflowSelectionForCapability } from "./useWorkflowResolutionFamilies";
 import { initialTurnEditorState, useTurnEditorState, type TurnEditorState } from "./useTurnEditorState";
 export type { TurnEditorState } from "./useTurnEditorState";
-import type { Artifact, ChatDetail, EngineCapabilities, EngineRole, Message, PriorTurnEditBinding, RoutingMode, WorkflowSelection } from "./types";
+import type { Artifact, ChatDetail, EngineCapabilities, EngineRole, ImageInputRole, Message, PriorTurnEditBinding, RoutingMode, WorkflowSelection } from "./types";
 export interface TurnEditorSubmission {
   sourceFit?: SourceFitSelection | null;
   requestId: string;
@@ -44,6 +46,7 @@ export interface TurnEditorSubmission {
   mode: RoutingMode;
   /** Undefined inherits source inputs; an empty array intentionally removes them. */
   inputArtifactIds: string[] | undefined;
+  inputImageRoles?: ImageInputRole[] | null;
   settings: Record<string, unknown>;
   references: TurnReference[] | undefined;
   outputCount: number;
@@ -89,12 +92,14 @@ export type TurnEditorProps = ComposerProps & {
   | { editorState?: undefined; onEditorStateChange?: undefined }
 );
 
-function TurnEditorAttachments({ attachments, changeMode, onFocus, onAnimate, onRemove }: {
+function TurnEditorAttachments({ attachments, changeMode, onFocus, onAnimate, onRemove, onPurpose, pending }: {
   attachments: ComposerAttachment[];
   changeMode: (mode: RoutingMode) => void;
   onFocus: () => void;
   onAnimate: () => void;
   onRemove: (id: string) => void;
+  onPurpose: (id: string, role: ImageInputRole | undefined) => void;
+  pending: boolean;
 }) {
   const shielding = useSensitiveMediaChoice() !== "show";
   return (
@@ -118,6 +123,7 @@ function TurnEditorAttachments({ attachments, changeMode, onFocus, onAnimate, on
             <span className="attachment-summary">
               <strong>{label}</strong>
               <small title={name}>{name}</small>
+              {attachment.kind === "image" && <ImagePurposeControl value={attachment.imageRole} disabled={pending} onChange={(role) => onPurpose(attachment.id, role)} />}
             </span>
             <span className="attachment-actions">
               {attachment.kind === "image" && (
@@ -127,6 +133,7 @@ function TurnEditorAttachments({ attachments, changeMode, onFocus, onAnimate, on
                     aria-label="Edit attached image"
                     onClick={() => {
                       changeMode("image");
+                      if (attachments.some((item) => item.imageRole !== undefined)) onPurpose(attachment.id, "edit_source");
                       onFocus();
                     }}
                   >
@@ -137,6 +144,7 @@ function TurnEditorAttachments({ attachments, changeMode, onFocus, onAnimate, on
                     aria-label="Animate attached image"
                     onClick={() => {
                       changeMode("video");
+                      if (attachments.some((item) => item.imageRole !== undefined)) onPurpose(attachment.id, "edit_source");
                       onAnimate();
                       onFocus();
                     }}
@@ -277,7 +285,7 @@ export function TurnEditor({
   ));
   const usePriorVisual = useDraftClassification(chat.id, text, mode, priorVisual, classificationSource);
   const editableImageAttached =
-    attachments.some((attachment) => attachment.kind === "image")
+    Boolean(editSourceId(attachments))
     || (priorImage && usePriorVisual);
   const imageEdit = mode === "image" && editableImageAttached;
   // See drawerRoleView: the drawer follows the persisted routing mode and
@@ -300,7 +308,7 @@ export function TurnEditor({
     ...(imageProfile?.load_settings_json ?? {}),
     ...(imageProfile?.request_settings_json ?? {}),
   };
-  const hasWorkflowAttachments = attachments.length > 0 || usePriorVisual;
+  const hasWorkflowAttachments = Boolean(editSourceId(attachments)) || usePriorVisual;
   const chatChoice = (capability: RoutingMode) => workflowSelectionForCapability(selections.data, capability);
   const projectChoice = (capability: RoutingMode) => project ? workflowSelectionForCapability(projectSelections.data, capability) : null;
   const families = useWorkflowResolutionFamilies([
@@ -308,7 +316,7 @@ export function TurnEditor({
       ? workflowFamilyTarget(mode, hasWorkflowAttachments, workflowSelection ?? chatChoice(mode), projectChoice(mode)) : null,
     workflowSchemaOverride === undefined && drawerMode !== mode
       ? workflowFamilyTarget(drawerMode, hasWorkflowAttachments, chatChoice(drawerMode), projectChoice(drawerMode)) : null,
-    sourceCanvasRevisionId === undefined && (mode === "image" || mode === "auto") && attachments[0]?.kind === "image"
+    sourceCanvasRevisionId === undefined && (mode === "image" || mode === "auto") && editSourceId(attachments)
       ? workflowFamilyTarget("image", true, workflowSelection ?? chatChoice("image"), projectChoice("image")) : null,
   ]);
   const workflowRevisionId = workflowSchemaOverride !== undefined ? null : workflowRevisionForTurn(
@@ -347,7 +355,7 @@ export function TurnEditor({
     enabled: !onAccept && workflowControl === undefined && workflowSelection === undefined && workflowSchemaOverride === undefined,
   });
   // A video made from a picture can take that picture's shape.
-  const shapeSource = drawerMode === "video" && attachments[0]?.kind === "image" ? attachments[0].id : null;
+  const shapeSource = drawerMode === "video" ? editSourceId(attachments) : null;
   const clearAcceptedDraft = () => {
     setText("");
     clearAcceptedState();
@@ -364,17 +372,18 @@ export function TurnEditor({
     if (!onAccept && selectedMode !== "auto" && !canSendLoras(submission.chosenSettings, submission.fields)) return;
     const { requestedOutputCount, references, promptSource } = submission;
     const sending = forSend(selectedMode, submission.settings, attachments.map((item) => item.id));
-    if (!sending) { setAcceptanceError(SOURCE_FIT_PREVIEW_REQUIRED); return; }
-    const { sourceFit, settings: selectedSettings, inputArtifactIds } = sending;
+    if ("error" in sending) { setAcceptanceError(sending.error); return; }
+    const { sourceFit, settings: selectedSettings, inputArtifactIds, imageRoles } = sending;
     if (!onAccept) {
       const dispatch = stopCurrent ? onStopAndSend : onSend;
-      sendWithSourceFit(dispatch, [text.trim(), selectedMode, inputArtifactIds, selectedSettings, references, requestedOutputCount, promptSource], sourceFit);
+      sendWithSourceFit(dispatch, [text.trim(), selectedMode, inputArtifactIds, selectedSettings, references, requestedOutputCount, promptSource], sourceFit, imageRoles);
       clearAcceptedDraft();
       return;
     }
     const payload = {
       text, mode: selectedMode, sourceFit,
       inputArtifactIds: !sourceFit && state.attachmentIntent === "inherit" ? undefined : inputArtifactIds,
+      inputImageRoles: !sourceFit && state.attachmentIntent === "inherit" ? undefined : imageRoles ?? null,
       settings: selectedSettings,
       references: state.referenceIntent === "inherit" && references.length === state.mentions.length ? undefined : references,
       outputCount: requestedOutputCount ?? 1, promptSource, presetId, settingsRole, workflowSelection,
@@ -420,6 +429,7 @@ export function TurnEditor({
           }}>Retry workflow settings</button>
         </div>}
         {attachments.length > 0 && <TurnEditorAttachments attachments={attachments} changeMode={onAccept ? changeMode : onMode}
+          pending={accepting} onPurpose={(id, role) => setAttachments((items) => withImagePurpose(items, id, role))}
           onFocus={() => textInput.current?.focus()}
           onAnimate={() => { detachPromptSource(); setText((current) => current.trim() ? current : "Animate this image"); }}
           onRemove={(id) => setAttachments((items) => items.filter((item) => item.id !== id))} />}

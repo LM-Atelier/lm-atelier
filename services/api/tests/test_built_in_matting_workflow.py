@@ -58,6 +58,7 @@ from local_lm.scheduler import ResourceScheduler
 from local_lm.schemas import DownloadRequest
 from local_lm.settings_registry import IMAGE_SETTINGS, workflow_settings
 from local_lm.studio_capabilities import tool_capabilities
+from local_lm.workflow_image_slots_v1 import SLOT_KEY
 
 MODEL_FILE = "background-model.safetensors"
 EMPTY: dict[str, Any] = {"type": "object", "properties": {}}
@@ -126,7 +127,17 @@ def test_the_graph_cuts_the_subject_out_with_the_mask_the_right_way_round() -> N
 
     load_id, load = by_type["LoadImage"]
     assert load["inputs"]["image"] == "${input_image}"
-    assert schema["properties"]["input_image"] == {"type": "string"}
+    # Nothing samples here, so the picture has no role to show.
+    assert schema["properties"]["input_image"] == {
+        "type": "string",
+        SLOT_KEY: {
+            "version": 1,
+            "node": load_id,
+            "role": "unknown",
+            "basis": "none",
+            "required": True,
+        },
+    }
     model_id, model = by_type["LoadBackgroundRemovalModel"]
     assert model["inputs"]["bg_removal_name"] == MODEL_FILE
     remove_id, remove = by_type["RemoveBackground"]

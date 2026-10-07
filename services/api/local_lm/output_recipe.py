@@ -34,6 +34,7 @@ from .output_origin import names_a_preview
 from .output_recipe_v1 import (
     NOT_RECORDED,
     OPERATIONS,
+    PURPOSES_VERSION,
     SCHEMA_ID,
     SCHEMA_VERSION,
     OutputRecipeFormatError,
@@ -181,7 +182,12 @@ def build_output_recipe(
 
     payload: dict[str, Any] = {
         "schema": SCHEMA_ID,
-        "version": SCHEMA_VERSION,
+        # Pictures named by purpose only where the run's accepted inputs named them.
+        "version": (
+            PURPOSES_VERSION
+            if snapshot is not None and snapshot.input_image_roles is not None
+            else SCHEMA_VERSION
+        ),
         "exported_by": {"application": "LM Atelier", "version": __version__},
         "output": {
             "sha256": artifact.sha256,
@@ -523,8 +529,13 @@ def _inputs(
     settings: Mapping[str, Any],
     draft: _Draft,
 ) -> list[dict[str, Any]]:
-    """The pictures this run was given, in order, by hash and role."""
+    """The pictures this run was given, in order, by hash and role.
 
+    Purposes accepted with the pictures name each one's role; without them the
+    first picture of a change is its source, as it always was.
+    """
+
+    purposes = snapshot.input_image_roles if snapshot is not None else None
     if snapshot is not None:
         identities = list(snapshot.input_artifact_ids)
     else:
@@ -542,7 +553,12 @@ def _inputs(
     for position, identity in enumerate(dict.fromkeys(identities)):
         # A selection that was also one of the pictures stays listed as that
         # picture too, so the record never hides a picture the run was given.
-        role = "source" if position == 0 and run.operation in _SOURCE_OPERATIONS else "input"
+        role: str
+        if purposes is not None:
+            # Accepted purposes are aligned with these pictures, which repeat none.
+            role = purposes[position]
+        else:
+            role = "source" if position == 0 and run.operation in _SOURCE_OPERATIONS else "input"
         ordered.append((identity, role))
     if isinstance(mask_id, str):
         ordered.append((mask_id, "mask"))

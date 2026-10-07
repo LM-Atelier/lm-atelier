@@ -21,6 +21,7 @@ from .accepted_turn_context import (
 from .auxiliary_assets import revision_accepts_added_loras
 from .chat_recovery_visibility import chat_is_deleted
 from .domain import MessageRole, Operation, RoutingMode
+from .media_input_roles import parse_input_image_roles
 from .models import (
     Artifact,
     Message,
@@ -300,6 +301,11 @@ def _source_view(
         plan_kind="ordered" if summary.get("operation") == "ordered" else "single",
         steps=step_sources,
         input_artifact_ids=input_ids,
+        input_image_roles=(
+            snapshot.input_image_roles
+            if snapshot is not None
+            else parse_input_image_roles(input_ids, prior.provenance_json.get("input_image_roles"))
+        ),
         input_artifacts=artifacts,
         references=[MessageReferenceOut.model_validate(row) for row in source.references],
         **configuration.model_dump(),
@@ -509,6 +515,12 @@ async def prepare_prior_turn_edit(
             list(snapshot.input_artifact_ids)
             if snapshot is not None
             else orchestrator.input_artifact_ids_for_run(session, prior)
+        )
+    if "input_image_roles" not in payload.model_fields_set:
+        values["input_image_roles"] = (
+            copy.deepcopy(editor_source.input_image_roles)
+            if values.get("input_artifact_ids") == editor_source.input_artifact_ids
+            else None
         )
     inherit_preset = same_role and "preset_id" not in payload.model_fields_set
     inherited_preset = copy.deepcopy(editor_source.preset)

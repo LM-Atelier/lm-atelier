@@ -12,6 +12,12 @@ digest covers those bytes with the digest field left out, behind a domain tag,
 so a record cannot be mistaken for any other kind of signed JSON. Reading a
 record refuses anything that is not byte-for-byte what this module would write,
 any key it does not define, and any value outside the closed vocabularies below.
+
+Version 2 differs in one thing: its pictures carry the purposes they were chosen
+for, the one changed and those read beside it, in place of version 1's
+first-picture-is-the-source convention. It is written only when a run's accepted
+inputs named purposes, so every other record is version 1, byte for byte, and
+reads and verifies exactly as before.
 """
 
 from __future__ import annotations
@@ -26,6 +32,8 @@ from typing import Any, Final
 
 SCHEMA_ID: Final = "lm-atelier-output-recipe-v1"
 SCHEMA_VERSION: Final = 1
+#: Pictures named by purpose rather than by position; see the module docstring.
+PURPOSES_VERSION: Final = 2
 DIGEST_DOMAIN: Final = SCHEMA_ID.encode("ascii") + b"\0"
 
 #: Generous for one output: a record carries no graph and no media.
@@ -40,6 +48,7 @@ OPERATIONS: Final = frozenset(
     {"text_to_image", "image_to_image", "text_to_video", "image_to_video"}
 )
 INPUT_ROLES: Final = frozenset({"source", "mask", "input"})
+PURPOSE_INPUT_ROLES: Final = frozenset({"edit_source", "reference", "mask"})
 SEED_BINDINGS: Final = frozenset({"bound", "graph_literal", "unknown", "not_recorded"})
 GRAPH_SOURCES: Final = frozenset({"frozen", "live", "unavailable"})
 PROMPT_OMISSIONS: Final = frozenset(
@@ -130,7 +139,7 @@ _EXPORTED_BY: Final = frozenset({"application", "version"})
 
 
 class OutputRecipeFormatError(ValueError):
-    """A record that is not exactly a version 1 record. The message never echoes input."""
+    """A record outside the supported format. The message never echoes input."""
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -205,9 +214,9 @@ def _check_record(value: dict[str, Any]) -> None:
     if (
         value["schema"] != SCHEMA_ID
         or type(value["version"]) is not int
-        or value["version"] != SCHEMA_VERSION
+        or value["version"] not in (SCHEMA_VERSION, PURPOSES_VERSION)
     ):
-        raise OutputRecipeFormatError("The record is not a version 1 output record.")
+        raise OutputRecipeFormatError("The record is not a version 1 or 2 output record.")
     if not isinstance(value["digest"], str) or not _DIGEST.fullmatch(value["digest"]):
         raise OutputRecipeFormatError("The record's digest is malformed.")
     exported_by = _object(value["exported_by"], _EXPORTED_BY, "exported_by")
@@ -223,7 +232,7 @@ def _check_record(value: dict[str, Any]) -> None:
     if seed["value"] is not None and not _whole(seed["value"], minimum=0):
         raise OutputRecipeFormatError("The record's seed is not a whole number.")
     _check_settings(value["settings"])
-    _check_inputs(value["inputs"])
+    _check_inputs(value["inputs"], value["version"])
     _check_workflow(value["workflow"])
     _check_model(value["model"])
     _check_loras(value["loras"])
@@ -289,15 +298,23 @@ def _check_settings(value: object) -> None:
                 raise OutputRecipeFormatError("A setting is not a plain value.")
 
 
-def _check_inputs(value: object) -> None:
+def _check_inputs(value: object, version: int) -> None:
+    known = PURPOSE_INPUT_ROLES if version == PURPOSES_VERSION else INPUT_ROLES
+    roles: list[str] = []
     for item in _list(value, "inputs"):
         entry = _object(item, _INPUT, "input")
         _hex(entry["sha256"], "input.sha256")
-        if entry["role"] not in INPUT_ROLES:
+        if not isinstance(entry["role"], str) or entry["role"] not in known:
             raise OutputRecipeFormatError("The record names an unknown input role.")
         if entry["size_bytes"] is not None and not _whole(entry["size_bytes"], minimum=0):
             raise OutputRecipeFormatError("An input size is not a whole number.")
         _optional_string(entry["media_type"], "input.media_type")
+        roles.append(entry["role"])
+    # Purposes say which picture is changed, so they never leave that open.
+    if version == PURPOSES_VERSION and (
+        roles.count("edit_source") > 1 or roles.count("mask") > 1 or "mask" in roles[:-1]
+    ):
+        raise OutputRecipeFormatError("The record's picture purposes are ambiguous.")
 
 
 def _check_workflow(value: object) -> None:

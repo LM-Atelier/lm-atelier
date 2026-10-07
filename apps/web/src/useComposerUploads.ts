@@ -3,13 +3,14 @@ import { useState, type DragEvent } from "react";
 import { api } from "./api";
 import { artifactOrigin } from "./messageMedia";
 import type { MediaOrigin } from "./messageMedia";
-import type { Artifact } from "./types";
+import type { Artifact, ImageInputRole } from "./types";
 
 export type ComposerAttachment = {
   id: string;
   kind: "image" | "video";
   artifact?: Artifact | null;
   origin: MediaOrigin;
+  imageRole?: ImageInputRole;
 };
 
 /** Attach files to the composer, one request at a time.

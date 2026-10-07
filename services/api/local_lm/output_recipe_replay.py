@@ -57,7 +57,7 @@ from .models import (
 from .orchestrator import ConversationOrchestrator
 from .output_origin import names_a_preview
 from .output_recipe import describe_run
-from .output_recipe_v1 import canonical_bytes
+from .output_recipe_v1 import PURPOSES_VERSION, canonical_bytes
 from .schemas import TurnRequest
 from .settings_registry import workflow_settings
 from .setup_verification import setup_verification_for_chat
@@ -282,7 +282,9 @@ def _plan(
     *,
     chosen_inputs: dict[int, str] | None = None,
 ) -> dict[str, Any]:
-    input_artifact_ids, mask_artifact_id = _inputs(session, record, refusals, chosen_inputs or {})
+    input_artifact_ids, mask_artifact_id, input_image_roles = _inputs(
+        session, record, refusals, chosen_inputs or {}
+    )
     resolved = None
     if not refusals and revision is not None:
         resolved = {
@@ -292,6 +294,8 @@ def _plan(
             "lora_asset_ids": lora_asset_ids,
             "input_artifact_ids": input_artifact_ids,
             "mask_artifact_id": mask_artifact_id,
+            # Only a record that names purposes gives any, so a version 1 plan reads as before.
+            **({"input_image_roles": input_image_roles} if input_image_roles is not None else {}),
         }
     return {
         "digest": record["digest"],
@@ -525,7 +529,16 @@ def _check_record(
         # A turn takes each input once, so a repeated one would run as one.
         reasons.append("repeated_inputs")
     roles = [item["role"] for item in inputs]
-    if operation in {Operation.TEXT_TO_IMAGE, Operation.TEXT_TO_VIDEO}:
+    if record["version"] == PURPOSES_VERSION:
+        # Pictures named by purpose: one made from words may read references,
+        # and only a change may name the picture it changes. A change must name
+        # it, or a turn would start from whatever picture it found instead.
+        if operation in {Operation.TEXT_TO_IMAGE, Operation.TEXT_TO_VIDEO}:
+            if "edit_source" in roles or "mask" in roles:
+                reasons.append("inputs_for_operation")
+        elif "edit_source" not in roles:
+            reasons.append("inputs_for_operation")
+    elif operation in {Operation.TEXT_TO_IMAGE, Operation.TEXT_TO_VIDEO}:
         if roles:
             reasons.append("inputs_for_operation")
     elif not roles or roles[0] != "source":
@@ -752,15 +765,17 @@ def _inputs(
     record: dict[str, Any],
     refusals: list[dict[str, Any]],
     chosen: dict[int, str],
-) -> tuple[list[str], str | None]:
+) -> tuple[list[str], str | None, list[str] | None]:
     """Each recorded picture by its content identity, in recorded order, and the selection apart.
 
     A turn takes its selection as a setting rather than as one of its pictures.
-    A picture chosen to stand in for one stands at its position; it must be a
-    picture here, and no picture may then stand at two positions.
+    A picture chosen to stand in for one stands at its position, and takes that
+    position's purpose; it must be a picture here, and no picture may then stand
+    at two positions. Purposes come back only from a record that names them.
     """
 
     identifiers: list[str] = []
+    purposes: list[str] = []
     mask: str | None = None
     for position, item in enumerate(record["inputs"]):
         if position in chosen:
@@ -778,10 +793,11 @@ def _inputs(
             mask = identifier
         else:
             identifiers.append(identifier)
+            purposes.append(item["role"])
     if chosen and len({*identifiers, *([mask] if mask else [])}) != len(identifiers) + bool(mask):
         # A turn takes each picture once, so one given twice would run as one.
         refusals.append(_refusal("adaptation-input-unusable", "input"))
-    return identifiers, mask
+    return identifiers, mask, purposes if record["version"] == PURPOSES_VERSION else None
 
 
 class ReplayDiffers(Exception):
@@ -930,6 +946,8 @@ async def _record_turn_request(
         preset_id=None,
         output_count=1,
         input_artifact_ids=resolved["input_artifact_ids"],
+        # The purposes the record names, so the replay is accepted with them again.
+        input_image_roles=resolved.get("input_image_roles"),
         settings=settings,
     )
     return turn, left_out

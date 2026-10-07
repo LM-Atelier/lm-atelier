@@ -79,7 +79,10 @@ def read_draft(session: Session, chat_id: str) -> ChatComposerDraftOut:
         output_count=row.output_count,
         attachments=[
             ChatComposerDraftAttachmentIn(
-                artifact_id=attachment.artifact_id, kind=attachment.kind, origin=attachment.origin
+                artifact_id=attachment.artifact_id,
+                kind=attachment.kind,
+                origin=attachment.origin,
+                image_role=attachment.image_role,
             )
             for attachment in row.attachments
         ],
@@ -170,6 +173,7 @@ def write_draft(
                     artifact_id=attachment.artifact_id,
                     kind=attachment.kind,
                     origin=attachment.origin,
+                    image_role=attachment.image_role,
                 )
             )
     except IntegrityError:

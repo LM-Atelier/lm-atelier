@@ -149,6 +149,12 @@ from .image_edit_verification import (
     without_contradicted,
 )
 from .matting_workflows import workflow_declares_matting
+from .media_input_roles import (
+    image_source_index,
+    parse_input_image_roles,
+    resolved_image_roles,
+    workflow_image_role_bindings,
+)
 from .media_references import exceeds_capacity
 from .message_references import (
     carry_message_references_if_absent,
@@ -183,6 +189,7 @@ from .models import (
     WorkStepDependency,
 )
 from .network import OutboundPolicy, OutboundRefused, outbound_client
+from .ordered_image_inputs import ordered_image_inputs
 from .ordered_planning import OrderedPlanCompiler, OrderedPlanConfirmationRequired
 from .outpaint_workflows import (
     OUTPAINT_SETTING_KEY,
@@ -1903,9 +1910,21 @@ class ConversationOrchestrator:
         resolved_input_ids = list(dict.fromkeys(request.input_artifact_ids))
         prior_prompt: str | None = None
         if plan.operation in {Operation.IMAGE_TO_IMAGE, Operation.IMAGE_TO_VIDEO}:
-            if not resolved_input_ids and prior_image:
+            source_index = image_source_index(resolved_input_ids, request.input_image_roles)
+            if source_index is None and prior_image:
+                if prior_image in resolved_input_ids:
+                    raise ValueError("Choose the prior picture as the picture to edit.")
                 resolved_input_ids.append(prior_image)
+                if request.input_image_roles is not None:
+                    request = request.model_copy(
+                        update={
+                            "input_artifact_ids": list(resolved_input_ids),
+                            "input_image_roles": [*request.input_image_roles, "edit_source"],
+                        }
+                    )
                 prior_prompt = prior_image_prompt
+            elif source_index is None:
+                raise ValueError("Choose a picture to edit.")
             if prior_prompt:
                 plan.standalone_prompt = f"{prior_prompt}. Follow-up instruction: {request.text}"
         plan.input_artifact_ids = resolved_input_ids
@@ -1932,7 +1951,12 @@ class ConversationOrchestrator:
                 self.session_factory,
                 self.engines,
                 workflow_use_case_inputs(
-                    plan.operation, request, source_present=bool(resolved_input_ids)
+                    plan.operation,
+                    request,
+                    source_present=(
+                        image_source_index(resolved_input_ids, request.input_image_roles)
+                        is not None
+                    ),
                 ),
                 chat_id=chat.id,
                 inherited=inherited_use_case_preset,
@@ -2099,6 +2123,8 @@ class ConversationOrchestrator:
             # extension paints new canvas at full strength.
             extension=request.source_fit is not None and request.source_fit.mode == "extend",
         )
+        if plan.operation != Operation.TEXT and request.input_image_roles is not None:
+            await self._require_image_slot_bindings(True)
         self._refuse_settings_the_workflow_cannot_take(
             session,
             plan,
@@ -2430,7 +2456,7 @@ class ConversationOrchestrator:
                 ),
             )
         ]
-        explicit_ids = set(explicit_artifacts)
+        explicit_ids = list(explicit_artifacts)
         for artifact_id in resolved_input_ids:
             artifact = explicit_artifacts.get(artifact_id) or session.get(Artifact, artifact_id)
             if not artifact:
@@ -2677,9 +2703,10 @@ class ConversationOrchestrator:
         """
         source_preview: SourceFitPreviewOut | None = None
         if request.source_fit is not None:
+            source_index = image_source_index(resolved_input_ids, request.input_image_roles)
             if (
                 plan.operation != Operation.IMAGE_TO_IMAGE
-                or not resolved_input_ids
+                or source_index is None
                 or workflow_revision is None
                 or workflow_revision.engine != "comfyui"
                 or self.engines.settings.media_engine != "comfyui"
@@ -2700,13 +2727,14 @@ class ConversationOrchestrator:
             if (
                 inherited_workflow is not None
                 and inherited_source_fit is not None
-                and inherited_source_fit.image.source_artifact_id == resolved_input_ids[0]
+                and inherited_source_fit.image.source_artifact_id
+                == resolved_input_ids[source_index]
             ):
                 replay_source_fit_image(
                     session,
                     self.artifacts,
                     inherited_source_fit.image,
-                    selected_source_id=resolved_input_ids[0],
+                    selected_source_id=resolved_input_ids[source_index],
                 )
                 if request.source_fit.mode == "crop":
                     source_preview = source_crop_preview_for_image(
@@ -2729,7 +2757,7 @@ class ConversationOrchestrator:
                     )
             else:
                 fit_definition = session.get(WorkflowDefinition, workflow_revision.workflow_id)
-                fit_source = session.get(Artifact, resolved_input_ids[0])
+                fit_source = session.get(Artifact, resolved_input_ids[source_index])
                 if fit_definition is None or fit_source is None:
                     raise ValueError("Source image or workflow is unavailable.")
                 source_preview = preview_source_fit(
@@ -2740,6 +2768,16 @@ class ConversationOrchestrator:
                     request.source_fit,
                 )
         return source_preview
+
+    async def _require_image_slot_bindings(
+        self, explicit: bool, *, execution: bool = False
+    ) -> None:
+        """Require declared adapter support before accepting or dispatching picture purposes."""
+        if explicit:
+            capabilities = await self.engines.media_capabilities()
+            if not capabilities.image_slot_bindings:
+                error = RuntimeError if execution else ValueError
+                raise error("The selected media adapter cannot bind pictures by their purpose.")
 
     def _refuse_settings_the_workflow_cannot_take(
         self,
@@ -2768,7 +2806,14 @@ class ConversationOrchestrator:
                     effective_settings,
                     workflow_revision.input_schema_json,
                     operation=plan.operation.value,
-                    source_count=len(resolved_input_ids),
+                    source_count=(
+                        len(resolved_input_ids)
+                        if request.input_image_roles is None
+                        else int(
+                            image_source_index(resolved_input_ids, request.input_image_roles)
+                            is not None
+                        )
+                    ),
                 )
             except MaskContractError as exc:
                 raise ValueError(str(exc)) from exc
@@ -2832,6 +2877,12 @@ class ConversationOrchestrator:
         # saying nothing. Silently using one of four is indistinguishable from
         # a bad model, which is the worst kind of failure to debug.
         if plan.operation != Operation.TEXT and workflow_revision:
+            workflow_image_role_bindings(
+                resolved_input_ids,
+                request.input_image_roles,
+                workflow_revision.input_schema_json,
+                workflow_revision.api_graph_json,
+            )
             over = exceeds_capacity(workflow_revision.api_graph_json, len(resolved_input_ids))
             if over is not None:
                 raise ValueError(
@@ -3001,6 +3052,11 @@ class ConversationOrchestrator:
             **({"visual_prompt": turn.visual_prompt} if turn.visual_prompt else {}),
             "model_selection": output_model_selection,
             "input_artifact_ids": turn.resolved_input_ids,
+            **(
+                {"input_image_roles": copy.deepcopy(turn.request.input_image_roles)}
+                if "input_image_roles" in turn.request.model_fields_set
+                else {}
+            ),
             "model": output_model_provenance,
             "preset": (
                 {
@@ -3273,6 +3329,14 @@ class ConversationOrchestrator:
         total_estimated_bytes = 0
         total_video_duration_seconds = 0.0
         for index, step_intent in enumerate(intent.steps):
+            image_inputs = ordered_image_inputs(request, intent, index)
+            planned_ids, planned_roles = image_inputs.planned()
+            selected_canvas = image_source_index(image_inputs.artifact_ids, image_inputs.roles)
+            has_selected_canvas = (
+                selected_canvas is not None
+                if request.input_image_roles is not None
+                else index == 0 and bool(first_explicit_images)
+            )
             artifact_source_modes = [
                 intent_by_id[binding.source_step_id].mode
                 for binding in step_intent.inputs
@@ -3283,20 +3347,25 @@ class ConversationOrchestrator:
             elif step_intent.mode == "image":
                 operation = (
                     Operation.IMAGE_TO_IMAGE
-                    if "image" in artifact_source_modes
-                    or (index == 0 and bool(first_explicit_images))
+                    if "image" in artifact_source_modes or has_selected_canvas
                     else Operation.TEXT_TO_IMAGE
                 )
             else:
                 operation = (
                     Operation.IMAGE_TO_VIDEO
-                    if "image" in artifact_source_modes
-                    or (index == 0 and bool(first_explicit_images))
+                    if "image" in artifact_source_modes or has_selected_canvas
                     else Operation.TEXT_TO_VIDEO
                 )
 
             role = self._role_for_operation(operation)
             step_request = request.for_role(role, ordered=True)
+            if request.input_image_roles is not None:
+                step_request = step_request.model_copy(
+                    update={
+                        "input_artifact_ids": image_inputs.artifact_ids,
+                        "input_image_roles": image_inputs.roles,
+                    }
+                )
             inherited = None
             if resolve_source is not None:
                 step_request, inherited = await resolve_source(
@@ -3310,10 +3379,7 @@ class ConversationOrchestrator:
                     workflow_use_case_inputs(
                         operation,
                         step_request,
-                        source_present=(
-                            "image" in artifact_source_modes
-                            or (index == 0 and bool(first_explicit_images))
-                        ),
+                        source_present=("image" in artifact_source_modes or has_selected_canvas),
                     ),
                     chat_id=chat.id,
                     inherited=(
@@ -3398,6 +3464,14 @@ class ConversationOrchestrator:
             use_case_admission = turn_workflow.use_case_admission
             use_case_receipt = turn_workflow.use_case_receipt
             fields = turn_workflow.fields
+            if operation != Operation.TEXT and planned_roles is not None:
+                await self._require_image_slot_bindings(True)
+                workflow_image_role_bindings(
+                    planned_ids,
+                    planned_roles,
+                    workflow_revision.input_schema_json if workflow_revision else {},
+                    workflow_revision.api_graph_json if workflow_revision else {},
+                )
             setting_layers = self.resolve_turn_setting_layers(
                 session,
                 chat,
@@ -3486,6 +3560,7 @@ class ConversationOrchestrator:
             resolved_steps.append(
                 {
                     "intent": step_intent,
+                    "image_inputs": image_inputs,
                     "operation": operation,
                     "profile": profile,
                     "upscale": step_request.upscale,
@@ -3648,6 +3723,15 @@ class ConversationOrchestrator:
                             else "step_output.artifact"
                         ),
                         "source_step_id": source_step.id,
+                        **(
+                            {
+                                "image_role": resolved["image_inputs"].dependency_roles[
+                                    binding.source_step_id
+                                ]
+                            }
+                            if binding.source_step_id in resolved["image_inputs"].dependency_roles
+                            else {}
+                        ),
                     }
                 )
             output_type = step_intent.mode
@@ -3724,6 +3808,14 @@ class ConversationOrchestrator:
                     "compiled_step": step_intent.model_dump(mode="json"),
                     "model_selection": resolved["model_selection"],
                     "input_artifact_ids": (list(explicit_ids) if ordinal == 1 else []),
+                    **(
+                        {
+                            "input_artifact_ids": list(resolved["image_inputs"].artifact_ids),
+                            "input_image_roles": copy.deepcopy(resolved["image_inputs"].roles),
+                        }
+                        if request.input_image_roles is not None
+                        else {}
+                    ),
                     "model": model_provenance,
                     "preset": (
                         {
@@ -4014,7 +4106,9 @@ class ConversationOrchestrator:
             # the claim still owns its row at the commit.
             before_commit(session, runs[0])
         for accepted_run in runs:
-            if refreeze(accepted_run) and accepted_context(session, accepted_run) is None:
+            if (
+                refreeze(accepted_run) or request.input_image_roles is not None
+            ) and accepted_context(session, accepted_run) is None:
                 self._freeze_turn_context(session, accepted_run)
 
     def start(self, job_id: str, run_id: str | None) -> None:
@@ -7001,20 +7095,24 @@ class ConversationOrchestrator:
         """The source fit the turn accepted, and the picture it uploads, read back exactly.
 
         That picture is the prepared source an extension pads, or the crop cut
-        from it. It belongs to the first input, so a fit with no input to bind
-        it to is refused rather than run against nothing.
+        from it. It belongs to the selected canvas, so a fit without that picture
+        is refused rather than run against another input.
         """
 
         source_fit = accepted_inputs.source_fit if accepted_inputs is not None else None
         if source_fit is None:
             return None, None
-        if not input_ids:
+        source_index = image_source_index(
+            accepted_inputs.input_artifact_ids if accepted_inputs is not None else list(input_ids),
+            accepted_inputs.input_image_roles if accepted_inputs is not None else None,
+        )
+        if source_index is None:
             raise ValueError("source_fit_context_binding")
         prepared = replay_source_fit_image(
             session,
             self.artifacts,
             source_fit.upload_image,
-            selected_source_id=input_ids[0],
+            selected_source_id=input_ids[source_index],
         )
         return source_fit, prepared
 
@@ -7029,10 +7127,14 @@ class ConversationOrchestrator:
         """Each input picture's file, and its checked bytes when a source fit needs them.
 
         An accepted input that has gone is refused. With a prepared source the
-        first input is the prepared picture, and every input's bytes are read
+        selected canvas is the prepared picture, and every input's bytes are read
         beside its file.
         """
 
+        source_index = image_source_index(
+            accepted_inputs.input_artifact_ids if accepted_inputs is not None else list(input_ids),
+            accepted_inputs.input_image_roles if accepted_inputs is not None else None,
+        )
         input_paths: list[Path] = []
         input_contents: list[bytes] | None = [] if prepared_source is not None else None
         for input_index, artifact_id in enumerate(input_ids):
@@ -7047,7 +7149,11 @@ class ConversationOrchestrator:
                     if accepted_inputs is not None
                     else self.artifacts.resolve(artifact)
                 )
-            elif input_index == 0 and prepared_source is not None and source_fit is not None:
+            elif (
+                input_index == source_index
+                and prepared_source is not None
+                and source_fit is not None
+            ):
                 path, content = self._prepared_source_input(session, source_fit, prepared_source)
                 input_paths.append(path)
                 input_contents.append(content)
@@ -7064,7 +7170,7 @@ class ConversationOrchestrator:
         source_fit: SourceFitRecipe,
         prepared_source: PreparedSourceImage,
     ) -> tuple[Path, bytes]:
-        """The picture that stands in for the first input, and its bytes."""
+        """The picture that stands in for the selected canvas, and its bytes."""
 
         prepared_artifact = session.get(Artifact, source_fit.upload_image.prepared_artifact_id)
         if prepared_artifact is None:
@@ -7155,6 +7261,12 @@ class ConversationOrchestrator:
                 self.session_factory,
                 validated_revision_id,
             )
+        has_explicit_roles = (
+            accepted_inputs.input_image_roles is not None
+            if accepted_inputs is not None
+            else run.provenance_json.get("input_image_roles") is not None
+        )
+        await self._require_image_slot_bindings(has_explicit_roles, execution=True)
         with self.session_factory() as session:
             run = session.get(Run, run_id)
             if not run:
@@ -7182,14 +7294,25 @@ class ConversationOrchestrator:
                 else run.provenance_json.get("auxiliary_assets") or {}
             )
             input_ids = self.input_artifact_ids_for_run(session, run)
+            input_roles = (
+                accepted_inputs.input_image_roles
+                if accepted_inputs is not None
+                else parse_input_image_roles(
+                    input_ids, run.provenance_json.get("input_image_roles")
+                )
+            )
             if accepted_inputs is not None:
                 dependencies = resolve_context_dependencies(session, run, accepted_inputs)
-                input_ids = list(
-                    dict.fromkeys([*accepted_inputs.input_artifact_ids, *dependencies.artifact_ids])
+                input_ids, input_roles = resolved_image_roles(
+                    accepted_inputs.input_artifact_ids,
+                    accepted_inputs.input_image_roles,
+                    dependencies.artifact_ids,
+                    dependencies.image_roles,
                 )
                 if dependencies.text_inputs:
                     context = "\n\n".join(item["text"] for item in dependencies.text_inputs)
                     execution_prompt += f"\n\nUse this prior text as context:\n{context}"
+            source_index = image_source_index(input_ids, input_roles)
             current_revision_id = (
                 accepted_inputs.workflow_revision_id
                 if accepted_inputs
@@ -7268,12 +7391,13 @@ class ConversationOrchestrator:
             # node takes whole pixels. They are spent on this run's graph here,
             # and never passed on as a setting that no graph input reads.
             if revision and OUTPAINT_SETTING_KEY in execution_settings:
-                if not input_paths:
+                if source_index is None or source_index >= len(input_paths):
                     raise RuntimeError("Extending a picture needs its source image.")
                 workflow = pad_the_source(
                     workflow,
                     margin_pixels(
-                        execution_settings[OUTPAINT_SETTING_KEY], *oriented_size(input_paths[0])
+                        execution_settings[OUTPAINT_SETTING_KEY],
+                        *oriented_size(input_paths[source_index]),
                     ),
                 )
             if source_fit is not None:
@@ -7287,6 +7411,12 @@ class ConversationOrchestrator:
             # and before the dispatch - anywhere later and it would be a claim
             # about a graph nobody kept.
             size_binding_confirmed = self._geometry_binding_confirmed(accepted_inputs, workflow)
+            input_bindings = workflow_image_role_bindings(
+                input_ids,
+                input_roles,
+                revision.input_schema_json if revision is not None else {},
+                workflow,
+            )
             # The mask travels as a resolved path beside the settings, never
             # as an input reference: it is instruction, not content, and must
             # not appear as an attachment or count toward edit lineage.
@@ -7315,11 +7445,12 @@ class ConversationOrchestrator:
                     or execution_operation != Operation.IMAGE_TO_IMAGE.value
                     or len(input_ids) != 2
                     or len(input_paths) != 2
+                    or source_index is None
                 ):
                     raise RuntimeError(
                         "Relighting needs the picture and its light map, and nothing else."
                     )
-                relight_source = session.get(Artifact, input_ids[0])
+                relight_source = session.get(Artifact, input_ids[source_index])
                 if relight_source is None:
                     raise RuntimeError("The picture being relit is unavailable.")
                 relight_finish = RelightFinish(
@@ -7346,12 +7477,22 @@ class ConversationOrchestrator:
                             None,
                             operation=execution_operation,
                             source_count=(
-                                len(input_ids) if len(input_paths) == len(input_ids) else 0
+                                (
+                                    len(input_ids)
+                                    if input_roles is None
+                                    else int(source_index is not None)
+                                )
+                                if len(input_paths) == len(input_ids)
+                                else 0
                             ),
                         )
                     except MaskContractError as exc:
                         raise RuntimeError(str(exc)) from exc
-                    source_artifact = session.get(Artifact, input_ids[0])
+                    source_artifact = (
+                        session.get(Artifact, input_ids[source_index])
+                        if source_index is not None
+                        else None
+                    )
                     if selection is None or source_artifact is None:
                         raise RuntimeError("The picture this edit selects from is unavailable.")
                     region_edit = RegionEdit(
@@ -7380,6 +7521,7 @@ class ConversationOrchestrator:
                 negative_prompt=str(execution_settings.get("negative_prompt", "")) or None,
                 input_paths=input_paths,
                 input_contents=tuple(input_contents) if input_contents is not None else None,
+                input_image_bindings=input_bindings,
                 workflow=workflow,
                 parameters=parameters,
                 persistence_scope=self.persistence_scope,
@@ -10372,6 +10514,14 @@ class ConversationOrchestrator:
     ) -> RoutingPlan:
         """What a single turn makes, asking first when an uncertain media plan needs confirming."""
 
+        source_index = image_source_index(request.input_artifact_ids, request.input_image_roles)
+        routing_images = (
+            request.input_artifact_ids
+            if request.input_image_roles is None
+            else [request.input_artifact_ids[source_index]]
+            if source_index is not None
+            else []
+        )
         if prompt_batch_selection is not None:
             plan = RoutingPlan(
                 operation=Operation.TEXT_TO_IMAGE,
@@ -10394,7 +10544,7 @@ class ConversationOrchestrator:
                     adapter=self.engines.chat,
                     text=request.text,
                     mode=mode,
-                    input_artifact_ids=request.input_artifact_ids,
+                    input_artifact_ids=routing_images,
                     has_prior_image=has_prior_image,
                     conversation=routing_context,
                 )
@@ -10402,7 +10552,7 @@ class ConversationOrchestrator:
                 plan = self.router.plan(
                     text=request.text,
                     mode=mode,
-                    input_artifact_ids=request.input_artifact_ids,
+                    input_artifact_ids=routing_images,
                     has_prior_image=has_prior_image,
                     conversation=routing_context,
                 )
@@ -10515,6 +10665,10 @@ class ConversationOrchestrator:
             artifact = session.get(Artifact, artifact_id)
             if not artifact:
                 raise LookupError(f"input artifact not found: {artifact_id}")
+            if request.input_image_roles is not None and not artifact.media_type.startswith(
+                "image/"
+            ):
+                raise ValueError("Explicit picture purposes require image attachments.")
             explicit_artifacts[artifact_id] = artifact
         return explicit_artifacts
 
@@ -12674,6 +12828,13 @@ class ConversationOrchestrator:
             else []
         )
         provenance = run.provenance_json if isinstance(run.provenance_json, dict) else {}
+        if provenance.get("input_image_roles") is not None:
+            selected_ids = provenance.get("input_artifact_ids")
+            if not isinstance(selected_ids, list) or any(
+                not isinstance(identity, str) for identity in selected_ids
+            ):
+                raise ValueError("Accepted image inputs are unavailable.")
+            durable_ids = list(selected_ids)
         dependency_ids = provenance.get("resolved_dependency_artifact_ids")
         resolved_dependency_ids = (
             [value for value in dependency_ids if isinstance(value, str)]
@@ -12932,6 +13093,15 @@ class ConversationOrchestrator:
         ]
         chat = session.get(Chat, run.chat_id)
         profile = session.get(ModelProfile, run.profile_id) if run.profile_id else None
+        input_roles = parse_input_image_roles(
+            input_ids,
+            run.provenance_json.get("input_image_roles")
+            if "input_image_roles" in run.provenance_json
+            else inherited_context.input_image_roles
+            if inherited_context is not None and inherited_context.input_artifact_ids == input_ids
+            else None,
+        )
+        source_index = image_source_index(input_ids, input_roles)
         source_fit: SourceFitRecipe | None = None
         fit_value = run.provenance_json.get("source_fit_request")
         if fit_value is not None:
@@ -12943,7 +13113,7 @@ class ConversationOrchestrator:
             )
             if (
                 run.operation != Operation.IMAGE_TO_IMAGE.value
-                or not input_ids
+                or source_index is None
                 or revision is None
                 or revision.engine != "comfyui"
             ):
@@ -12953,10 +13123,13 @@ class ConversationOrchestrator:
             if (
                 inherit_workflow_configuration
                 and recipe is not None
-                and recipe.image.source_artifact_id == input_ids[0]
+                and recipe.image.source_artifact_id == input_ids[source_index]
             ):
                 replayed = replay_source_fit_image(
-                    session, self.artifacts, recipe.image, selected_source_id=input_ids[0]
+                    session,
+                    self.artifacts,
+                    recipe.image,
+                    selected_source_id=input_ids[source_index],
                 )
                 if intent.mode == "extend":
                     source_fit = plan_source_extension(
@@ -12975,7 +13148,7 @@ class ConversationOrchestrator:
                         session,
                         self.artifacts,
                         recipe.upload_image,
-                        selected_source_id=input_ids[0],
+                        selected_source_id=input_ids[source_index],
                     )
                     source_fit = plan_source_crop_recipe(
                         recipe.image,
@@ -13004,7 +13177,7 @@ class ConversationOrchestrator:
                 ]
                 if len(saves) != 1:
                     raise ValueError("Source fitting requires one image output.")
-                source = session.get(Artifact, input_ids[0])
+                source = session.get(Artifact, input_ids[source_index])
                 if source is None:
                     raise ValueError("Source image is unavailable.")
                 prepared = prepare_source_fit_image(self.artifacts, source)
@@ -13045,6 +13218,7 @@ class ConversationOrchestrator:
             sources=sources,
             artifact_ids=artifact_ids,
             input_artifact_ids=input_ids,
+            input_image_roles=input_roles,
             context_artifact_ids=context_artifact_ids,
             inherited_context=inherited_context,
             inherited_configuration=inherited_configuration,

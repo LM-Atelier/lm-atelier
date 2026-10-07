@@ -252,9 +252,9 @@ export default function App() {
       if (displayedChat) applyAcceptedTurn(displayedChat.id, accepted, accepted.branch_activated);
     }} onStop={() => {
       if (displayedChat) stop.mutate(displayedChat.id);
-    }} onStopAndSend={(text, mode, artifacts, settings, references, outputCount, promptSource, sourceFit) => {
+    }} onStopAndSend={(text, mode, artifacts, settings, references, outputCount, promptSource, sourceFit, imageRoles) => {
       if (displayedChat) {
-        send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource, sourceFit, stopCurrent: true });
+        send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource, sourceFit, imageRoles, stopCurrent: true });
       }
     }} onDeleteExchange={deleteExchange.mutate} onRemoveItem={removeItem.mutate} onForkThread={forkThread.mutate} onCancelPlan={(planId) => {
       cancelWorkPlan.mutate(planId);
@@ -264,9 +264,9 @@ export default function App() {
       cancelWorkStep.mutate(stepId);
     }} onRetryStep={(stepId) => {
       retryWorkStep.mutate(stepId);
-    }} onSend={(text, mode, artifacts, settings, references, outputCount, promptSource, sourceFit) => {
+    }} onSend={(text, mode, artifacts, settings, references, outputCount, promptSource, sourceFit, imageRoles) => {
       if (displayedChat) {
-        send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource, sourceFit });
+        send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource, sourceFit, imageRoles });
       }
     }} />;
   }, [openWorkflows, studioSource, studioHandOver, sendStudioPicture, studioPictureTaken, activeChatId, view, setView, appearance, settingsDestination, setSettingsDestination, settingsFocusRequest, modelLibraryRole, engines.data, applicationInfo.data, selectedProject, chat.data, chat.reads, chatDrafts, autoSettingsRoles, rememberSettingsRole, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage, applyAcceptedTurn, openChat]);

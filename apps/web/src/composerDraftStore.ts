@@ -19,6 +19,7 @@ export function storedDraft(draft: ComposerDraft): ChatComposerDraftInput {
       artifact_id: attachment.id,
       kind: attachment.kind,
       origin: attachment.origin,
+      ...(attachment.imageRole ? { image_role: attachment.imageRole } : {}),
     })),
     mentions: (editor?.mentions ?? []).map((mention) => ({
       reference_subject_id: mention.referenceSubjectId,
@@ -59,6 +60,7 @@ export function composerDraftFrom(
         kind: attachment.kind,
         artifact: artifacts.get(attachment.artifact_id) ?? null,
         origin: attachment.origin,
+        ...(attachment.image_role ? { imageRole: attachment.image_role } : {}),
       })),
       mentions: stored.mentions.map((mention) => ({
         referenceSubjectId: mention.reference_subject_id,

@@ -12,6 +12,7 @@ import type {
   ChatTranscriptContext,
   EngineCapabilities,
   EngineRole,
+  ImageInputRole,
   Project,
   PriorTurnEditAccepted,
   RoutingMode,
@@ -27,6 +28,7 @@ export type SendFromComposer = (
   outputCount?: number,
   promptSource?: ComposerPromptSource,
   sourceFit?: SourceFitSelection,
+  imageRoles?: ImageInputRole[],
 ) => void;
 
 export type PendingTurn = { id: string; text: string; mode: RoutingMode };

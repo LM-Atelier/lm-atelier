@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .domain import JobStatus, MessageStatus, Operation, PartType, RoutingMode
+from .media_input_roles import ImageInputRole, image_source_index, validate_input_image_roles
 from .models import (
     Artifact,
     Message,
@@ -55,6 +56,7 @@ class ContextDependency(BaseModel):
     plan_id: str
     run_id: str
     message_id: str
+    image_role: ImageInputRole | None = None
 
 
 class AcceptedInstall(BaseModel):
@@ -267,6 +269,7 @@ class AcceptedContext(BaseModel):
     source_snapshot_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     messages: list[ContextMessage]
     input_artifact_ids: list[str]
+    input_image_roles: list[ImageInputRole] | None = None
     visual_artifact_ids: list[str]
     visual_posters: dict[str, str] = Field(default_factory=dict)
     strict_artifact_ids: list[str]
@@ -303,6 +306,19 @@ class AcceptedContext(BaseModel):
     source_fit: RecordedSourceFitRecipe | None = None
 
     @model_validator(mode="after")
+    def bind_input_image_roles(self) -> Self:
+        validate_input_image_roles(self.input_artifact_ids, self.input_image_roles)
+        if self.input_image_roles is not None:
+            roles = [
+                dependency.image_role
+                for dependency in self.dependencies
+                if dependency.kind == "artifact" and dependency.image_role is not None
+            ]
+            if self.input_image_roles.count("edit_source") + roles.count("edit_source") > 1:
+                raise ValueError("Accepted dependency image purposes are ambiguous.")
+        return self
+
+    @model_validator(mode="after")
     def bind_workflow_use_case_preset(self) -> Self:
         recipe = self.workflow_use_case_preset
         if recipe is not None and recipe.workflow_revision_id != self.workflow_revision_id:
@@ -314,6 +330,7 @@ class AcceptedContext(BaseModel):
         recipe = self.source_fit
         if recipe is None:
             return self
+        source_index = image_source_index(self.input_artifact_ids, self.input_image_roles)
         if (
             self.unavailable_reason is not None
             or self.operation != Operation.IMAGE_TO_IMAGE.value
@@ -321,8 +338,8 @@ class AcceptedContext(BaseModel):
             or self.workflow is None
             or self.workflow.engine != "comfyui"
             or self.workflow.id != self.workflow_revision_id
-            or not self.input_artifact_ids
-            or self.input_artifact_ids[0] != recipe.image.source_artifact_id
+            or source_index is None
+            or self.input_artifact_ids[source_index] != recipe.image.source_artifact_id
             or not recipe.retained_artifact_ids <= set(self.artifact_ids)
         ):
             raise ValueError("source_fit_context_binding")
@@ -365,6 +382,7 @@ def save_accepted_context(
     sources: list[str | None],
     artifact_ids: set[str],
     input_artifact_ids: list[str],
+    input_image_roles: list[ImageInputRole] | None = None,
     visual_artifact_ids: list[str],
     strict_artifact_ids: list[str],
     vision_settings: dict[str, Any],
@@ -543,6 +561,7 @@ def save_accepted_context(
         source_snapshot_sha256=edit_source.get("source_snapshot_sha256"),
         messages=entries,
         input_artifact_ids=input_artifact_ids,
+        input_image_roles=input_image_roles,
         visual_artifact_ids=visual_artifact_ids,
         visual_posters=visual_posters,
         strict_artifact_ids=strict_artifact_ids,
@@ -600,7 +619,7 @@ def _accepted_dependencies(session: Session, run: Run) -> list[ContextDependency
             )
         )
     )
-    requests: list[tuple[str, Literal["text", "artifact"] | None]] = []
+    requests: list[tuple[str, Literal["text", "artifact"] | None, ImageInputRole | None]] = []
     for binding in step.input_bindings_json:
         kind = binding.get("type")
         if kind not in {"step_output.text", "step_output.artifact"}:
@@ -608,11 +627,14 @@ def _accepted_dependencies(session: Session, run: Run) -> list[ContextDependency
         source_id = binding.get("source_step_id")
         if not isinstance(source_id, str) or source_id not in edges:
             raise ValueError("Accepted dependency identity is unavailable.")
-        requests.append((source_id, "text" if kind == "step_output.text" else "artifact"))
-    requested = {source_id for source_id, _ in requests}
-    requests.extend((source_id, None) for source_id in sorted(edges - requested))
+        role = binding.get("image_role")
+        if role not in (None, "edit_source", "reference"):
+            raise ValueError("Accepted dependency image purposes are unavailable.")
+        requests.append((source_id, "text" if kind == "step_output.text" else "artifact", role))
+    requested = {source_id for source_id, _, _ in requests}
+    requests.extend((source_id, None, None) for source_id in sorted(edges - requested))
     result: list[ContextDependency] = []
-    for source_id, kind in requests:
+    for source_id, kind, role in requests:
         producer_step = session.get(WorkStep, source_id)
         producer = (
             session.get(Run, producer_step.run_id)
@@ -628,6 +650,7 @@ def _accepted_dependencies(session: Session, run: Run) -> list[ContextDependency
                 plan_id=producer_step.plan_id,
                 run_id=producer.id,
                 message_id=producer.assistant_message_id,
+                image_role=role,
             )
         )
     return result
@@ -637,6 +660,7 @@ class ResolvedContextDependencies(NamedTuple):
     text_inputs: list[dict[str, str]]
     artifact_ids: list[str]
     visual_posters: dict[str, str]
+    image_roles: dict[str, ImageInputRole]
 
 
 def resolve_context_dependencies(
@@ -645,6 +669,7 @@ def resolve_context_dependencies(
     text_inputs: list[dict[str, str]] = []
     artifact_ids: list[str] = []
     visual_posters: dict[str, str] = {}
+    image_roles: dict[str, ImageInputRole] = {}
     for dependency in snapshot.dependencies:
         step = session.get(WorkStep, dependency.step_id)
         producer = session.get(Run, dependency.run_id)
@@ -710,9 +735,16 @@ def resolve_context_dependencies(
                 visual_posters.setdefault(artifact.id, poster.id)
         if not selected:
             raise RuntimeError("Accepted dependency media is unavailable.")
+        if dependency.image_role is not None:
+            if len(selected) != 1:
+                raise RuntimeError("Accepted dependency image purposes are ambiguous.")
+            identity = selected[0]
+            if identity in image_roles and image_roles[identity] != dependency.image_role:
+                raise RuntimeError("Accepted dependency image purposes are ambiguous.")
+            image_roles[identity] = dependency.image_role
         artifact_ids.extend(selected)
     return ResolvedContextDependencies(
-        text_inputs, list(dict.fromkeys(artifact_ids)), visual_posters
+        text_inputs, list(dict.fromkeys(artifact_ids)), visual_posters, image_roles
     )
 
 

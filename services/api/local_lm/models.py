@@ -3099,6 +3099,7 @@ class ChatComposerDraftAttachment(Base):
     )
     kind: Mapped[str] = mapped_column(String(16))
     origin: Mapped[str] = mapped_column(String(16))
+    image_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 class RetentionPolicy(TimestampMixin, Base):
