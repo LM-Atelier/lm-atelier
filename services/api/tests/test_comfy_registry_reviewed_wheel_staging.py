@@ -42,7 +42,9 @@ def source_review_context(tmp_path: Path) -> Iterator[tuple[Session, ArtifactSto
         f"sqlite:///{(tmp_path / 'reviews.sqlite3').as_posix()}",
         connect_args={"check_same_thread": False},
     )
-    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("BEGIN")
+        Base.metadata.create_all(connection)
     settings = Settings(data_dir=tmp_path / "data", dev=True)
     settings.prepare()
     try:
