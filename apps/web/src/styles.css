@@ -1243,6 +1243,9 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
 .editing-studio footer { display: flex; justify-content: flex-end; gap: calc(8px * var(--spacing-scale, 1)); }
 .setup-total { color: var(--muted); margin: -6px 0 12px; }
 .compare-dialog { width: min(760px, 96vw); }
+.video-frame-dialog { width: min(720px, 96vw); }
+.video-frame-picker { display: grid; gap: calc(8px * var(--spacing-scale, 1)); }
+.video-frame-picker video { display: block; width: 100%; max-height: 60vh; object-fit: contain; background: var(--surface-0); }
 .compare-stage { position: relative; overflow: hidden; border-radius: 10px; border: 1px solid var(--border); }
 .compare-stage img { display: block; width: 100%; max-height: 60vh; object-fit: contain; background: var(--surface-0); }
 .compare-stage img + img { position: absolute; inset: 0; height: 100%; }

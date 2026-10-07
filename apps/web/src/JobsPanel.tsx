@@ -12,6 +12,7 @@ function jobDisplayName(kind: string): string {
   if (kind === "edit_verify") return "Image edit check";
   if (kind === "registry_prepare") return "Package preparation";
   if (kind === "workflow_install") return "Workflow installation";
+  if (kind === "media_utility") return "Video utility";
   return kind;
 }
 

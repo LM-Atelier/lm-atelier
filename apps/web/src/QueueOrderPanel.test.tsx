@@ -9,7 +9,7 @@ import type { QueueOrderPage } from "./queueOrderTypes";
 vi.mock("./api", async (original) => ({
   ...(await original<typeof import("./api")>()),
   api: { queueOrder: vi.fn(), reorderQueue: vi.fn(), queueActivity: vi.fn(),
-    generationQueuePolicy: vi.fn(), transferQueuePolicy: vi.fn(), installQueuePolicy: vi.fn() },
+    generationQueuePolicy: vi.fn(), transferQueuePolicy: vi.fn(), installQueuePolicy: vi.fn(), utilityQueuePolicy: vi.fn(), utilityQueueControl: vi.fn() },
 }));
 const clients: QueryClient[] = [];
 let page: QueueOrderPage;
@@ -19,6 +19,7 @@ const advance = () => act(() => vi.advanceTimersByTimeAsync(50));
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(api.utilityQueuePolicy).mockResolvedValue({ lane: "utility", dispatch_state: "open", revision: 0, running_jobs: 0, allowed_actions: ["pause_after_current"] });
   vi.useFakeTimers();
   page = { lane: "transfer", revision: 7, total: 3, next_cursor: null,
     items: owners.map((owner, i) => ({
@@ -45,7 +46,7 @@ beforeEach(() => {
     return { lane, revision: page.revision, owner: command.owner };
   });
   vi.mocked(api.queueActivity).mockResolvedValue({ items: [], total: 0, next_cursor: null,
-    lane_counts: { generation: 0, transfer: 0, install: 0 }, observed_at: "2026-09-01T00:00:00Z" });
+    lane_counts: { generation: 0, transfer: 0, install: 0, utility: 0 }, observed_at: "2026-09-01T00:00:00Z" });
   vi.mocked(api.generationQueuePolicy).mockResolvedValue({ lane: "generation", revision: 0,
     dispatch_state: "open", running_jobs: 0, allowed_actions: ["pause_after_current"] });
   vi.mocked(api.transferQueuePolicy).mockResolvedValue({ lane: "transfer", revision: 0,

@@ -9,7 +9,7 @@ from pydantic import Field, StrictStr, model_validator
 
 from .schemas import ApiModel, QueueControlCommand
 
-QueueLane = Literal["generation", "transfer", "install"]
+QueueLane = Literal["generation", "transfer", "install", "utility"]
 
 
 class QueueOrderOwner(ApiModel):

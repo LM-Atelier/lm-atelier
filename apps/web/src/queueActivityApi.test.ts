@@ -5,7 +5,7 @@ afterEach(() => {
 });
 
 it("encodes the queue cursor and forwards cancellation without a request body", async () => {
-  const result = { items: [], total: 0, lane_counts: { generation: 0, transfer: 0, install: 0 },
+  const result = { items: [], total: 0, lane_counts: { generation: 0, transfer: 0, install: 0, utility: 0 },
     next_cursor: null, observed_at: "2026-09-01T00:00:00Z" };
   const fetchMock = vi.fn()
     .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))

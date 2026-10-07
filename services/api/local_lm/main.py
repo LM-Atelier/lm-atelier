@@ -73,6 +73,7 @@ from .security import (
     UploadBodyLimitMiddleware,
 )
 from .seed import seed_defaults
+from .video_utilities import VideoUtilityManager
 from .worker_startup import restore_configured_workers
 from .workflow_editor_sessions import WorkflowEditorSessions
 from .workflow_selection_errors import register_workflow_selection_error_handler
@@ -335,6 +336,7 @@ class Services:
     workflow_editor_sessions: WorkflowEditorSessions
     workspace_lock: WorkspaceLock
     power: PowerInhibitor
+    video_utilities: VideoUtilityManager
 
     @property
     def catalog(self) -> HuggingFaceCatalog:
@@ -394,6 +396,7 @@ def build_services(settings: Settings) -> Services:
         # Built locked; the lifespan settles it from the saved setting.
         workspace_lock=WorkspaceLock(),
         power=power,
+        video_utilities=VideoUtilityManager(artifacts, scheduler),
     )
     return services
 
@@ -790,6 +793,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 services.downloads.recover_interrupted()
             with _startup_stage("registry-preparation-recovery"):
                 recover_registry_preparations(services)
+            with _startup_stage("video-utility-recovery"):
+                services.video_utilities.recover()
             with _startup_stage("generation-queue-recovery"), SessionLocal() as session:
                 recover_queue_lanes(session)
                 session.commit()
@@ -842,6 +847,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     with suppress(asyncio.CancelledError):
                         await task
                 await shutdown_registry_preparations()
+                await services.video_utilities.close()
                 services.workflow_editor_sessions.clear()
                 await services.downloads.close()
                 await services.orchestrator.close()

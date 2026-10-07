@@ -61,6 +61,7 @@ export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
             <option value="generation">Generation</option>
             <option value="transfer">Transfers</option>
             <option value="install">Installs</option>
+            <option value="utility">Video utilities</option>
           </select>
         </label>
         <button className="secondary compact-button" aria-disabled={activity.isFetching}
@@ -75,6 +76,7 @@ export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
       <GenerationQueueControls />
       <QueueLaneControls lane="transfer" />
       <QueueLaneControls lane="install" />
+      <QueueLaneControls lane="utility" />
       {activity.error && (
         <div role="alert" className="queue-activity-error">
           {activity.error.message}
@@ -86,7 +88,7 @@ export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
         <>
           <p className="queue-activity-counts">
             {first.lane_counts.generation} generation · {first.lane_counts.transfer} transfer ·{" "}
-            {first.lane_counts.install} install
+            {first.lane_counts.install} install · {first.lane_counts.utility} video utility
           </p>
           <p role="status">Showing {items.length} of {first.total} active items</p>
           {!items.length && !activity.error && <p>No active accepted work in this category.</p>}

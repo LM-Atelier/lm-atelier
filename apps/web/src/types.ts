@@ -12,6 +12,7 @@ export type * from "./workerStatusTypes";
 import type { WorkflowInstallOffer } from "./workflowInstallOfferTypes";
 export type * from "./workflowInstallOfferTypes";
 export type * from "./priorTurnEditTypes";
+export type * from "./videoUtilityTypes";
 export type * from "./studioLocalEditTypes";
 export type * from "./enlargementTypes";
 export type * from "./recipeDraftTypes";
@@ -31,7 +32,8 @@ export type JobKind =
   | "download"
   | "registry_prepare"
   | "workflow_install"
-  | "export";
+  | "export"
+  | "media_utility";
 export type JobStatus =
   | "queued"
   | "running"
@@ -465,6 +467,7 @@ export interface QueueLaneCounts {
   generation: number;
   transfer: number;
   install: number;
+  utility: number;
 }
 
 export type GenerationQueueAction = "pause_after_current" | "resume";
@@ -485,6 +488,15 @@ export interface TransferQueuePolicy {
   allowed_actions: TransferQueueAction[];
 }
 
+export type UtilityQueueAction = "pause_after_current" | "resume";
+export interface UtilityQueuePolicy {
+  lane: "utility";
+  dispatch_state: "open" | "draining" | "paused";
+  revision: number;
+  running_jobs: number;
+  allowed_actions: UtilityQueueAction[];
+}
+
 export interface QueueControlCommand {
   expected_revision: number;
   idempotency_key: string;
@@ -501,7 +513,7 @@ export interface QueueActivityItem {
   owner_type: "work_plan" | "job";
   owner_id: string;
   label: string;
-  lane: "generation" | "transfer" | "install";
+  lane: "generation" | "transfer" | "install" | "utility";
   status: "running" | "queued" | "paused" | "blocked";
   chat_id: string | null;
   chat_title: string | null;

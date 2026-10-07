@@ -1650,6 +1650,7 @@ class QueueLaneCountsOut(ApiModel):
     generation: int = Field(default=0, ge=0)
     transfer: int = Field(default=0, ge=0)
     install: int = Field(default=0, ge=0)
+    utility: int = Field(default=0, ge=0)
 
 
 class QueueControlCommand(ApiModel):
@@ -1688,11 +1689,19 @@ class InstallQueuePolicyOut(ApiModel):
     allowed_actions: list[Literal["pause_after_current", "resume"]]
 
 
+class UtilityQueuePolicyOut(ApiModel):
+    lane: Literal["utility"]
+    dispatch_state: Literal["open", "draining", "paused"]
+    revision: int = Field(ge=0)
+    running_jobs: int = Field(ge=0)
+    allowed_actions: list[Literal["pause_after_current", "resume"]]
+
+
 class QueueActivityItemOut(ApiModel):
     owner_type: Literal["work_plan", "job"]
     owner_id: str
     label: str
-    lane: Literal["generation", "transfer", "install"]
+    lane: Literal["generation", "transfer", "install", "utility"]
     status: Literal["running", "queued", "paused", "blocked"]
     chat_id: str | None
     chat_title: str | None

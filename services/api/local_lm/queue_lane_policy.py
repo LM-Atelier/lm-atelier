@@ -18,9 +18,9 @@ from .domain import JobKind, JobStatus
 from .models import GenerationQueuePolicy, GenerationQueueReceipt, Job
 from .schemas import QueueControlCommand
 
-Lane = Literal["generation", "transfer", "install"]
+Lane = Literal["generation", "transfer", "install", "utility"]
 Action = Literal["pause_after_current", "resume"]
-LANES: tuple[Lane, ...] = ("generation", "transfer", "install")
+LANES: tuple[Lane, ...] = ("generation", "transfer", "install", "utility")
 GENERATION_KINDS = (
     JobKind.CHAT.value,
     JobKind.IMAGE.value,
@@ -33,10 +33,12 @@ INSTALL_KINDS = (
     JobKind.REGISTRY_PREPARE.value,
     JobKind.WORKFLOW_INSTALL.value,
 )
+UTILITY_KINDS = (JobKind.MEDIA_UTILITY.value,)
 _KINDS: dict[Lane, tuple[str, ...]] = {
     "generation": GENERATION_KINDS,
     "transfer": TRANSFER_KINDS,
     "install": INSTALL_KINDS,
+    "utility": UTILITY_KINDS,
 }
 _MAX_REVISION = 9_223_372_036_854_775_807
 

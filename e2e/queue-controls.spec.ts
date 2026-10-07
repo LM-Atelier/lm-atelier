@@ -24,7 +24,7 @@ for (const firstToFinish of ["plan-a", "plan-b"]) {
     await page.route("**/api/queue/activity?*", async (route) => {
       await route.fulfill({ json: {
         items, total: items.length,
-        lane_counts: { generation: items.length, transfer: 0, install: 0 },
+        lane_counts: { generation: items.length, transfer: 0, install: 0, utility: 0 },
         next_cursor: null, observed_at: stamp,
       } });
     });

@@ -18,7 +18,7 @@ async function openOrder(page: Page) {
     };
   };
   await page.route("**/api/queue/activity?*", (route) => route.fulfill({ json: {
-    items: [], total: 0, lane_counts: { generation: 0, transfer: 0, install: 0 },
+    items: [], total: 0, lane_counts: { generation: 0, transfer: 0, install: 0, utility: 0 },
     next_cursor: null, observed_at: "2026-09-01T00:00:00Z",
   } }));
   for (const lane of ["generation", "transfer"]) {

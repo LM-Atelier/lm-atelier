@@ -1,6 +1,6 @@
 import type { QueueControlCommand } from "./types";
 
-export type QueueLane = "generation" | "transfer" | "install";
+export type QueueLane = "generation" | "transfer" | "install" | "utility";
 export interface QueueOrderOwner {
   type: "work_plan" | "job";
   id: string;
