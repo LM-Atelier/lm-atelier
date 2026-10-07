@@ -644,3 +644,13 @@ it("keeps an accepted trim when its progress cannot be read, and reads it again 
   expect(api.videoUtilityJob).toHaveBeenCalledTimes(reads + 1);
   expect(api.trimVideo).toHaveBeenCalledTimes(1);
 });
+
+it("says the tools it runs were found on this computer, and only when they were", async () => {
+  const found = "The video utilities use the ffmpeg and ffprobe found on this computer, which the app has not checked.";
+  await open();
+  expect(screen.getByText(found)).toBeInTheDocument();
+
+  cleanup();
+  await open({ ...PROBE, tool: { ...PROBE.tool, origin: "provided" } });
+  expect(screen.queryByText(found)).not.toBeInTheDocument();
+});

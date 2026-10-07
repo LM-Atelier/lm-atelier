@@ -8,7 +8,7 @@ import { ShieldedMedia } from "./ShieldedMedia";
 import type { Job, VideoProbe, VideoTrimMode, VideoTrimPreview, VideoTrimRequest } from "./types";
 import { EXACT_LIMIT_TEXT, SAME_MOMENT, previewLines, savedLines, workingText } from "./videoTrimText";
 import { JobReadProblem } from "./VideoUtilityJobRead";
-import { FINISHED, LIMIT_TEXT, useVideoProbe, useVideoUtilityJob } from "./videoUtilityText";
+import { FINISHED, FOUND_TOOLS_TEXT, LIMIT_TEXT, toolBuild, useVideoProbe, useVideoUtilityJob } from "./videoUtilityText";
 
 interface Cut {
   start: number;
@@ -184,6 +184,7 @@ function VideoTrimEditor({ artifactId, source, facts, duration }: {
   return (
     <div className="video-utility-body">
       <p>Choose the part to keep, and how to cut it. The original is not changed.</p>
+      {toolBuild(facts.tool)?.found && <p>{FOUND_TOOLS_TEXT}</p>}
       {/* Covered or hidden here as everywhere else the video appears, until someone shows it. */}
       <ShieldedMedia kind="video">
         {/* A stored video has no caption track to point at, and an empty one would claim one. */}
