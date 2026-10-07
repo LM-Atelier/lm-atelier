@@ -39,6 +39,7 @@ from local_lm.artifacts import ArtifactStore, RetentionCleanupSummary
 from local_lm.config import Settings
 from local_lm.db import Base, SessionLocal
 from local_lm.domain import ArtifactKind
+from local_lm.filesystem_links import list_entries
 from local_lm.main import create_app
 from local_lm.models import Artifact
 
@@ -671,7 +672,7 @@ async def test_slow_staging_recovery_keeps_the_deletion_budget(
     clock = 0.0
     delays = 0
     removed: list[int] = []
-    real_listing = artifacts_module.list_entries
+    real_listing = list_entries
     real_cleanup = ArtifactStore.cleanup_retention
 
     def slow_listing(*args: Any, **kwargs: Any) -> Any:

@@ -16,9 +16,10 @@ from collections.abc import AsyncIterator, Awaitable
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, BinaryIO
 
 import pytest
+from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from httpx2 import AsyncClient
 from PIL import Image
 
@@ -36,7 +37,7 @@ from local_lm.portable_archive_v1 import (
     read_header,
     write_archive,
 )
-from local_lm.project_archive_encryption import STAGING_FOLDER, STAGING_PREFIX
+from local_lm.project_archive_encryption import STAGING_FOLDER, STAGING_PREFIX, staging_path
 
 PASSPHRASE = "correct horse battery staple"
 # Archives sealed by hand here open the same way with a cheaper key; the
@@ -447,9 +448,9 @@ async def test_a_check_cancelled_mid_write_keeps_the_upload_until_the_write_ends
 async def test_a_backup_that_does_not_open_again_is_not_kept(
     client: AsyncClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real = backup_archives.write_archive
+    real = write_archive
 
-    def damaging(source: Any, destination: Any, **kwargs: Any) -> int:
+    def damaging(source: BinaryIO, destination: BinaryIO, **kwargs: Any) -> int:
         # A byte past the end, which no honest archive has.
         return real(source, destination, **kwargs) + destination.write(b"\x00")
 
@@ -466,7 +467,7 @@ async def test_a_backup_that_does_not_open_again_is_not_kept(
 async def test_the_plaintext_copy_is_staged_privately_under_the_name_startup_removes(
     client: AsyncClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real = backup_archives.staging_path
+    real = staging_path
     made: list[Path] = []
 
     def recording(directory: Path, suffix: str) -> Path:
@@ -672,7 +673,7 @@ async def test_a_passphrase_longer_than_the_format_allows_is_refused_before_any_
 async def test_a_check_after_sealing_without_memory_is_not_called_an_unverified_backup(
     client: AsyncClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real = portable_archive_v1.Argon2id
+    real = Argon2id
     derivations: list[int] = []
 
     class _CheckWithoutMemory:

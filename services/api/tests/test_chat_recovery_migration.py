@@ -10,7 +10,7 @@ import pytest
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from sqlalchemy import select, text, update
+from sqlalchemy import Engine, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from test_migrations import _is_the_recorded_uniqueness_allowance
@@ -29,7 +29,7 @@ RECOVERY = "4b6e18d7c092"
 TABLES = {"recovery_items", "recovery_operations", "recovery_previews"}
 
 
-def _previous_database(tmp_path: Path):
+def _previous_database(tmp_path: Path) -> tuple[Settings, Engine]:
     settings = Settings(data_dir=tmp_path / "data", chat_engine="mock", media_engine="mock")
     settings.prepare()
     command.upgrade(alembic_config(settings), PREVIOUS)
@@ -64,9 +64,9 @@ def test_upgrade_keeps_history_and_installs_the_canonical_bulk_write_guards(tmp_
         assert tuple(session.execute(text("SELECT * FROM message_parts")).all()) == before
         assert session.scalar(select(Chat.title)) == "Garden notes"
         triggers = dict(
-            session.execute(
-                text("SELECT name, sql FROM sqlite_master WHERE type = 'trigger'")
-            ).all()
+            session.execute(text("SELECT name, sql FROM sqlite_master WHERE type = 'trigger'"))
+            .tuples()
+            .all()
         )
         for statement in CREATE_CHAT_RECOVERY_TRIGGER_SQL:
             assert triggers[statement.split()[2]].strip() == statement.strip()

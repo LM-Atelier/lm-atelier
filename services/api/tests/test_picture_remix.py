@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
+from httpx2 import AsyncClient as CurrentAsyncClient
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 from sqlalchemy import func, select
@@ -82,7 +83,7 @@ def _revision(name: str, *, input_schema: dict[str, Any] | None = None) -> str:
         return revision.id
 
 
-async def _uploaded(client: AsyncClient, content: bytes) -> str:
+async def _uploaded(client: AsyncClient | CurrentAsyncClient, content: bytes) -> str:
     response = await client.post(
         "/api/artifacts", files={"file": ("picture.png", content, "image/png")}
     )
@@ -91,7 +92,7 @@ async def _uploaded(client: AsyncClient, content: bytes) -> str:
 
 
 async def _preview(
-    client: AsyncClient,
+    client: AsyncClient | CurrentAsyncClient,
     artifact_id: str,
     revision_id: str,
     profile_id: str,
@@ -437,7 +438,7 @@ async def _new_chat(client: AsyncClient, title: str = "Remix") -> str:
 
 
 async def _queue(
-    client: AsyncClient,
+    client: AsyncClient | CurrentAsyncClient,
     chat_id: str,
     artifact_id: str,
     preview: dict[str, Any],

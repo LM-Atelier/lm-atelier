@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 from httpx2 import ASGITransport, AsyncClient
 
-from local_lm import backups as backups_module
 from local_lm.backups import BackupManager
 from local_lm.config import Settings
 from local_lm.main import create_app
@@ -117,7 +116,7 @@ def test_a_requested_restore_that_cannot_replace_the_data_keeps_it_and_its_log(
             raise PermissionError("the database file is in use")
         real_replace(source, target)
 
-    monkeypatch.setattr(backups_module.os, "replace", refusing)
+    monkeypatch.setattr(os, "replace", refusing)
 
     assert manager.apply_pending_restore() is False
 
@@ -146,7 +145,7 @@ def test_a_requested_restore_whose_log_cannot_be_put_back_stops_the_start(
             raise PermissionError("the file is in use")
         real_replace(source, target)
 
-    monkeypatch.setattr(backups_module.os, "replace", refusing)
+    monkeypatch.setattr(os, "replace", refusing)
 
     with pytest.raises(OSError):
         manager.apply_pending_restore()

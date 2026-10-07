@@ -12,12 +12,15 @@ from local_lm.downloads import DownloadManager
 from local_lm.models import Chat, ModelInstall, ModelProfile, Project
 from local_lm.profile_service import retire_profiles_for_installs
 from local_lm.workflow_compatibility import (
+    ChatSelectorCapability,
     ensure_legacy_profile_workflow,
     mirror_legacy_chat_workflow_selections,
 )
 
 
-def _bound_profile(app: FastAPI, capability: str = "chat") -> tuple[str, str, str]:
+def _bound_profile(
+    app: FastAPI, capability: ChatSelectorCapability = "chat"
+) -> tuple[str, str, str]:
     path = app.state.services.settings.model_dir / "neutral-recovery-model.gguf"
     path.write_bytes(b"neutral model fixture")
     with SessionLocal() as session:
@@ -53,7 +56,7 @@ def _bound_profile(app: FastAPI, capability: str = "chat") -> tuple[str, str, st
 async def test_profile_deletion_explains_its_recovery_dependency_and_preserves_restore(
     app: FastAPI,
     client: AsyncClient,
-    capability: str,
+    capability: ChatSelectorCapability,
 ) -> None:
     _install_id, profile_id, chat_id = _bound_profile(app, capability)
     item = await _trash(client, f"/api/chats/{chat_id}", "trash-profile-dependent")
@@ -116,7 +119,9 @@ async def test_preset_deletion_preserves_a_hidden_binding_until_restore(
     response = await client.delete(f"/api/presets/{preset['id']}")
     assert response.status_code == 204, response.text
     with SessionLocal() as session:
-        resource = session.get(Chat if kind == "chat" else Project, owner["id"])
+        resource = (
+            session.get(Chat, owner["id"]) if kind == "chat" else session.get(Project, owner["id"])
+        )
         assert resource is not None
         assert "chat" not in resource.generation_preset_ids_json
         assert resource.generation_settings_json["chat"]["temperature"] == 0.2
@@ -151,11 +156,15 @@ async def test_model_retirement_skips_hidden_chats_and_restore_repairs_their_def
             )
             assert retired == [install_id]
         else:
-            session.get(ModelInstall, install_id).active = False
+            installed = session.get(ModelInstall, install_id)
+            assert installed is not None
+            installed.active = False
             retired = retire_profiles_for_installs(session, [install_id])
             assert retired == [profile_id]
         session.commit()
-        assert session.get(Chat, chat_id).active_chat_profile_id == profile_id
+        restored_chat = session.get(Chat, chat_id)
+        assert restored_chat is not None
+        assert restored_chat.active_chat_profile_id == profile_id
     await _restore(client, item["deletion_id"])
     metadata: dict[str, Any] = (await client.get(f"/api/chats/{chat_id}/metadata")).json()
     assert metadata["active_chat_profile_id"] == "__auto__"

@@ -8,13 +8,14 @@ from typing import Any
 
 import pytest
 from fastapi import FastAPI
-from httpx import AsyncClient
+from httpx2 import AsyncClient
 from test_output_recipe_adaptation import _adapt
 from test_output_recipe_replay import _profile as _recorded_profile
 from test_output_recipe_replay import _recorded, _replay, _resealed
 from test_picture_remix import SETTINGS, _png, _preview, _profile, _queue, _revision, _uploaded
 
 from local_lm import api as api_module
+from local_lm.picture_remix import preview_remix
 
 
 async def _new_chat(client: AsyncClient) -> str:
@@ -92,7 +93,7 @@ async def test_a_refused_remix_leaves_its_chat_blank(
     artifact_id = await _uploaded(client, _png(("parameters", SETTINGS)))
     profile_id, revision_id = _profile("Ceramic model"), _revision("Ceramic workflow")
     preview = (await _preview(client, artifact_id, revision_id, profile_id, ["steps"])).json()
-    real = api_module.preview_remix
+    real = preview_remix
 
     async def shown_otherwise(*args: Any, **kwargs: Any) -> Any:
         # Refused only once the turn is being built, after the chat was checked as clean.

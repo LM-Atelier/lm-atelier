@@ -1377,6 +1377,7 @@ async def test_runtime_contract_does_not_count_a_linked_distribution(
     def _matching_probe(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
         del kwargs
         command = args[0] if args else []
+        assert isinstance(command, list)
         return subprocess.CompletedProcess(
             command,
             0,
