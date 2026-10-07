@@ -49,7 +49,9 @@ run_checked "Ruff lint" \
 # they were added the tools that judge the gate were the only Python in the
 # repository the gate never judged.
 run_checked "Strict mypy" \
-  "$python_tools/mypy" --config-file services/api/pyproject.toml services/api/local_lm scripts
+  env MYPYPATH="$root/services/api:$root/services/api/tests" \
+  "$python_tools/mypy" --explicit-package-bases --config-file services/api/pyproject.toml \
+    services/api/local_lm services/api/tests scripts
 run_checked "Bandit high-severity scan" \
   "$python_tools/bandit" -q -lll -r services/api/local_lm
 run_checked "Version metadata" \
