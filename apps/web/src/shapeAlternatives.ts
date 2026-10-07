@@ -1,5 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "./api";
+import { useWorkflowSelectionSave } from "./useWorkflowSelectionSave";
 import { operationForTurn, revisionForTurn, type TurnOperation } from "./turnWorkflow";
 import { orderFamilies, servesCapability } from "./workflowFamilies";
 import type { WorkflowFamily } from "./types";
@@ -78,18 +77,13 @@ export function useShapeAlternatives({
   currentRevisionId: string | null;
   enabled: boolean;
 }): ShapeAlternatives | undefined {
-  const client = useQueryClient();
-  const choose = useMutation({
-    mutationFn: ({ chat, kind, familyId }: { chat: string; kind: "image" | "video"; familyId: string }) =>
-      api.setChatWorkflowSelection(chat, kind, { mode: "family", workflow_family_id: familyId }),
-    onSuccess: (_selection, { chat }) =>
-      void client.invalidateQueries({ queryKey: ["chat", chat, "workflow-selections"] }),
-  });
+  const choose = useWorkflowSelectionSave(!enabled || !chatId || !capability ? null
+    : { kind: "chat", id: chatId, capability });
   if (!enabled || !chatId || !capability) return undefined;
   return {
     candidates: shapeAlternativeCandidates(families, capability, hasAttachments, currentRevisionId),
-    onChoose: (familyId) => choose.mutate({ chat: chatId, kind: capability, familyId }),
-    choosing: choose.isPending,
-    error: choose.error ? (choose.error as Error).message : null,
+    onChoose: (familyId) => choose.choose({ mode: "family", workflow_family_id: familyId }),
+    choosing: choose.saving,
+    error: choose.error ? choose.error.message : null,
   };
 }

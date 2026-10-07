@@ -1,12 +1,11 @@
 import { useId } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
 import { readinessReason } from "./readinessReason";
 import { useWorkflowFamilyChoices } from "./useWorkflowFamilyChoices";
+import { useWorkflowSelectionSave } from "./useWorkflowSelectionSave";
 import { WorkflowFamilyBrowseControls } from "./WorkflowFamilyBrowseControls";
 import type {
-  ChatWorkflowSelectionInput,
-  ProjectWorkflowSelectionInput,
   WorkflowFamily,
   WorkflowSelection,
   WorkflowSelectorCapability,
@@ -35,7 +34,6 @@ export function WorkflowSelector({
   label: string;
 }) {
   const selectorId = useId();
-  const client = useQueryClient();
   const selections = useQuery({
     queryKey: [scope, scopeId, "workflow-selections"],
     queryFn: () =>
@@ -52,22 +50,7 @@ export function WorkflowSelector({
   );
   const ordered = families.families;
 
-  const choose = useMutation({
-    mutationFn: (selection: ChatWorkflowSelectionInput | ProjectWorkflowSelectionInput) =>
-      scope === "chat"
-        ? api.setChatWorkflowSelection(
-            scopeId,
-            capability,
-            selection as ChatWorkflowSelectionInput,
-          )
-        : api.setProjectWorkflowSelection(
-            scopeId,
-            capability,
-            selection as ProjectWorkflowSelectionInput,
-          ),
-    onSuccess: () =>
-      void client.invalidateQueries({ queryKey: [scope, scopeId, "workflow-selections"] }),
-  });
+  const choose = useWorkflowSelectionSave({ kind: scope, id: scopeId, capability });
 
   // Neither read having arrived is not the same as an answer. Undefined data
   // fell straight through the value chain below: a failed families read
@@ -134,13 +117,13 @@ export function WorkflowSelector({
       <select
         id={selectorId}
         value={value}
-        disabled={choose.isPending || families.isLoading || selections.isLoading}
+        disabled={choose.saving || families.isLoading || selections.isLoading}
         onChange={(event) => {
           const next = event.target.value;
           if (next === REVISION_VALUE || next === LEGACY_VALUE) return;
-          if (next === followMode) choose.mutate({ mode: followMode } as never);
-          else if (next === "automatic") choose.mutate({ mode: "automatic" });
-          else choose.mutate({ mode: "family", workflow_family_id: next });
+          if (next === followMode) choose.choose({ mode: followMode });
+          else if (next === "automatic") choose.choose({ mode: "automatic" });
+          else choose.choose({ mode: "family", workflow_family_id: next });
         }}
       >
         <option value={followMode}>
