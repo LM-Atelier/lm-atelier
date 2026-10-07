@@ -148,7 +148,7 @@ async def test_waiting_activation_cleanup_checks_the_claim_after_the_worker_lock
         state="ready",
     )
     try:
-        await asyncio.wait_for(lock.entered.wait(), timeout=2)
+        await asyncio.wait_for(lock.entered.wait(), timeout=PATIENCE_SECONDS)
         assert not task.done()
         supervisor._workers["chat"] = record
         if disposition != "owned":

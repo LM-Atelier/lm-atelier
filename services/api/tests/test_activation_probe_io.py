@@ -31,7 +31,7 @@ async def test_activation_input_write_finishes_before_cancellation_removes_it(
             return real_write(path, content)
         paths.append(path)
         entered.set()
-        assert release.wait(timeout=5), "The neutral input write was not released."
+        assert release.wait(timeout=PATIENCE_SECONDS), "The neutral input write was not released."
         try:
             return real_write(path, content)
         finally:
@@ -58,7 +58,7 @@ async def test_activation_input_write_finishes_before_cancellation_removes_it(
     monkeypatch.setattr(Path, "write_bytes", write)
     task = asyncio.create_task(manager._probe_adaptive_checkpoint(compiled))
     try:
-        await _until(entered.is_set)
+        await _until(entered.is_set, timeout=PATIENCE_SECONDS)
         if disposition != "owned":
             task.cancel()
         await asyncio.sleep(0.04)
@@ -82,4 +82,4 @@ async def test_activation_input_write_finishes_before_cancellation_removes_it(
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         if entered.is_set():
-            await _until(finished.is_set)
+            await _until(finished.is_set, timeout=PATIENCE_SECONDS)

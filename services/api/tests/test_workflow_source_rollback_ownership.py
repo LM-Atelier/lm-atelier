@@ -192,7 +192,7 @@ async def test_source_batch_rollback_keeps_a_replacement_worker_after_waiting_fo
         manager.start_workflow_installation(offer_id)
         task = manager._offer_tasks[offer_id]
         try:
-            await asyncio.wait_for(entered.wait(), timeout=6)
+            await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
             assert len(created) == 1
             with SessionLocal() as session:
                 install = session.scalar(select(ComfyRegistryInstall))
@@ -201,7 +201,7 @@ async def test_source_batch_rollback_keeps_a_replacement_worker_after_waiting_fo
             await lock.acquire()
             lock.entered.clear()
             release.set()
-            await asyncio.wait_for(lock.entered.wait(), timeout=3)
+            await asyncio.wait_for(lock.entered.wait(), timeout=PATIENCE_SECONDS)
             assert not task.done()
             previous = supervisor._workers["media"]
             supervisor._workers["media"] = replacement

@@ -126,12 +126,12 @@ async def test_registry_restoration_rechecks_the_claim_inside_worker_startup(
     model_paths = settings.state_dir / "comfy-extra-model-paths.yaml"
     replacement_paths = b"replacement configuration marker"
     try:
-        await asyncio.wait_for(dependencies_entered.wait(), timeout=3)
+        await asyncio.wait_for(dependencies_entered.wait(), timeout=PATIENCE_SECONDS)
         if boundary == "lock":
             await lock.acquire()
             lock.entered.clear()
             dependencies_release.set()
-            await asyncio.wait_for(lock.entered.wait(), timeout=3)
+            await asyncio.wait_for(lock.entered.wait(), timeout=PATIENCE_SECONDS)
         assert not task.done()
         supervisor._workers["media"] = replacement
         with SessionLocal() as session:

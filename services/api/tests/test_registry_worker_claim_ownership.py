@@ -98,9 +98,9 @@ async def test_registry_setup_preserves_a_replacement_worker_after_waiting_for_i
     replacement = record("replacement-worker")
     try:
         if boundary == "restore":
-            await asyncio.wait_for(prepared.wait(), timeout=3)
+            await asyncio.wait_for(prepared.wait(), timeout=PATIENCE_SECONDS)
             release.set()
-        await asyncio.wait_for(lock.entered.wait(), timeout=3)
+        await asyncio.wait_for(lock.entered.wait(), timeout=PATIENCE_SECONDS)
         assert not task.done()
         supervisor._workers["media"] = replacement
         with SessionLocal() as session:
