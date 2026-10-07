@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
+from verification_phase_timings import register_verification_phase_timings
 
 import local_lm
 from local_lm import db
@@ -48,6 +49,10 @@ if _IMPORTED_FROM != _EXPECTED_PACKAGE:
         "Set PYTHONPATH to this worktree before running:\n"
         f"  PYTHONPATH={_REPOSITORY_ROOT / 'services' / 'api'}"
     )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    register_verification_phase_timings(config)
 
 
 @pytest.fixture(scope="session")
