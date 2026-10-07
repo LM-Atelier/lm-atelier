@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import sys
 import threading
 from typing import cast
@@ -31,7 +33,24 @@ async def _start_neutral_worker(
     exit_after_seconds: float | None = None,
 ) -> tuple[ProcessSupervisor, WorkerRecord, ComfyEditorBridgeSupport]:
     supervisor = ProcessSupervisor(settings, liveness_interval_seconds=60)
-    monkeypatch.setattr(supervisor, "_wait_healthy", AsyncMock())
+    ready_path = settings.data_dir / "neutral-worker-ready.json"
+
+    async def wait_for_child_start(record: WorkerRecord, _health_url: str) -> None:
+        async with asyncio.timeout(30):
+            while True:
+                try:
+                    started = json.loads(ready_path.read_text())
+                    child = psutil.Process(int(started["pid"]))
+                    if child.create_time() == float(started["create_time"]) and (
+                        child.pid == record.process.pid
+                        or record.process.pid in {parent.pid for parent in child.parents()}
+                    ):
+                        return
+                except (OSError, ValueError, KeyError, psutil.Error):
+                    pass
+                await asyncio.sleep(0.01)
+
+    monkeypatch.setattr(supervisor, "_wait_healthy", AsyncMock(side_effect=wait_for_child_start))
     support = ComfyEditorBridgeSupport(
         True, "ready", "Native workflow editing is available.", "0.28.0", "1.45.21"
     )
@@ -40,9 +59,15 @@ async def _start_neutral_worker(
         [
             sys.executable,
             "-c",
-            "import time; time.sleep(60)"
-            if exit_after_seconds is None
-            else f"import time; time.sleep({exit_after_seconds}); raise SystemExit(9)",
+            "import json, pathlib, psutil, sys, time; process = psutil.Process(); "
+            "pathlib.Path(sys.argv[1]).write_text(json.dumps({"
+            "'pid': process.pid, 'create_time': process.create_time()})); "
+            + (
+                "time.sleep(60)"
+                if exit_after_seconds is None
+                else f"time.sleep({exit_after_seconds}); raise SystemExit(9)"
+            ),
+            str(ready_path),
         ],
         f"{settings.comfy_url}/health",
         launch_scope_sha256="a" * 64,
@@ -226,4 +251,36 @@ async def test_an_exit_event_waits_for_worker_cleanup_to_finish(
     finally:
         release.set()
         monkeypatch.setattr(supervisor, "_matching_worker_processes", original_matches)
+        await supervisor.close()
+
+
+@pytest.mark.parametrize("invalid", ["birth_time", "parent"])
+async def test_a_startup_marker_must_belong_to_the_current_worker(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, invalid: str
+) -> None:
+    supervisor, record, _support = await _start_neutral_worker(settings, monkeypatch)
+    ready_path = settings.data_dir / "neutral-worker-ready.json"
+    root = psutil.Process(record.process.pid)
+    genuine = (
+        ready_path.read_text()
+        if ready_path.exists()
+        else json.dumps({"pid": root.pid, "create_time": root.create_time()})
+    )
+    if invalid == "birth_time":
+        marker = {"pid": root.pid, "create_time": root.create_time() + 1}
+    else:
+        unrelated = psutil.Process(os.getpid())
+        marker = {"pid": unrelated.pid, "create_time": unrelated.create_time()}
+    ready_path.write_text(json.dumps(marker))
+    check = asyncio.create_task(supervisor._wait_healthy(record, f"{settings.comfy_url}/health"))
+    try:
+        await asyncio.sleep(0.05)
+        assert not check.done()
+        ready_path.write_text(genuine)
+        await asyncio.wait_for(check, timeout=5)
+    finally:
+        ready_path.write_text(genuine)
+        if not check.done():
+            check.cancel()
+            await asyncio.gather(check, return_exceptions=True)
         await supervisor.close()
