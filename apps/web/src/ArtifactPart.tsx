@@ -26,6 +26,7 @@ import { ShieldedMedia } from "./ShieldedMedia";
 import { sourcePixelsChanged } from "./sourceFitAgreement";
 import type { MessagePart } from "./types";
 import { VideoFrameButton } from "./VideoFrameButton";
+import { VideoTrimButton } from "./VideoTrimButton";
 
 export function ArtifactPart({
   part,
@@ -202,6 +203,7 @@ export function ArtifactPart({
         <a href={source} download>Download</a>
         {recordRunId && <GenerationRecordButton runId={recordRunId} artifactId={part.artifact_id} kind="video" />}
         {!preview && <VideoFrameButton artifactId={part.artifact_id} source={source} />}
+        {!preview && <VideoTrimButton artifactId={part.artifact_id} source={source} />}
       </figcaption>
       {!preview && !inputReference && origin !== null && origin !== "uploaded" && <GenerationDetails provenance={generationProvenance} />}
     </figure>

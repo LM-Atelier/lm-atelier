@@ -709,6 +709,25 @@ def open_entry(anchor: AnchoredDirectory, name: str) -> int | None:
     The caller owns the descriptor and must close it.
     """
 
+    return _open_existing_entry(anchor, name, intent="open_file")
+
+
+def open_entry_unshared(anchor: AnchoredDirectory, name: str) -> int | None:
+    """Open an EXISTING entry as open_entry does, and on Windows keep it as it is while held.
+
+    On Windows the entry is opened without write or delete sharing: while the
+    descriptor is held, nothing else can open it to write, rename it, replace
+    it or delete it, and an entry something already holds open for writing
+    refuses. Readers can still open it. Other systems have no sharing modes,
+    so there it is opened exactly as open_entry opens it.
+
+    The caller owns the descriptor and must close it.
+    """
+
+    return _open_existing_entry(anchor, name, intent="open_unshared_file")
+
+
+def _open_existing_entry(anchor: AnchoredDirectory, name: str, *, intent: str) -> int | None:
     _require_entry_name(name)
     if anchor.descriptor is not None:
         # O_NONBLOCK matters as much as O_NOFOLLOW here: opening a named pipe
@@ -726,7 +745,7 @@ def open_entry(anchor: AnchoredDirectory, name: str) -> int | None:
     handle = anchor.handle
     if handle is None:
         _refuse()
-    opened, status = _nt_try_open_relative(handle, name, intent="open_file")
+    opened, status = _nt_try_open_relative(handle, name, intent=intent)
     if status in (_STATUS_OBJECT_NAME_NOT_FOUND, _STATUS_OBJECT_PATH_NOT_FOUND):
         return None
     if status != _STATUS_SUCCESS or not opened:
@@ -2398,7 +2417,7 @@ def _nt_try_open_relative(
 
     `intent` is one of open_dir, create_dir, open_security_dir, create_security_dir,
     create_private_dir (a new directory only, with the given security descriptor),
-    open_file, open_publishable_file, create_file, create_publishable_file,
+    open_file, open_unshared_file, open_publishable_file, create_file, create_publishable_file,
     delete_directory, delete_source, delete_link or rename_source. It is spelled out rather
     than inferred from a flag because
     the access mask and the disposition have to agree, and getting that pair
@@ -2449,7 +2468,7 @@ def _nt_try_open_relative(
         access |= _FILE_READ_DATA | _FILE_WRITE_DATA | _DELETE
         options |= _FILE_NON_DIRECTORY_FILE
         disposition = _FILE_CREATE
-    elif intent == "open_file":
+    elif intent in ("open_file", "open_unshared_file"):
         access |= _FILE_READ_DATA
         options |= _FILE_NON_DIRECTORY_FILE
         disposition = _FILE_OPEN
@@ -2491,7 +2510,13 @@ def _nt_try_open_relative(
         api.ctypes.byref(status_block),
         None,
         api.ctypes.c_ulong(0),
-        api.ctypes.c_ulong(_FILE_SHARE_READ | _FILE_SHARE_WRITE),
+        # Without write or delete sharing, nothing can change an unshared file
+        # while it is held, and one already open for writing refuses to open.
+        api.ctypes.c_ulong(
+            _FILE_SHARE_READ
+            if intent == "open_unshared_file"
+            else _FILE_SHARE_READ | _FILE_SHARE_WRITE
+        ),
         api.ctypes.c_ulong(disposition),
         api.ctypes.c_ulong(options),
         None,

@@ -719,3 +719,35 @@ def test_a_leaf_replaced_after_it_was_measured_is_not_deleted(
     assert replaced == ["once"], "the seam never fired, so nothing was measured"
     assert (removed, reclaimed) == (0, 0)
     assert orphan.read_bytes() == b"freshly published bytes"
+
+
+def test_a_file_made_for_a_tool_to_write_is_swept_only_in_its_exact_shape(
+    store_session: tuple[ArtifactStore, Session, Path],
+) -> None:
+    """A tool's output file is removed when its call ends; one a crash left behind is the sweep's.
+
+    Only the exact name such a file is given is the sweep's to remove:
+    `tool-output-`, 32 lowercase hex digits and `.tmp`. Anything merely
+    resembling it stays.
+    """
+
+    store, session, root = store_session
+    digits = "13579bdf02468ace" * 2
+    abandoned = _write_aged(root / f"tool-output-{digits}.tmp", b"output")
+    resembling = [
+        _write_aged(root / name, name.encode())
+        for name in (
+            "tool-output-abandoned.tmp",
+            f"tool-output-{digits}.mp4",
+            f"tool-output-{digits[:-1]}.tmp",
+            f"tool-output-{digits}0.tmp",
+            f"tool-output-{'FEDCBA9876543210' * 2}.tmp",
+            f"tool-output-{digits}.tmp.keep",
+        )
+    ]
+
+    removed, reclaimed = _sweep(store, session)
+
+    assert (removed, reclaimed) == (1, len(b"output"))
+    assert not abandoned.exists()
+    assert [path.read_bytes() for path in resembling] == [path.name.encode() for path in resembling]

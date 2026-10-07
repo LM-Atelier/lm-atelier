@@ -91,6 +91,8 @@ import type {
   UtilityQueueAction,
   UtilityQueuePolicy,
   VideoProbe,
+  VideoTrimPreview,
+  VideoTrimRequest,
   QueueControlResult,
   QueueActivityPage,
   QueuePlanSteps,
@@ -902,6 +904,26 @@ export const api = {
   saveVideoFrame: (artifactId: string, requestedSeconds: number) =>
     request<Job>(`/api/artifacts/${encodeURIComponent(artifactId)}/video-frames`, {
       method: "POST", body: JSON.stringify({ requested_seconds: requestedSeconds }),
+    }),
+  videoTrimPreview: (
+    artifactId: string,
+    startSeconds: number,
+    endSeconds: number,
+    keepAudio: boolean,
+    signal?: AbortSignal,
+  ) => {
+    const query = new URLSearchParams({
+      start_seconds: String(startSeconds),
+      end_seconds: String(endSeconds),
+      keep_audio: String(keepAudio),
+    });
+    return request<VideoTrimPreview>(
+      `/api/artifacts/${encodeURIComponent(artifactId)}/video-trim-preview?${query}`, { signal },
+    );
+  },
+  trimVideo: (artifactId: string, body: VideoTrimRequest) =>
+    request<Job>(`/api/artifacts/${encodeURIComponent(artifactId)}/video-trims`, {
+      method: "POST", body: JSON.stringify(body),
     }),
   videoUtilityJob: (jobId: string, signal?: AbortSignal) =>
     request<Job>(`/api/video-utilities/jobs/${encodeURIComponent(jobId)}`, { signal }),

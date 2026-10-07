@@ -113,6 +113,8 @@ CHECKED_CONTRACTS = {
     "InstallQueuePolicy": "InstallQueuePolicyOut",
     "UtilityQueuePolicy": "UtilityQueuePolicyOut",
     "VideoProbe": "VideoProbe",
+    "VideoTrimPreview": "VideoTrimPreview",
+    "VideoTrimRequest": "VideoTrimRequest",
     "VideoStreamFacts": "VideoStreamFacts",
     "AudioStreamFacts": "AudioStreamFacts",
     "QueueControlResult": "QueueControlResultOut",

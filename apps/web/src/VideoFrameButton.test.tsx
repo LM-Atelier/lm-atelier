@@ -75,6 +75,23 @@ it("saves the frame at the chosen moment and says which frame it really was", as
   expect(screen.getByRole("button", { name: "Save this frame" })).toHaveAttribute("aria-disabled", "false");
 });
 
+it("points to Recently Deleted when the same picture is already there", async () => {
+  vi.mocked(api.saveVideoFrame).mockResolvedValue(job("queued"));
+  vi.mocked(api.videoUtilityJob).mockResolvedValue(
+    job("complete", { requested_seconds: 0.5, actual_seconds: 0.5, in_library: false }),
+  );
+  open();
+  await screen.findByText(/64 × 48/);
+  seek(0.5);
+  fireEvent.click(screen.getByRole("button", { name: "Save this frame" }));
+
+  expect(await screen.findByText(
+    "Saved the frame at 0.500 s. The same picture is already in Recently Deleted. Restore it there to see it in the Media Library.",
+  )).toBeInTheDocument();
+  expect(screen.queryByText(/It is in the Media Library/)).not.toBeInTheDocument();
+  expect(api.saveVideoFrame).toHaveBeenCalledWith("sha256:clip", 0.5);
+});
+
 it("keeps the video covered by the same choice as everywhere else it appears", async () => {
   localStorage.setItem(SENSITIVE_MEDIA_KEY, "hide");
   open();
