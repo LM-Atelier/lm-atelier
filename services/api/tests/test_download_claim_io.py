@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import pytest
 from httpx2 import AsyncClient
 from huggingface_hub import HfApi
+from run_waits import PATIENCE_SECONDS
 from test_download_claim_ownership import _finish, _move_claim, _state, _transfer
 from test_downloads import gguf_bytes
 from test_scheduler_claim_hold import _until
@@ -39,7 +40,9 @@ async def test_download_disk_work_finishes_before_its_execution_releases_the_lea
 
     def digest(path: Path) -> str:
         entered.set()
-        assert release.wait(timeout=5), "The neutral disk operation was not released."
+        assert release.wait(timeout=PATIENCE_SECONDS), (
+            "The neutral disk operation was not released."
+        )
         try:
             return real_digest(path)
         finally:
@@ -49,11 +52,11 @@ async def test_download_disk_work_finishes_before_its_execution_releases_the_lea
     work = await _transfer(settings, monkeypatch)
     try:
         work.gate.set()
-        await _until(entered.is_set)
+        await _until(entered.is_set, timeout=PATIENCE_SECONDS)
         if disposition in {"cleared", "replaced"}:
             _move_claim(disposition)
             before = _state()
-            await _until(work.heartbeat.done)
+            await _until(work.heartbeat.done, timeout=PATIENCE_SECONDS)
             # Cancellation must wait for the disk operation to finish.
             work.task.cancel()
         elif disposition == "cancelled":
@@ -66,7 +69,9 @@ async def test_download_disk_work_finishes_before_its_execution_releases_the_lea
         if disposition == "cancelled":
             assert _state()[1:3] == before[1:3]
         release.set()
-        await asyncio.wait_for(asyncio.gather(work.task, return_exceptions=True), timeout=3)
+        await asyncio.wait_for(
+            asyncio.gather(work.task, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         assert finished.is_set()
         if disposition in {"cleared", "replaced"}:
             assert _state() == before
@@ -159,7 +164,9 @@ async def test_a_reused_component_is_published_only_by_its_current_download_clai
     monkeypatch.setattr("local_lm.downloads.shutil.copyfile", copy)
     task = asyncio.create_task(manager._download("download-claim"))
     try:
-        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=5)
+        await asyncio.wait_for(
+            asyncio.gather(task, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         assert len(before) == 1
         staged = settings.download_dir / "download-claim.partial" / "fixture.gguf"
         if disposition == "owned":

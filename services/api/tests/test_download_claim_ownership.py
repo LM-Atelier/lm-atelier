@@ -12,6 +12,7 @@ from unittest.mock import Mock
 import pytest
 from httpx2 import AsyncClient
 from huggingface_hub import HfApi
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import delete, func, select, update
 from test_downloads import gguf_bytes
 from test_scheduler_claim_hold import _until
@@ -92,7 +93,7 @@ async def _transfer(
     manager.start("download-claim")
     task = manager._tasks["download-claim"]
     try:
-        await asyncio.wait_for(entered.wait(), timeout=3)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         heartbeat = next(
             task
             for task in asyncio.all_tasks()
@@ -148,8 +149,8 @@ async def test_a_download_stops_after_its_claim_is_lost(
     work = await _transfer(settings, monkeypatch)
     try:
         _move_claim(disposition)
-        await _until(work.heartbeat.done)
-        await _until(work.task.done, timeout=1)
+        await _until(work.heartbeat.done, timeout=PATIENCE_SECONDS)
+        await _until(work.task.done, timeout=PATIENCE_SECONDS)
         await asyncio.gather(work.task, return_exceptions=True)
     finally:
         await _finish(work)
@@ -168,9 +169,11 @@ async def test_a_displaced_download_preserves_the_current_job_and_installs(
     try:
         _move_claim(disposition)
         before = _state()
-        await _until(work.heartbeat.done)
+        await _until(work.heartbeat.done, timeout=PATIENCE_SECONDS)
         work.gate.set()
-        await asyncio.wait_for(asyncio.gather(work.task, return_exceptions=True), timeout=3)
+        await asyncio.wait_for(
+            asyncio.gather(work.task, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         assert _state() == before
     finally:
         await _finish(work)
@@ -183,7 +186,7 @@ async def test_an_owned_download_publishes_its_verified_file_and_profile(
     before = _state()
     try:
         work.gate.set()
-        await asyncio.wait_for(work.task, timeout=3)
+        await asyncio.wait_for(work.task, timeout=PATIENCE_SECONDS)
         after = _state()
         assert after[0] == JobStatus.COMPLETE.value
         assert after[7:9] == (int(str(before[7])) + 1, int(str(before[8])) + 1)
@@ -204,7 +207,7 @@ async def test_an_owned_download_reports_a_transfer_failure(
     before = _state()
     try:
         work.gate.set()
-        await asyncio.wait_for(work.task, timeout=3)
+        await asyncio.wait_for(work.task, timeout=PATIENCE_SECONDS)
         after = _state()
         assert after[0] == JobStatus.FAILED.value
         assert after[5] == "Neutral transfer failure"
