@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 from test_comfy_registry_mixed_wheel_environments import _input_context
@@ -54,7 +55,7 @@ async def test_final_binding_allows_another_writer_and_refuses_a_late_revocation
         assert threading.get_ident() != event_loop_thread
         binding = verify_comfy_registry_wheel_binding(*args, **kwargs)
         started.set()
-        assert release.wait(15)
+        assert release.wait(PATIENCE_SECONDS)
         return binding
 
     def write() -> None:
@@ -85,7 +86,7 @@ async def test_final_binding_allows_another_writer_and_refuses_a_late_revocation
     try:
         try:
             assert await asyncio.to_thread(started.wait, 15)
-            await asyncio.wait_for(asyncio.to_thread(write), timeout=3)
+            await asyncio.wait_for(asyncio.to_thread(write), timeout=PATIENCE_SECONDS)
             assert not task.done()
             # This object still exists in the caller's identity map even when
             # the other connection deleted its row. The final query must see
@@ -180,7 +181,7 @@ async def test_a_review_can_be_revoked_while_its_bytes_are_read_from_a_consisten
     def read(self: ArtifactStore, artifact: Artifact, **kwargs: Any) -> bytes:
         result = original(self, artifact, **kwargs)
         started.set()
-        assert release.wait(15)
+        assert release.wait(PATIENCE_SECONDS)
         return result
 
     def revoke() -> None:
@@ -194,7 +195,7 @@ async def test_a_review_can_be_revoked_while_its_bytes_are_read_from_a_consisten
     )
     try:
         assert await asyncio.to_thread(started.wait, 15)
-        await asyncio.wait_for(asyncio.to_thread(revoke), timeout=3)
+        await asyncio.wait_for(asyncio.to_thread(revoke), timeout=PATIENCE_SECONDS)
     finally:
         release.set()
     authority = await operation

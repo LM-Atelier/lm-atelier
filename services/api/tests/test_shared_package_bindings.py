@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from alembic import command
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
@@ -242,7 +243,7 @@ def test_concurrent_preparations_converge_on_one_local_record(
 
     def prepare() -> str:
         with db.SessionLocal() as session:
-            start.wait(timeout=5)
+            start.wait(timeout=PATIENCE_SECONDS)
             binding = api.prepare_binding(session, reference)
             session.commit()
             return binding.id

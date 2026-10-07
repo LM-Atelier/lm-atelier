@@ -17,6 +17,7 @@ import pytest
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from directory_security import create_owned_directory
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 
 from local_lm import exports as exports_module
 from local_lm import portable_archive_v1, project_archive_encryption
@@ -229,7 +230,7 @@ async def test_an_encrypted_export_leaves_the_application_answering(
 
     def held(plaintext: Path, directory: Path, passphrase: bytes) -> Path:
         started.set()
-        release.wait(5)
+        release.wait(PATIENCE_SECONDS)
         return real(plaintext, directory, passphrase)
 
     monkeypatch.setattr(exports_module, "encrypt_export", held)
@@ -237,8 +238,8 @@ async def test_an_encrypted_export_leaves_the_application_answering(
         client.post(f"/api/projects/{project['id']}/export", json={"passphrase": PASSPHRASE})
     )
     try:
-        assert await asyncio.to_thread(started.wait, 10)
-        health = await asyncio.wait_for(client.get("/api/health"), timeout=10)
+        assert await asyncio.to_thread(started.wait, PATIENCE_SECONDS)
+        health = await asyncio.wait_for(client.get("/api/health"), timeout=PATIENCE_SECONDS)
 
         # Answered while the export was still held, not after it finished.
         assert health.status_code == 200 and not export.done()

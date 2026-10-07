@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import select
 from test_downloads import safetensors_bytes
 from test_workflow_package_import_endpoint import _object_info, _ui_graph
@@ -350,7 +351,7 @@ async def test_compilation_does_not_hold_a_writer_while_awaiting_runtime(
                 session.add(models.AppSetting(key="neutral-compilation-control", value_json=True))
                 session.commit()
 
-        await asyncio.wait_for(asyncio.to_thread(write), timeout=5)
+        await asyncio.wait_for(asyncio.to_thread(write), timeout=PATIENCE_SECONDS)
         return []
 
     monkeypatch.setattr(app.state.services.engines.media, "validate_workflow", validate)
@@ -379,7 +380,9 @@ async def test_worker_restoration_retries_a_zero_download_source_after_releasing
         return 0
 
     monkeypatch.setattr(services.downloads, "refresh_installed_media_workflows", refresh)
-    await asyncio.wait_for(worker_startup.restore_configured_workers(services), timeout=10)
+    await asyncio.wait_for(
+        worker_startup.restore_configured_workers(services), timeout=PATIENCE_SECONDS
+    )
     assert _state(offer_id)[0] == "completed"
 
 
@@ -399,7 +402,7 @@ async def test_repeated_cancellation_retains_the_primary_lease_until_compilation
     plan_id = await _plan(client)
     response = await client.post(f"/api/workflow-install-offers/{plan_id}/install")
     assert response.status_code == 202, response.text
-    await asyncio.wait_for(entered.wait(), timeout=5)
+    await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
     with SessionLocal() as session:
         offer = session.scalar(select(models.WorkflowInstallOffer))
         assert offer is not None
@@ -422,7 +425,7 @@ async def test_repeated_cancellation_retains_the_primary_lease_until_compilation
         assert not completion.done() and not acquired.is_set()
         release.set()
         await asyncio.gather(completion, return_exceptions=True)
-        await asyncio.wait_for(waiting, timeout=5)
+        await asyncio.wait_for(waiting, timeout=PATIENCE_SECONDS)
         assert acquired.is_set() and _state(offer_id)[0] == "completed"
     finally:
         release.set()

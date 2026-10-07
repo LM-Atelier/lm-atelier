@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
+from run_waits import PATIENCE_SECONDS
 
 pytestmark = pytest.mark.asyncio
 
@@ -178,7 +179,7 @@ async def test_abandoned_suggestions_close_the_local_client(
         task = asyncio.create_task(
             summaries.suggest_use_case_summary("http://127.0.0.1:12341", "Watercolor landscapes")
         )
-        await asyncio.wait_for(entered.wait(), timeout=5)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task

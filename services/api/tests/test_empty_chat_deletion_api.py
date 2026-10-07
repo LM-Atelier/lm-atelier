@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy.orm import Session
 
 from local_lm.db import SessionLocal
@@ -208,7 +209,7 @@ async def test_the_guard_is_held_before_the_selection_is_revalidated(
     finally:
         guard.release()
 
-    refused = await asyncio.wait_for(pending, timeout=10)
+    refused = await asyncio.wait_for(pending, timeout=PATIENCE_SECONDS)
     assert refused.status_code == 409, refused.text
     assert refused.json()["code"] == "empty-chat-selection-drifted"
     assert _exists(blank)

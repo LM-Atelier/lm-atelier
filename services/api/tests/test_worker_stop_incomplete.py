@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import psutil
 import pytest
+from run_waits import PATIENCE_SECONDS
 
 from local_lm.config import Settings
 from local_lm.processes import (
@@ -187,7 +188,7 @@ async def test_cancelled_start_keeps_ownership_when_its_cleanup_fails(
         supervisor._replace("chat", ["neutral-worker"], "http://127.0.0.1:12341/health")
     )
     try:
-        await asyncio.wait_for(entered.wait(), timeout=1)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         record = supervisor._workers["chat"]
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -277,7 +278,7 @@ async def test_closing_waits_for_every_stop_before_reporting_one_that_failed(
     )
     closing = asyncio.create_task(supervisor.close())
     try:
-        await asyncio.wait_for(failed.wait(), timeout=10)
+        await asyncio.wait_for(failed.wait(), timeout=PATIENCE_SECONDS)
         for _ in range(10):
             await asyncio.sleep(0)
         assert not closing.done(), "Closing abandoned a worker whose stop was still running"
@@ -289,4 +290,4 @@ async def test_closing_waits_for_every_stop_before_reporting_one_that_failed(
     finally:
         release.set()
         await asyncio.gather(closing, return_exceptions=True)
-        await asyncio.wait_for(finished.wait(), timeout=10)
+        await asyncio.wait_for(finished.wait(), timeout=PATIENCE_SECONDS)

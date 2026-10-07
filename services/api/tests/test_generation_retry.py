@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
-from run_waits import wait_for_terminal_status, wait_until
+from run_waits import PATIENCE_SECONDS, wait_for_terminal_status, wait_until
 from sqlalchemy import select
 
 from local_lm.adapters.base import ChatEvent, ChatRequest, MediaEvent, MediaRequest
@@ -321,7 +321,7 @@ async def test_cancelling_a_running_generation_never_reserves_a_retry(
     monkeypatch.setattr(app.state.services.engines.media, "generate", generate)
     monkeypatch.setattr(app.state.services.engines.media, "cancel", cancel)
     run_id = await start_media(client, mode)
-    await asyncio.wait_for(started.wait(), timeout=10)
+    await asyncio.wait_for(started.wait(), timeout=PATIENCE_SECONDS)
     with SessionLocal() as session:
         job = session.scalar(select(Job).where(Job.run_id == run_id))
         assert job is not None

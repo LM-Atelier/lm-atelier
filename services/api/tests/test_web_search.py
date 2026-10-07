@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 import pytest
+from run_waits import PATIENCE_SECONDS
 
 from local_lm.network import OutboundPolicy
 
@@ -301,7 +302,7 @@ async def test_caller_cancellation_is_preserved() -> None:
             transport=httpx.MockTransport(serve),
         )
     )
-    await asyncio.wait_for(started.wait(), timeout=2)
+    await asyncio.wait_for(started.wait(), timeout=PATIENCE_SECONDS)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task

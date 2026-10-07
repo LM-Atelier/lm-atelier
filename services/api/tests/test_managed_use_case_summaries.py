@@ -8,6 +8,7 @@ from typing import cast
 
 import pytest
 from fastapi import FastAPI
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy.orm import Session
 
 from local_lm import managed_use_case_summaries as summaries
@@ -83,13 +84,13 @@ async def test_ready_managed_model_holds_the_worker_lease_until_the_suggestion_f
     task = asyncio.create_task(
         summaries.suggest_managed_use_case_summary(services, session, "Watercolor landscapes")
     )
-    await asyncio.wait_for(entered.wait(), timeout=5)
+    await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
     competing = asyncio.create_task(other())
     await asyncio.sleep(0)
     assert not other_acquired.is_set()
     finish.set()
-    assert await asyncio.wait_for(task, timeout=5) == "Watercolor scenes."
-    await asyncio.wait_for(competing, timeout=5)
+    assert await asyncio.wait_for(task, timeout=PATIENCE_SECONDS) == "Watercolor scenes."
+    await asyncio.wait_for(competing, timeout=PATIENCE_SECONDS)
     assert other_acquired.is_set()
 
 
@@ -218,7 +219,7 @@ async def test_abandoned_managed_suggestions_release_the_worker_lease(
             await task
     else:
         with pytest.raises(UseCaseSummaryError):
-            await asyncio.wait_for(task, timeout=5)
+            await asyncio.wait_for(task, timeout=PATIENCE_SECONDS)
     async with asyncio.timeout(5):
         async with services.scheduler.lease("primary"):
             pass
