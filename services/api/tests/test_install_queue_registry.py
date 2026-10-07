@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy.exc import IntegrityError
 from test_install_queue_recovery import control
 from test_registry_install_endpoints import _seed_install, _write_install_paths
@@ -84,7 +85,7 @@ async def test_queued_registry_preparation_waits_for_resume_after_restart(
             assert policy.dispatch_state == "paused" and policy.running_jobs == 0
         control("resume", policy.revision)
         await app.state.services.scheduler.queue_control_changed("install")
-        await asyncio.wait_for(entered.wait(), timeout=5)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         async with asyncio.timeout(10):
             while state(job_id)[:3] != ("failed", None, 1):
                 await asyncio.sleep(0.01)
@@ -117,7 +118,7 @@ async def test_retry_keeps_accepted_registry_inputs_and_waits_for_installation_r
 
     monkeypatch.setattr(api_module, "prepare_workflow_package", prepare)
     job_id = await accept(client)
-    await asyncio.wait_for(entered.wait(), timeout=10)
+    await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
     if ending == "cancelled":
         cancelled = await client.post(f"/api/jobs/{job_id}/cancel")
         assert cancelled.status_code == 200
@@ -214,7 +215,7 @@ async def test_a_failed_registry_claim_settles_only_its_original_queued_attempt(
 
     monkeypatch.setattr(app.state.services.scheduler, "_acquire_job", fail)
     job_id = await accept(client)
-    await asyncio.wait_for(entered.wait(), timeout=10)
+    await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
     task = api_module._REGISTRY_PREPARE_TASKS[job_id]
     if replaced != "none":
         with SessionLocal() as session:
@@ -229,7 +230,9 @@ async def test_a_failed_registry_claim_settles_only_its_original_queued_attempt(
             session.commit()
     try:
         release.set()
-        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=10)
+        await asyncio.wait_for(
+            asyncio.gather(task, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         with SessionLocal() as session:
             job = session.get(Job, job_id)
             assert job is not None
@@ -280,12 +283,12 @@ async def test_a_failed_registry_release_retains_its_result_until_claim_recovery
     original_release = scheduler._release_job
     monkeypatch.setattr(scheduler, "_release_job", fail_release)
     job_id = await accept(client)
-    await asyncio.wait_for(entered.wait(), timeout=10)
+    await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
     task = api_module._REGISTRY_PREPARE_TASKS[job_id]
     assert control("pause_after_current", 0).dispatch_state == "draining"
     try:
         finish.set()
-        await asyncio.wait_for(task, timeout=10)
+        await asyncio.wait_for(task, timeout=PATIENCE_SECONDS)
         with SessionLocal() as session:
             job = session.get(Job, job_id)
             assert job is not None and job.status == outcome
@@ -330,7 +333,7 @@ async def test_an_old_cancel_does_not_cancel_a_retry_accepted_after_cleanup(
 
     monkeypatch.setattr(api_module, "prepare_workflow_package", prepare)
     job_id = await accept(client)
-    await asyncio.wait_for(entered.wait(), timeout=10)
+    await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
     assert control("pause_after_current", 0).dispatch_state == "draining"
     task = api_module._REGISTRY_PREPARE_TASKS[job_id]
     with SessionLocal() as session:
@@ -422,7 +425,7 @@ async def test_registry_cancellation_keeps_the_install_claim_until_restoration_f
     monkeypatch.setattr(api_module, "prepare_workflow_package", preparing)
     monkeypatch.setattr(app.state.services.processes, "stop", stop)
     job_id = await accept(client)
-    await asyncio.wait_for(entered.wait(), timeout=10)
+    await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
     assert control("pause_after_current", 0).dispatch_state == "draining"
     task = asyncio.create_task(
         api_module.shutdown_registry_preparations()
@@ -430,14 +433,14 @@ async def test_registry_cancellation_keeps_the_install_claim_until_restoration_f
         else client.post(f"/api/jobs/{job_id}/cancel")
     )
     try:
-        await asyncio.wait_for(restoring.wait(), timeout=10)
+        await asyncio.wait_for(restoring.wait(), timeout=PATIENCE_SECONDS)
         assert not task.done()
         with SessionLocal() as session:
             policy = read_lane_policy(session, "install")
             assert policy.dispatch_state == "draining" and policy.running_jobs == 1
         assert state(job_id)[0] == "running" and state(job_id)[1] is not None
         release.set()
-        response = await asyncio.wait_for(task, timeout=10)
+        response = await asyncio.wait_for(task, timeout=PATIENCE_SECONDS)
         if not shutdown:
             assert response is not None and response.status_code == 200
         assert state(job_id)[:3] == ("interrupted" if shutdown else "cancelled", None, 1)
@@ -518,7 +521,7 @@ async def test_a_departed_registry_attempt_cannot_overwrite_current_job_state(
 
     monkeypatch.setattr(api_module, "prepare_workflow_package", prepare)
     job_id = await accept(client)
-    await asyncio.wait_for(entered.wait(), timeout=10)
+    await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
     task = api_module._REGISTRY_PREPARE_TASKS[job_id]
     with SessionLocal() as session:
         job = session.get(Job, job_id)
@@ -536,7 +539,9 @@ async def test_a_departed_registry_attempt_cannot_overwrite_current_job_state(
         session.commit()
     try:
         release.set()
-        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=10)
+        await asyncio.wait_for(
+            asyncio.gather(task, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         with SessionLocal() as session:
             job = session.get(Job, job_id)
             assert job is not None
@@ -593,7 +598,7 @@ async def test_registry_preparation_cannot_continue_after_losing_its_claim(
     monkeypatch.setattr(api_module, "prepare_workflow_package", prepare)
     monkeypatch.setattr(api_module, "activate_prepared_workflow_package", activate)
     job_id = await accept(client)
-    await asyncio.wait_for(entered.wait(), timeout=10)
+    await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
     task = api_module._REGISTRY_PREPARE_TASKS[job_id]
     try:
         with SessionLocal() as session:
@@ -610,7 +615,7 @@ async def test_registry_preparation_cannot_continue_after_losing_its_claim(
             assert ResourceScheduler()._expire_foreign_claims("primary") == [job_id]
         expected = state(job_id)
         release.set()
-        await asyncio.wait_for(task, timeout=10)
+        await asyncio.wait_for(task, timeout=PATIENCE_SECONDS)
         if replacement == "none":
             assert continued == [boundary]
             assert state(job_id)[:3] == ("complete", None, 1)

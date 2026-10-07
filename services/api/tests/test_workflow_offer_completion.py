@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from test_downloads import safetensors_bytes
@@ -429,7 +430,7 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
 
         def held_completion(current_offer: str, *, claim: JobClaim) -> str | None:
             entered.set()
-            assert release.wait(10), "Completion was not released"
+            assert release.wait(PATIENCE_SECONDS), "Completion was not released"
             result: str | None = complete(current_offer, claim=claim)
             return result
 
@@ -437,7 +438,7 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
         task = asyncio.create_task(manager._download(job_id))
         observer = None
         try:
-            assert await asyncio.to_thread(entered.wait, 10)
+            assert await asyncio.to_thread(entered.wait, PATIENCE_SECONDS)
             with SessionLocal() as session:
                 completion_job = session.get(Job, completion_job_id)
                 assert completion_job is not None and completion_job.claim_owner is not None
@@ -460,7 +461,7 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
                     assert retry_job is not None and retry_job.status == "queued"
                     assert retry_job.claim_owner is not None and retry_job.attempt == 1
                 # Let the new dispatcher observe the old attempt's retained claim.
-                await asyncio.wait_for(manager._offer_tasks[offer_id], timeout=10)
+                await asyncio.wait_for(manager._offer_tasks[offer_id], timeout=PATIENCE_SECONDS)
             else:
                 task.cancel()
             acquired: list[bool] = []
@@ -498,7 +499,7 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
                         ),
                     )
                 await services.scheduler.queue_control_changed("install")
-                async with asyncio.timeout(10):
+                async with asyncio.timeout(PATIENCE_SECONDS):
                     while True:
                         with SessionLocal() as session:
                             retry_job = session.get(Job, completion_job_id)
@@ -515,7 +516,7 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
     elif change == "install-paused":
         task = asyncio.create_task(manager._download(job_id))
         try:
-            async with asyncio.timeout(10):
+            async with asyncio.timeout(PATIENCE_SECONDS):
                 while True:
                     with SessionLocal() as session:
                         download = session.get(Job, job_id)
@@ -535,7 +536,7 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
                     QueueControlCommand(expected_revision=1, idempotency_key="resume-install"),
                 )
             await services.scheduler.queue_control_changed("install")
-            await asyncio.wait_for(task, timeout=10)
+            await asyncio.wait_for(task, timeout=PATIENCE_SECONDS)
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -833,7 +834,7 @@ async def _check_completion_batch(
                 for task in asyncio.all_tasks()
                 if task.get_name() == f"job-heartbeat-{first_job_id}"
             )
-            await asyncio.wait_for(asyncio.shield(heartbeat), timeout=5)
+            await asyncio.wait_for(asyncio.shield(heartbeat), timeout=PATIENCE_SECONDS)
         if caller_cancelled:
             batch.cancel()
             await asyncio.sleep(0)

@@ -10,6 +10,7 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from run_waits import PATIENCE_SECONDS
 from test_downloads import gguf_bytes
 from test_transfer_queue_downloads import control, read, wait_queued
 
@@ -164,14 +165,14 @@ async def test_two_downloads_drain_through_complete_transfer_and_activation_life
         new = create("new")
         await wait_queued(new)
         activation_release[0].set()
-        await asyncio.wait_for(first_task, timeout=10)
+        await asyncio.wait_for(first_task, timeout=PATIENCE_SECONDS)
         assert read().dispatch_state == "draining" and read().running_jobs == 1
         second_transfer_release.set()
         await wait_entered(activation_entered[1], second)
         assert read().dispatch_state == "draining" and read().running_jobs == 1
         await wait_queued(new)
         activation_release[1].set()
-        await asyncio.wait_for(second_task, timeout=10)
+        await asyncio.wait_for(second_task, timeout=PATIENCE_SECONDS)
         assert read().dispatch_state == "paused" and read().running_jobs == 0
         assert downloads == ["first", "second"]
         with SessionLocal() as session:

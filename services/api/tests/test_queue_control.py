@@ -21,7 +21,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
 from PIL import Image
-from run_waits import wait_until
+from run_waits import PATIENCE_SECONDS, wait_until
 from sqlalchemy import delete, event, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session, sessionmaker
@@ -451,7 +451,7 @@ async def test_duplicate_concurrent_delivery_has_one_durable_result(
         barrier = threading.Barrier(2)
 
         def together() -> tuple[int, dict[str, Any]]:
-            barrier.wait(timeout=5)
+            barrier.wait(timeout=PATIENCE_SECONDS)
             return post()
 
         first = pool.submit(together)
@@ -480,7 +480,7 @@ async def test_different_concurrent_commands_cannot_share_one_revision(
                 )
                 return response.status_code
 
-        barrier.wait(timeout=5)
+        barrier.wait(timeout=PATIENCE_SECONDS)
         return asyncio.run(request())
 
     with ThreadPoolExecutor(max_workers=2) as pool:

@@ -12,6 +12,7 @@ from unittest.mock import Mock
 
 import pytest
 from fastapi import FastAPI
+from run_waits import PATIENCE_SECONDS
 
 from local_lm.adapters.base import ChatEvent, ChatRequest
 from local_lm.db import SessionLocal
@@ -148,7 +149,7 @@ async def test_standalone_chat_activation_drains_through_runtime_restoration(
 
     activation = asyncio.create_task(downloads._reactivate(job_id))
     try:
-        await asyncio.wait_for(entered_cleanup.wait(), timeout=10)
+        await asyncio.wait_for(entered_cleanup.wait(), timeout=PATIENCE_SECONDS)
         with SessionLocal() as session:
             policy = change_lane_policy(
                 session,
@@ -160,7 +161,7 @@ async def test_standalone_chat_activation_drains_through_runtime_restoration(
         assert len(claim_seen) == 1
         assert not activation.done()
         release_cleanup.set()
-        await asyncio.wait_for(activation, timeout=10)
+        await asyncio.wait_for(activation, timeout=PATIENCE_SECONDS)
         with SessionLocal() as session:
             completed = session.get(Job, job_id)
             assert completed is not None and completed.status == "complete"

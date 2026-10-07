@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from test_workflow_offer_packages import _accepted, _prepare, _setup
 
 from local_lm import workflow_source_completion, workflow_source_extensions
@@ -104,7 +105,7 @@ async def test_delayed_quarantine_keeps_replacement_packages_active(
     monkeypatch.setattr(manager.events, "publish", publish)
     task = asyncio.create_task(manager.reconcile_workflow_install_offers(only_offer_id=offer_id))
     try:
-        async with asyncio.timeout(10):
+        async with asyncio.timeout(PATIENCE_SECONDS):
             while not entered.is_set():
                 assert not task.done(), "Completion returned before quarantine"
                 await asyncio.sleep(0.01)
@@ -127,7 +128,7 @@ async def test_delayed_quarantine_keeps_replacement_packages_active(
                 offer.completion_error_code = None
             session.commit()
         release.set()
-        await asyncio.wait_for(task, timeout=10)
+        await asyncio.wait_for(task, timeout=PATIENCE_SECONDS)
         with SessionLocal() as session:
             install = session.get(ComfyRegistryInstall, preparation.install_id)
             assert install is not None and install.trusted

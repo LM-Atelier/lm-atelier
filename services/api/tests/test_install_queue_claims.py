@@ -7,6 +7,7 @@ from contextlib import suppress
 from datetime import timedelta
 
 import pytest
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy.orm import Session, sessionmaker
 from test_generation_queue_pause import sessions as sessions
 
@@ -134,13 +135,14 @@ async def test_a_claim_retained_for_install_cleanup_blocks_another_dispatcher(
     observations = [asyncio.create_task(event.wait()) for event in (observed_wait, claimed)]
     try:
         await asyncio.wait_for(
-            asyncio.wait(observations, return_when=asyncio.FIRST_COMPLETED), timeout=5
+            asyncio.wait(observations, return_when=asyncio.FIRST_COMPLETED),
+            timeout=PATIENCE_SECONDS,
         )
         assert observed_wait.is_set() and not claimed.is_set()
         await scheduler._release_job("retried-install", "live-owner", "primary")
-        await asyncio.wait_for(claimed.wait(), timeout=5)
+        await asyncio.wait_for(claimed.wait(), timeout=PATIENCE_SECONDS)
         release.set()
-        await asyncio.wait_for(execution, timeout=5)
+        await asyncio.wait_for(execution, timeout=PATIENCE_SECONDS)
     finally:
         release.set()
         for task in [execution, *observations]:

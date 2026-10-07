@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 from fastapi import FastAPI
+from run_waits import PATIENCE_SECONDS
 
 from local_lm.db import SessionLocal
 from local_lm.domain import utcnow
@@ -68,7 +69,7 @@ async def test_restart_recovers_activations_without_reopening_a_paused_lane(
         # control below may wait. Start from the settled store, as the client
         # fixture does.
         await asyncio.wait_for(app.state.retention_sweep, timeout=30)
-        async with asyncio.timeout(10):
+        async with asyncio.timeout(PATIENCE_SECONDS):
             while True:
                 with SessionLocal() as session:
                     jobs = [session.get(Job, name) for name in ("recovered", "queued")]
@@ -88,7 +89,7 @@ async def test_restart_recovers_activations_without_reopening_a_paused_lane(
         tasks = [manager._tasks[name] for name in ("recovered", "queued")]
         control("resume", policy.revision)
         await manager.scheduler.queue_control_changed("install")
-        await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=PATIENCE_SECONDS)
         assert set(entered) == {"recovered", "queued"}
         with SessionLocal() as session:
             for name in entered:
@@ -112,7 +113,7 @@ async def test_shutdown_interrupts_an_activation_and_releases_the_draining_lane(
         session.commit()
     try:
         manager.start_activation("active-install")
-        await asyncio.wait_for(entered.wait(), timeout=10)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         policy = control("pause_after_current", 0)
         assert policy.dispatch_state == "draining" and policy.running_jobs == 1
         await manager.close()
