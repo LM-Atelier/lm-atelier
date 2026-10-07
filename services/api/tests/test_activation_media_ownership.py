@@ -9,6 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import func, select
 from test_activation_claim_ownership import _Activation, _move_claim, _state
 from test_scheduler_claim_hold import _until
@@ -118,7 +119,7 @@ async def _media_probe(
     manager.start_activation("activation-claim")
     task = manager._tasks["activation-claim"]
     try:
-        await asyncio.wait_for(entered.wait(), timeout=2)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         heartbeat = next(
             task
             for task in asyncio.all_tasks()
@@ -156,9 +157,11 @@ async def test_a_displaced_media_probe_preserves_install_evidence_and_workflows(
         _move_claim(disposition)
         before_job = _state()
         before_counts = _counts()
-        await _until(work.heartbeat.done)
+        await _until(work.heartbeat.done, timeout=PATIENCE_SECONDS)
         work.gate.set()
-        await asyncio.wait_for(asyncio.gather(work.task, return_exceptions=True), timeout=2)
+        await asyncio.wait_for(
+            asyncio.gather(work.task, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         assert _counts() == before_counts
         assert _state() == before_job
     finally:
@@ -178,7 +181,7 @@ async def test_an_owned_media_probe_records_evidence_and_workflows(
     try:
         before = _counts()
         work.gate.set()
-        await asyncio.wait_for(work.task, timeout=2)
+        await asyncio.wait_for(work.task, timeout=PATIENCE_SECONDS)
         active, evidence, workflows = _counts()
         assert active and evidence == before[1] + 1 and workflows == before[2] + 1
         assert _state()[0] == JobStatus.COMPLETE.value

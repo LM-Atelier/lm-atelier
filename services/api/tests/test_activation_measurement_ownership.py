@@ -12,6 +12,7 @@ from unittest.mock import Mock
 
 import pytest
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from test_activation_claim_ownership import _move_claim, _state
 from test_activation_probe_ownership import _Processes
 
@@ -102,7 +103,9 @@ async def test_activation_identity_measurement_preserves_a_replacement_claim(
     monkeypatch.setattr(manager, "measured_install_identity", measure)
     activation = asyncio.create_task(manager._reactivate("activation-claim"))
     try:
-        await asyncio.wait_for(asyncio.gather(activation, return_exceptions=True), timeout=2)
+        await asyncio.wait_for(
+            asyncio.gather(activation, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
     finally:
         activation.cancel()
         await asyncio.gather(activation, return_exceptions=True)

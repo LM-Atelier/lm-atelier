@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import pytest
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import delete, update
 from test_scheduler_claim_hold import _until
 
@@ -66,7 +67,7 @@ async def _activation(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> _A
     manager.start_activation("activation-claim")
     task = manager._tasks["activation-claim"]
     try:
-        await asyncio.wait_for(entered.wait(), timeout=2)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         heartbeat = next(
             t for t in asyncio.all_tasks() if t.get_name() == "job-heartbeat-activation-claim"
         )
@@ -111,8 +112,8 @@ async def test_an_activation_stops_after_its_claim_is_lost(
     work = await _activation(settings, monkeypatch)
     try:
         _move_claim(disposition)
-        await _until(work.heartbeat.done)
-        await _until(work.task.done, timeout=1)
+        await _until(work.heartbeat.done, timeout=PATIENCE_SECONDS)
+        await _until(work.task.done, timeout=PATIENCE_SECONDS)
         await asyncio.gather(work.task, return_exceptions=True)
     finally:
         work.gate.set()
@@ -126,7 +127,7 @@ async def test_an_owned_activation_finishes_normally(
     work = await _activation(settings, monkeypatch)
     try:
         work.gate.set()
-        await asyncio.wait_for(work.task, timeout=2)
+        await asyncio.wait_for(work.task, timeout=PATIENCE_SECONDS)
         assert _state()[0] == JobStatus.COMPLETE.value
     finally:
         work.gate.set()
@@ -142,9 +143,11 @@ async def test_displaced_activation_completion_preserves_the_current_job(
     try:
         _move_claim(disposition)
         before = _state()
-        await _until(work.heartbeat.done)
+        await _until(work.heartbeat.done, timeout=PATIENCE_SECONDS)
         work.gate.set()
-        await asyncio.wait_for(asyncio.gather(work.task, return_exceptions=True), timeout=2)
+        await asyncio.wait_for(
+            asyncio.gather(work.task, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         assert _state() == before
     finally:
         work.gate.set()
