@@ -1,4 +1,5 @@
 import { permanentlyDeleteChat } from "./recovery-cleanup";
+import { withScenarioCleanup } from "./scenario-cleanup";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 async function session(request: APIRequestContext) {
@@ -69,7 +70,7 @@ for (const width of [1280, 390]) {
       expect(created.status()).toBe(201);
       const { id } = await created.json() as { id: string };
       const other = await browser.newPage();
-      try {
+      await withScenarioCleanup(async () => {
         for (let index = 0; index < 43; index++) {
           expect((await request.post(`/api/chats/${id}/turns`, { headers,
             data: { text: `Notebook entry ${index}.`, mode: "text" } })).status()).toBe(202);
@@ -124,11 +125,11 @@ After: ${JSON.stringify(await layout(page, readingText))}`,
         }
         await expect(page.locator(".transcript-history-button")).toBeFocused();
         expect(errors).toEqual([]);
-      } finally {
+      }, async () => {
         await other.close();
         await page.goto("about:blank");
         await permanentlyDeleteChat(request, id, headers);
-      }
+      });
     });
   }
 }
