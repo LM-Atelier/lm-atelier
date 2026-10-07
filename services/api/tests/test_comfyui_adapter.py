@@ -583,6 +583,11 @@ class _BlockingSocket:
 
 
 def _adapter_on(monkeypatch: pytest.MonkeyPatch, handler: Any) -> ComfyUIAdapter:
+    async def legacy_backend(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/api/jobs/"):
+            return httpx.Response(404)
+        return await handler(request)
+
     monkeypatch.setattr(
         "local_lm.adapters.comfyui.websockets.connect",
         lambda *_args, **_kwargs: _BlockingSocket(),
@@ -590,7 +595,7 @@ def _adapter_on(monkeypatch: pytest.MonkeyPatch, handler: Any) -> ComfyUIAdapter
     adapter = ComfyUIAdapter("http://comfy.test", inactivity_seconds=60)
     adapter._client = httpx.AsyncClient(
         base_url="http://comfy.test",
-        transport=httpx.MockTransport(handler),
+        transport=httpx.MockTransport(legacy_backend),
     )
     return adapter
 
