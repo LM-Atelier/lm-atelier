@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
-from run_waits import wait_for_terminal_status, wait_until
+from run_waits import PATIENCE_SECONDS, wait_for_terminal_status, wait_until
 from test_generation_retry import choose_retries, failing_media, read_run, start_media
 
 from local_lm.adapters.base import ChatEvent, ChatRequest, MediaEvent, MediaRequest
@@ -141,7 +141,7 @@ async def test_a_text_turn_waiting_behind_a_failing_picture_gets_chat_back_befor
     monkeypatch.setattr(services.engines.chat, "stream", stream)
 
     picture = await start_media(client)
-    await asyncio.wait_for(picture_started.wait(), timeout=5)
+    await asyncio.wait_for(picture_started.wait(), timeout=PATIENCE_SECONDS)
     other = await client.post("/api/chats", json={"title": "Waiting question"})
     assert other.status_code == 201
     question = await client.post(

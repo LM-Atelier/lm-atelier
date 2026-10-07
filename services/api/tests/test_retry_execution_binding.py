@@ -18,7 +18,7 @@ import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 from PIL import Image
-from run_waits import wait_for_terminal_status
+from run_waits import PATIENCE_SECONDS, wait_for_terminal_status
 from sqlalchemy import select
 
 from local_lm.adapters.base import ChatEvent, ChatRequest, GeneratedAsset, MediaEvent, MediaRequest
@@ -325,7 +325,7 @@ def _committing_first(
                 )
                 writer.commit()
 
-        await asyncio.wait_for(asyncio.to_thread(write), timeout=10)
+        await asyncio.wait_for(asyncio.to_thread(write), timeout=PATIENCE_SECONDS)
         committed.append(name)
         return await awaited(*args, **kwargs)
 

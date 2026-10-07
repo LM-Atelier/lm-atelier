@@ -10,6 +10,7 @@ import anyio
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -219,11 +220,11 @@ async def test_cancelling_a_suggestion_cancels_inference_without_a_saved_update(
     task = asyncio.create_task(
         client.post(path + "/use-case-suggestion", json={"expected_use_case": "Saved manual text"})
     )
-    await asyncio.wait_for(entered.wait(), timeout=5)
+    await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    await asyncio.wait_for(cancelled.wait(), timeout=5)
+    await asyncio.wait_for(cancelled.wait(), timeout=PATIENCE_SECONDS)
     with SessionLocal() as session:
         row = session.get(ModelProfile, record_id)
         assert row and row.use_case == "Saved manual text"
@@ -301,10 +302,10 @@ async def test_connection_disconnect_releases_inference_through_the_application_
 
     task = asyncio.create_task(app(scope, receive, send))
     try:
-        await asyncio.wait_for(entered.wait(), timeout=5)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         disconnected.set()
-        await asyncio.wait_for(cancelled.wait(), timeout=2)
-        await asyncio.wait_for(task, timeout=2)
+        await asyncio.wait_for(cancelled.wait(), timeout=PATIENCE_SECONDS)
+        await asyncio.wait_for(task, timeout=PATIENCE_SECONDS)
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):

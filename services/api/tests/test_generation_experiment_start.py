@@ -11,7 +11,7 @@ from typing import Any, cast
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
-from run_waits import wait_for_terminal_status
+from run_waits import PATIENCE_SECONDS, wait_for_terminal_status
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import OperationalError
 from test_generation_experiment_preflight import (
@@ -868,7 +868,7 @@ async def test_a_start_holds_the_write_lock_while_it_checks_each_choice(
 
     def writer() -> None:
         try:
-            assert checking.wait(timeout=10)
+            assert checking.wait(timeout=PATIENCE_SECONDS)
             with SessionLocal() as session:
                 session.connection().exec_driver_sql("PRAGMA busy_timeout=200")
                 session.execute(
@@ -886,7 +886,7 @@ async def test_a_start_holds_the_write_lock_while_it_checks_each_choice(
     def check_while_another_writes(*args: Any) -> None:
         if not checking.is_set():
             checking.set()
-            assert finished.wait(timeout=10)
+            assert finished.wait(timeout=PATIENCE_SECONDS)
         real_check(*args)
 
     monkeypatch.setattr(start_module, "_check_arm", check_while_another_writes)

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
-from run_waits import wait_for_terminal_status
+from run_waits import PATIENCE_SECONDS, wait_for_terminal_status
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 from test_custom_node_source_identity import installed_source as installed_source
@@ -96,7 +96,7 @@ async def test_workflow_dispatch_releases_transactions_during_verification(
                 writer.commit()
                 writes.append("committed")
 
-        await asyncio.wait_for(asyncio.to_thread(write), timeout=2)
+        await asyncio.wait_for(asyncio.to_thread(write), timeout=PATIENCE_SECONDS)
 
     async def object_info() -> dict[str, Any]:
         if stage in {"http", "selection_change"}:

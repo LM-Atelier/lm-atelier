@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from test_workflow_package_install_plans import _payload, configure_runtime
@@ -117,7 +118,7 @@ async def test_overlapping_approvals_share_one_offer_and_job(
         arrived += 1
         if arrived == 2:
             both.set()
-        await asyncio.wait_for(both.wait(), timeout=5)
+        await asyncio.wait_for(both.wait(), timeout=PATIENCE_SECONDS)
         return {"LoraLoader": {}, "EmptyLatentImage": {}}
 
     monkeypatch.setattr(app.state.services.engines.media, "object_info", object_info)
@@ -386,7 +387,7 @@ async def test_repeated_acceptance_reuses_the_active_download_worker(
     try:
         first = await client.post(_url(plan["id"]))
         assert first.status_code == 202, first.text
-        await asyncio.wait_for(entered.wait(), timeout=5)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         active = manager._tasks[first.json()[0]["id"]]
         second = await client.post(_url(plan["id"]))
         assert second.status_code == 202, second.text

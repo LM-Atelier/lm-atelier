@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 from PIL import Image
+from run_waits import PATIENCE_SECONDS
 
 from local_lm import video_output_measurement
 from local_lm.output_measurement import Budget
@@ -422,7 +423,9 @@ async def test_cancelling_a_measurement_reaps_the_decoder_and_removes_the_copy(
     # Bounded, so a measurement that fails before ever reading ends this case
     # instead of leaving it waiting for a read that will never come.
     reading = asyncio.create_task(stdout.reading.wait())
-    done, _ = await asyncio.wait({task, reading}, timeout=10, return_when=asyncio.FIRST_COMPLETED)
+    done, _ = await asyncio.wait(
+        {task, reading}, timeout=PATIENCE_SECONDS, return_when=asyncio.FIRST_COMPLETED
+    )
     assert reading in done, "the decoder never started reading"
     assert len(_copies(scratch)) == 1, "the decoder should be reading a private copy"
 

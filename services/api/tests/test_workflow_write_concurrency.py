@@ -7,6 +7,7 @@ from sqlite3 import Cursor
 import pytest
 from fastapi import FastAPI, Request
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import Connection, event, func, select
 
 from local_lm import api
@@ -147,7 +148,7 @@ async def test_cancelling_a_workflow_write_keeps_its_session_until_the_worker_fi
     event.listen(engine, "before_cursor_execute", before_write)
     task = asyncio.create_task(request())
     try:
-        await asyncio.wait_for(entered.wait(), timeout=10)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         assert not task.done(), "the workflow write did not yield to the event loop"
         for _ in range(2):
             task.cancel()
@@ -219,7 +220,7 @@ async def test_concurrent_revision_writes_choose_distinct_versions(
         if len(reader_threads) == 1:
             loop.call_soon_threadsafe(first_read.set)
             if threading.get_ident() != event_loop_thread:
-                assert release.wait(timeout=10), (
+                assert release.wait(timeout=PATIENCE_SECONDS), (
                     "the test did not release the first revision writer"
                 )
         else:
@@ -232,9 +233,9 @@ async def test_concurrent_revision_writes_choose_distinct_versions(
     first = asyncio.create_task(client.post(endpoint, json=payload))
     second = None
     try:
-        await asyncio.wait_for(first_read.wait(), timeout=10)
+        await asyncio.wait_for(first_read.wait(), timeout=PATIENCE_SECONDS)
         second = asyncio.create_task(client.post(endpoint, json=payload))
-        await asyncio.wait_for(second_entered.wait(), timeout=10)
+        await asyncio.wait_for(second_entered.wait(), timeout=PATIENCE_SECONDS)
         release.set()
         responses = await asyncio.gather(first, second, return_exceptions=True)
         assert all(getattr(response, "status_code", None) == 201 for response in responses), (

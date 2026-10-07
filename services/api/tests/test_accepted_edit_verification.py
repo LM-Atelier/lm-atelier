@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import select
 from test_image_edit_verification_jobs import _png, _wait_for_run
 
@@ -238,7 +239,7 @@ async def test_image_edit_verification_uses_accepted_configuration(
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         assert job is not None, "Accepted verification was silently disabled"
-    await asyncio.wait_for(finished.wait(), timeout=10)
+    await asyncio.wait_for(finished.wait(), timeout=PATIENCE_SECONDS)
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         assert job is not None
@@ -371,7 +372,7 @@ async def test_image_edit_verification_uses_accepted_configuration(
             assert edited.status_code == 202, edited.text
         edited_run_id = edited.json()["run"]["id"]
         await _wait_for_run(client, edited_run_id)
-        await asyncio.wait_for(finished.wait(), timeout=10)
+        await asyncio.wait_for(finished.wait(), timeout=PATIENCE_SECONDS)
         with SessionLocal() as session:
             job = session.get(Job, image_edit_verification_job_id(edited_run_id))
             assert job is not None

@@ -11,6 +11,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from test_api import _claimed_text_job
 
 from local_lm import orchestrator as orchestrator_module
@@ -153,7 +154,7 @@ async def _read_through_the_page_reader(
     messages = [{"role": "user", "content": f"Read {PAGE}"}]
     # Bounded here as well, so a read that never ends fails rather than hangs.
     return await asyncio.wait_for(
-        orch._read_linked_page(messages, run_id, job_id, claim), timeout=10
+        orch._read_linked_page(messages, run_id, job_id, claim), timeout=PATIENCE_SECONDS
     )
 
 

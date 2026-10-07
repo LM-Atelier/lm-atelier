@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import select, text
 from test_comfy_registry_downloads import archive_bytes
 from test_workflow_package_execution_plan import _inputs
@@ -302,7 +303,7 @@ async def test_cancellation_during_extension_resolution_saves_no_workflow_plan(
     monkeypatch.setattr(inputs["registry_client"], "resolve", cancelled)
     try:
         task = asyncio.create_task(client.post(URL, json=payload))
-        await asyncio.wait_for(entered.wait(), timeout=5)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task

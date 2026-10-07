@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
-from run_waits import wait_for_terminal_status
+from run_waits import PATIENCE_SECONDS, wait_for_terminal_status
 from starlette.types import Message as ASGIMessage
 
 from local_lm import workspace_lock_api
@@ -625,10 +625,10 @@ class _EventSocket:
         self.task = asyncio.create_task(app(scope, self.inbound.get, self.outbound.put))
 
     async def next_sent(self) -> ASGIMessage:
-        return await asyncio.wait_for(self.outbound.get(), timeout=10)
+        return await asyncio.wait_for(self.outbound.get(), timeout=PATIENCE_SECONDS)
 
     async def ended(self) -> None:
-        await asyncio.wait_for(self.task, timeout=10)
+        await asyncio.wait_for(self.task, timeout=PATIENCE_SECONDS)
 
     async def leave(self) -> None:
         self.inbound.put_nowait({"type": "websocket.disconnect", "code": 1000})
@@ -717,17 +717,17 @@ async def test_a_pin_check_decided_for_an_earlier_lock_cannot_open_a_newer_one(
         answer = check(attempts, pin)
         if not decided.is_set():
             decided.set()
-            assert resume.wait(timeout=15)
+            assert resume.wait(timeout=PATIENCE_SECONDS)
         return answer
 
     monkeypatch.setattr(workspace_lock_api, "_check_saved_pin", slow_to_answer)
     earlier = asyncio.create_task(_unlock(client, PIN))
     try:
-        assert await asyncio.to_thread(decided.wait, 10)
+        assert await asyncio.to_thread(decided.wait, PATIENCE_SECONDS)
         assert (await _unlock(client, PIN)).status_code == 200
         newer = await _lock(client)
         resume.set()
-        late = await asyncio.wait_for(earlier, timeout=10)
+        late = await asyncio.wait_for(earlier, timeout=PATIENCE_SECONDS)
     finally:
         resume.set()
         await asyncio.gather(earlier, return_exceptions=True)
