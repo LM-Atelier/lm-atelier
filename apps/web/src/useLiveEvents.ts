@@ -186,6 +186,11 @@ export function useLiveEvents(
               if (index < 0) return [snapshot, ...current];
               return current.map((job) => job.id === snapshot.id ? snapshot : job);
             });
+            if (snapshot.kind === "media_utility" && snapshot.status === "complete") {
+              // A saved frame or a trimmed video is a new library item, wherever it was started.
+              for (const key of ["artifact-library-v1", "artifacts", "artifact-storage"])
+                void client.invalidateQueries({ queryKey: [key] });
+            }
             if (snapshot.kind !== "edit_verify") {
               scheduleQueueRefresh();
               const active = ["queued", "running", "paused"].includes(snapshot.status);
