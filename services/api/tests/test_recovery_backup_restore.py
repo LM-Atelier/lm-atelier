@@ -41,10 +41,12 @@ async def test_backup_restore_keeps_original_deletion_identity_and_deadline(
         with SessionLocal() as session:
             artifact, entry, _collection, _tag = _seed(app.state.services.artifacts, session)
             artifact_id, entry_id = artifact.id, entry.id
+            message = session.get(Message, leaf_id)
+            assert message is not None
             session.add(
                 MessagePart(
                     message_id=leaf_id,
-                    position=len(session.get(Message, leaf_id).parts),
+                    position=len(message.parts),
                     type="image",
                     artifact_id=artifact_id,
                 )
@@ -88,6 +90,7 @@ async def test_backup_restore_keeps_original_deletion_identity_and_deadline(
         assert _history(chat_id) == before
         with SessionLocal() as session:
             row = session.get(RecoveryItem, deletion_id)
+            assert row is not None
             assert row.deleted_at.replace(tzinfo=UTC) == deleted_at
             assert row.purge_after.replace(tzinfo=UTC) == deadline
             assert session.scalar(select(func.count()).select_from(Job)) == job_count
@@ -114,6 +117,7 @@ async def test_backup_restore_keeps_original_deletion_identity_and_deadline(
             assert expired.examined == expired.purged == 1 and expired.deferred == 0
             with SessionLocal() as session:
                 row = session.get(RecoveryItem, deletion_id)
+                assert row is not None
                 assert row.state == "purged"
                 assert row.deleted_at.replace(tzinfo=UTC) == deleted_at
                 assert row.purge_after.replace(tzinfo=UTC) == deadline
@@ -121,7 +125,9 @@ async def test_backup_restore_keeps_original_deletion_identity_and_deadline(
                     assert session.get(Chat, chat_id) is None
                 elif kind == "project":
                     assert session.get(Project, project_id) is None
-                    assert session.get(Chat, chat_id).project_id is None
+                    chat = session.get(Chat, chat_id)
+                    assert chat is not None
+                    assert chat.project_id is None
                 else:
                     assert session.get(ArtifactLibraryEntry, entry_id) is None
         assert (await client.get("/api/recovery-items")).json()["items"] == []
@@ -135,6 +141,7 @@ async def test_backup_restore_keeps_original_deletion_identity_and_deadline(
                 assert row is None
                 assert _history(chat_id) == before
             else:
+                assert row is not None
                 assert row.state == "purged" and row.purge_after.replace(tzinfo=UTC) == deadline
             assert (
                 app.state.services.artifacts.resolve(
