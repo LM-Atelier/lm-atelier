@@ -1,9 +1,11 @@
 """Accepted workflow consumers and historical snapshots constrain recovery independently."""
 
 from datetime import UTC, datetime
+from typing import Literal, overload
 
 import pytest
 from httpx2 import AsyncClient
+from sqlalchemy.orm import Session
 from test_workflow_recovery_api import _seed
 
 from local_lm.db import SessionLocal
@@ -24,7 +26,18 @@ from local_lm.recovery_v1 import RecoveryAction, RecoveryConflict
 from local_lm.workflow_recovery_graph import inspect_workflow_recovery
 
 
-def _consumer(session, kind: str, revision_id: str, status: str):
+@overload
+def _consumer(session: Session, kind: Literal["job"], revision_id: str, status: str) -> Job: ...
+
+
+@overload
+def _consumer(
+    session: Session, kind: str, revision_id: str, status: str
+) -> Job | WorkStep | Run: ...
+
+
+def _consumer(session: Session, kind: str, revision_id: str, status: str) -> Job | WorkStep | Run:
+    row: Job | WorkStep | Run
     if kind == "job":
         row = Job(
             id="job-workflow",
@@ -153,7 +166,7 @@ async def test_workflow_recovery_does_not_interpret_description_as_identity(
 
 
 async def test_workflow_graph_refuses_excessive_canonical_data(
-    client: AsyncClient, monkeypatch
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from local_lm import chat_recovery_graph
 
@@ -200,6 +213,7 @@ async def test_runless_queued_work_names_the_required_activation_or_install_offe
 ) -> None:
     family_id, _definition_id, revision_id, _graph = _seed()
     with SessionLocal() as session:
+        owner: WorkflowActivation | WorkflowInstallOffer
         if kind == "activation":
             owner = WorkflowActivation(
                 workflow_revision_id=revision_id,
