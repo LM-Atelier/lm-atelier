@@ -1,7 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { activeWorkflowCapability, workflowChoiceKind } from "./activeWorkflowCapability";
 import { api } from "./api";
 import { useWorkflowFamilyChoices } from "./useWorkflowFamilyChoices";
+import { useWorkflowSelectionSave } from "./useWorkflowSelectionSave";
 import type { WorkflowFamilyBrowseState } from "./useWorkflowFamilyChoices";
 import type {
   ChatWorkflowSelectionInput,
@@ -13,12 +14,6 @@ import type {
   ComposerWorkflowCapability,
   WorkflowChoiceKind,
 } from "./activeWorkflowCapability";
-
-type SelectionMutation = {
-  chatId: string;
-  capability: ComposerWorkflowCapability;
-  selection: ChatWorkflowSelectionInput;
-};
 
 export type ActiveChatWorkflowSelectionState =
   | { kind: "unresolved"; capability: null }
@@ -51,7 +46,6 @@ export function useActiveChatWorkflowSelection(
   routingMode: RoutingMode,
   operation?: string,
 ): ActiveChatWorkflowSelectionState {
-  const client = useQueryClient();
   const capability = activeWorkflowCapability(routingMode);
   const selections = useQuery({
     queryKey: ["chat", chatId, "workflow-selections"],
@@ -63,17 +57,8 @@ export function useActiveChatWorkflowSelection(
   );
   const currentFamilyId = current?.mode === "family" ? current.workflow_family_id : null;
   const families = useWorkflowFamilyChoices(capability, currentFamilyId, operation);
-  const choose = useMutation({
-    mutationFn: ({ chatId: selectedChatId, capability: selectedCapability, selection }:
-      SelectionMutation) => api.setChatWorkflowSelection(
-        selectedChatId,
-        selectedCapability,
-        selection,
-      ),
-    onSuccess: (_saved, variables) => client.invalidateQueries({
-      queryKey: ["chat", variables.chatId, "workflow-selections"],
-    }),
-  });
+  const choose = useWorkflowSelectionSave(capability === null ? null
+    : { kind: "chat", id: chatId, capability });
 
   if (capability === null) return { kind: "unresolved", capability: null };
   if (families.isLoading || selections.isLoading) {
@@ -92,9 +77,6 @@ export function useActiveChatWorkflowSelection(
     };
   }
 
-  const mutationMatchesCurrent = choose.variables?.chatId === chatId
-    && choose.variables.capability === capability;
-
   return {
     kind: "ready",
     capability,
@@ -106,8 +88,8 @@ export function useActiveChatWorkflowSelection(
     selectedFamilyMissing: Boolean(
       currentFamilyId && !families.families.some((family) => family.id === currentFamilyId),
     ),
-    saving: mutationMatchesCurrent && choose.isPending,
-    saveError: mutationMatchesCurrent ? choose.error as Error | null : null,
-    choose: (selection) => choose.mutate({ chatId, capability, selection }),
+    saving: choose.saving,
+    saveError: choose.error,
+    choose: choose.choose,
   };
 }
