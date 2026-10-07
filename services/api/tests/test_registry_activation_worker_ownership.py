@@ -12,6 +12,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import select
 from test_activation_worker_replacement import _ControlledProcess, _ObservedLock
 from test_install_queue_registry import accept
@@ -179,7 +180,9 @@ async def test_prepared_package_startup_preserves_claimed_workers_and_cancelled_
             release.set()
         else:
             lock.release()
-        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=6)
+        await asyncio.wait_for(
+            asyncio.gather(task, return_exceptions=True), timeout=PATIENCE_SECONDS
+        )
         process = replacement.process
         assert isinstance(process, _ControlledProcess)
         if disposition in {"cleared", "replaced"}:
