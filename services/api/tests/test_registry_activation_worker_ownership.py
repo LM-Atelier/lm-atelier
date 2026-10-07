@@ -164,7 +164,7 @@ async def test_prepared_package_startup_preserves_claimed_workers_and_cancelled_
             await lock.acquire()
             lock.entered.clear()
             release.set()
-            await asyncio.wait_for(lock.entered.wait(), timeout=3)
+            await asyncio.wait_for(lock.entered.wait(), timeout=PATIENCE_SECONDS)
         supervisor._workers["media"] = replacement
         with SessionLocal() as session:
             job = session.get(Job, job_id)

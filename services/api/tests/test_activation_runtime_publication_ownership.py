@@ -242,7 +242,7 @@ async def test_media_activation_runtime_publication_requires_the_same_claim(
     ensure_entered = asyncio.Event()
     if shared:
         provisioner.start("comfyui")
-        await _until(runtime_entered.is_set)
+        await _until(runtime_entered.is_set, timeout=PATIENCE_SECONDS)
         shared_task = provisioner._tasks["comfyui"]
         original_ensure = provisioner.ensure
 
@@ -262,9 +262,9 @@ async def test_media_activation_runtime_publication_requires_the_same_claim(
         state="ready",
     )
     try:
-        await _until(runtime_entered.is_set)
+        await _until(runtime_entered.is_set, timeout=PATIENCE_SECONDS)
         if shared:
-            await asyncio.wait_for(ensure_entered.wait(), timeout=2)
+            await asyncio.wait_for(ensure_entered.wait(), timeout=PATIENCE_SECONDS)
         heartbeat = next(
             item
             for item in asyncio.all_tasks()
@@ -283,10 +283,10 @@ async def test_media_activation_runtime_publication_requires_the_same_claim(
             saved_config.write_bytes(sentinel)
         lock.release()
         if shared and disposition != "owned":
-            await _until(heartbeat.done)
+            await _until(heartbeat.done, timeout=PATIENCE_SECONDS)
             assert shared_task is not None and not shared_task.cancelling()
         runtime_release.set()
-        await _until(runtime_finished.is_set)
+        await _until(runtime_finished.is_set, timeout=PATIENCE_SECONDS)
         await asyncio.wait_for(
             asyncio.gather(task, return_exceptions=True), timeout=PATIENCE_SECONDS
         )

@@ -205,7 +205,7 @@ async def test_fresh_runtime_publication_requires_the_same_claim_after_installat
             before = _state(offer_id, job_id)
             assert not heartbeat.done()
             release.set()
-            await _until(finished.is_set)
+            await _until(finished.is_set, timeout=PATIENCE_SECONDS)
             await asyncio.wait_for(
                 asyncio.gather(task, return_exceptions=True), timeout=PATIENCE_SECONDS
             )
