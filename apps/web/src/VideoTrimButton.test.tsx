@@ -617,3 +617,30 @@ it("takes no time from a blurred player, which cannot be played until it is show
   fireEvent.click(end);
   expect(screen.getByLabelText("End (seconds)")).toHaveValue(1.5);
 });
+
+it("keeps an accepted trim when its progress cannot be read, and reads it again only when asked", async () => {
+  vi.mocked(api.videoUtilityJob)
+    .mockResolvedValueOnce(job("running", { phase: "Copying the chosen part" }))
+    .mockRejectedValueOnce(new ApiError(503, "The app is busy.", "The app is busy.", "busy"));
+  await trimChecked();
+
+  expect(await screen.findByText(
+    "Trimming was accepted, but how it is going could not be read: The app is busy.",
+  )).toBeInTheDocument();
+  // The reading stops rather than repeating, and the cut is not sent again.
+  const reads = vi.mocked(api.videoUtilityJob).mock.calls.length;
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  expect(api.videoUtilityJob).toHaveBeenCalledTimes(reads);
+  expect(screen.queryByText("Copying the chosen part…")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Trim" })).toHaveAttribute("aria-disabled", "true");
+  expect(screen.getByRole("button", { name: "Stop trimming" })).toHaveAttribute("aria-disabled", "false");
+
+  vi.mocked(api.videoUtilityJob).mockResolvedValue(job("complete", { phase: "Video trimmed", result_json: RESULT }));
+  fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+  expect(await screen.findByText(
+    "Saved a new video from 1.000 s to 2.040 s of the original (you chose 1.430 s to 2.000 s). It is in the Media Library.",
+  )).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Check again" })).not.toBeInTheDocument();
+  expect(api.videoUtilityJob).toHaveBeenCalledTimes(reads + 1);
+  expect(api.trimVideo).toHaveBeenCalledTimes(1);
+});

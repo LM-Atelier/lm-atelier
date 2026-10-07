@@ -7,6 +7,7 @@ import { ApiError, api } from "./api";
 import { ShieldedMedia } from "./ShieldedMedia";
 import type { Job, VideoProbe, VideoTrimMode, VideoTrimPreview, VideoTrimRequest } from "./types";
 import { EXACT_LIMIT_TEXT, SAME_MOMENT, previewLines, savedLines, workingText } from "./videoTrimText";
+import { JobReadProblem } from "./VideoUtilityJobRead";
 import { FINISHED, LIMIT_TEXT, useVideoProbe, useVideoUtilityJob } from "./videoUtilityText";
 
 interface Cut {
@@ -150,6 +151,8 @@ function VideoTrimEditor({ artifactId, source, facts, duration }: {
   const working = posting || (jobId !== null && (!current || !FINISHED.has(current.status)));
   const trimmable = preview !== null && !preview.keeps_whole_video && !working;
   const finished = current && FINISHED.has(current.status) ? current : null;
+  // The trim is still accepted when its progress cannot be read; only the reading stopped.
+  const readFailed = !posting && job.error !== null;
   const playable = player !== null && player.closest("[inert]") === null;
 
   const fromPlayer = (setText: (text: string) => void) => {
@@ -242,7 +245,7 @@ function VideoTrimEditor({ artifactId, source, facts, duration }: {
           since taking it away would drop the focus it may hold out of the dialog. */}
       {(working || jobId !== null) && (
         <div className="row-actions">
-          {working && <p role="status">{workingText(current)}</p>}
+          {working && !readFailed && <p role="status">{workingText(current)}</p>}
           {!posting && jobId !== null && (
             <button type="button" className="secondary" aria-disabled={!working || stop.isPending} onClick={stopTrimming}>
               Stop trimming
@@ -250,6 +253,7 @@ function VideoTrimEditor({ artifactId, source, facts, duration }: {
           )}
         </div>
       )}
+      {!posting && jobId !== null && <JobReadProblem job={job} subject="Trimming" />}
       {working && stop.error && (
         <p role="alert">
           {stop.error instanceof ApiError && stop.error.status === 409
