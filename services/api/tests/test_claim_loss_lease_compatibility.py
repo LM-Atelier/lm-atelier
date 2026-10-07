@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from run_waits import PATIENCE_SECONDS
 
 from local_lm import scheduler as scheduler_module
 from local_lm.config import Settings
@@ -48,7 +49,7 @@ async def test_a_default_lease_caller_keeps_running_after_ownership_moves(
 
     execution = asyncio.create_task(work())
     try:
-        await asyncio.wait_for(entered.wait(), timeout=5)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         heartbeat = next(
             task for task in asyncio.all_tasks() if task.get_name() == f"job-heartbeat-{job_id}"
         )
@@ -65,10 +66,10 @@ async def test_a_default_lease_caller_keeps_running_after_ownership_moves(
                 job.heartbeat_at,
             )
             session.commit()
-        await asyncio.wait_for(asyncio.shield(heartbeat), timeout=5)
+        await asyncio.wait_for(asyncio.shield(heartbeat), timeout=PATIENCE_SECONDS)
         assert not execution.done()
         finish.set()
-        await asyncio.wait_for(execution, timeout=5)
+        await asyncio.wait_for(execution, timeout=PATIENCE_SECONDS)
         assert not execution.cancelled() and not scheduler._lock("primary", 1).locked()
         with SessionLocal() as session:
             job = session.get(Job, job_id)

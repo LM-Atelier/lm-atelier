@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import delete
 from test_install_queue_registry import accept, state
 from test_install_queue_registry import configured_registry as configured_registry
@@ -47,13 +48,13 @@ async def test_a_registry_preparation_wait_retains_only_its_own_claim(
     job_id = await accept(client)
     task = api_module._REGISTRY_PREPARE_TASKS[job_id]
     try:
-        await asyncio.wait_for(entered.wait(), timeout=3)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         heartbeat = next(
             task for task in asyncio.all_tasks() if task.get_name() == f"job-heartbeat-{job_id}"
         )
         if disposition == "owned":
             release.set()
-            await asyncio.wait_for(task, timeout=3)
+            await asyncio.wait_for(task, timeout=PATIENCE_SECONDS)
             assert state(job_id)[:3] == ("complete", None, 1)
         else:
             with SessionLocal() as session:
@@ -67,8 +68,8 @@ async def test_a_registry_preparation_wait_retains_only_its_own_claim(
                         job.attempt = 2
                 session.commit()
             before = state(job_id) if disposition != "removed" else None
-            await _until(heartbeat.done)
-            await _until(task.done, timeout=1)
+            await _until(heartbeat.done, timeout=PATIENCE_SECONDS)
+            await _until(task.done, timeout=PATIENCE_SECONDS)
             await asyncio.gather(task, return_exceptions=True)
             assert ended.is_set()
             if before is not None:

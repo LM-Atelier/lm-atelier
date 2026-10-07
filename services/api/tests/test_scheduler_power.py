@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
@@ -81,7 +82,7 @@ async def test_a_job_waiting_its_turn_holds_nothing(client: AsyncClient) -> None
         await asyncio.sleep(0.5)
         assert not second_claimed.is_set()
         assert power.state().holder_count == 1
-    await asyncio.wait_for(waiting, timeout=10)
+    await asyncio.wait_for(waiting, timeout=PATIENCE_SECONDS)
 
     assert backend.calls == ["acquire", "release", "acquire", "release"]
 
