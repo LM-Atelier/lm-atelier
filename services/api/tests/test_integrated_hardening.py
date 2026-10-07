@@ -11,7 +11,7 @@ from typing import Any, cast
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
-from run_waits import wait_for_terminal_status, wait_until
+from run_waits import PATIENCE_SECONDS, wait_for_terminal_status, wait_until
 from sqlalchemy import select, update
 
 from local_lm.adapters.base import MediaEvent, MediaRequest
@@ -108,7 +108,7 @@ async def test_ordered_story_image_video_summary_retries_only_cancelled_video(
         "image_to_video",
         "text",
     ]
-    await asyncio.wait_for(video_started.wait(), timeout=8)
+    await asyncio.wait_for(video_started.wait(), timeout=PATIENCE_SECONDS)
 
     video_step = plan["steps"][2]
     cancelled = await client.post(f"/api/work-steps/{video_step['id']}/cancel")
@@ -267,7 +267,7 @@ async def test_lora_image_regeneration_cancel_retry_revision_switch_and_export(
     assert regenerated.status_code == 202
     replacement_run_id = regenerated.json()["run"]["id"]
     replacement_step_id = regenerated.json()["run"]["work_step_id"]
-    await asyncio.wait_for(regeneration_started.wait(), timeout=8)
+    await asyncio.wait_for(regeneration_started.wait(), timeout=PATIENCE_SECONDS)
     cancelled = await client.post(f"/api/work-steps/{replacement_step_id}/cancel")
     assert cancelled.status_code == 200
     await _wait_for_run(client, replacement_run_id, "cancelled")

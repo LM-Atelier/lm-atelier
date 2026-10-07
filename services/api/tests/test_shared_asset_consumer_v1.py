@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from run_waits import PATIENCE_SECONDS
 
 from local_lm import filesystem_links as links
 from local_lm import shared_asset_consumer_v1 as consumer
@@ -485,7 +486,7 @@ def test_two_concurrent_first_starts_converge_on_one_identity(
             # instead would prove nothing, because by then the bytes are
             # already written under either design.
             inside.set()
-            release.wait(timeout=10)
+            release.wait(timeout=PATIENCE_SECONDS)
         return descriptor
 
     monkeypatch.setattr(instance_identity, "create_entry", pause_after_create)
@@ -495,7 +496,7 @@ def test_two_concurrent_first_starts_converge_on_one_identity(
 
     def second() -> None:
         try:
-            inside.wait(timeout=10)
+            inside.wait(timeout=PATIENCE_SECONDS)
             results["second"] = _derive(data_dir)
         except BaseException as error:  # noqa: BLE001 - reported, not swallowed
             errors.append(error)

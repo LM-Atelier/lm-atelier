@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from workflow_fixtures import seed_workflow_trust
@@ -266,7 +267,7 @@ async def test_custom_node_change_rechecks_media_queue_inside_compute_lease(
             )
             session.commit()
 
-    response = await asyncio.wait_for(trust, timeout=2)
+    response = await asyncio.wait_for(trust, timeout=PATIENCE_SECONDS)
     assert response.status_code == 409
     assert "active or queued job" in response.json()["detail"]
     assert verified is False

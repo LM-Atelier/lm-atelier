@@ -8,6 +8,7 @@ from typing import Any, Self
 
 import pytest
 from pydantic import ValidationError
+from run_waits import PATIENCE_SECONDS
 
 import local_lm.adapters.contracts as contracts
 from local_lm.adapters.base import ChatEvent, ChatRequest
@@ -652,7 +653,7 @@ async def test_cancelling_the_caller_still_asks_the_close_to_stop() -> None:
 
     producer = SlowClose()
     waiting = asyncio.ensure_future(contracts.close_iterator(producer))
-    await asyncio.wait_for(entered.wait(), timeout=2)
+    await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
 
     waiting.cancel()
     with pytest.raises(asyncio.CancelledError):

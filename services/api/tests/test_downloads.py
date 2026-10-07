@@ -12,6 +12,7 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import select
 
 from local_lm.adapters.base import ChatEvent, ChatRequest, MediaRequest
@@ -2195,7 +2196,7 @@ async def test_media_activation_waits_for_the_shared_compute_lease(
         await asyncio.sleep(0.03)
         assert started.is_set() is False
 
-    result = await asyncio.wait_for(activation, timeout=2)
+    result = await asyncio.wait_for(activation, timeout=PATIENCE_SECONDS)
     assert result
     assert started.is_set() is True
     with SessionLocal() as session:
@@ -2721,7 +2722,7 @@ async def test_cancel_removes_provisional_install_and_abandoned_partial(
         assert cancellation.done() is False
         assert destination.exists()
 
-    assert await asyncio.wait_for(cancellation, timeout=2) is True
+    assert await asyncio.wait_for(cancellation, timeout=PATIENCE_SECONDS) is True
 
     with SessionLocal() as session:
         job = session.get(Job, "job_cancel_provisional")

@@ -18,7 +18,7 @@ import httpx
 import psutil
 import pytest
 from httpx2 import AsyncClient
-from run_waits import wait_until
+from run_waits import PATIENCE_SECONDS, wait_until
 from sqlalchemy.orm import Session, object_session
 
 import local_lm.comfy_registry_interpreter as registry_interpreter_module
@@ -3067,7 +3067,7 @@ async def test_supervisor_reports_unexpected_worker_exit_without_status_polling(
     assert status.failure_detail == "chat worker exited with code 9."
     assert event.entity_id == "chat"
     assert event.payload == {"name": "chat", "state": "exited", "exit_code": 9}
-    await asyncio.wait_for(record.monitor_task, timeout=1)
+    await asyncio.wait_for(record.monitor_task, timeout=PATIENCE_SECONDS)
     assert record.monitor_task.done()
     await supervisor.close()
 

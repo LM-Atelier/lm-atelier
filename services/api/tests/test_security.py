@@ -11,6 +11,7 @@ from typing import Annotated
 import pytest
 from fastapi import FastAPI, File, Response, UploadFile
 from httpx2 import ASGITransport, AsyncClient
+from run_waits import PATIENCE_SECONDS
 from starlette.types import Message, Receive, Scope, Send
 
 from local_lm.config import Settings
@@ -247,7 +248,7 @@ async def test_json_body_replay_waits_on_the_real_connection_after_the_body() ->
             "more_body": False,
         }
         pending_receive = asyncio.ensure_future(receive())
-        await asyncio.wait_for(downstream_receive_started.wait(), timeout=0.5)
+        await asyncio.wait_for(downstream_receive_started.wait(), timeout=PATIENCE_SECONDS)
         await asyncio.sleep(0)
         assert not pending_receive.done()
         allow_disconnect.set()

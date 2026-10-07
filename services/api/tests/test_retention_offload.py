@@ -28,6 +28,7 @@ from typing import Any
 
 import pytest
 from httpx2 import ASGITransport, AsyncClient
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -202,7 +203,7 @@ async def test_the_app_serves_while_the_sweep_commits_one_batch_at_a_time(
         with SessionLocal() as other:
             visible_before.append(_count(other))
         if len(visible_before) == 1:
-            assert release.wait(timeout=10), "the first batch was never released"
+            assert release.wait(timeout=PATIENCE_SECONDS), "the first batch was never released"
         return real_cleanup(self, session, **kwargs)
 
     monkeypatch.setattr(ArtifactStore, "cleanup_retention", spying_cleanup)
@@ -715,7 +716,9 @@ async def test_cancelling_during_staging_recovery_still_reaches_its_stop(
         should_stop = kwargs["should_stop"]
         assert not should_stop()
         entered.set()
-        assert release.wait(timeout=5), "the constructed staging recovery was not released"
+        assert release.wait(timeout=PATIENCE_SECONDS), (
+            "the constructed staging recovery was not released"
+        )
         assert should_stop()
         stopped.set()
         real_recovery(self, session, **kwargs)
@@ -819,7 +822,7 @@ async def test_retention_progress_reports_a_statement_while_sqlite_is_still_insi
     def pause_inside_sqlite() -> int:
         in_sql.set()
         try:
-            reported.wait(timeout=3)
+            reported.wait(timeout=PATIENCE_SECONDS)
         finally:
             in_sql.clear()
         return 1
@@ -910,7 +913,7 @@ async def test_retention_progress_includes_the_batch_committed_during_cancellati
     def paused_delete(self: ArtifactStore, session: Session, *args: Any, **kwargs: Any) -> Any:
         result = real_delete(self, session, *args, **kwargs)
         deleted.set()
-        assert release.wait(timeout=5), "the constructed deletion was not released"
+        assert release.wait(timeout=PATIENCE_SECONDS), "the constructed deletion was not released"
         return result
 
     monkeypatch.setattr(ArtifactStore, "_delete_artifact", paused_delete)
@@ -1014,7 +1017,7 @@ async def test_retention_cancellation_reports_committed_unindexed_files(
     def paused_cleanup(self: ArtifactStore, session: Session, **kwargs: Any) -> Any:
         result = real_cleanup(self, session, **kwargs)
         completed.set()
-        assert release.wait(timeout=5), "the completed batch was not released"
+        assert release.wait(timeout=PATIENCE_SECONDS), "the completed batch was not released"
         return result
 
     monkeypatch.setattr(ArtifactStore, "cleanup_retention", paused_cleanup)

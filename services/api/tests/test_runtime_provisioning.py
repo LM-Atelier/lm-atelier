@@ -18,6 +18,7 @@ from typing import Any, Never
 
 import httpx
 import pytest
+from run_waits import PATIENCE_SECONDS
 
 import local_lm.runtime_provisioning as runtime_provisioning
 from local_lm.config import Settings
@@ -928,7 +929,7 @@ async def test_managed_runtime_verification_starts_in_background(
         assert restarted.status("llama.cpp").state == "installing"
         restore = restarted.start_restore()
         assert restore is not None
-        assert await asyncio.to_thread(started.wait, 1)
+        assert await asyncio.to_thread(started.wait, PATIENCE_SECONDS)
         assert restarted.status("llama.cpp").state == "installing"
 
         ensure = asyncio.create_task(restarted.ensure("llama.cpp"))
@@ -989,9 +990,9 @@ async def test_managed_runtime_verification_stops_cleanly_on_close(
         )
         restore = restarted.start_restore()
         assert restore is not None
-        assert await asyncio.to_thread(started.wait, 1)
+        assert await asyncio.to_thread(started.wait, PATIENCE_SECONDS)
 
-        await asyncio.wait_for(restarted.close(), timeout=1)
+        await asyncio.wait_for(restarted.close(), timeout=PATIENCE_SECONDS)
         assert restore.done()
 
 

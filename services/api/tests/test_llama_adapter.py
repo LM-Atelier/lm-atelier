@@ -5,6 +5,7 @@ import json
 from collections.abc import AsyncIterator
 
 import httpx
+from run_waits import PATIENCE_SECONDS
 
 from local_lm.adapters.base import ChatEvent, ChatRequest, estimate_chat_tokens
 from local_lm.adapters.contracts import MAX_ADAPTER_EVENT_BYTES
@@ -265,7 +266,7 @@ async def test_llama_adapter_completes_when_terminal_choice_does_not_close_strea
                     messages=[{"role": "user", "content": "Finish"}],
                 ),
             ),
-            timeout=0.5,
+            timeout=PATIENCE_SECONDS,
         )
         assert [event.type for event in events] == ["delta", "usage", "complete"]
         assert events[-1].data["finish_reason"] == "stop"
@@ -353,9 +354,9 @@ async def test_llama_adapter_cancels_a_blocked_non_streaming_vision_completion()
     )
     task = asyncio.create_task(_collect_events(adapter, request))
     try:
-        await asyncio.wait_for(started.wait(), timeout=0.5)
+        await asyncio.wait_for(started.wait(), timeout=PATIENCE_SECONDS)
         await adapter.cancel(request.run_id)
-        events = await asyncio.wait_for(task, timeout=0.5)
+        events = await asyncio.wait_for(task, timeout=PATIENCE_SECONDS)
         assert [event.type for event in events] == ["cancelled"]
     finally:
         if not task.done():
@@ -636,9 +637,9 @@ async def test_llama_adapter_cancel_wakes_a_blocked_stream() -> None:
     request = ChatRequest(run_id="cancel-blocked", messages=[])
     collecting = asyncio.create_task(_collect_events(adapter, request))
     try:
-        await asyncio.wait_for(receiving.wait(), timeout=0.5)
+        await asyncio.wait_for(receiving.wait(), timeout=PATIENCE_SECONDS)
         await adapter.cancel(request.run_id)
-        events = await asyncio.wait_for(collecting, timeout=0.5)
+        events = await asyncio.wait_for(collecting, timeout=PATIENCE_SECONDS)
     finally:
         if not collecting.done():
             collecting.cancel()
