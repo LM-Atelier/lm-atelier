@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from test_scheduler_claim_hold import _until
 from test_workflow_completion_jobs import _accept
 from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
@@ -116,7 +117,7 @@ async def test_source_inspection_keeps_its_slot_until_the_displaced_thread_exits
 
     waiter: asyncio.Task[None] | None = None
     try:
-        await _until(entered.is_set)
+        await _until(entered.is_set, timeout=PATIENCE_SECONDS)
         assert not finished.is_set() and not task.done()
         heartbeat = next(
             item for item in asyncio.all_tasks() if item.get_name() == f"job-heartbeat-{job_id}"
@@ -131,7 +132,7 @@ async def test_source_inspection_keeps_its_slot_until_the_displaced_thread_exits
                     job.attempt += 1
                 session.commit()
             before = _state(offer_id, job_id)
-            await _until(heartbeat.done)
+            await _until(heartbeat.done, timeout=PATIENCE_SECONDS)
         elif disposition == "cancelled":
             response = await client.post(f"/api/jobs/{job_id}/cancel")
             assert response.status_code == 200 and response.json()["status"] == "cancelled"
@@ -147,12 +148,12 @@ async def test_source_inspection_keeps_its_slot_until_the_displaced_thread_exits
         assert not acquired.is_set(), "The next installation acquired the slot before I/O ended."
         assert not task.done(), "The installation exited while its source thread was still running."
         release.set()
-        await _until(finished.is_set)
+        await _until(finished.is_set, timeout=PATIENCE_SECONDS)
         await asyncio.wait_for(
             asyncio.gather(task, return_exceptions=True),
-            timeout=30 if disposition == "owned" else 5,
+            timeout=PATIENCE_SECONDS,
         )
-        await _until(acquired.is_set)
+        await _until(acquired.is_set, timeout=PATIENCE_SECONDS)
         after = _state(offer_id, job_id)
         result = after[1]["result_json"]
         assert isinstance(result, dict)
@@ -171,5 +172,5 @@ async def test_source_inspection_keeps_its_slot_until_the_displaced_thread_exits
         if waiter is not None:
             waiter.cancel()
             await asyncio.gather(waiter, return_exceptions=True)
-        await _until(finished.is_set)
+        await _until(finished.is_set, timeout=PATIENCE_SECONDS)
         await manager.close()

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 from test_activation_worker_replacement import _ControlledProcess, _ObservedLock
 from test_workflow_completion_jobs import _accept
 from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
@@ -135,13 +136,13 @@ async def test_source_startup_preserves_the_worker_and_configuration_of_a_newer_
     replacement = record("replacement-worker")
     replacement_paths = b"replacement configuration marker"
     try:
-        await asyncio.wait_for(entered.wait(), timeout=5)
+        await asyncio.wait_for(entered.wait(), timeout=PATIENCE_SECONDS)
         assert len(scopes) == 1
         if boundary == "lock":
             await lock.acquire()
             lock.entered.clear()
             release.set()
-            await asyncio.wait_for(lock.entered.wait(), timeout=3)
+            await asyncio.wait_for(lock.entered.wait(), timeout=PATIENCE_SECONDS)
         assert not task.done()
         supervisor._workers["media"] = replacement
         with SessionLocal() as session:
@@ -175,7 +176,7 @@ async def test_source_startup_preserves_the_worker_and_configuration_of_a_newer_
             lock.release()
         await asyncio.wait_for(
             asyncio.gather(task, return_exceptions=True),
-            timeout=30 if disposition == "owned" else 5,
+            timeout=PATIENCE_SECONDS,
         )
         process = replacement.process
         assert isinstance(process, _ControlledProcess)
