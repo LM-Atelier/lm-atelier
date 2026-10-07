@@ -792,6 +792,7 @@ from .user_queue_activity import (
 )
 from .verified_setup import build_verified_setup, resolve_verified_setup
 from .video_length import video_length_reaches_graph, workflow_video_length
+from .video_utility_api import router as video_utility_router
 from .web_search import CrwSearchProvider, WebSearchError
 from .web_search_configuration import configured_search_provider, search_provider_revision
 from .web_search_consent import SearchConsentConflict, decide_search, replace_search_proposal
@@ -1019,6 +1020,7 @@ router.include_router(recovery_router)
 router.include_router(output_recipe_router)
 router.include_router(picture_remix_router)
 router.include_router(workspace_lock_router)
+router.include_router(video_utility_router)
 logger = logging.getLogger(__name__)
 
 

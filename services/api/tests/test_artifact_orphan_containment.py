@@ -529,6 +529,38 @@ def test_an_aged_file_this_store_did_not_write_survives_in_the_root(
     assert almost.read_bytes() == b"wrong suffix"
 
 
+def test_a_copy_made_for_a_tool_and_left_by_a_crash_is_swept(
+    store_session: tuple[ArtifactStore, Session, Path],
+) -> None:
+    """A tool's copy is removed when its call ends; one a crash left behind is the sweep's.
+
+    Only the exact name a copy is given is the sweep's to remove: `tool-input-`,
+    32 lowercase hex digits and `.tmp`. Anything merely resembling it stays.
+    """
+
+    store, session, root = store_session
+    digits = "0123456789abcdef" * 2
+    abandoned = _write_aged(root / f"tool-input-{digits}.tmp", b"copy")
+    resembling = [
+        _write_aged(root / name, name.encode())
+        for name in (
+            "tool-input-abandoned.tmp",
+            f"tool-input-{digits}.mp4",
+            f"tool-input-{digits[:-1]}.tmp",
+            f"tool-input-{digits}0.tmp",
+            # Different digits: on a case-insensitive disk the same ones name the same file.
+            f"tool-input-{'FEDCBA9876543210' * 2}.tmp",
+            f"tool-input-{digits}.tmp.keep",
+        )
+    ]
+
+    removed, reclaimed = _sweep(store, session)
+
+    assert (removed, reclaimed) == (1, len(b"copy"))
+    assert not abandoned.exists()
+    assert [path.read_bytes() for path in resembling] == [path.name.encode() for path in resembling]
+
+
 def test_a_removal_that_refuses_is_not_counted_and_does_not_end_the_pass(
     store_session: tuple[ArtifactStore, Session, Path],
     monkeypatch: pytest.MonkeyPatch,
