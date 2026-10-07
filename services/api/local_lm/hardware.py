@@ -103,18 +103,36 @@ def _nvidia_devices() -> list[DeviceInfo]:
         if len(fields) != 5:
             continue
         index, name, total_mib, free_mib, driver = fields
+        total_bytes = _memory_bytes_from_mib(total_mib)
+        available_bytes = _memory_bytes_from_mib(free_mib)
+        if (
+            total_bytes is not None
+            and available_bytes is not None
+            and available_bytes > total_bytes
+        ):
+            available_bytes = None
         devices.append(
             DeviceInfo(
                 id=f"cuda:{index}",
                 name=name,
                 kind="gpu",
-                total_memory_bytes=int(total_mib) * 1024 * 1024,
-                available_memory_bytes=int(free_mib) * 1024 * 1024,
+                total_memory_bytes=total_bytes,
+                available_memory_bytes=available_bytes,
                 backend="cuda",
                 details={"driver": driver},
             )
         )
     return devices
+
+
+def _memory_bytes_from_mib(value: str) -> int | None:
+    try:
+        amount = int(value)
+    except ValueError:
+        return None
+    if not 0 <= amount <= ((1 << 63) - 1) // (1024 * 1024):
+        return None
+    return amount * 1024 * 1024
 
 
 def _llama_devices() -> list[DeviceInfo]:
