@@ -81,7 +81,10 @@ def sessions(tmp_path: Path) -> Iterator[SessionFactory]:
     def foreign_keys(connection: object, _record: object) -> None:
         connection.execute("PRAGMA foreign_keys=ON")  # type: ignore[attr-defined]
 
-    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        # SQLite's legacy transaction mode does not begin a transaction for DDL.
+        connection.exec_driver_sql("BEGIN")
+        Base.metadata.create_all(connection)
     try:
         yield sessionmaker(engine, expire_on_commit=False)
     finally:
