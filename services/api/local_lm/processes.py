@@ -2636,7 +2636,10 @@ class ProcessSupervisor:
                     self.settings.worker_shutdown_seconds,
                 )
             if record.output_task:
-                await asyncio.shield(record.output_task)
+                await asyncio.wait_for(
+                    asyncio.shield(record.output_task),
+                    timeout=self.settings.worker_shutdown_seconds,
+                )
         except (WorkerStopIncomplete, OSError) as exc:
             record.shutdown_incomplete = True
             raise WorkerStopIncomplete() from exc
