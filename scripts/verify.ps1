@@ -116,13 +116,26 @@ try {
     # lines above: two of them decide whether verification happens at all, and
     # until they were added the tools that judge the gate were the only Python
     # in the repository the gate never judged.
-    Invoke-Checked "Strict mypy" $Mypy @(
-        "--config-file", "services/api/pyproject.toml", "services/api/local_lm", "scripts"
-    )
-    Invoke-Checked "Strict mypy (Linux platform)" $Mypy @(
-        "--platform", "linux",
-        "--config-file", "services/api/pyproject.toml", "services/api/local_lm", "scripts"
-    )
+    $PreviousMypyPath = $env:MYPYPATH
+    try {
+        $env:MYPYPATH = @(
+            (Join-Path $RepositoryRoot "services/api"),
+            (Join-Path $RepositoryRoot "services/api/tests")
+        ) -join [System.IO.Path]::PathSeparator
+        Invoke-Checked "Strict mypy" $Mypy @(
+            "--explicit-package-bases",
+            "--config-file", "services/api/pyproject.toml",
+            "services/api/local_lm", "services/api/tests", "scripts"
+        )
+        Invoke-Checked "Strict mypy (Linux platform)" $Mypy @(
+            "--platform", "linux", "--explicit-package-bases",
+            "--config-file", "services/api/pyproject.toml",
+            "services/api/local_lm", "services/api/tests", "scripts"
+        )
+    }
+    finally {
+        $env:MYPYPATH = $PreviousMypyPath
+    }
     Invoke-Checked "Bandit high-severity scan" $Bandit @(
         "-q", "-lll", "-r", "services/api/local_lm"
     )

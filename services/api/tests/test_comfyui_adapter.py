@@ -5,7 +5,7 @@ import json
 import os
 import subprocess
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -582,7 +582,10 @@ class _BlockingSocket:
         raise AssertionError("unreachable")
 
 
-def _adapter_on(monkeypatch: pytest.MonkeyPatch, handler: Any) -> ComfyUIAdapter:
+def _adapter_on(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Callable[[httpx.Request], Awaitable[httpx.Response]],
+) -> ComfyUIAdapter:
     async def legacy_backend(request: httpx.Request) -> httpx.Response:
         if request.url.path.startswith("/api/jobs/"):
             return httpx.Response(404)
