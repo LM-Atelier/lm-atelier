@@ -24,7 +24,9 @@ def artifact_session(tmp_path: Path) -> Iterator[tuple[ArtifactStore, Session]]:
     settings = Settings(data_dir=tmp_path / "data")
     settings.prepare()
     engine = create_engine(f"sqlite:///{tmp_path / 'artifacts.sqlite3'}")
-    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("BEGIN")
+        Base.metadata.create_all(connection)
     with Session(engine, expire_on_commit=False) as session:
         yield ArtifactStore(settings), session
     engine.dispose()
