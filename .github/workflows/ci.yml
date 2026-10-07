@@ -252,12 +252,9 @@ jobs:
     needs: verification-plan
     if: needs.verification-plan.outputs.windows == 'true'
     runs-on: windows-2025
-    # The whole Windows verification grows with the test suite: passing runs
-    # took 47 to 54 minutes in October 2026, and changes were cancelled at 55
-    # minutes with every stage they reached green. The merge queue waits at
-    # most 90 minutes for every required check, so this stays inside that
-    # window with room for the plan job ahead of it.
-    timeout-minutes: 80
+    # The full Windows gate can exceed 80 minutes on slower runners. Reserve
+    # five minutes for the plan within the queue's 90-minute check window.
+    timeout-minutes: 85
     env:
       LOCAL_LM_DATA_DIR: ${{ github.workspace }}/temp/local-lm-tests
       UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
