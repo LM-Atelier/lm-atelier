@@ -404,7 +404,7 @@ async def test_a_trim_begins_at_the_shown_keyframe_and_records_what_it_measured(
 async def test_a_new_video_whose_end_cannot_be_sought_is_measured_from_all_its_packets(
     client: AsyncClient, app: FastAPI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Sought far past its end, a Matroska file can list no packet at all.
+    # Sought far past its end, an MP4 file now and then lists no packet at all.
     source = _store(app, _walk(tmp_path))
     video_trim = _trim_module()
     run_tool = video_trim.run_tool
@@ -434,6 +434,54 @@ async def test_a_new_video_whose_end_cannot_be_sought_is_measured_from_all_its_p
     assert job["result_json"]["actual_end_seconds"] == pytest.approx(
         1.0 + float(video["duration"]) - float(video["start_time"]), abs=0.001
     )
+
+
+async def test_a_matroska_video_is_measured_to_its_last_packet_when_a_seek_lists_part_of_it(
+    client: AsyncClient, app: FastAPI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Sought far past its end, a Matroska file can list a few of its last
+    # packets and stop there, without an error.
+    content = _make(
+        tmp_path, "keyed.mkv", *PATTERN, *TONE, "-t", "4", *KEYED, "-c:a", "flac", "-shortest"
+    )
+    source = _store(app, content, "keyed.mkv", "video/x-matroska")
+    video_trim = _trim_module()
+    run_tool = video_trim.run_tool
+
+    async def part_past_the_end(executable: Path, arguments: list[str], **bounds: Any) -> Any:
+        answer = await run_tool(executable, arguments, **bounds)
+        if "packet=pts_time,duration_time" in arguments and "-read_intervals" in arguments:
+            first = answer.stdout.splitlines(keepends=True)[:2]
+            return dataclasses.replace(answer, stdout=b"".join(first))
+        return answer
+
+    monkeypatch.setattr(video_trim, "run_tool", part_past_the_end)
+
+    job = await _trimmed(client, source, 1.43, 2.7, True)
+
+    assert job["status"] == "complete", (job["result_json"], job["error"])
+    made = _path(app, job["result_json"]["result_artifact_id"])
+    listed = subprocess.run(
+        [
+            _tool("ffprobe"),
+            "-v",
+            "error",
+            "-select_streams",
+            "0",
+            "-show_entries",
+            "packet=pts_time,duration_time",
+            "-of",
+            "csv=p=0",
+            str(made),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    ).stdout.split()
+    rows = [row.split(",")[:2] for row in listed]
+    last = max(float(start) + (0.0 if length == "N/A" else float(length)) for start, length in rows)
+    assert job["result_json"]["video"]["end_seconds"] == pytest.approx(last, abs=0.001)
 
 
 async def test_a_video_whose_timestamps_start_late_is_cut_on_its_own_timeline(

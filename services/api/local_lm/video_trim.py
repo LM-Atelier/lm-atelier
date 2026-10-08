@@ -56,6 +56,7 @@ from .video_probe import (
     MAX_ERROR_BYTES,
     MAX_PROBE_BYTES,
     AudioStreamFacts,
+    Container,
     VideoProbe,
     VideoProbeRefused,
     VideoStreamFacts,
@@ -370,7 +371,7 @@ async def check_trim(
     streams = facts.get("streams")
     if not isinstance(streams, list) or not all(isinstance(item, dict) for item in streams):
         raise TrimRefused("video-trim-unmeasured")
-    expected_container = "mp4" if plan.preview.format == "mp4" else "matroska"
+    expected_container: Container = "mp4" if plan.preview.format == "mp4" else "matroska"
     if container != expected_container or len(streams) != 1 + len(plan.audio):
         raise TrimRefused("video-trim-output-mismatch")
     try:
@@ -401,7 +402,7 @@ async def check_trim(
             raise TrimRefused("video-trim-output-mismatch")
         audio.append((facts_of.codec, _stated_time(stream.get("start_time")), _packets(stream)))
 
-    end = await _video_end(output, ffprobe)
+    end = await _video_end(output, ffprobe, expected_container)
     await _require_whole_start(output, ffprobe)
     shown = await _picture(output, 0, ffmpeg, keyframe=None)
     if shown.sha256 != source.sha256:
@@ -739,19 +740,22 @@ async def _measure(output: Path, ffprobe: MediaTool) -> dict[str, Any]:
     return payload
 
 
-async def _video_end(output: Path, ffprobe: MediaTool) -> float:
-    """Where the new video's picture ends, read from its last group of pictures.
+async def _video_end(output: Path, ffprobe: MediaTool, container: Container) -> float:
+    """Where the new video's picture ends: the latest end among its picture packets.
 
-    The read starts past any end the file can have, so it begins at the last
-    keyframe and runs to the end. A Matroska file sought that far can list no
-    packet at all; then every packet of the picture stream is read instead,
-    within the same bounds.
+    An MP4 file is read from past any end it can have, so the read begins at
+    its last keyframe and runs to the end; when that lists no packet, as it now
+    and then does, every packet of the picture stream is read instead. A
+    Matroska file sought that far can list a few of its last packets and stop
+    there, without an error, so every packet of its picture is read, within the
+    same bounds.
     """
 
-    listed = await _end_packets(output, ffprobe, f"{2 * MAX_DURATION_SECONDS}%")
-    if not listed.strip():
-        listed = await _end_packets(output, ffprobe, None)
-    return last_packet_end(listed)
+    if container == "mp4":
+        listed = await _end_packets(output, ffprobe, f"{2 * MAX_DURATION_SECONDS}%")
+        if listed.strip():
+            return last_packet_end(listed)
+    return last_packet_end(await _end_packets(output, ffprobe, None))
 
 
 async def _end_packets(output: Path, ffprobe: MediaTool, interval: str | None) -> bytes:
