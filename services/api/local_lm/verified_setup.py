@@ -1,19 +1,12 @@
-"""A working setup, as data that means the same thing on another machine.
+"""Portable configuration with provenance from a bounded generation probe.
 
-The owner tunes a setup until it works. Today that result is not portable: it is
-a directory shape plus rows keyed by local UUIDs, and nothing that survives an
-export describes *why* the setup works or how to recognise the same thing here.
-
-This is the record that does travel. Every field identifies something by content
-or by a name the receiving machine can resolve for itself - model files by hash,
-the template by identity, the workflow by the artifact hash of what it executes,
-the machine by an envelope rather than a fingerprint. No install id, profile id,
-revision id, chat, run or job appears anywhere in it.
-
-It also carries an attestation: not "this configuration is believed good" but
-"this exact configuration produced a real generation on a machine within this
-envelope, at this time". That is the part a new user cannot obtain by reading
-documentation, and the part that makes the record worth shipping.
+Content hashes and portable settings describe the requested setup. The
+attestation records that a bounded preview produced non-empty output; it does
+not establish that every exported request setting ran at its requested value
+or that the full request fits the hardware envelope. Supported fields can
+adjust preview targets through defaults, bounds and step sizes; the targets
+are not observed run settings.
+The receiving machine still verifies its own setup.
 """
 
 from __future__ import annotations
@@ -22,7 +15,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -42,6 +35,8 @@ from .models import (
     SetupVerification,
     WorkflowRevision,
 )
+from .schemas import SettingField
+from .setup_verification import SETUP_VERIFICATION_VERSION, setup_verification_settings
 
 VERIFIED_SETUP_VERSION = 1
 
@@ -75,6 +70,35 @@ def verified_setup_digest(payload: Mapping[str, Any]) -> str:
     """Identify a setup record by its content, so two copies compare equal."""
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _generation_probe_scope(role: str) -> dict[str, Any]:
+    scope: dict[str, Any] = {
+        "scope": "bounded-preview",
+        "version": SETUP_VERIFICATION_VERSION,
+        "nominal_request_targets": {},
+        "target_constraints": "supported-field-constraints",
+        "full_request_settings_verified": False,
+    }
+    probe_role: Literal["chat", "image", "video"]
+    keys: tuple[str, ...]
+    if role == "chat":
+        probe_role = "chat"
+        keys = ("max_tokens",)
+    elif role in {"image", "video"}:
+        probe_role = "image" if role == "image" else "video"
+        keys = ("steps", "width", "height", "frames", "duration", "batch_size")
+    else:
+        scope["scope"] = "unknown"
+        return scope
+    fields = [
+        SettingField(
+            key=key, label=key, type="number" if key == "duration" else "integer", scope="request"
+        )
+        for key in keys
+    ]
+    scope["nominal_request_targets"] = setup_verification_settings(fields, probe_role)
+    return scope
 
 
 def build_verified_setup(
@@ -129,6 +153,7 @@ def build_verified_setup(
         "hardware": evidence.hardware_envelope_json,
         "attestation": {
             "generated_output": verification.state == "ready",
+            "generation_probe": _generation_probe_scope(verification.role),
             "verified_at": (
                 verification.completed_at.isoformat() if verification.completed_at else None
             ),

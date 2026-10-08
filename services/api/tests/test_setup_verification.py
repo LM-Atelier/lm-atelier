@@ -31,6 +31,7 @@ from local_lm.models import (
 )
 from local_lm.setup_verification import (
     SETUP_VERIFICATION_SCOPE,
+    SETUP_VERIFICATION_VERSION,
     ingest_synthetic_setup_image,
     recover_terminal_setup_verifications,
     setup_verification_settings,
@@ -514,6 +515,16 @@ async def test_a_completed_generation_verification_can_export_its_setup(
     assert payload["role"] == role
     assert payload["attestation"]["generated_output"] is True
     assert payload["attestation"]["verified_at"] is not None
+    probe = payload["attestation"]["generation_probe"]
+    assert probe["scope"] == "bounded-preview"
+    assert probe["version"] == SETUP_VERIFICATION_VERSION
+    assert probe["target_constraints"] == "supported-field-constraints"
+    assert probe["full_request_settings_verified"] is False
+    assert probe["nominal_request_targets"] == (
+        {"max_tokens": 8}
+        if role == "chat"
+        else {"steps": 8, "width": 512, "height": 512, "frames": 16, "duration": 2, "batch_size": 1}
+    )
     assert local_identifiers_in(payload) == []
     with SessionLocal() as session:
         verification = session.scalar(select(SetupVerification))

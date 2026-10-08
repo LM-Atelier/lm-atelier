@@ -1960,11 +1960,11 @@ def export_verified_setup(
     request: Request,
     session: SessionDep,
 ) -> VerifiedSetup:
-    """Export a setup that is known to work, with nothing local left in it.
+    """Export portable configuration after a bounded generation probe succeeds.
 
-    Refuses unless a generation actually succeeded for this exact configuration.
-    A record that only says "this ought to work" is what the user already has;
-    the attestation is the part worth shipping.
+    The profile settings describe the requested configuration. The attestation
+    records non-empty preview output, without certifying the full request's
+    settings or hardware fit. A receiving machine verifies its own setup.
     """
     services = _services(request)
     report = setup_readiness_report(
