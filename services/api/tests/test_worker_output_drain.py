@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+from collections.abc import Awaitable
 from pathlib import Path
+from typing import TypeVar
 from unittest.mock import AsyncMock
 
 import psutil
@@ -13,6 +15,8 @@ from local_lm.comfy_editor_bridge import ComfyEditorBridgeSupport
 from local_lm.config import Settings
 from local_lm.processes import ProcessSupervisor, WorkerRecord, WorkerStopIncomplete
 
+_T = TypeVar("_T")
+
 
 def _read_fixture_pid(path: Path) -> int | None:
     try:
@@ -21,15 +25,19 @@ def _read_fixture_pid(path: Path) -> int | None:
         return None
 
 
-@pytest.mark.parametrize("hold_output", [False, True])
+@pytest.mark.parametrize(
+    ("hold_output", "finish_during_drain"),
+    [(False, False), (True, False), (True, True)],
+)
 async def test_inherited_output_preserves_incomplete_shutdown_until_eof(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
     unused_tcp_port: int,
     hold_output: bool,
+    finish_during_drain: bool,
 ) -> None:
     settings.comfy_url = f"http://127.0.0.1:{unused_tcp_port}"
-    settings.worker_shutdown_seconds = 1
+    settings.worker_shutdown_seconds = 30 if finish_during_drain else 1
     supervisor = ProcessSupervisor(settings, liveness_interval_seconds=60)
     started = settings.data_dir / "parent-started"
     signal = settings.data_dir / "spawn-child"
@@ -102,8 +110,40 @@ async def test_inherited_output_preserves_incomplete_shutdown_until_eof(
         original_terminate()
 
     monkeypatch.setattr(record.process, "terminate", spawn_after_snapshot)
+    drain_entered = asyncio.Event()
+    original_wait_for = asyncio.wait_for
+
+    async def observe_drain(awaitable: Awaitable[_T], timeout: float | None) -> _T:
+        if (
+            record.stopping
+            and record.process.returncode is not None
+            and record.output_task is not None
+            and not record.output_task.done()
+        ):
+            drain_entered.set()
+        return await original_wait_for(awaitable, timeout)
+
+    async def finish_pending_output() -> None:
+        await original_wait_for(drain_entered.wait(), timeout=30)
+        assert record.process.returncode is not None and record.stopping
+        assert record.output_task is not None and not record.output_task.done()
+        release.write_text("finish")
+
+    finish_task: asyncio.Task[None] | None = None
+    stop_timeout = 30 if finish_during_drain else 8
+    if finish_during_drain:
+
+        async def wait_for_root_exit() -> int:
+            async with asyncio.timeout(30):
+                while record.process.returncode is None:
+                    await asyncio.sleep(0.01)
+            return record.process.returncode
+
+        monkeypatch.setattr(record.process, "wait", wait_for_root_exit)
+        monkeypatch.setattr(asyncio, "wait_for", observe_drain)
+        finish_task = asyncio.create_task(finish_pending_output())
     try:
-        if hold_output:
+        if hold_output and not finish_during_drain:
             with pytest.raises(WorkerStopIncomplete):
                 await asyncio.wait_for(supervisor.stop("media"), timeout=8)
             assert child is not None and child.create_time() == child_birth and child.is_running()
@@ -119,11 +159,19 @@ async def test_inherited_output_preserves_incomplete_shutdown_until_eof(
             assert supervisor.workflow_editor_bridge_support() is None
             release.write_text("finish")
             await asyncio.wait_for(asyncio.shield(record.output_task), timeout=5)
-        stopped = await asyncio.wait_for(supervisor.stop("media"), timeout=8)
+        stopped = await asyncio.wait_for(supervisor.stop("media"), timeout=stop_timeout)
         assert stopped.state == "stopped" and not stopped.running and not stopped.managed
         assert record.output_task is not None and record.output_task.done()
         assert record.log._handle.closed
+        if finish_task is not None:
+            await finish_task
+            assert drain_entered.is_set() and not record.shutdown_incomplete
     finally:
+        monkeypatch.setattr(asyncio, "wait_for", original_wait_for)
+        if finish_task is not None and not finish_task.done():
+            finish_task.cancel()
+            await asyncio.gather(finish_task, return_exceptions=True)
+
         release.write_text("finish")
         monkeypatch.setattr(record.process, "terminate", original_terminate)
         if child is not None:
