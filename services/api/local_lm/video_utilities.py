@@ -23,7 +23,7 @@ from contextlib import suppress
 from pathlib import PurePath
 from typing import Annotated, Any, Final, Literal, NamedTuple
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
@@ -46,12 +46,21 @@ from .video_probe import (
 )
 from .video_trim import (
     CUT_ROOM,
+    TrimMode,
     TrimRefused,
     check_trim,
     cut_video,
     keyframe_picture,
     plan_trim,
     trim_record,
+)
+from .video_trim_exact import (
+    MAX_EXACT_FRAMES,
+    check_exact_trim,
+    compare_with_source,
+    encode_part,
+    exact_trim_record,
+    plan_exact_trim,
 )
 
 #: The scheduler group utility jobs take turns in. No generation job uses it.
@@ -81,7 +90,8 @@ class TrimRequest(BaseModel):
     """The immutable request a trim job keeps, with the start the person was shown.
 
     The start is worked out again when the job runs; a job whose start would
-    differ from the one shown fails rather than copying another part.
+    differ from the one shown fails rather than copying another part. A cut on
+    exact frames also keeps how many frames it was shown to hold.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -94,6 +104,14 @@ class TrimRequest(BaseModel):
     requested_end_seconds: float = Field(gt=0, le=MAX_DURATION_SECONDS, allow_inf_nan=False)
     keep_audio: bool
     shown_start_seconds: float = Field(ge=0, le=MAX_DURATION_SECONDS, allow_inf_nan=False)
+    mode: TrimMode = "copy"
+    shown_frame_count: int | None = Field(default=None, ge=1, le=MAX_EXACT_FRAMES)
+
+    @model_validator(mode="after")
+    def _frames_shown_for_an_exact_cut(self) -> TrimRequest:
+        if (self.mode == "exact") != (self.shown_frame_count is not None):
+            raise ValueError("an exact cut, and only an exact cut, keeps the frames it was shown")
+        return self
 
 
 UtilityRequest = Annotated[FrameRequest | TrimRequest, Field(discriminator="action")]
@@ -159,6 +177,8 @@ class VideoUtilityManager:
         end_seconds: float,
         keep_audio: bool,
         shown_start_seconds: float,
+        mode: TrimMode = "copy",
+        shown_frame_count: int | None = None,
     ) -> Job:
         """Add a queued trim job to the caller's transaction, without committing or starting it."""
 
@@ -171,6 +191,8 @@ class VideoUtilityManager:
                 requested_end_seconds=end_seconds,
                 keep_audio=keep_audio,
                 shown_start_seconds=shown_start_seconds,
+                mode=mode,
+                shown_frame_count=shown_frame_count,
             ),
         )
 
@@ -383,6 +405,9 @@ class VideoUtilityManager:
         ffprobe: MediaTool,
         ffmpeg: MediaTool,
     ) -> None:
+        if request.mode == "exact":
+            await self._exact_trim(job_id, claim, request, artifact, ffprobe, ffmpeg)
+            return
         await asyncio.to_thread(self._report, job_id, claim, "Reading the video")
         # The new video is written into a file the store made, which outlives
         # the copy it is cut from so that it can be checked and kept after the
@@ -436,6 +461,85 @@ class VideoUtilityManager:
                     await _write(lambda: self._finish(job_id, claim, store_video, record, done))
             except ToolOutputChanged:
                 raise TrimRefused("video-trim-output-mismatch") from None
+
+    async def _exact_trim(
+        self,
+        job_id: str,
+        claim: JobClaim,
+        request: TrimRequest,
+        artifact: Artifact,
+        ffprobe: MediaTool,
+        ffmpeg: MediaTool,
+    ) -> None:
+        await asyncio.to_thread(self._report, job_id, claim, "Reading the video")
+        # The original is read again to compare the new video with it, so its
+        # copy lasts until the new video is kept; both files are removed
+        # however the job ends.
+        async with self._store.verified_copy(artifact, maximum_bytes=MAX_INPUT_BYTES) as copy:
+            probe = await probe_copy(copy, artifact, ffprobe)
+            await asyncio.to_thread(self._report, job_id, claim, "Finding the frames")
+            plan = await plan_exact_trim(
+                copy,
+                artifact,
+                probe,
+                ffprobe,
+                ffmpeg,
+                request.requested_start_seconds,
+                request.requested_end_seconds,
+                request.keep_audio,
+            )
+            if abs(plan.preview.start_seconds - request.shown_start_seconds) > _SAME_START:
+                raise TrimRefused("video-trim-start-moved")
+            if plan.preview.frame_count != request.shown_frame_count:
+                raise TrimRefused("video-trim-frames-moved")
+            async with self._store.tool_output(maximum_bytes=plan.output_bytes) as output:
+                await asyncio.to_thread(self._report, job_id, claim, "Re-encoding the chosen part")
+                fed = await encode_part(copy, plan, ffmpeg, output)
+                written = await asyncio.to_thread(self._store.tool_output_size, output)
+                # ffmpeg stops at its size limit and still exits cleanly, so a
+                # file that reached the limit is a part, not the whole.
+                if not 0 < written < output.maximum_bytes:
+                    raise TrimRefused("video-trim-not-encoded")
+                await asyncio.to_thread(self._report, job_id, claim, "Checking the new video")
+                # The checks and the comparison read the new video by name, so
+                # it is sealed and held unchanged until it is kept, and only
+                # what was sealed is kept.
+                try:
+                    async with self._store.sealed_tool_output(output) as seal:
+                        measured = await check_exact_trim(output.path, plan, ffprobe)
+                        await asyncio.to_thread(
+                            self._report, job_id, claim, "Comparing it with the original"
+                        )
+                        closeness, checked_from = await compare_with_source(
+                            copy, output.path, plan, ffmpeg, fed
+                        )
+                        record = exact_trim_record(
+                            artifact,
+                            plan,
+                            measured,
+                            closeness,
+                            fed,
+                            checked_from,
+                            ffmpeg.record(),
+                            ffprobe.record(),
+                        )
+                        name = _trim_name(artifact, record, ".mp4")
+
+                        def store_video(session: Session) -> Artifact:
+                            return self._store.ingest_tool_output(
+                                session,
+                                output,
+                                seal=seal,
+                                kind=ArtifactKind.VIDEO,
+                                media_type="video/mp4",
+                                original_name=name,
+                                metadata={"video_trim": record},
+                            )
+
+                        done = _OUTCOMES[request.action].done
+                        await _write(lambda: self._finish(job_id, claim, store_video, record, done))
+                except ToolOutputChanged:
+                    raise TrimRefused("video-trim-output-mismatch") from None
 
     def _accepted(
         self, job_id: str, claim: JobClaim

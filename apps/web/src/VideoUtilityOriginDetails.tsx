@@ -20,12 +20,17 @@ export function VideoUtilityOriginDetails({ origin, sourceName }: {
       <p>The frame at {seconds(origin.actual)}{asked}.</p>
     </div>;
   }
+  const asked = `(asked for ${seconds(origin.requestedStart)} to ${seconds(origin.requestedEnd)})`;
+  if (origin.exactFrames !== null) {
+    const frames = `${origin.exactFrames} ${origin.exactFrames === 1 ? "frame" : "frames"}`;
+    return <div className="generation-details-content">
+      <p>Trimmed from {source}, re-encoded to start and end on the chosen frames.</p>
+      <p>The {frames} from {seconds(origin.actualStart)} to {seconds(origin.actualEnd)} {asked}.</p>
+    </div>;
+  }
   const from = origin.fromBeginning ? "the beginning" : seconds(origin.actualStart);
   return <div className="generation-details-content">
     <p>Trimmed from {source}, copied without re-encoding.</p>
-    <p>
-      The part from {from} to {seconds(origin.actualEnd)} (asked for {seconds(origin.requestedStart)} to{" "}
-      {seconds(origin.requestedEnd)}).
-    </p>
+    <p>The part from {from} to {seconds(origin.actualEnd)} {asked}.</p>
   </div>;
 }

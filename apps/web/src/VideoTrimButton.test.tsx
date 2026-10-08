@@ -20,19 +20,27 @@ const PROBE: VideoProbe = {
   video: {
     index: 0, codec: "h264", width: 64, height: 48, display_width: 64, display_height: 48,
     sample_aspect: null, rotation: 0, frame_rate: "10/1", frame_rate_form: "constant", time_base: "1/10240",
+    pixel_format: "yuv420p", color_range: null, color_space: null, color_transfer: null, color_primaries: null,
+    field_order: "progressive",
   },
   audio: [{ index: 1, codec: "aac", channels: 2, sample_rate: 48000 }],
   omitted_streams: 0, can_save_frame: true, can_trim: true, can_keep_audio: true, limits: [],
+  can_trim_exact: true, can_keep_audio_exact: true, exact_trim_limits: [],
   tool: { name: "ffprobe", version: "8.1.2", sha256: "b".repeat(64), origin: "system" },
 };
 const PREVIEW: VideoTrimPreview = {
-  version: 1, artifact_id: "sha256:clip", artifact_sha256: "a".repeat(64),
+  version: 1, mode: "copy", artifact_id: "sha256:clip", artifact_sha256: "a".repeat(64),
   requested_start_seconds: 1.43, requested_end_seconds: 2, keep_audio: true,
   start_seconds: 1, keyframe_seconds: 1, from_beginning: false, keeps_whole_video: false,
+  last_frame_seconds: null, end_seconds: null, frame_count: null, began_at_first_picture: false,
   audio_streams_kept: 1, omitted_streams: 0, format: "mp4", media_type: "video/mp4",
 };
+/** The same part checked as an exact cut: the frame shown at 1.43 s began at 1.4 s. */
+const EXACT: VideoTrimPreview = {
+  ...PREVIEW, mode: "exact", start_seconds: 1.4, last_frame_seconds: 1.9, end_seconds: 2, frame_count: 6,
+};
 const RESULT = {
-  result_artifact_id: "sha256:part", in_library: true, action: "trim",
+  result_artifact_id: "sha256:part", in_library: true, action: "trim", mode: "copy",
   source_artifact_id: "sha256:clip", source_sha256: "a".repeat(64),
   requested_start_seconds: 1.43, requested_end_seconds: 2, actual_start_seconds: 1, keyframe_seconds: 1,
   actual_end_seconds: 2.04, from_beginning: false, keep_audio: true, format: "mp4", media_type: "video/mp4",
@@ -41,7 +49,20 @@ const RESULT = {
     display_width: 64, display_height: 48, rotation: 0, sample_aspect: null,
   },
   audio: [{ codec: "aac", start_seconds: 0, packets: 49 }],
-  omitted_streams: 0, tool: { name: "ffmpeg" }, measured_with: { name: "ffprobe" },
+  omitted_streams: 0, frames: null, quality: null, encoding: null,
+  tool: { name: "ffmpeg" }, measured_with: { name: "ffprobe" },
+} satisfies VideoTrimResult;
+const EXACT_RESULT = {
+  ...RESULT, mode: "exact", actual_start_seconds: 1.4, actual_end_seconds: 2,
+  frames: {
+    first_seconds: 1.4, last_seconds: 1.9, count: 6, began_at_first_picture: false,
+    source_frames_sha256: "c".repeat(64), decoded_from_seconds: 0, checked_from_seconds: 1,
+  },
+  quality: { ssim_mean: 0.99873, psnr_mean_db: 47.97, psnr_lowest_db: 46.79 },
+  encoding: {
+    video_encoder: "libx264", preset: "medium", crf: 18, pixel_format: "yuv420p", audio_encoder: "aac",
+    audio_bitrates: [192000],
+  },
 } satisfies VideoTrimResult;
 const STAMP = "2026-10-06T00:00:00Z";
 const STALE = "Where this cut starts has changed. Check the cut again.";
@@ -109,20 +130,163 @@ it("trims only a checked cut, and says where the copy really starts", async () =
   expect(api.trimVideo).not.toHaveBeenCalled();
 
   await checkCut();
-  expect(api.videoTrimPreview).toHaveBeenCalledWith("sha256:clip", 1.43, 2, true);
+  expect(api.videoTrimPreview).toHaveBeenCalledWith("sha256:clip", 1.43, 2, true, "copy");
   expect(screen.getByText("It starts at the keyframe at 1.000 s, 0.430 s before your start.")).toBeInTheDocument();
   expect(screen.getByText("It ends near 2.000 s. Its real end is measured once it is made.")).toBeInTheDocument();
   expect(screen.getByText("Saved as a new MP4 video. The original is not changed.")).toBeInTheDocument();
   expect(screen.getByText("It keeps its sound.")).toBeInTheDocument();
-  expect(screen.getByRole("dialog").textContent).not.toMatch(/exact/i);
+  // A copy that starts early points to the cut that would not, and claims nothing exact of itself.
+  expect(screen.getByText(
+    "To start on the frame at your start instead, choose Cut on the exact frames and check again.",
+  )).toBeInTheDocument();
+  expect(screen.getByRole("radio", { name: "Keep the original quality" })).toBeChecked();
   expect(trim).toHaveAttribute("aria-disabled", "false");
 
   fireEvent.click(trim);
   await waitFor(() => expect(api.trimVideo).toHaveBeenCalledWith("sha256:clip", {
-    start_seconds: 1.43, end_seconds: 2, keep_audio: true, shown_start_seconds: 1,
+    start_seconds: 1.43, end_seconds: 2, keep_audio: true, shown_start_seconds: 1, mode: "copy",
   }));
   expect(await screen.findByText("Copying the chosen part…")).toBeInTheDocument();
-  expect(screen.getByRole("dialog").textContent).not.toMatch(/exact/i);
+});
+
+it("cuts on the exact frames when chosen, bound to the frames the check showed", async () => {
+  vi.mocked(api.videoTrimPreview).mockResolvedValue(EXACT);
+  vi.mocked(api.videoUtilityJob).mockResolvedValue(job("running", { phase: "Re-encoding the chosen part" }));
+  await open();
+  enter("Start (seconds)", "1.43");
+  fireEvent.click(screen.getByRole("radio", { name: "Cut on the exact frames" }));
+  expect(screen.getByRole("radio", { name: "Cut on the exact frames" })).toBeChecked();
+  fireEvent.click(screen.getByRole("button", { name: "Check the cut" }));
+
+  expect(await screen.findByText("It starts on the frame shown at your start, which begins at 1.400 s.")).toBeInTheDocument();
+  expect(api.videoTrimPreview).toHaveBeenCalledWith("sha256:clip", 1.43, 2, true, "exact");
+  expect(screen.getByText(
+    "It ends after the frame at 1.900 s, the last one shown before your end: 6 frames, 0.600 s in all.",
+  )).toBeInTheDocument();
+  expect(screen.getByText(/close to the original but not identical, and it takes longer than a copy/)).toBeInTheDocument();
+  expect(screen.getByText("Its sound is re-encoded as AAC and cut with the picture.")).toBeInTheDocument();
+  expect(screen.queryByText(/Its real end is measured/)).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Trim" }));
+  await waitFor(() => expect(api.trimVideo).toHaveBeenCalledWith("sha256:clip", {
+    start_seconds: 1.43, end_seconds: 2, keep_audio: true, shown_start_seconds: 1.4, mode: "exact",
+    shown_frame_count: 6,
+  }));
+  expect(await screen.findByText("Re-encoding the chosen part…")).toBeInTheDocument();
+  vi.mocked(api.videoUtilityJob).mockResolvedValue(job("running", { phase: "Comparing it with the original" }));
+  expect(await screen.findByText("Comparing it with the original…", {}, { timeout: 3000 })).toBeInTheDocument();
+  vi.mocked(api.videoUtilityJob).mockResolvedValue(job("complete", { phase: "Video trimmed", result_json: EXACT_RESULT }));
+  expect(await screen.findByText(
+    "Saved a new video of 6 frames, from 1.400 s to 2.000 s of the original (you chose 1.430 s to 2.000 s). It is in the Media Library.",
+    {}, { timeout: 3000 },
+  )).toBeInTheDocument();
+  expect(screen.getByText(
+    "Measured against the original frame by frame: SSIM 0.999 on average (1 is identical), and no frame below 46.8 dB PSNR.",
+  )).toBeInTheDocument();
+});
+
+it("says when an exact cut starts on the frame asked for, or on the first picture", async () => {
+  vi.mocked(api.videoTrimPreview)
+    .mockResolvedValueOnce({ ...EXACT, requested_start_seconds: 1.4 })
+    .mockResolvedValueOnce({
+      ...EXACT, requested_start_seconds: 0, start_seconds: 0.5, began_at_first_picture: true, frame_count: 1,
+      last_frame_seconds: 0.5, end_seconds: 0.6, keeps_whole_video: true,
+    });
+  await open();
+  fireEvent.click(screen.getByRole("radio", { name: "Cut on the exact frames" }));
+  enter("Start (seconds)", "1.4");
+  fireEvent.click(screen.getByRole("button", { name: "Check the cut" }));
+  expect(await screen.findByText("It starts on the frame at 1.400 s, your start.")).toBeInTheDocument();
+
+  enter("Start (seconds)", "0");
+  fireEvent.click(screen.getByRole("button", { name: "Check the cut" }));
+  expect(await screen.findByText(
+    "Your start comes before the video's first picture, so it starts on that picture, at 0.500 s. The sound before it is left out.",
+  )).toBeInTheDocument();
+  expect(screen.getByText(/the last one shown before your end: 1 frame, 0\.100 s in all\./)).toBeInTheDocument();
+  expect(screen.getByText(
+    "That keeps every frame of the video. Choose a later start or an earlier end. To leave out only its sound, keep the original quality instead.",
+  )).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Trim" })).toHaveAttribute("aria-disabled", "true");
+});
+
+it("tells a silent video only to choose another part when an exact cut keeps every frame", async () => {
+  vi.mocked(api.videoTrimPreview).mockResolvedValue({
+    ...EXACT, requested_start_seconds: 0, start_seconds: 0, keep_audio: false, audio_streams_kept: 0,
+    keeps_whole_video: true,
+  });
+  await open({ ...PROBE, audio: [] });
+  fireEvent.click(screen.getByRole("radio", { name: "Cut on the exact frames" }));
+  fireEvent.click(screen.getByRole("button", { name: "Check the cut" }));
+
+  expect(await screen.findByText(
+    "That keeps every frame of the video. Choose a later start or an earlier end.",
+  )).toBeInTheDocument();
+  expect(screen.queryByText(/leave out only its sound/)).not.toBeInTheDocument();
+});
+
+it("takes the preview away when the way to cut changes", async () => {
+  vi.mocked(api.videoTrimPreview).mockResolvedValueOnce(PREVIEW).mockResolvedValueOnce(EXACT);
+  await open();
+  enter("Start (seconds)", "1.43");
+  await checkCut();
+
+  fireEvent.click(screen.getByRole("radio", { name: "Cut on the exact frames" }));
+  expect(screen.queryByText(/0\.430 s before your start/)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Trim" })).toHaveAttribute("aria-disabled", "true");
+  fireEvent.click(screen.getByRole("radio", { name: "Keep the original quality" }));
+  expect(screen.getByText("It starts at the keyframe at 1.000 s, 0.430 s before your start.")).toBeInTheDocument();
+  expect(api.videoTrimPreview).toHaveBeenCalledTimes(1);
+});
+
+it("offers no exact cut for a video it would change, and says why", async () => {
+  await open({
+    ...PROBE, can_trim_exact: false, can_keep_audio_exact: false,
+    exact_trim_limits: ["exact-trim-picture-unsupported", "exact-trim-turned-unsupported", "exact-trim-audio-unsupported"],
+  });
+
+  const exact = screen.getByRole("radio", { name: "Cut on the exact frames" });
+  expect(exact).toHaveAttribute("aria-disabled", "true");
+  fireEvent.click(exact);
+  expect(screen.getByRole("radio", { name: "Keep the original quality" })).toBeChecked();
+  expect(screen.getByText("This video cannot be cut on exact frames.")).toBeInTheDocument();
+  expect(screen.getByText(/such as 10-bit, HDR, full-range or interlaced video\./)).toBeInTheDocument();
+  expect(screen.getByText("It is turned, and an exact cut cannot keep the turn yet.")).toBeInTheDocument();
+  // Sound that only an exact cut cannot keep is no reason the cut is not offered.
+  expect(screen.queryByText(/an exact cut leaves it out/)).not.toBeInTheDocument();
+  enter("Start (seconds)", "1.43");
+  await checkCut();
+  expect(screen.queryByText(/choose Cut on the exact frames/)).not.toBeInTheDocument();
+});
+
+it("offers to keep the sound in an exact cut only when it can be re-encoded", async () => {
+  vi.mocked(api.videoTrimPreview).mockResolvedValue({ ...EXACT, keep_audio: false, audio_streams_kept: 0 });
+  await open({ ...PROBE, can_keep_audio_exact: false, exact_trim_limits: ["exact-trim-audio-unsupported"] });
+  expect(screen.getByRole("checkbox", { name: "Keep the sound" })).toBeChecked();
+
+  fireEvent.click(screen.getByRole("radio", { name: "Cut on the exact frames" }));
+  expect(screen.queryByRole("checkbox", { name: "Keep the sound" })).not.toBeInTheDocument();
+  expect(screen.getByText("Its sound cannot be re-encoded for an exact cut, so the new video has none.")).toBeInTheDocument();
+  enter("Start (seconds)", "1.43");
+  fireEvent.click(screen.getByRole("button", { name: "Check the cut" }));
+  await screen.findByText("Without sound.");
+  expect(api.videoTrimPreview).toHaveBeenCalledWith("sha256:clip", 1.43, 2, false, "exact");
+});
+
+it("says an exact cut decoded identical when its PSNR is infinite", async () => {
+  vi.mocked(api.videoTrimPreview).mockResolvedValue(EXACT);
+  vi.mocked(api.videoUtilityJob).mockResolvedValue(job("complete", {
+    phase: "Video trimmed",
+    result_json: { ...EXACT_RESULT, quality: { ssim_mean: 1, psnr_mean_db: null, psnr_lowest_db: null } },
+  }));
+  await open();
+  enter("Start (seconds)", "1.43");
+  fireEvent.click(screen.getByRole("radio", { name: "Cut on the exact frames" }));
+  fireEvent.click(screen.getByRole("button", { name: "Check the cut" }));
+  await screen.findByText(/It starts on the frame shown at your start/);
+  fireEvent.click(screen.getByRole("button", { name: "Trim" }));
+
+  expect(await screen.findByText("Every frame decoded identical to the original's.")).toBeInTheDocument();
 });
 
 it("takes the preview away once the cut changes, and keeps both ends within the video", async () => {
@@ -157,7 +321,7 @@ it("leaves the sound out when it cannot be copied, and offers no choice about it
   expect(screen.getByText("Its sound cannot be copied unchanged, so the new video has none.")).toBeInTheDocument();
   enter("Start (seconds)", "0.5");
   await checkCut();
-  expect(api.videoTrimPreview).toHaveBeenCalledWith("sha256:clip", 0.5, 2, false);
+  expect(api.videoTrimPreview).toHaveBeenCalledWith("sha256:clip", 0.5, 2, false, "copy");
   expect(screen.getByText("Without sound.")).toBeInTheDocument();
 });
 
@@ -171,7 +335,7 @@ it("offers to keep the sound only when the video has some", async () => {
   expect(sound).toBeChecked();
   fireEvent.click(sound);
   await checkCut();
-  expect(api.videoTrimPreview).toHaveBeenCalledWith("sha256:clip", 0, 2, false);
+  expect(api.videoTrimPreview).toHaveBeenCalledWith("sha256:clip", 0, 2, false, "copy");
   cleanup();
 
   await open({ ...PROBE, audio: [] });
@@ -220,7 +384,7 @@ it("suggests leaving out the sound only when a cut that keeps the whole video ke
   await open({ ...PROBE, audio: [] });
   await checkCut();
 
-  expect(api.videoTrimPreview).toHaveBeenCalledWith("sha256:clip", 0, 2, false);
+  expect(api.videoTrimPreview).toHaveBeenCalledWith("sha256:clip", 0, 2, false, "copy");
   expect(screen.getByText("That would keep the whole video as it is. Choose an earlier end.")).toBeInTheDocument();
   expect(screen.queryByText(/leave out the sound/)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Trim" })).toHaveAttribute("aria-disabled", "true");
@@ -236,7 +400,7 @@ it("says why a cut was refused until the cut changes, and offers no trim for it"
   fireEvent.click(screen.getByRole("button", { name: "Check the cut" }));
 
   expect(await screen.findByText(beforePicture)).toHaveAttribute("role", "alert");
-  expect(api.videoTrimPreview).toHaveBeenCalledWith("sha256:clip", 0, 0.2, true);
+  expect(api.videoTrimPreview).toHaveBeenCalledWith("sha256:clip", 0, 0.2, true, "copy");
   const trim = screen.getByRole("button", { name: "Trim" });
   expect(trim).toHaveAttribute("aria-disabled", "true");
   fireEvent.click(trim);
@@ -344,7 +508,7 @@ it("follows a second trim in the same dialog, and shows only what that one made"
   // While the second trim is being sent, the first one's outcome is not shown as if it were this one's.
   expect(await screen.findByText("Trimming…")).toBeInTheDocument();
   expect(api.trimVideo).toHaveBeenLastCalledWith("sha256:clip", {
-    start_seconds: 1.43, end_seconds: 1.5, keep_audio: true, shown_start_seconds: 1,
+    start_seconds: 1.43, end_seconds: 1.5, keep_audio: true, shown_start_seconds: 1, mode: "copy",
   });
   expect(screen.queryByText(firstSaved)).not.toBeInTheDocument();
 

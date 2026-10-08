@@ -91,6 +91,7 @@ import type {
   UtilityQueueAction,
   UtilityQueuePolicy,
   VideoProbe,
+  VideoTrimMode,
   VideoTrimPreview,
   VideoTrimRequest,
   QueueControlResult,
@@ -910,12 +911,14 @@ export const api = {
     startSeconds: number,
     endSeconds: number,
     keepAudio: boolean,
+    mode: VideoTrimMode,
     signal?: AbortSignal,
   ) => {
     const query = new URLSearchParams({
       start_seconds: String(startSeconds),
       end_seconds: String(endSeconds),
       keep_audio: String(keepAudio),
+      mode,
     });
     return request<VideoTrimPreview>(
       `/api/artifacts/${encodeURIComponent(artifactId)}/video-trim-preview?${query}`, { signal },

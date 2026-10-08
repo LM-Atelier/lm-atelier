@@ -1,25 +1,19 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { createPortal } from "react-dom";
 import { useMutation } from "@tanstack/react-query";
 import { Scissors } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { ApiError, api } from "./api";
 import { ShieldedMedia } from "./ShieldedMedia";
-import type { Job, VideoProbe, VideoTrimPreview, VideoTrimRequest, VideoTrimResult } from "./types";
-import { FINISHED, LIMIT_TEXT, numberField, seconds, useVideoProbe, useVideoUtilityJob } from "./videoUtilityText";
-
-/** The stages a running trim names, each shown as it is. */
-const STAGES = new Set(["Reading the video", "Finding the keyframe", "Copying the chosen part", "Checking the new video"]);
-const FORMAT_NAMES: Record<VideoTrimPreview["format"], string> = { mp4: "MP4", webm: "WebM", matroska: "Matroska" };
-/** Closer than this, two times are the same moment at the millisecond the dialog shows. */
-const SAME_MOMENT = 0.0005;
-/** Picture and sound this far apart are worth mentioning; closer than this, nobody would notice. */
-const NOTICEABLE_GAP = 0.01;
+import type { Job, VideoProbe, VideoTrimMode, VideoTrimPreview, VideoTrimRequest } from "./types";
+import { EXACT_LIMIT_TEXT, SAME_MOMENT, previewLines, savedLines, workingText } from "./videoTrimText";
+import { FINISHED, LIMIT_TEXT, useVideoProbe, useVideoUtilityJob } from "./videoUtilityText";
 
 interface Cut {
   start: number;
   end: number;
   keepAudio: boolean;
+  mode: VideoTrimMode;
 }
 
 /** A typed time, to the millisecond and within the video, or null while the field holds no number. */
@@ -37,82 +31,59 @@ function fieldText(value: number): string {
 function sameCut(one: Cut, other: Cut): boolean {
   return Math.abs(one.start - other.start) < SAME_MOMENT
     && Math.abs(one.end - other.end) < SAME_MOMENT
-    && one.keepAudio === other.keepAudio;
+    && one.keepAudio === other.keepAudio
+    && one.mode === other.mode;
 }
 
 function checkedCut(preview: VideoTrimPreview): Cut {
-  return { start: preview.requested_start_seconds, end: preview.requested_end_seconds, keepAudio: preview.keep_audio };
+  return {
+    start: preview.requested_start_seconds,
+    end: preview.requested_end_seconds,
+    keepAudio: preview.keep_audio,
+    mode: preview.mode,
+  };
 }
 
-/** Where a checked cut really starts, measured against the start that was asked for. */
-function startLine(preview: VideoTrimPreview): string {
-  const asked = preview.requested_start_seconds;
-  const keyframe = preview.keyframe_seconds;
-  if (preview.from_beginning) {
-    return asked <= SAME_MOMENT
-      ? "It starts at the beginning."
-      : `It starts at the beginning of the video, ${seconds(asked)} before your start, because your start comes before its second keyframe.`;
-  }
-  if (Math.abs(keyframe - asked) < SAME_MOMENT) return `It starts at ${seconds(keyframe)}, on a keyframe.`;
-  return `It starts at the keyframe at ${seconds(keyframe)}, ${seconds(asked - keyframe)} before your start.`;
-}
-
-function soundLine(kept: number): string {
-  if (kept === 0) return "Without sound.";
-  return kept === 1 ? "It keeps its sound." : `It keeps its ${kept} sound tracks.`;
-}
-
-/** What a checked cut would keep, a sentence at a time. */
-function previewLines(preview: VideoTrimPreview): string[] {
-  const lines = [
-    startLine(preview),
-    `It ends near ${seconds(preview.requested_end_seconds)}. Its real end is measured once it is made.`,
-    `Saved as a new ${FORMAT_NAMES[preview.format]} video. The original is not changed.`,
-    soundLine(preview.audio_streams_kept),
-  ];
-  if (preview.omitted_streams > 0) lines.push("Subtitles, cover pictures and other streams are left out.");
-  if (preview.format === "matroska") lines.push("Some browsers cannot play Matroska videos; it can still be downloaded.");
-  if (preview.keeps_whole_video) {
-    // Leaving out the sound changes the video only when the cut would keep some.
-    lines.push(preview.audio_streams_kept > 0
-      ? "That would keep the whole video as it is. Choose an earlier end, or leave out the sound."
-      : "That would keep the whole video as it is. Choose an earlier end.");
-  }
-  return lines;
-}
-
-/** What a finished trim made, beside what was chosen, read from its job's result. */
-function savedLines(result: Record<string, unknown>): string[] {
-  const field = (key: keyof VideoTrimResult) => numberField(result, key);
-  const start = field("actual_start_seconds");
-  const end = field("actual_end_seconds");
-  const askedStart = field("requested_start_seconds");
-  const askedEnd = field("requested_end_seconds");
-  if (start === null || end === null || askedStart === null || askedEnd === null) return ["Saved a new video."];
-  const from = result.from_beginning === true ? "the beginning" : seconds(start);
-  const inLibrary = result.in_library !== false;
-  const lines = [
-    `Saved a new video from ${from} to ${seconds(end)} of the original (you chose ${seconds(askedStart)} to ${seconds(askedEnd)}).`
-      + (inLibrary ? " It is in the Media Library." : ""),
-  ];
-  if (!inLibrary) {
-    lines.push("The same video is already in Recently Deleted. Restore it there to see it in the Media Library.");
-  }
-  const audio = result.audio;
-  if (result.keep_audio === true && Array.isArray(audio)) {
-    const picture = numberField(result.video, "start_seconds");
-    const sound = numberField(audio[0], "start_seconds");
-    if (picture !== null && sound !== null && Math.abs(picture - sound) >= NOTICEABLE_GAP) {
-      lines.push(`Its picture begins ${seconds(Math.abs(picture - sound))} ${picture > sound ? "after" : "before"} its sound.`);
-    }
-  }
-  return lines;
-}
-
-function workingText(job: Job | undefined): string {
-  if (!job) return "Trimming…";
-  if (job.status === "queued" || job.status === "paused") return "Waiting its turn…";
-  return STAGES.has(job.phase) ? `${job.phase}…` : "Trimming…";
+/** The choice between copying a part unchanged and re-encoding it on its exact frames. */
+function TrimModeChoice({ mode, facts, onChoose }: {
+  mode: VideoTrimMode;
+  facts: VideoProbe;
+  onChoose: (mode: VideoTrimMode) => void;
+}) {
+  const name = useId();
+  const copyHint = useId();
+  const exactHint = useId();
+  const offered = facts.can_trim_exact;
+  // Only reasons that stop an exact cut; sound it cannot keep is said beside the sound.
+  const reasons = facts.exact_trim_limits.filter((limit) => limit !== "exact-trim-audio-unsupported");
+  return (
+    <div role="radiogroup" aria-label="How to cut">
+      <label className="generation-record-choice">
+        <input type="radio" name={name} checked={mode === "copy"} aria-describedby={copyHint}
+          onChange={() => onChoose("copy")} />
+        <span>Keep the original quality</span>
+      </label>
+      <p className="muted" id={copyHint}>
+        Copied without re-encoding, so its quality is unchanged. A copy can only begin on a keyframe, a frame the
+        video stores whole, so it may begin a little before your start and run a few frames past your end.
+      </p>
+      <label className="generation-record-choice">
+        <input type="radio" name={name} checked={mode === "exact"} aria-describedby={exactHint}
+          aria-disabled={!offered} onChange={() => { if (offered) onChoose("exact"); }} />
+        <span>Cut on the exact frames</span>
+      </label>
+      <p className="muted" id={exactHint}>
+        Re-encoded as a new H.264 video, so it begins and ends on the frames you chose. Its picture is close to the
+        original but not identical, and it takes longer.
+      </p>
+      {!offered && (
+        <div>
+          <p>This video cannot be cut on exact frames.</p>
+          <ul>{reasons.map((limit) => <li key={limit}>{EXACT_LIMIT_TEXT[limit]}</li>)}</ul>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function TrimOutcome({ job }: { job: Job }) {
@@ -124,7 +95,7 @@ function TrimOutcome({ job }: { job: Job }) {
   return <p role="status">Trimming was interrupted when the app stopped. It starts again when the app restarts.</p>;
 }
 
-/** Choose the part of a stored video to keep, check where the copy would really start, then make it. */
+/** Choose the part of a stored video to keep and how to cut it, check what the cut would really keep, then make it. */
 function VideoTrimEditor({ artifactId, source, facts, duration }: {
   artifactId: string;
   source: string;
@@ -138,6 +109,8 @@ function VideoTrimEditor({ artifactId, source, facts, duration }: {
   const [startText, setStartText] = useState("0");
   const [endText, setEndText] = useState(() => fieldText(duration));
   const [soundChosen, setSoundChosen] = useState(true);
+  // A copy unless the person chooses otherwise, each time the dialog opens.
+  const [mode, setMode] = useState<VideoTrimMode>("copy");
   const [jobId, setJobId] = useState<string | null>(null);
   const job = useVideoUtilityJob(jobId);
   const stop = useMutation({
@@ -145,7 +118,7 @@ function VideoTrimEditor({ artifactId, source, facts, duration }: {
     onSuccess: () => void job.refetch(),
   });
   const check = useMutation({
-    mutationFn: (cut: Cut) => api.videoTrimPreview(artifactId, cut.start, cut.end, cut.keepAudio),
+    mutationFn: (cut: Cut) => api.videoTrimPreview(artifactId, cut.start, cut.end, cut.keepAudio, cut.mode),
   });
   const trim = useMutation({
     mutationFn: (body: VideoTrimRequest) => api.trimVideo(artifactId, body),
@@ -161,10 +134,12 @@ function VideoTrimEditor({ artifactId, source, facts, duration }: {
   });
 
   const hasSound = facts.audio.length > 0;
-  const soundOffered = hasSound && facts.can_keep_audio;
+  const soundOffered = hasSound && (mode === "exact" ? facts.can_keep_audio_exact : facts.can_keep_audio);
   const start = fieldTime(startText, duration);
   const end = fieldTime(endText, duration);
-  const cut: Cut | null = start !== null && end !== null ? { start, end, keepAudio: soundOffered && soundChosen } : null;
+  const cut: Cut | null = start !== null && end !== null
+    ? { start, end, keepAudio: soundOffered && soundChosen, mode }
+    : null;
   // A preview speaks only for the cut it was asked about: change the cut and
   // it is gone, and comes back if the cut is changed back.
   const preview = cut && check.data && sameCut(checkedCut(check.data), cut) ? check.data : null;
@@ -193,6 +168,9 @@ function VideoTrimEditor({ artifactId, source, facts, duration }: {
       end_seconds: cut.end,
       keep_audio: cut.keepAudio,
       shown_start_seconds: preview.start_seconds,
+      mode: cut.mode,
+      // An exact cut is bound to the frames it showed as well as to where it starts.
+      ...(cut.mode === "exact" ? { shown_frame_count: preview.frame_count } : {}),
     });
   };
   const stopTrimming = () => {
@@ -202,11 +180,7 @@ function VideoTrimEditor({ artifactId, source, facts, duration }: {
 
   return (
     <div className="video-utility-body">
-      <p>
-        Choose the part to keep. It is copied into a new video without re-encoding, so its quality is
-        unchanged. A copy can only begin on a keyframe, a frame the video stores whole, so it may begin a
-        little before your start and run a few frames past your end.
-      </p>
+      <p>Choose the part to keep, and how to cut it. The original is not changed.</p>
       {/* Covered or hidden here as everywhere else the video appears, until someone shows it. */}
       <ShieldedMedia kind="video">
         {/* A stored video has no caption track to point at, and an empty one would claim one. */}
@@ -235,13 +209,20 @@ function VideoTrimEditor({ artifactId, source, facts, duration }: {
           End here
         </button>
       </div>
+      <TrimModeChoice mode={mode} facts={facts} onChoose={(chosen) => { if (!working) setMode(chosen); }} />
       {soundOffered && (
         <label className="generation-record-choice">
           <input type="checkbox" checked={soundChosen} onChange={(event) => setSoundChosen(event.target.checked)} />
           <span>Keep the sound</span>
         </label>
       )}
-      {hasSound && !facts.can_keep_audio && <p>Its sound cannot be copied unchanged, so the new video has none.</p>}
+      {hasSound && !soundOffered && (
+        <p>
+          {mode === "exact"
+            ? "Its sound cannot be re-encoded for an exact cut, so the new video has none."
+            : "Its sound cannot be copied unchanged, so the new video has none."}
+        </p>
+      )}
       {!cut && <p>Type the start and the end in seconds.</p>}
       <div className="row-actions">
         <button type="button" className="secondary" aria-disabled={!cut || check.isPending || working} onClick={runCheck}>
@@ -253,7 +234,9 @@ function VideoTrimEditor({ artifactId, source, facts, duration }: {
       </div>
       {check.isPending && <p role="status">Checking the cut…</p>}
       {checkProblem && <p role="alert">{checkProblem.message}</p>}
-      {preview && <div role="status">{previewLines(preview).map((line) => <p key={line}>{line}</p>)}</div>}
+      {preview && (
+        <div role="status">{previewLines(preview, facts.can_trim_exact, hasSound).map((line) => <p key={line}>{line}</p>)}</div>
+      )}
       {trim.error && <p role="alert">{trim.error.message}</p>}
       {/* Once there is a job the stop button stays, unusable after the job ends,
           since taking it away would drop the focus it may hold out of the dialog. */}

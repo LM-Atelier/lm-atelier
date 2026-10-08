@@ -126,6 +126,13 @@ async def test_a_stored_video_is_described_with_what_the_utilities_may_do(
         "frame_rate": "10/1",
         "frame_rate_form": "constant",
         "time_base": probe["video"]["time_base"],
+        # Made as 8-bit 4:2:0 with no colours stated, a whole frame at a time.
+        "pixel_format": "yuv420p",
+        "color_range": None,
+        "color_space": None,
+        "color_transfer": None,
+        "color_primaries": None,
+        "field_order": "progressive",
     }
     assert re.fullmatch(r"1/\d+", probe["video"]["time_base"])
     assert probe["audio"] == [{"index": 1, "codec": "aac", "channels": 1, "sample_rate": 8000}]
@@ -136,6 +143,8 @@ async def test_a_stored_video_is_described_with_what_the_utilities_may_do(
         True,
     )
     assert probe["limits"] == []
+    assert (probe["can_trim_exact"], probe["can_keep_audio_exact"]) == (True, True)
+    assert probe["exact_trim_limits"] == []
     # The ffprobe found on the system path, by its version and file digest, never its path.
     tool = probe["tool"]
     assert set(tool) == {"name", "version", "sha256", "origin"}
