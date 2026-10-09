@@ -5,7 +5,7 @@ import { ApiError, api } from "./api";
 import { ArtifactGenerationDetails } from "./ArtifactGenerationDetails";
 import { SENSITIVE_MEDIA_KEY } from "./sensitiveMedia";
 import type { Artifact } from "./types";
-import { videoUtilityOrigin } from "./videoUtilityText";
+import { madeWithText, videoUtilityOrigin } from "./videoUtilityText";
 
 vi.mock("./api", async (original) => {
   const actual = await original<typeof import("./api")>();
@@ -15,10 +15,11 @@ vi.mock("./api", async (original) => {
 const stamp = "2026-10-06T12:00:00Z";
 const resultId = `sha256:${"b".repeat(64)}`;
 const sourceId = `sha256:${"a".repeat(64)}`;
+const FFMPEG = { name: "ffmpeg", version: "8.1.2", sha256: "c".repeat(64), origin: "system" };
 const TRIM = {
   action: "trim", source_artifact_id: sourceId, source_sha256: "a".repeat(64),
   requested_start_seconds: 1.43, requested_end_seconds: 2.7, actual_start_seconds: 1,
-  keyframe_seconds: 1, actual_end_seconds: 2.9, from_beginning: false,
+  keyframe_seconds: 1, actual_end_seconds: 2.9, from_beginning: false, tool: FFMPEG,
 };
 const EXACT_TRIM = {
   ...TRIM, mode: "exact", actual_start_seconds: 1.4, actual_end_seconds: 2.7,
@@ -26,7 +27,7 @@ const EXACT_TRIM = {
 };
 const FRAME = {
   action: "extract_frame", source_artifact_id: sourceId, source_sha256: "a".repeat(64),
-  requested_seconds: 0.43, actual_seconds: 0.4,
+  requested_seconds: 0.43, actual_seconds: 0.4, tool: FFMPEG,
 };
 
 function artifact(id: string, name: string, metadata: Record<string, unknown>): Artifact {
@@ -81,6 +82,20 @@ describe("the video a saved frame or a trim came from", () => {
     expect(screen.getByText("The frame at 0.400 s (asked for 0.430 s).")).toBeVisible();
   });
 
+  it("names the build that made a result, and says one found on this computer was not checked", async () => {
+    await details({ video_trim: EXACT_TRIM }, artifact(sourceId, "walk.mp4", {}));
+
+    expect(await screen.findByText("Made with ffmpeg 8.1.2 found on this computer, which the app has not checked."))
+      .toBeVisible();
+  });
+
+  it("says nothing of a build when the record names none", async () => {
+    await details({ video_frame: { ...FRAME, tool: undefined } }, artifact(sourceId, "walk.mp4", {}));
+
+    expect(await screen.findByText("Saved as a picture from walk.mp4.")).toBeVisible();
+    expect(screen.queryByText(/Made with/)).toBeNull();
+  });
+
   it("says plainly when the source is no longer stored", async () => {
     await details({ video_trim: { ...TRIM, from_beginning: true } }, new ApiError(404, "gone", "artifact not found"));
 
@@ -105,12 +120,13 @@ describe("the video a saved frame or a trim came from", () => {
 
 describe("reading a video utility's record from stored metadata", () => {
   it("reads a frame and a trim and nothing else", () => {
+    const madeWith = { name: "ffmpeg", version: "8.1.2", found: true };
     expect(videoUtilityOrigin({ video_frame: FRAME })).toEqual({
-      action: "extract_frame", sourceId, requested: 0.43, actual: 0.4,
+      action: "extract_frame", sourceId, requested: 0.43, actual: 0.4, madeWith,
     });
     expect(videoUtilityOrigin({ video_trim: TRIM })).toEqual({
       action: "trim", sourceId, requestedStart: 1.43, requestedEnd: 2.7, actualStart: 1, actualEnd: 2.9,
-      fromBeginning: false, exactFrames: null,
+      fromBeginning: false, exactFrames: null, madeWith,
     });
     expect(videoUtilityOrigin({ video_trim: EXACT_TRIM })).toMatchObject({ actualStart: 1.4, exactFrames: 13 });
     // A copy's record names no frames, whatever else it holds.
@@ -118,5 +134,12 @@ describe("reading a video utility's record from stored metadata", () => {
     expect(videoUtilityOrigin({ run_id: "run" })).toBeNull();
     expect(videoUtilityOrigin({ video_trim: { ...TRIM, actual_end_seconds: "late" } })).toBeNull();
     expect(videoUtilityOrigin({ video_frame: { ...FRAME, source_artifact_id: 7 } })).toBeNull();
+  });
+
+  it("reads which build made a result only from a whole record of it", () => {
+    expect(videoUtilityOrigin({ video_frame: { ...FRAME, tool: { ...FFMPEG, origin: undefined } } }))
+      .toMatchObject({ madeWith: null });
+    expect(videoUtilityOrigin({ video_trim: { ...TRIM, tool: { ...FFMPEG, version: 8 } } })).toMatchObject({ madeWith: null });
+    expect(madeWithText({ name: "ffmpeg", version: "8.1.2", found: false })).toBe("Made with ffmpeg 8.1.2.");
   });
 });

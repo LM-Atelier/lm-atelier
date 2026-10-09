@@ -55,9 +55,35 @@ export function useVideoUtilityJob(jobId: string | null) {
   });
 }
 
+/** Said in each video utility while the tools it runs are builds found on the computer. */
+export const FOUND_TOOLS_TEXT =
+  "The video utilities use the ffmpeg and ffprobe found on this computer, which the app has not checked.";
+
+/** The build of a media tool that made something, as its record names it. */
+export interface ToolBuild {
+  name: string;
+  version: string;
+  /** Found on this computer rather than provided and checked by the app. */
+  found: boolean;
+}
+
+/** The tool build a record names, or null when it names none. */
+export function toolBuild(record: unknown): ToolBuild | null {
+  if (typeof record !== "object" || record === null) return null;
+  const { name, version, origin } = record as Record<string, unknown>;
+  if (typeof name !== "string" || typeof version !== "string" || typeof origin !== "string") return null;
+  return { name, version, found: origin === "system" };
+}
+
+/** Says which build made something, and that a build found on the computer is not one the app checked. */
+export function madeWithText(tool: ToolBuild): string {
+  const build = `${tool.name} ${tool.version}`;
+  return tool.found ? `Made with ${build} found on this computer, which the app has not checked.` : `Made with ${build}.`;
+}
+
 /** What a picture or video made by a video utility records about the video it came from. */
 export type VideoUtilityOrigin =
-  | { action: "extract_frame"; sourceId: string; requested: number; actual: number }
+  | { action: "extract_frame"; sourceId: string; requested: number; actual: number; madeWith: ToolBuild | null }
   | {
     action: "trim";
     sourceId: string;
@@ -68,6 +94,7 @@ export type VideoUtilityOrigin =
     fromBeginning: boolean;
     /** How many frames an exact cut kept; null for a copy, which records none. */
     exactFrames: number | null;
+    madeWith: ToolBuild | null;
   };
 
 /** The origin a stored file's metadata records, or null when it was not made by a video utility. */
@@ -78,7 +105,9 @@ export function videoUtilityOrigin(metadata: Record<string, unknown>): VideoUtil
     const requested = numberField(record, "requested_seconds");
     const actual = numberField(record, "actual_seconds");
     if (typeof record.source_artifact_id === "string" && requested !== null && actual !== null) {
-      return { action: "extract_frame", sourceId: record.source_artifact_id, requested, actual };
+      return {
+        action: "extract_frame", sourceId: record.source_artifact_id, requested, actual, madeWith: toolBuild(record.tool),
+      };
     }
   }
   const trim = metadata.video_trim;
@@ -96,6 +125,7 @@ export function videoUtilityOrigin(metadata: Record<string, unknown>): VideoUtil
         fromBeginning: record.from_beginning === true,
         // A record with no mode was made before cuts had one, so it is a copy.
         exactFrames: record.mode === "exact" ? numberField(record.frames, "count") : null,
+        madeWith: toolBuild(record.tool),
       };
     }
   }

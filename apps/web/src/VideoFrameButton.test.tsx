@@ -171,3 +171,15 @@ it("keeps an accepted frame job when its progress cannot be read, and reads it a
   expect(api.videoUtilityJob).toHaveBeenCalledTimes(reads + 1);
   expect(api.saveVideoFrame).toHaveBeenCalledTimes(1);
 });
+
+it("says the tools it runs were found on this computer, and only when they were", async () => {
+  const found = "The video utilities use the ffmpeg and ffprobe found on this computer, which the app has not checked.";
+  open();
+  expect(await screen.findByText(found)).toBeInTheDocument();
+
+  cleanup();
+  vi.mocked(api.videoProbe).mockResolvedValue({ ...PROBE, tool: { ...PROBE.tool, origin: "provided" } });
+  open();
+  expect(await screen.findByText(/64 × 48/)).toBeInTheDocument();
+  expect(screen.queryByText(found)).not.toBeInTheDocument();
+});

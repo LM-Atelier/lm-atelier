@@ -5,7 +5,9 @@ import { AccessibleDialog } from "./AccessibleDialog";
 import { ApiError, api } from "./api";
 import { ShieldedMedia } from "./ShieldedMedia";
 import { JobReadProblem } from "./VideoUtilityJobRead";
-import { FINISHED, LIMIT_TEXT, numberField, seconds, useVideoProbe, useVideoUtilityJob } from "./videoUtilityText";
+import {
+  FINISHED, FOUND_TOOLS_TEXT, LIMIT_TEXT, numberField, seconds, toolBuild, useVideoProbe, useVideoUtilityJob,
+} from "./videoUtilityText";
 
 /** Pick a moment in a stored video and save the frame there as a new picture. */
 function VideoFrameBody({ artifactId, source }: { artifactId: string; source: string }) {
@@ -61,6 +63,7 @@ function VideoFrameBody({ artifactId, source }: { artifactId: string; source: st
         {facts.duration_seconds !== null && <> · {seconds(facts.duration_seconds)} long</>}
         {facts.video.frame_rate_form === "variable" && <> · frames are not evenly spaced</>}
       </p>
+      {toolBuild(facts.tool)?.found && <p>{FOUND_TOOLS_TEXT}</p>}
       <p>The saved frame is the one shown at {seconds(at)}.</p>
       <button type="button" className="primary" aria-disabled={working} onClick={() => void save()}>
         {working ? "Saving the frame…" : "Save this frame"}
