@@ -90,14 +90,14 @@ async def test_a_saved_frame_is_the_one_shown_at_the_time_and_says_which(
     result = job["result_json"]
     # Frames sit every tenth of a second; at 0.43 s a player shows the frame from 0.4 s.
     assert (result["requested_seconds"], result["actual_seconds"]) == (0.43, 0.4)
-    assert (result["source_artifact_id"], result["action"]) == (source, "extract_frame")
+    assert (result["from_artifact_id"], result["action"]) == (source, "extract_frame")
     assert (result["width"], result["height"], result["rotation_applied"]) == (64, 48, 0)
     assert result["sample_aspect"] is None
     assert result["tool"]["name"] == "ffmpeg"
     assert result["tool"]["origin"] == "system"
 
     with SessionLocal() as session:
-        picture = session.get(Artifact, result["result_artifact_id"])
+        picture = session.get(Artifact, result["made_artifact_id"])
         assert picture is not None
         assert (picture.kind, picture.media_type) == (ArtifactKind.IMAGE.value, "image/png")
         assert picture.original_name == "walk frame 0.400s.png"
@@ -266,7 +266,7 @@ async def test_a_job_cancelled_while_its_picture_is_saved_ends_complete_after_th
     assert (cancelled.status_code, cancelled.json()["code"]) == (409, "job-not-cancellable")
     job = await _finished(client, job_id)
     assert job["status"] == "complete", job
-    assert job["result_json"]["result_artifact_id"]
+    assert job["result_json"]["made_artifact_id"]
 
 
 async def test_a_job_with_no_room_for_its_copy_fails_with_its_code(
@@ -514,7 +514,7 @@ async def _saved(client: AsyncClient, app: FastAPI, source: str, at: float) -> d
 
 def _saved_pixels(app: FastAPI, result: dict[str, Any]) -> bytes:
     with SessionLocal() as session:
-        picture = session.get(Artifact, result["result_artifact_id"])
+        picture = session.get(Artifact, result["made_artifact_id"])
         assert picture is not None
         path = app.state.services.artifacts.verified_path(picture)
     return _pixels(Path(path))
@@ -655,7 +655,7 @@ async def test_a_frame_far_into_a_video_is_timed_to_the_microsecond(
     assert result["actual_seconds"] == 0.033
     assert _saved_pixels(app, result) == _source_frame(tmp_path / "late.mkv", 1)
     with SessionLocal() as session:
-        picture = session.get(Artifact, result["result_artifact_id"])
+        picture = session.get(Artifact, result["made_artifact_id"])
         assert picture is not None and picture.original_name == "late frame 0.033s.png"
 
 

@@ -352,7 +352,7 @@ async def test_a_trim_begins_at_the_shown_keyframe_and_records_what_it_measured(
     assert job["status"] == "complete", (job["result_json"], job["error"])
     assert job["phase"] == "Video trimmed"
     result = job["result_json"]
-    made = _path(app, result["result_artifact_id"])
+    made = _path(app, result["made_artifact_id"])
     # The new video's first shown picture is the source's keyframe at 1 s.
     assert _picture(made) == _picture(tmp_path / "walk.mp4", 1.0)
     assert (result["actual_start_seconds"], result["keyframe_seconds"]) == (1.0, 1.0)
@@ -380,7 +380,7 @@ async def test_a_trim_begins_at_the_shown_keyframe_and_records_what_it_measured(
         "TrimmedAudioStream"
     )
     assert [entry["codec"] for entry in result["audio"]] == ["aac"]
-    assert (result["source_artifact_id"], result["action"], result["format"]) == (
+    assert (result["from_artifact_id"], result["action"], result["format"]) == (
         source,
         "trim",
         "mp4",
@@ -389,7 +389,7 @@ async def test_a_trim_begins_at_the_shown_keyframe_and_records_what_it_measured(
     assert result["measured_with"]["name"] == "ffprobe"
     assert result["in_library"] is True
     with SessionLocal() as session:
-        trimmed = session.get(Artifact, result["result_artifact_id"])
+        trimmed = session.get(Artifact, result["made_artifact_id"])
         assert trimmed is not None
         assert (trimmed.kind, trimmed.media_type) == (ArtifactKind.VIDEO.value, "video/mp4")
         assert re.fullmatch(r"walk trim 1\.000-\d\.\d{3}s\.mp4", trimmed.original_name or "")
@@ -429,7 +429,7 @@ async def test_a_new_video_whose_end_cannot_be_sought_is_measured_from_all_its_p
 
     assert job["status"] == "complete", (job["result_json"], job["error"])
     assert reads == [f"{2 * video_probe.MAX_DURATION_SECONDS}%", ""]
-    made = _path(app, job["result_json"]["result_artifact_id"])
+    made = _path(app, job["result_json"]["made_artifact_id"])
     [video, _sound] = _streams(made)
     assert job["result_json"]["actual_end_seconds"] == pytest.approx(
         1.0 + float(video["duration"]) - float(video["start_time"]), abs=0.001
@@ -460,7 +460,7 @@ async def test_a_matroska_video_is_measured_to_its_last_packet_when_a_seek_lists
     job = await _trimmed(client, source, 1.43, 2.7, True)
 
     assert job["status"] == "complete", (job["result_json"], job["error"])
-    made = _path(app, job["result_json"]["result_artifact_id"])
+    made = _path(app, job["result_json"]["made_artifact_id"])
     listed = subprocess.run(
         [
             _tool("ffprobe"),
@@ -509,7 +509,7 @@ async def test_a_video_whose_timestamps_start_late_is_cut_on_its_own_timeline(
     assert result["format"] == "matroska"
     # Two seconds into the video, which is seven seconds into the file's own timestamps,
     # and every frame from there to the requested end.
-    assert _frames(_path(app, result["result_artifact_id"]), count=10) == _frames(
+    assert _frames(_path(app, result["made_artifact_id"]), count=10) == _frames(
         tmp_path / "late.mkv", 2.0, 10
     )
 
@@ -536,7 +536,7 @@ async def test_a_keyframe_far_into_a_files_timestamps_is_matched_to_the_microsec
 
     assert job["status"] == "complete", (job["result_json"], job["error"])
     assert job["result_json"]["keyframe_seconds"] == 2.0
-    assert _frames(_path(app, job["result_json"]["result_artifact_id"]), count=10) == _frames(
+    assert _frames(_path(app, job["result_json"]["made_artifact_id"]), count=10) == _frames(
         tmp_path / "late.mkv", 2.0, 10
     )
 
@@ -565,7 +565,7 @@ async def test_a_matroska_video_of_keyframes_only_is_cut_on_the_keyframe_asked_f
     job = await _trimmed(client, source, 1.43, 2.0, False)
 
     assert job["status"] == "complete", (job["result_json"], job["error"])
-    assert _picture(_path(app, job["result_json"]["result_artifact_id"])) == _picture(
+    assert _picture(_path(app, job["result_json"]["made_artifact_id"])) == _picture(
         tmp_path / "every-frame.mkv", 1.4
     )
 
@@ -601,7 +601,7 @@ async def test_a_picture_that_begins_after_its_sound_is_copied_from_the_beginnin
     )
     job = await _trimmed(client, source, 0, 1.2, True)
     assert job["status"] == "complete", (job["result_json"], job["error"])
-    made = _path(app, job["result_json"]["result_artifact_id"])
+    made = _path(app, job["result_json"]["made_artifact_id"])
     [video, sound] = _streams(made)
     # The sound before the first picture is kept.
     assert float(sound["start_time"]) == 0.0 < float(video["start_time"])
@@ -611,7 +611,7 @@ async def test_a_picture_that_begins_after_its_sound_is_copied_from_the_beginnin
     assert 1.2 <= end <= 1.7
     assert _frames(made, count=7) == _frames(tmp_path / "sound-first.mkv", count=7)
     with SessionLocal() as session:
-        trimmed = session.get(Artifact, job["result_json"]["result_artifact_id"])
+        trimmed = session.get(Artifact, job["result_json"]["made_artifact_id"])
         assert trimmed is not None
         assert trimmed.original_name == f"sound-first trim 0.000-{end:.3f}s.mkv"
 
@@ -653,7 +653,7 @@ async def test_an_mp4_whose_picture_begins_after_its_sound_keeps_that_sound(
 
     assert job["status"] == "complete", (job["result_json"], job["error"])
     assert job["result_json"]["from_beginning"] is True
-    [video, sound] = _streams(_path(app, job["result_json"]["result_artifact_id"]))
+    [video, sound] = _streams(_path(app, job["result_json"]["made_artifact_id"]))
     # Copied from the very beginning, so the picture keeps its place after the sound.
     assert float(sound["start_time"]) == 0.0 < float(video["start_time"])
 
@@ -700,7 +700,7 @@ async def test_a_single_keyframe_video_can_only_be_shortened(
     assert silent["status"] == "complete", silent
     assert [
         stream["codec_type"]
-        for stream in _streams(_path(app, silent["result_json"]["result_artifact_id"]))
+        for stream in _streams(_path(app, silent["result_json"]["made_artifact_id"]))
     ] == ["video"]
 
 
@@ -782,7 +782,7 @@ async def test_dropping_the_sound_leaves_only_the_picture(
 
     assert job["status"] == "complete", (job["result_json"], job["error"])
     assert (job["result_json"]["keep_audio"], job["result_json"]["audio"]) == (False, [])
-    streams = _streams(_path(app, job["result_json"]["result_artifact_id"]))
+    streams = _streams(_path(app, job["result_json"]["made_artifact_id"]))
     assert [stream["codec_type"] for stream in streams] == ["video"]
 
 
@@ -816,13 +816,13 @@ async def test_only_the_chosen_streams_are_kept_and_the_picture_comes_first(
     dropped = await _trimmed(client, source, 1.43, 2.7, False)
 
     assert (kept["status"], dropped["status"]) == ("complete", "complete")
-    both = _streams(_path(app, kept["result_json"]["result_artifact_id"]))
+    both = _streams(_path(app, kept["result_json"]["made_artifact_id"]))
     assert [(stream["codec_type"], stream["codec_name"]) for stream in both] == [
         ("video", "h264"),
         ("audio", "aac"),
         ("audio", "aac"),
     ]
-    alone = _streams(_path(app, dropped["result_json"]["result_artifact_id"]))
+    alone = _streams(_path(app, dropped["result_json"]["made_artifact_id"]))
     assert [stream["codec_type"] for stream in alone] == ["video"]
 
 
@@ -839,7 +839,7 @@ async def test_a_turned_video_stays_turned(
 
     assert job["status"] == "complete", (job["result_json"], job["error"])
     after = (
-        await client.get(f"/api/artifacts/{job['result_json']['result_artifact_id']}/video-probe")
+        await client.get(f"/api/artifacts/{job['result_json']['made_artifact_id']}/video-probe")
     ).json()
     assert after["video"]["rotation"] == before["video"]["rotation"] != 0
     assert after["video"]["sample_aspect"] == before["video"]["sample_aspect"] == "2:1"
@@ -971,7 +971,7 @@ async def test_a_new_video_changed_while_it_is_checked_and_changed_back_is_not_k
     if os.name == "nt":
         assert job["status"] == "complete", (job["result_json"], job["error"])
         result = job["result_json"]
-        kept = _streams(_path(app, result["result_artifact_id"]))
+        kept = _streams(_path(app, result["made_artifact_id"]))
         assert int(kept[0]["nb_read_packets"]) == result["video"]["frames_stored"]
     else:
         assert (job["status"], job["result_json"]) == (
@@ -1063,7 +1063,7 @@ async def test_streams_a_trim_leaves_out_make_a_whole_length_cut_a_real_change(
     job = await _trimmed(client, source, 0, duration, False)
 
     assert job["status"] == "complete", (job["result_json"], job["error"])
-    made = _path(app, job["result_json"]["result_artifact_id"])
+    made = _path(app, job["result_json"]["made_artifact_id"])
     assert [stream["codec_type"] for stream in _streams(made)] == ["video"]
 
 
@@ -1075,7 +1075,7 @@ async def test_a_trim_whose_video_is_already_in_recently_deleted_says_so(
     with SessionLocal() as session:
         entry = session.scalar(
             select(ArtifactLibraryEntry).where(
-                ArtifactLibraryEntry.artifact_id == first["result_json"]["result_artifact_id"]
+                ArtifactLibraryEntry.artifact_id == first["result_json"]["made_artifact_id"]
             )
         )
         assert entry is not None
@@ -1089,7 +1089,7 @@ async def test_a_trim_whose_video_is_already_in_recently_deleted_says_so(
 
     assert second["status"] == "complete", second
     # The same bytes are the same video, which is in Recently Deleted.
-    assert second["result_json"]["result_artifact_id"] == first["result_json"]["result_artifact_id"]
+    assert second["result_json"]["made_artifact_id"] == first["result_json"]["made_artifact_id"]
     assert second["result_json"]["in_library"] is False
 
 
@@ -1170,7 +1170,7 @@ async def test_a_timecode_track_does_not_follow_the_part_into_the_new_video(
     job = await _trimmed(client, source, 1.43, 2.7, True)
 
     assert job["status"] == "complete", (job["result_json"], job["error"])
-    made = _path(app, job["result_json"]["result_artifact_id"])
+    made = _path(app, job["result_json"]["made_artifact_id"])
     assert [stream["codec_type"] for stream in _streams(made)] == ["video", "audio"]
 
 
@@ -1260,10 +1260,10 @@ async def test_a_webm_stays_a_webm(client: AsyncClient, app: FastAPI, tmp_path: 
         "webm",
         "video/webm",
     )
-    made = _path(app, job["result_json"]["result_artifact_id"])
+    made = _path(app, job["result_json"]["made_artifact_id"])
     assert b"webm" in made.read_bytes()[:64]
     with SessionLocal() as session:
-        trimmed = session.get(Artifact, job["result_json"]["result_artifact_id"])
+        trimmed = session.get(Artifact, job["result_json"]["made_artifact_id"])
         assert trimmed is not None and (trimmed.original_name or "").endswith(".webm")
 
 
@@ -1308,7 +1308,7 @@ async def test_a_transparent_webm_is_measured_to_its_last_picture(
             "packet=pts_time,duration_time",
             "-of",
             "csv=p=0",
-            str(_path(app, result["result_artifact_id"])),
+            str(_path(app, result["made_artifact_id"])),
         ],
         check=True,
         capture_output=True,

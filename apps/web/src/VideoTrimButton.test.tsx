@@ -40,8 +40,8 @@ const EXACT: VideoTrimPreview = {
   ...PREVIEW, mode: "exact", start_seconds: 1.4, last_frame_seconds: 1.9, end_seconds: 2, frame_count: 6,
 };
 const RESULT = {
-  result_artifact_id: "sha256:part", in_library: true, action: "trim", mode: "copy",
-  source_artifact_id: "sha256:clip", source_sha256: "a".repeat(64),
+  made_artifact_id: "sha256:part", in_library: true, action: "trim", mode: "copy",
+  from_artifact_id: "sha256:clip", source_sha256: "a".repeat(64),
   requested_start_seconds: 1.43, requested_end_seconds: 2, actual_start_seconds: 1, keyframe_seconds: 1,
   actual_end_seconds: 2.04, from_beginning: false, keep_audio: true, format: "mp4", media_type: "video/mp4",
   video: {

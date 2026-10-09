@@ -7,11 +7,15 @@ immutable request; its result names what was made, the requested and actual
 times, and the ffmpeg found on the system path, by the version it reports and
 its file's digest.
 
-Retention, for now: the payload's ``source_artifact_id`` and the result's
-``result_artifact_id`` are retention references, so both the video a utility
-read and what it made are kept while the job exists. Letting a source go once
-its utilities are done needs a hold that ends with the job, which does not
-exist yet; until then nothing here claims a source can be freed.
+Retention: while a job is queued, running or interrupted, its payload names
+its source as ``source_artifact_id``, a key retention follows, so the video
+cannot be deleted under it. Once the job has finished (complete, failed or
+cancelled), and only after its tools, copies and final write have ended, the
+job names its source and what it made under keys retention does not follow,
+so either can be deleted like any other file; what it made stays in the Media
+Library on its own. Running a finished job again holds its source again, and
+only while that video is still stored and not in Recently Deleted. Jobs that
+finished before this rule keep holding their files.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ from .db import SessionLocal
 from .domain import ArtifactKind, JobKind, JobStatus, new_id, utcnow
 from .media_process import outlast_cancellation
 from .media_tools import MediaTool, MediaToolUnavailable, ToolUnavailableCode, find_media_tool
-from .models import Artifact, Job
+from .models import Artifact, ArtifactLibraryEntry, Job
 from .progress import update_job_progress
 from .scheduler import JobClaim, ResourceScheduler
 from .video_frames import DecodedFrame, FrameRefused, decode_frame
@@ -70,6 +74,13 @@ _FINISHED: Final = frozenset(
 )
 #: How far apart two times read from the same file may be and still be the same time.
 _SAME_START: Final = 1e-6
+#: The keys a job holds its files by, each beside the key a finished job names it by
+#: instead. Retention follows the first and not the second.
+_HELD_AS: Final[dict[str, str]] = {
+    "source_artifact_id": "from_artifact_id",
+    "result_artifact_id": "made_artifact_id",
+}
+_NAMED_AS: Final[dict[str, str]] = {named: held for held, named in _HELD_AS.items()}
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +157,15 @@ class _SourceChanged(Exception):
 
     def __str__(self) -> str:
         return "The video this job was asked for is no longer the one stored."
+
+
+class SourceNotStored(Exception):
+    """A finished job cannot run again: its video is gone or in Recently Deleted."""
+
+    code: Final = "video-utility-source-gone"
+
+    def __str__(self) -> str:
+        return "The video this job was made from is no longer stored, or is in Recently Deleted."
 
 
 class VideoUtilityManager:
@@ -230,6 +250,12 @@ class VideoUtilityManager:
                 .order_by(Job.enqueued_at, Job.queue_ticket, Job.created_at, Job.id)
             ).all()
             for job in jobs:
+                # An unfinished job never lets its source go, so this only
+                # fails for a row something else changed; such a job cannot
+                # run, and ends rather than waiting for good.
+                if not _hold_source(session, job):
+                    _end_unheld(job)
+                    continue
                 if job.status == JobStatus.INTERRUPTED.value:
                     _requeue(job, "queued")
                 waiting.append(job.id)
@@ -237,9 +263,18 @@ class VideoUtilityManager:
         for job_id in waiting:
             self.start(job_id)
 
-    def stage_retry(self, job: Job) -> None:
-        """Queue an unsuccessful utility job again from its unchanged request."""
+    def stage_retry(self, session: Session, job: Job) -> None:
+        """Queue an unsuccessful utility job again from its unchanged request.
 
+        A finished job no longer holds its source, so it holds it again here,
+        under the writer, and only while that video is still stored and not in
+        Recently Deleted; otherwise nothing is queued.
+        """
+
+        session.execute(text("UPDATE jobs SET status = status WHERE 0"))
+        session.refresh(job)
+        if not _hold_source(session, job):
+            raise SourceNotStored
         _requeue(job, "retry queued")
 
     async def cancel(self, job_id: str) -> bool:
@@ -274,6 +309,8 @@ class VideoUtilityManager:
                 return False
             job.status = JobStatus.CANCELLED.value
             job.completed_at = utcnow()
+            # The task has ended, its tools with it, so nothing reads the files any more.
+            _release(job)
             update_job_progress(job, stage="cancelled", indeterminate=True)
             session.commit()
         return True
@@ -605,6 +642,9 @@ class VideoUtilityManager:
                 "in_library": entry is not None and entry.state == "visible",
                 **record,
             }
+            # What was made is kept by its library entry from here on, and the
+            # source was read from the job's own copy, so the job holds neither.
+            _release(job)
             job.status = JobStatus.COMPLETE.value
             job.completed_at = utcnow()
             job.progress = 1.0
@@ -622,6 +662,9 @@ class VideoUtilityManager:
             job.error = message
             job.result_json = {"failure_code": code}
             job.completed_at = utcnow()
+            # A failure is written only once the work has unwound, its copies
+            # removed and its tools ended.
+            _release(job)
             update_job_progress(job, stage=outcome.not_done, indeterminate=True)
             session.commit()
 
@@ -663,6 +706,65 @@ def _requeue(job: Job, stage: str) -> None:
     job.claim_expires_at = None
     job.heartbeat_at = None
     update_job_progress(job, stage=stage, queue_resource=UTILITY_GROUP, indeterminate=True)
+
+
+def _naming(value: object) -> dict[str, Any]:
+    """A job's payload or result naming its files without holding them."""
+
+    if not isinstance(value, dict):
+        return {}
+    named: dict[str, Any] = {}
+    for key, item in value.items():
+        name = str(key)
+        named[_HELD_AS.get(name, name)] = item
+    return named
+
+
+def _release(job: Job) -> None:
+    """Let a finished job's source and what it made go, keeping both named."""
+
+    job.payload_json = _naming(job.payload_json)
+    job.result_json = _naming(job.result_json)
+
+
+def _hold_source(session: Session, job: Job) -> bool:
+    """Hold a job's source again for another run, while it is still stored and not trashed.
+
+    The caller holds the writer, so the video cannot be deleted between this
+    check and the commit that holds it. A job that still holds its source keeps
+    holding it.
+    """
+
+    payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+    if "source_artifact_id" in payload:
+        return True
+    source_id = payload.get("from_artifact_id")
+    if not isinstance(source_id, str) or session.get(Artifact, source_id) is None:
+        return False
+    trashed = session.scalar(
+        select(ArtifactLibraryEntry.id).where(
+            ArtifactLibraryEntry.artifact_id == source_id,
+            ArtifactLibraryEntry.state == "trashed",
+        )
+    )
+    if trashed is not None:
+        return False
+    job.payload_json = {_NAMED_AS.get(key, key): item for key, item in payload.items()}
+    return True
+
+
+def _end_unheld(job: Job) -> None:
+    """End a waiting job whose source it can no longer hold, so it waits no longer."""
+
+    action = job.payload_json.get("action") if isinstance(job.payload_json, dict) else None
+    job.status = JobStatus.FAILED.value
+    job.error = str(SourceNotStored())
+    job.result_json = {"failure_code": SourceNotStored.code}
+    job.completed_at = utcnow()
+    job.claim_owner = None
+    update_job_progress(
+        job, stage=_OUTCOMES.get(str(action), _UNKNOWN).not_done, indeterminate=True
+    )
 
 
 def _current(session: Session, job_id: str, claim: JobClaim) -> Job | None:
