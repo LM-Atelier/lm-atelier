@@ -144,3 +144,30 @@ it("reports a video that could not be read at all", async () => {
 
   expect(await screen.findByRole("alert")).toHaveTextContent("This video could not be read as an MP4 or Matroska file.");
 });
+
+it("keeps an accepted frame job when its progress cannot be read, and reads it again only when asked", async () => {
+  vi.mocked(api.saveVideoFrame).mockResolvedValue(job("queued"));
+  vi.mocked(api.videoUtilityJob)
+    .mockResolvedValueOnce(job("running"))
+    .mockRejectedValueOnce(new ApiError(503, "The app is busy.", "The app is busy.", "busy"));
+  open();
+  await screen.findByText(/64 × 48/);
+  fireEvent.click(screen.getByRole("button", { name: "Save this frame" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Saving the frame was accepted, but how it is going could not be read: The app is busy.",
+  );
+  // The reading stops rather than repeating, and the frame is not asked for again.
+  const reads = vi.mocked(api.videoUtilityJob).mock.calls.length;
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  expect(api.videoUtilityJob).toHaveBeenCalledTimes(reads);
+  expect(screen.getByRole("button", { name: "Saving the frame…" })).toHaveAttribute("aria-disabled", "true");
+  expect(screen.queryByText("Saving the frame…", { selector: "p" })).not.toBeInTheDocument();
+
+  vi.mocked(api.videoUtilityJob).mockResolvedValue(job("complete", { requested_seconds: 0, actual_seconds: 0 }));
+  fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+  expect(await screen.findByText(/Saved the frame at 0.000 s\. It is in the Media Library\./)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Check again" })).not.toBeInTheDocument();
+  expect(api.videoUtilityJob).toHaveBeenCalledTimes(reads + 1);
+  expect(api.saveVideoFrame).toHaveBeenCalledTimes(1);
+});

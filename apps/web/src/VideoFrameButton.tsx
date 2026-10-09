@@ -4,6 +4,7 @@ import { Camera } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { ApiError, api } from "./api";
 import { ShieldedMedia } from "./ShieldedMedia";
+import { JobReadProblem } from "./VideoUtilityJobRead";
 import { FINISHED, LIMIT_TEXT, numberField, seconds, useVideoProbe, useVideoUtilityJob } from "./videoUtilityText";
 
 /** Pick a moment in a stored video and save the frame there as a new picture. */
@@ -67,7 +68,10 @@ function VideoFrameBody({ artifactId, source }: { artifactId: string; source: st
       {problem && <p role="alert">{problem}</p>}
       {job.data?.status === "failed" && <p role="alert">{job.data.error ?? "The frame was not saved."}</p>}
       {job.data?.status === "cancelled" && <p role="status">Saving the frame was cancelled.</p>}
-      {working && job.data && <p role="status">{job.data.status === "queued" ? "Waiting its turn…" : "Saving the frame…"}</p>}
+      {working && job.data && !job.error && (
+        <p role="status">{job.data.status === "queued" ? "Waiting its turn…" : "Saving the frame…"}</p>
+      )}
+      {jobId !== null && <JobReadProblem job={job} subject="Saving the frame" />}
       {requested !== null && actual !== null && (
         <p role="status">
           Saved the frame at {seconds(actual)}

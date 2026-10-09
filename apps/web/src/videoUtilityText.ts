@@ -37,13 +37,21 @@ export function useVideoProbe(artifactId: string) {
   });
 }
 
-/** A video utility job, read again every half second until it finishes. */
+/**
+ * A video utility job, read again every half second until it finishes.
+ *
+ * A read that fails stops the reading until someone asks again, rather than
+ * repeating twice a second for as long as the dialog stays open.
+ */
 export function useVideoUtilityJob(jobId: string | null) {
   return useQuery({
     queryKey: ["video-utility-job", jobId],
     queryFn: ({ signal }) => api.videoUtilityJob(jobId ?? "", signal),
     enabled: jobId !== null,
-    refetchInterval: (query) => query.state.data && FINISHED.has(query.state.data.status) ? false : 500,
+    refetchInterval: (query) => {
+      if (query.state.status === "error") return false;
+      return query.state.data && FINISHED.has(query.state.data.status) ? false : 500;
+    },
   });
 }
 
