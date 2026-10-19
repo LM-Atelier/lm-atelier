@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 MAX_REGISTRY_WHEEL_METADATA_TOTAL_BYTES = 64 * 1024 * 1024
 WHEEL_METADATA_DOWNLOAD_CHUNK_BYTES = 64 * 1024
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
-_PACKAGE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
+_PACKAGE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 _SEMANTIC_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 
 ClosurePhase = Literal[

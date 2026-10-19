@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from .comfy_registry import ComfyNodeResolution
 
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
-_PACKAGE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
+_PACKAGE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 _REPOSITORY_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 _SEMANTIC_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 
