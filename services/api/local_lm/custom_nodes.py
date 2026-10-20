@@ -21,6 +21,13 @@ from .models import CustomNodeInstall
 from .subprocess_env import git_subprocess_environment
 
 _COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
+# A package is reviewed and verified as the blobs of its pinned tree, so its files
+# must be checked out as exactly those bytes. A package's own .gitattributes can ask
+# Git to rewrite files on checkout (line endings through text and eol, keyword
+# expansion through ident, smudge filters, re-encoding), and on Windows text=auto
+# alone turns LF into CRLF; verification would then refuse a package that nobody
+# changed. The repository's info/attributes outranks every .gitattributes file.
+_EXACT_CHECKOUT_ATTRIBUTES = b"* -text -eol -filter -ident -working-tree-encoding\n"
 MAX_REVIEWED_CUSTOM_NODE_TYPES = 4_096
 MAX_REVIEWED_CUSTOM_NODE_TYPE_LENGTH = 200
 
@@ -87,6 +94,7 @@ class CustomNodeManager:
                 source,
                 str(staging),
             )
+            self._check_out_exact_bytes(staging)
             await self._run("git", "-C", str(staging), "checkout", "--detach", commit)
             resolved = await self._run("git", "-C", str(staging), "rev-parse", "HEAD")
             if resolved.lower() != commit:
@@ -116,6 +124,7 @@ class CustomNodeManager:
         commit = self._commit(revision)
         destination = self._destination(install.installed_path, require_exists=True)
         previous = install.revision
+        self._check_out_exact_bytes(destination)
         await self._run(
             "git", "-C", str(destination), "fetch", "--filter=blob:none", "origin", commit
         )
@@ -141,6 +150,7 @@ class CustomNodeManager:
         current = install.revision
         previous = install.previous_revision
         destination = self._destination(install.installed_path, require_exists=True)
+        self._check_out_exact_bytes(destination)
         await self._run("git", "-C", str(destination), "checkout", "--detach", previous)
         install.revision = previous
         install.previous_revision = current
@@ -255,6 +265,12 @@ class CustomNodeManager:
     def remove(self, install: CustomNodeInstall) -> None:
         destination = self._destination(install.installed_path)
         shutil.rmtree(destination, ignore_errors=True)
+
+    @staticmethod
+    def _check_out_exact_bytes(repository: Path) -> None:
+        info = repository / ".git" / "info"
+        info.mkdir(exist_ok=True)
+        (info / "attributes").write_bytes(_EXACT_CHECKOUT_ATTRIBUTES)
 
     def _destination(self, name: str, *, require_exists: bool = False) -> Path:
         if Path(name).name != name or not name.startswith("lm-atelier-node_"):
