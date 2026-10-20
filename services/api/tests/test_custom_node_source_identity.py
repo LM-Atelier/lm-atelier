@@ -365,3 +365,61 @@ async def test_managed_start_checks_pinned_node_bytes_before_spawning(
         assert command[command.index("--whitelist-custom-nodes") + 1 :] == [
             "lm-atelier-node_fixture"
         ]
+
+
+async def test_a_package_that_asks_git_to_rewrite_files_installs_as_its_pinned_blobs(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A package's .gitattributes may ask Git to rewrite files on checkout: CRLF line
+    # endings (text=auto does this on Windows; eol=crlf everywhere) and $Id$ keyword
+    # expansion. Install, update and rollback must still check out the reviewed
+    # blobs byte for byte, or verification refuses a package nobody changed.
+    from local_lm.db import SessionLocal
+
+    source = tmp_path / "attributed-source"
+    source.mkdir()
+    _git(source, "init", "--quiet")
+    _git(source, "config", "user.name", "ajccarlson")
+    _git(source, "config", "user.email", "32660587+ajccarlson@users.noreply.github.com")
+    _git(source, "config", "core.autocrlf", "false")
+    first = {
+        ".gitattributes": b"* text=auto\n*.txt eol=crlf\n*.py ident\n",
+        "__init__.py": b"NODE_CLASS_MAPPINGS = {}\n# $Id$\n",
+        "notes.txt": b"first line\nsecond line\n",
+    }
+    for name, data in first.items():
+        (source / name).write_bytes(data)
+    _git(source, "add", ".")
+    _git(source, "commit", "--quiet", "-m", "Add attributed node fixture")
+    first_revision = _git(source, "rev-parse", "HEAD")
+    second = {**first, "notes.txt": b"first line\nchanged line\n"}
+    (source / "notes.txt").write_bytes(second["notes.txt"])
+    _git(source, "commit", "--quiet", "-am", "Change attributed node fixture")
+    second_revision = _git(source, "rev-parse", "HEAD")
+
+    monkeypatch.setattr(CustomNodeManager, "_source", staticmethod(lambda value: value))
+    settings.custom_node_dir.mkdir(parents=True, exist_ok=True)
+    manager = CustomNodeManager(settings)
+
+    def assert_installed(install: CustomNodeInstall, expected: dict[str, bytes]) -> None:
+        installed = settings.custom_node_dir / install.installed_path
+        for name, data in expected.items():
+            assert (installed / name).read_bytes() == data, name
+
+    with SessionLocal() as session:
+        install = await manager.install(
+            session,
+            name="Attributed node fixture",
+            source_url=str(source),
+            revision=first_revision,
+        )
+        assert_installed(install, first)
+        await manager.verify(install)
+
+        await manager.update(install, second_revision)
+        assert_installed(install, second)
+        await manager.verify(install)
+
+        await manager.rollback(install)
+        assert_installed(install, first)
+        await manager.verify(install)
