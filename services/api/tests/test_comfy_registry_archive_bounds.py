@@ -33,7 +33,13 @@ MIB = 1024 * 1024
 @pytest.mark.parametrize(
     "name,ceiling",
     [
-        ("MAX_ARCHIVE_BYTES", 64 * MIB),
+        # Raised from 64 MiB to the expansion ceiling. Images and other media are stored
+        # already compressed, so a package that ships example pictures downloads at about
+        # the size it expands to; any download cap below the expansion cap refuses exactly
+        # those packages while the expansion, entry and per-file bounds still limit what an
+        # archive may spend once opened. The whole archive is read into memory, so this is
+        # also the memory a single download may take.
+        ("MAX_ARCHIVE_BYTES", 256 * MIB),
         ("MAX_ARCHIVE_ENTRIES", 4_096),
         ("MAX_ARCHIVE_EXPANDED_BYTES", 256 * MIB),
         ("MAX_ARCHIVE_FILE_BYTES", 64 * MIB),

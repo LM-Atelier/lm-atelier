@@ -54,7 +54,7 @@ _COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
 _STABLE_TEXT = re.compile(
     rf"^[A-Za-z0-9][A-Za-z0-9_.:/+-]{{0,{MAX_WORKFLOW_IDENTITY_TEXT_LENGTH - 1}}}$"
 )
-_PACKAGE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
+_PACKAGE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 _LOWERCASE_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _SEMANTIC_VERSION = re.compile(r"^[0-9]+[.][0-9]+[.][0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 _REGISTRY_ENVIRONMENT_PATH = re.compile(r"^registry-wheels-v3-([0-9a-f]{64})$")

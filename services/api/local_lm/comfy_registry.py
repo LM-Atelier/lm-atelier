@@ -20,7 +20,7 @@ MAX_REGISTRY_TEXT_CHARACTERS = 1_000
 MAX_REGISTRY_RETRY_AFTER_SECONDS = 30.0
 
 _COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
-_PACKAGE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
+_PACKAGE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 _SEMANTIC_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 
 InstallKind = Literal["already_installed", "git_commit", "registry_archive"]
