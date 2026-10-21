@@ -1415,3 +1415,422 @@ async def test_automatic_lora_selection_records_the_saved_use_case_origin(
     assert [item["asset_id"] for item in selection.settings] == [asset.id]
     assert selection.provenance["selected"][0]["use_case"] == "watercolor landscapes"
     assert selection.provenance["selected"][0]["use_case_derived"] is derived
+
+
+_MODEL_ONLY_SCHEMA = {
+    "type": "object",
+    "properties": {"loras": {"type": "array", "default": [], "maxItems": 8}},
+}
+
+
+def _model_only(model: list[Any], **declared: Any) -> dict[str, Any]:
+    return {"extensions": {"lora": {"mode": "model_only", "model": model, **declared}}}
+
+
+def _sampled(model: list[Any], class_type: str = "KSampler") -> dict[str, Any]:
+    return {
+        "class_type": class_type,
+        "inputs": {
+            "model": model,
+            "positive": ["pos", 0],
+            "negative": ["neg", 0],
+            "latent_image": ["latent", 0],
+        },
+    }
+
+
+def _prompt_nodes() -> dict[str, Any]:
+    return {
+        "clip": {"class_type": "CLIPLoader", "inputs": {}},
+        "pos": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0]}},
+        "neg": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0]}},
+        "latent": {"class_type": "EmptyLatentImage", "inputs": {}},
+    }
+
+
+def _two_stage_graph(stage2_model: list[Any]) -> dict[str, Any]:
+    # A custom two-stage sampler whose stages are fed by different patches of one model.
+    return {
+        **_prompt_nodes(),
+        "1": {"class_type": "UNETLoader", "inputs": {}},
+        "40": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0]}},
+        "38": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["40", 0]}},
+        "7": {"class_type": "UNETLoader", "inputs": {}},
+        "9": {
+            "class_type": "KreaTwoStageSampler",
+            "inputs": {
+                "stage1_model": ["40", 0],
+                "stage2_model": stage2_model,
+                "positive": ["pos", 0],
+                "negative": ["neg", 0],
+                "latent_image": ["latent", 0],
+            },
+        },
+    }
+
+
+_TWO_STAGES = [["9", "stage1_model"], ["9", "stage2_model"]]
+
+
+def test_model_only_loras_reach_both_stages_of_a_named_custom_sampler() -> None:
+    graph = _two_stage_graph(["38", 0])
+
+    for model in (["1", 0], ["40", 0]):
+        dependencies = _model_only(model, sampler_inputs=_TWO_STAGES)
+        validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, dependencies)
+    from types import SimpleNamespace
+
+    revision = SimpleNamespace(
+        api_graph_json=graph,
+        input_schema_json=_MODEL_ONLY_SCHEMA,
+        dependencies_json=_model_only(["1", 0], sampler_inputs=_TWO_STAGES),
+    )
+    assert workflow_lora_extension(cast(Any, revision)) == {
+        "mode": "model_only",
+        "model": ["1", 0],
+        "sampler_inputs": _TWO_STAGES,
+    }
+    # After the second stage's own patch is too late for the first stage.
+    with pytest.raises(ValueError, match="every supported sampler"):
+        validate_lora_workflow_contract(
+            graph, _MODEL_ONLY_SCHEMA, _model_only(["38", 0], sampler_inputs=_TWO_STAGES)
+        )
+
+    transformed = transform_lora_graph(
+        graph,
+        {"mode": "model_only", "model": ["1", 0]},
+        [{"comfy_name": "style.safetensors", "model_strength": 0.5, "clip_strength": 1.0}],
+    )
+    assert transformed["lma_lora_001"]["inputs"]["model"] == ["1", 0]
+    assert transformed["40"]["inputs"]["model"] == ["lma_lora_001", 0]
+    assert transformed["9"]["inputs"]["stage1_model"] == ["40", 0]
+    assert transformed["38"]["inputs"]["model"] == ["40", 0]
+
+
+def test_model_only_loras_refuse_a_named_stage_fed_by_another_model() -> None:
+    graph = _two_stage_graph(["7", 0])
+
+    with pytest.raises(ValueError, match="every supported sampler"):
+        validate_lora_workflow_contract(
+            graph, _MODEL_ONLY_SCHEMA, _model_only(["1", 0], sampler_inputs=_TWO_STAGES)
+        )
+
+
+def test_an_unnamed_custom_sampler_is_not_recognised_from_its_graph() -> None:
+    graph = _two_stage_graph(["38", 0])
+
+    assert detect_lora_extension(graph) is None
+    with pytest.raises(ValueError, match="every supported sampler"):
+        validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, _model_only(["1", 0]))
+
+
+@pytest.mark.parametrize(
+    "sampler_inputs",
+    [[], [["9"]], [["9", ""]], [["9", "stage1_model"], ["9", "stage1_model"]], "9", [[9, "x"]]],
+)
+def test_a_malformed_sampler_input_list_is_refused(sampler_inputs: object) -> None:
+    graph = _two_stage_graph(["38", 0])
+
+    with pytest.raises(ValueError, match="extension is invalid"):
+        validate_lora_workflow_contract(
+            graph, _MODEL_ONLY_SCHEMA, _model_only(["1", 0], sampler_inputs=sampler_inputs)
+        )
+
+
+def test_a_named_sampler_input_must_exist_in_the_graph() -> None:
+    graph = _two_stage_graph(["38", 0])
+
+    with pytest.raises(ValueError, match="names a sampler input"):
+        validate_lora_workflow_contract(
+            graph,
+            _MODEL_ONLY_SCHEMA,
+            _model_only(["1", 0], sampler_inputs=[["9", "stage1_model"], ["9", "refiner"]]),
+        )
+
+
+def test_model_only_loras_insert_where_core_samplers_on_different_patches_meet() -> None:
+    graph = {
+        **_prompt_nodes(),
+        "1": {"class_type": "UNETLoader", "inputs": {}},
+        "2": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["1", 0]}},
+        "3": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["2", 0]}},
+        "first": _sampled(["2", 0]),
+        "second": _sampled(["3", 0], "KSamplerAdvanced"),
+    }
+
+    assert detect_lora_extension(graph) == {"mode": "model_only", "model": ["2", 0]}
+    validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, _model_only(["1", 0]))
+    with pytest.raises(ValueError, match="every supported sampler"):
+        validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, _model_only(["3", 0]))
+
+
+@pytest.mark.parametrize(
+    "between",
+    [
+        # A switch can select the branch that does not carry the LoRAs.
+        {"class_type": "ComfySwitchNode", "inputs": {"on_true": ["2", 0], "on_false": ["1", 0]}},
+        # A merge with its own unpatched base would carry them only partly.
+        {"class_type": "ModelMergeSimple", "inputs": {"model1": ["2", 0], "model2": ["1", 0]}},
+    ],
+)
+def test_model_only_loras_refuse_an_insertion_point_behind_a_switch_or_merge(
+    between: dict[str, Any],
+) -> None:
+    graph = {
+        **_prompt_nodes(),
+        "1": {"class_type": "UNETLoader", "inputs": {}},
+        "2": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0]}},
+        "3": between,
+        "4": _sampled(["3", 0]),
+    }
+
+    with pytest.raises(ValueError, match="every supported sampler"):
+        validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, _model_only(["2", 0]))
+    validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, _model_only(["3", 0]))
+    assert detect_lora_extension(graph) == {"mode": "model_only", "model": ["3", 0]}
+
+
+def test_model_only_loras_refuse_a_second_pass_tied_only_by_an_image() -> None:
+    graph = {
+        **_prompt_nodes(),
+        "1": {"class_type": "UNETLoader", "inputs": {}},
+        "2": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["1", 0]}},
+        "3": _sampled(["2", 0]),
+        "vae": {"class_type": "VAELoader", "inputs": {}},
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["vae", 0]}},
+        "patch": {"class_type": "ModelPatchLoader", "inputs": {}},
+        "72": {
+            "class_type": "QwenImageDiffsynthControlnet",
+            "inputs": {"model": ["1", 0], "model_patch": ["patch", 0], "image": ["8", 0]},
+        },
+        "73": _sampled(["72", 0]),
+    }
+
+    with pytest.raises(ValueError, match="every supported sampler"):
+        validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, _model_only(["2", 0]))
+    # The control patch passes on the model it takes, so both passes meet at the loader.
+    assert detect_lora_extension(graph) == {"mode": "model_only", "model": ["1", 0]}
+
+
+@pytest.mark.parametrize(
+    "between",
+    [
+        # A custom switch that can pick a model taken straight from the loader.
+        {
+            "class_type": "CustomModelSwitch",
+            "inputs": {"model": ["2", 0], "model_alt": ["3", 0], "select": 2},
+        },
+        # A custom blend with a model from a loader the graph does not otherwise use.
+        {
+            "class_type": "CustomModelBlend",
+            "inputs": {"model": ["2", 0], "model2": ["other", 0], "ratio": 0.5},
+        },
+        # A custom node that takes only a model, yet outputs one it loads by name.
+        {
+            "class_type": "CustomModelOverride",
+            "inputs": {"model": ["2", 0], "unet_name": "other.safetensors"},
+        },
+    ],
+)
+def test_model_only_loras_refuse_a_node_that_may_pass_on_another_model(
+    between: dict[str, Any],
+) -> None:
+    graph = {
+        **_prompt_nodes(),
+        "1": {"class_type": "UNETLoader", "inputs": {}},
+        "other": {"class_type": "SomeDiffusionModelLoader", "inputs": {}},
+        "2": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0]}},
+        "3": {"class_type": "ModelSamplingFlux", "inputs": {"model": ["1", 0]}},
+        "between": between,
+        "first": _sampled(["between", 0]),
+        "second": _sampled(["2", 0]),
+    }
+
+    assert detect_lora_extension(graph) is None
+    for model in (["1", 0], ["2", 0]):
+        with pytest.raises(ValueError, match="every supported sampler"):
+            validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, _model_only(model))
+
+
+def test_a_core_patch_with_a_linked_setting_still_passes_its_model_on() -> None:
+    graph = {
+        **_prompt_nodes(),
+        "1": {"class_type": "UNETLoader", "inputs": {}},
+        "shift": {"class_type": "PrimitiveFloat", "inputs": {"value": 3.0}},
+        "2": {
+            "class_type": "ModelSamplingSD3",
+            "inputs": {"model": ["1", 0], "shift": ["shift", 0]},
+        },
+        "3": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["2", 0]}},
+        "first": _sampled(["2", 0]),
+        "second": _sampled(["3", 0]),
+    }
+
+    assert detect_lora_extension(graph) == {"mode": "model_only", "model": ["2", 0]}
+    validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, _model_only(["1", 0]))
+
+
+def test_a_model_chain_that_feeds_itself_offers_no_insertion_point() -> None:
+    graph = {
+        **_prompt_nodes(),
+        "a": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["b", 0]}},
+        "b": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["a", 0]}},
+        "first": _sampled(["a", 0]),
+        "second": _sampled(["b", 0]),
+    }
+
+    assert detect_lora_extension(graph) is None
+
+
+def test_a_node_with_a_malformed_class_is_passed_over() -> None:
+    graph = {
+        **_prompt_nodes(),
+        "1": {"class_type": "UNETLoader", "inputs": {}},
+        "odd": {"class_type": ["KSampler"], "inputs": {"model": ["1", 0]}},
+        "first": _sampled(["1", 0]),
+    }
+
+    assert detect_lora_extension(graph) == {"mode": "model_only", "model": ["1", 0]}
+    validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, _model_only(["1", 0]))
+
+
+def test_model_only_loras_refuse_an_insertion_point_on_a_clip_output() -> None:
+    graph = {
+        "c": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+        "l": {"class_type": "LoraLoader", "inputs": {"model": ["c", 0], "clip": ["c", 1]}},
+        "pos": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["l", 1]}},
+        "neg": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["l", 1]}},
+        "latent": {"class_type": "EmptyLatentImage", "inputs": {}},
+        "k": _sampled(["l", 0]),
+    }
+
+    with pytest.raises(ValueError, match="every supported sampler"):
+        validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, _model_only(["c", 1]))
+
+
+def _guided_graph(guider: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **_prompt_nodes(),
+        "1": {"class_type": "UNETLoader", "inputs": {}},
+        "2": {"class_type": "UNETLoader", "inputs": {}},
+        "11": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["1", 0]}},
+        "guider": guider,
+        "sample": {
+            "class_type": "SamplerCustomAdvanced",
+            "inputs": {"guider": ["guider", 0], "latent_image": ["latent", 0]},
+        },
+    }
+
+
+def test_model_only_loras_reach_a_custom_advanced_sampler_through_its_guider() -> None:
+    graph = _guided_graph(
+        {
+            "class_type": "CFGGuider",
+            "inputs": {"model": ["11", 0], "positive": ["pos", 0], "negative": ["neg", 0]},
+        }
+    )
+
+    validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, _model_only(["1", 0]))
+    assert detect_lora_extension(graph) == {"mode": "model_only", "model": ["11", 0]}
+
+
+def test_a_dual_model_guider_needs_the_stack_on_its_negative_model_too() -> None:
+    separate = _guided_graph(
+        {
+            "class_type": "DualModelGuider",
+            "inputs": {"model": ["11", 0], "model_negative": ["2", 0], "positive": ["pos", 0]},
+        }
+    )
+    shared = _guided_graph(
+        {
+            "class_type": "DualModelGuider",
+            "inputs": {"model": ["11", 0], "model_negative": ["1", 0], "positive": ["pos", 0]},
+        }
+    )
+
+    assert detect_lora_extension(separate) is None
+    with pytest.raises(ValueError, match="every supported sampler"):
+        validate_lora_workflow_contract(separate, _MODEL_ONLY_SCHEMA, _model_only(["11", 0]))
+    assert detect_lora_extension(shared) == {"mode": "model_only", "model": ["1", 0]}
+    with pytest.raises(ValueError, match="every supported sampler"):
+        validate_lora_workflow_contract(shared, _MODEL_ONLY_SCHEMA, _model_only(["11", 0]))
+
+
+def test_an_unknown_guider_cannot_be_accounted_for() -> None:
+    graph = _guided_graph({"class_type": "SomeCustomGuider", "inputs": {"model": ["11", 0]}})
+
+    assert detect_lora_extension(graph) is None
+    with pytest.raises(ValueError, match="every supported sampler"):
+        validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, _model_only(["1", 0]))
+
+
+def test_a_model_patch_that_takes_conditioning_keeps_its_insertion_point() -> None:
+    # Video nodes such as talking-head patches take conditioning and patch the model;
+    # they are not samplers, so the sampler after them still decides the point.
+    graph = {
+        **_prompt_nodes(),
+        "1": {"class_type": "UNETLoader", "inputs": {}},
+        "11": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0]}},
+        "20": {
+            "class_type": "WanInfiniteTalkToVideo",
+            "inputs": {"model": ["11", 0], "positive": ["pos", 0], "negative": ["neg", 0]},
+        },
+        "30": _sampled(["20", 0]),
+    }
+
+    assert detect_lora_extension(graph) == {"mode": "model_only", "model": ["20", 0]}
+    validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, _model_only(["20", 0]))
+
+
+def test_model_only_loras_still_refuse_a_graph_that_samples_nothing() -> None:
+    graph = {
+        "1": {"class_type": "UNETLoader", "inputs": {}},
+        "11": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["1", 0]}},
+        "save": {"class_type": "ModelSave", "inputs": {"model": ["11", 0]}},
+    }
+
+    assert detect_lora_extension(graph) is None
+    with pytest.raises(ValueError, match="every supported sampler"):
+        validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, _model_only(["1", 0]))
+
+
+def test_finding_the_insertion_point_stays_linear_in_the_graph() -> None:
+    # One long model chain sampled at its far end first, then by many samplers on
+    # patches along it: each step of the chain is walked once, not once per sampler.
+    import time
+
+    size = 40_000
+    graph: dict[str, Any] = {**_prompt_nodes(), "m0": {"class_type": "UNETLoader", "inputs": {}}}
+    for index in range(1, size):
+        graph[f"m{index}"] = {
+            "class_type": "ModelSamplingSD3",
+            "inputs": {"model": [f"m{index - 1}", 0]},
+        }
+    graph["far"] = _sampled([f"m{size - 1}", 0])
+    for index in range(0, size, 20):
+        graph[f"p{index}"] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {"model": [f"m{index}", 0]},
+        }
+        graph[f"s{index}"] = _sampled([f"p{index}", 0])
+
+    # Samplers on many outputs of one patch with many settings: only its first output
+    # passes the model on, and telling so does not read the settings.
+    wide: dict[str, Any] = {
+        **_prompt_nodes(),
+        "u": {"class_type": "UNETLoader", "inputs": {}},
+        "x": {
+            "class_type": "ModelSamplingSD3",
+            "inputs": {"model": ["u", 0], **{f"w{index}": 0.0 for index in range(30_000)}},
+        },
+    }
+    for slot in range(3_000):
+        wide[f"k{slot}"] = _sampled(["x", slot])
+
+    started = time.perf_counter()
+    assert detect_lora_extension(graph) == {"mode": "model_only", "model": ["m0", 0]}
+    validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, _model_only(["m0", 0]))
+    assert detect_lora_extension(wide) is None
+    with pytest.raises(ValueError, match="every supported sampler"):
+        validate_lora_workflow_contract(wide, _MODEL_ONLY_SCHEMA, _model_only(["u", 0]))
+    assert time.perf_counter() - started < 3

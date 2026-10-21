@@ -47,6 +47,96 @@ _MODEL_SAMPLER_CLASS_TYPES = {
     "SamplerCustom",
     "SamplerCustomAdvanced",
 }
+# SamplerCustomAdvanced samples with the models of its guider: the core guiders and the
+# inputs that carry those models, required first and optional after. A guider not listed
+# here cannot be accounted for, so a model-only extension refuses it.
+_GUIDER_MODEL_INPUTS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "BasicGuider": (("model",), ()),
+    "CFGGuider": (("model",), ()),
+    "DualCFGGuider": (("model",), ()),
+    "DualModelGuider": (("model",), ("model_negative",)),
+    "PerpNegGuider": (("model",), ()),
+}
+# ComfyUI's own nodes that take one model through their "model" input and pass it on,
+# patched, as their first output. Any other node, a custom one included, may output a
+# model its "model" input never reaches, so a model chain is followed through these only.
+_MODEL_PATCH_CLASS_TYPES = frozenset(
+    {
+        "APG",
+        "ARVideoI2V",
+        "AnimaLLLiteApply",
+        "CFGNorm",
+        "CFGOverride",
+        "CFGZeroStar",
+        "ChromaRadianceOptions",
+        "ContextWindowsManual",
+        "DifferentialDiffusion",
+        "EasyCache",
+        "Epsilon Scaling",
+        "FluxKVCache",
+        "FreSca",
+        "FreeU",
+        "FreeU_V2",
+        "HiDreamO1PatchSeamSmoothing",
+        "HyperTile",
+        "HypernetworkLoader",
+        "LTXVContextWindows",
+        "LTXVReferenceAudio",
+        "LatentApplyOperationCFG",
+        "LazyCache",
+        "LoraLoader",
+        "LoraLoaderBypass",
+        "LoraLoaderBypassModelOnly",
+        "LoraLoaderModelOnly",
+        "LoraModelLoader",
+        "Mahiro",
+        "MiniMaxH3SigmaShift",
+        "ModelComputeDtype",
+        "ModelNoiseScale",
+        "ModelSamplingAuraFlow",
+        "ModelSamplingContinuousEDM",
+        "ModelSamplingContinuousV",
+        "ModelSamplingDiscrete",
+        "ModelSamplingFlux",
+        "ModelSamplingLTXV",
+        "ModelSamplingSD3",
+        "ModelSamplingStableCascade",
+        "MultiGPU_WorkUnits",
+        "NAGuidance",
+        "PatchModelAddDownscale",
+        "PerpNeg",
+        "PerturbedAttentionGuidance",
+        "QwenImageDiffsynthControlnet",
+        "RenormCFG",
+        "RescaleCFG",
+        "SUPIRApply",
+        "ScaleROPE",
+        "SelectModelDevice",
+        "SelfAttentionGuidance",
+        "SkipLayerGuidanceDiT",
+        "SkipLayerGuidanceDiTSimple",
+        "SkipLayerGuidanceSD3",
+        "TCFG",
+        "TemporalScoreRescaling",
+        "TomePatchModel",
+        "TorchCompileModel",
+        "TripoSplatSamplingPreview",
+        "UNetCrossAttentionMultiply",
+        "UNetSelfAttentionMultiply",
+        "UNetTemporalAttentionMultiply",
+        "USOStyleReference",
+        "VideoLinearCFGGuidance",
+        "VideoTriangleCFGGuidance",
+        "WanContextWindowsManual",
+        "WanInfiniteTalkToVideo",
+        "WanUni3CControlnetApply",
+        "ZImageFunControlnet",
+        "wanBlockSwap",
+    }
+)
+# A workflow names its custom samplers' model inputs explicitly; the node and input
+# names are bounded like the graph's own.
+_MAX_DECLARED_SAMPLER_INPUTS = 64
 
 
 class LoraWorkflowDocument(Protocol):
@@ -384,14 +474,22 @@ def checkpoint_lora_extension(graph: dict[str, Any]) -> dict[str, list[Any]] | N
 
 
 def model_only_lora_extension(graph: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the one model link shared by all supported core sampler nodes."""
+    """Return the nearest model link that every sampler in the graph samples through.
 
-    links = _sampler_model_links(graph)
-    distinct = {tuple(link) for link in links}
-    if len(distinct) != 1:
+    Samplers that share one model link insert there, as they always have. Samplers on
+    different patches of one model insert where their model chains meet, so each of
+    them receives the stack. A custom sampler is not recognised here; a workflow that
+    uses one names its model inputs in a recorded extension.
+    """
+
+    sampled = list(dict.fromkeys(_sampler_model_links(graph, ())))
+    if not sampled:
         return None
-    model = list(next(iter(distinct)))
-    if model[0] not in graph:
+    shared = sampled[0] if len(sampled) == 1 else _nearest_shared_model_link(graph, sampled)
+    if shared is None:
+        return None
+    model = list(shared)
+    if model[0] not in graph or not _feeds_every_sampler(graph, model):
         return None
     return {
         "mode": "model_only",
@@ -479,10 +577,14 @@ def _declared_lora_extension(raw: object) -> dict[str, Any] | None:
     model = raw.get("model")
     mode = raw.get("mode")
     if mode == "model_only":
-        if set(raw) != {"mode", "model"} or not _valid_link(model):
+        declared = _declared_sampler_inputs(raw)
+        if set(raw) not in _MODEL_ONLY_EXTENSION_KEYS or declared is None or not _valid_link(model):
             return None
         assert isinstance(model, list)
-        return {"mode": "model_only", "model": list(model)}
+        extension: dict[str, Any] = {"mode": "model_only", "model": list(model)}
+        if declared:
+            extension["sampler_inputs"] = [list(item) for item in declared]
+        return extension
     if mode is not None or set(raw) != {"model", "clip"}:
         return None
     clip = raw.get("clip")
@@ -491,6 +593,35 @@ def _declared_lora_extension(raw: object) -> dict[str, Any] | None:
     assert isinstance(model, list)
     assert isinstance(clip, list)
     return {"model": list(model), "clip": list(clip)}
+
+
+_MODEL_ONLY_EXTENSION_KEYS = ({"mode", "model"}, {"mode", "model", "sampler_inputs"})
+
+
+def _declared_sampler_inputs(raw: dict[str, Any]) -> tuple[tuple[str, str], ...] | None:
+    """The custom sampler model inputs a model-only extension names, or None when malformed.
+
+    A custom sampler is not recognisable from its graph alone, so a workflow that samples
+    with one names each of its model inputs as a node id and input name; the stack has to
+    reach every one of them as it does a core sampler's model.
+    """
+
+    if "sampler_inputs" not in raw:
+        return ()
+    value = raw["sampler_inputs"]
+    if not isinstance(value, list) or not 1 <= len(value) <= _MAX_DECLARED_SAMPLER_INPUTS:
+        return None
+    found: list[tuple[str, str]] = []
+    for item in value:
+        if (
+            not isinstance(item, list)
+            or len(item) != 2
+            or not all(isinstance(part, str) and 0 < len(part) <= 200 for part in item)
+            or (item[0], item[1]) in found
+        ):
+            return None
+        found.append((item[0], item[1]))
+    return tuple(found)
 
 
 def validate_lora_workflow_contract(
@@ -523,13 +654,25 @@ def validate_lora_workflow_contract(
     model = raw_extension.get("model")
     clip = raw_extension.get("clip")
     if mode == "model_only":
-        if set(raw_extension) != {"mode", "model"} or not _valid_link(model):
+        declared = _declared_sampler_inputs(raw_extension)
+        if (
+            set(raw_extension) not in _MODEL_ONLY_EXTENSION_KEYS
+            or declared is None
+            or not _valid_link(model)
+        ):
             raise ValueError("The model-only LoRA workflow extension is invalid.")
         assert isinstance(model, list)
         if model[0] not in graph:
             raise ValueError("The LoRA workflow extension references a missing graph node.")
-        sampler_links = _sampler_model_links(graph)
-        if not sampler_links or {tuple(link) for link in sampler_links} != {tuple(model)}:
+        for node_id, name in declared:
+            node = graph.get(node_id)
+            inputs = node.get("inputs") if isinstance(node, dict) else None
+            if not isinstance(inputs, dict) or not _valid_link(inputs.get(name)):
+                raise ValueError(
+                    "The model-only LoRA workflow extension names a sampler input "
+                    "the graph does not have."
+                )
+        if not _feeds_every_sampler(graph, model, declared):
             raise ValueError(
                 "The model-only LoRA workflow extension must feed every supported sampler."
             )
@@ -1199,18 +1342,175 @@ def _valid_link(value: object) -> bool:
     )
 
 
-def _sampler_model_links(graph: dict[str, Any]) -> list[list[Any]]:
-    links: list[list[Any]] = []
+def _sampler_model_links(
+    graph: dict[str, Any], declared: tuple[tuple[str, str], ...]
+) -> list[tuple[str, int]]:
+    """Every model link the graph samples with, or an empty list when one is unaccounted for.
+
+    Core samplers sample with their model input and SamplerCustomAdvanced with its
+    guider's models. A custom sampler's model inputs are the ones a recorded extension
+    names; a sampler that cannot be accounted for refuses rather than being skipped.
+    """
+
+    links: list[tuple[str, int]] = []
     for node in graph.values():
-        if not isinstance(node, dict) or node.get("class_type") not in _MODEL_SAMPLER_CLASS_TYPES:
+        class_type = node.get("class_type") if isinstance(node, dict) else None
+        if not isinstance(class_type, str) or class_type not in _MODEL_SAMPLER_CLASS_TYPES:
             continue
         inputs = node.get("inputs")
-        model = inputs.get("model") if isinstance(inputs, dict) else None
+        inputs = inputs if isinstance(inputs, dict) else {}
+        if class_type == "SamplerCustomAdvanced":
+            guider_link = inputs.get("guider")
+            if not _valid_link(guider_link):
+                return []
+            assert isinstance(guider_link, list)
+            guider = graph.get(guider_link[0])
+            guider_inputs = guider.get("inputs") if isinstance(guider, dict) else None
+            names = (
+                _GUIDER_MODEL_INPUTS.get(str(guider.get("class_type")))
+                if isinstance(guider, dict)
+                else None
+            )
+            if names is None or not isinstance(guider_inputs, dict):
+                return []
+            required, optional = names
+            for name in (*required, *optional):
+                value = guider_inputs.get(name)
+                if value is None and name in optional:
+                    continue
+                if not _valid_link(value):
+                    return []
+                assert isinstance(value, list)
+                links.append((value[0], value[1]))
+            continue
+        model = inputs.get("model")
         if not _valid_link(model):
             return []
         assert isinstance(model, list)
-        links.append(list(model))
+        links.append((model[0], model[1]))
+    for node_id, name in declared:
+        node = graph.get(node_id)
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        value = inputs.get(name) if isinstance(inputs, dict) else None
+        if not _valid_link(value):
+            return []
+        assert isinstance(value, list)
+        links.append((value[0], value[1]))
     return links
+
+
+def _model_parent(graph: dict[str, Any], link: tuple[str, int]) -> tuple[str, int] | None:
+    """The link a core model patch takes the model it outputs from, or None for any other.
+
+    A switch, a merge or a custom node may output a model that its "model" input never
+    reaches, and so may any output of a patch but its first, so the chain ends there.
+    """
+
+    node_id, slot = link
+    node = graph.get(node_id)
+    if slot != 0 or not isinstance(node, dict):
+        return None
+    class_type = node.get("class_type")
+    if not isinstance(class_type, str) or class_type not in _MODEL_PATCH_CLASS_TYPES:
+        return None
+    inputs = node.get("inputs")
+    value = inputs.get("model") if isinstance(inputs, dict) else None
+    if not _valid_link(value):
+        return None
+    assert isinstance(value, list)
+    return value[0], value[1]
+
+
+def _model_chain_passes(
+    graph: dict[str, Any],
+    link: tuple[str, int],
+    target: tuple[str, int],
+    memo: dict[tuple[str, int], bool],
+) -> bool:
+    """Whether a model link, followed upstream through model patches, passes the target."""
+
+    walked: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    current: tuple[str, int] | None = link
+    result = False
+    while current is not None:
+        if current in memo:
+            result = memo[current]
+            break
+        if current == target:
+            result = True
+            break
+        if current in seen:
+            break
+        walked.append(current)
+        seen.add(current)
+        current = _model_parent(graph, current)
+    for step in walked:
+        memo[step] = result
+    return result
+
+
+def _feeds_every_sampler(
+    graph: dict[str, Any],
+    model: list[Any],
+    declared: tuple[tuple[str, str], ...] = (),
+) -> bool:
+    """Whether LoRAs inserted at this link reach every model the graph samples with.
+
+    Insertion rewires every consumer of the link, so a sampler receives the whole stack
+    when its model chain passes the link. Every node on that chain is a core patch that
+    passes on the model it takes, so nothing between the link and the sampler can bring
+    in a model the stack does not reach.
+    """
+
+    sampled = _sampler_model_links(graph, declared)
+    if not sampled:
+        return False
+    target = (model[0], model[1])
+    chains: dict[tuple[str, int], bool] = {}
+    return all(_model_chain_passes(graph, link, target, chains) for link in dict.fromkeys(sampled))
+
+
+def _nearest_shared_model_link(
+    graph: dict[str, Any], links: list[tuple[str, int]]
+) -> tuple[str, int] | None:
+    """The link nearest the samplers that every one of their model chains passes."""
+
+    first: list[tuple[str, int]] = []
+    position: dict[tuple[str, int], int] = {}
+    current: tuple[str, int] | None = links[0]
+    while current is not None and current not in position:
+        position[current] = len(first)
+        first.append(current)
+        current = _model_parent(graph, current)
+    if current is not None:
+        # A chain that feeds itself is a graph ComfyUI refuses to run.
+        return None
+    joins: dict[tuple[str, int], int] = {}
+    deepest = 0
+    for link in links[1:]:
+        walked: list[tuple[str, int]] = []
+        seen: set[tuple[str, int]] = set()
+        current = link
+        joined: int | None = None
+        while current is not None:
+            if current in position:
+                joined = position[current]
+                break
+            if current in joins:
+                joined = joins[current]
+                break
+            if current in seen:
+                break
+            walked.append(current)
+            seen.add(current)
+            current = _model_parent(graph, current)
+        if joined is None:
+            return None
+        for step in walked:
+            joins[step] = joined
+        deepest = max(deepest, joined)
+    return first[deepest]
 
 
 def _graph_contains_link(value: object, link: list[Any]) -> bool:
