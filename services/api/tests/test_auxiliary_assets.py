@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from copy import deepcopy
 from types import MappingProxyType
 from typing import Any, cast
@@ -1350,6 +1351,231 @@ async def test_samplers_reading_different_models_offer_no_insertion_point(
         }
 
         assert workflow_lora_extension(revision) is None
+
+
+_CHECKPOINT_LORAS = {"model": ["ck", 0], "clip": ["ck", 1]}
+
+
+def _checkpoint_graph(**nodes: dict[str, Any]) -> dict[str, Any]:
+    # One checkpoint feeding the prompt and a first pass; each case adds its own nodes.
+    return {
+        "ck": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "base"}},
+        "pos": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["ck", 1]}},
+        "neg": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["ck", 1]}},
+        "latent": {"class_type": "EmptyLatentImage", "inputs": {}},
+        "first": _sampled(["ck", 0]),
+        "u": {"class_type": "UNETLoader", "inputs": {"unet_name": "second"}},
+        **nodes,
+    }
+
+
+def _guided(guider: str) -> dict[str, Any]:
+    return {
+        "class_type": "SamplerCustomAdvanced",
+        "inputs": {"guider": [guider, 0], "latent_image": ["latent", 0]},
+    }
+
+
+# Each case names the nodes it adds; they are built per test so no case shares a node.
+_GraphCases = dict[str, dict[str, Callable[[], dict[str, Any]]]]
+
+_SAMPLERS_THE_CHECKPOINT_MISSES: _GraphCases = {
+    "a second loader": {"second": lambda: _sampled(["u", 0])},
+    "a patch on a second loader": {
+        "p": lambda: {"class_type": "ModelSamplingSD3", "inputs": {"model": ["u", 0]}},
+        "second": lambda: _sampled(["p", 0]),
+    },
+    "a guider on a second loader": {
+        "g": lambda: {"class_type": "CFGGuider", "inputs": {"model": ["u", 0]}},
+        "second": lambda: _guided("g"),
+    },
+    "a negative model on a second loader": {
+        "g": lambda: {
+            "class_type": "DualModelGuider",
+            "inputs": {"model": ["ck", 0], "model_negative": ["u", 0]},
+        },
+        "second": lambda: _guided("g"),
+    },
+    "an unknown guider on a second loader": {
+        "g": lambda: {"class_type": "SomeCustomGuider", "inputs": {"model": ["u", 0]}},
+        "second": lambda: _guided("g"),
+    },
+    "an adapter on a second loader fed the first picture": {
+        "decode": lambda: {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["first", 0], "vae": ["ck", 2]},
+        },
+        "p": lambda: {
+            "class_type": "SomeImageAdapter",
+            "inputs": {"model": ["u", 0], "image": ["decode", 0]},
+        },
+        "second": lambda: _sampled(["p", 0]),
+    },
+    "a LoRA loader on a second loader": {
+        "l": lambda: {"class_type": "LoraLoader", "inputs": {"model": ["u", 0], "clip": ["ck", 1]}},
+        "second": lambda: _sampled(["l", 0]),
+    },
+    "a loader the app does not know": {
+        "other": lambda: {"class_type": "SomeModelLoader", "inputs": {}},
+        "second": lambda: _sampled(["other", 0]),
+    },
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SAMPLERS_THE_CHECKPOINT_MISSES))
+def test_checkpoint_loras_refuse_a_sampler_on_a_separately_loaded_model(case: str) -> None:
+    graph = _checkpoint_graph(
+        **{name: build() for name, build in _SAMPLERS_THE_CHECKPOINT_MISSES[case].items()}
+    )
+
+    assert checkpoint_lora_extension(graph) is None
+    assert detect_lora_extension(graph) is None
+    with pytest.raises(ValueError, match="model of every supported sampler"):
+        validate_lora_workflow_contract(
+            graph, _MODEL_ONLY_SCHEMA, {"extensions": {"lora": _CHECKPOINT_LORAS}}
+        )
+
+
+_SAMPLERS_THE_CHECKPOINT_REACHES: _GraphCases = {
+    "a LoRA loader and an image adapter": {
+        "l": lambda: {
+            "class_type": "LoraLoader",
+            "inputs": {"model": ["ck", 0], "clip": ["ck", 1]},
+        },
+        "image": lambda: {"class_type": "LoadImage", "inputs": {"image": "reference.png"}},
+        "a": lambda: {
+            "class_type": "SomeImageAdapter",
+            "inputs": {"model": ["l", 0], "image": ["image", 0]},
+        },
+        "second": lambda: _sampled(["a", 0]),
+    },
+    "a second pass on the same model": {
+        "second": lambda: _sampled(["ck", 0], "KSamplerAdvanced"),
+    },
+    "a guider on the checkpoint": {
+        "g": lambda: {"class_type": "CFGGuider", "inputs": {"model": ["ck", 0]}},
+        "second": lambda: _guided("g"),
+    },
+    # Part of what these sample carries the LoRAs, so nothing proves they miss them.
+    "a merge with the checkpoint": {
+        "m": lambda: {
+            "class_type": "ModelMergeSimple",
+            "inputs": {"model1": ["ck", 0], "model2": ["u", 0]},
+        },
+        "second": lambda: _sampled(["m", 0]),
+    },
+    "a switch with the checkpoint": {
+        "s": lambda: {
+            "class_type": "ComfySwitchNode",
+            "inputs": {"on_true": ["ck", 0], "on_false": ["u", 0]},
+        },
+        "second": lambda: _sampled(["s", 0]),
+    },
+    # A sampler the contract cannot read has always been passed over.
+    "an unrecognised sampler on a second loader": {
+        "second": lambda: {**_sampled(["u", 0]), "class_type": "SomeCustomSampler"},
+    },
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SAMPLERS_THE_CHECKPOINT_REACHES))
+def test_checkpoint_loras_keep_graphs_whose_samplers_can_receive_them(case: str) -> None:
+    graph = _checkpoint_graph(
+        **{name: build() for name, build in _SAMPLERS_THE_CHECKPOINT_REACHES[case].items()}
+    )
+
+    assert checkpoint_lora_extension(graph) == _CHECKPOINT_LORAS
+    assert detect_lora_extension(graph) == _CHECKPOINT_LORAS
+    validate_lora_workflow_contract(
+        graph, _MODEL_ONLY_SCHEMA, {"extensions": {"lora": _CHECKPOINT_LORAS}}
+    )
+
+
+def test_checkpoint_loras_move_to_the_model_a_sampler_reads() -> None:
+    # The checkpoint lends its text encoder; a separately loaded model does the sampling.
+    graph = _checkpoint_graph(
+        first=_sampled(["u", 0]),
+        save={"class_type": "ModelSave", "inputs": {"model": ["ck", 0]}},
+    )
+
+    assert checkpoint_lora_extension(graph) is None
+    assert detect_lora_extension(graph) == {"mode": "model_only", "model": ["u", 0]}
+
+
+def test_a_recorded_checkpoint_link_refuses_a_sampler_reading_above_it() -> None:
+    graph = _checkpoint_graph(
+        l={"class_type": "LoraLoader", "inputs": {"model": ["ck", 0], "clip": ["ck", 1]}},
+        pos={"class_type": "CLIPTextEncode", "inputs": {"clip": ["l", 1]}},
+        first=_sampled(["l", 0]),
+        second=_sampled(["ck", 0]),
+    )
+    recorded = {"extensions": {"lora": {"model": ["l", 0], "clip": ["l", 1]}}}
+
+    with pytest.raises(ValueError, match="model of every supported sampler"):
+        validate_lora_workflow_contract(graph, _MODEL_ONLY_SCHEMA, recorded)
+    validate_lora_workflow_contract(
+        graph, _MODEL_ONLY_SCHEMA, {"extensions": {"lora": _CHECKPOINT_LORAS}}
+    )
+
+
+async def test_a_recorded_extension_that_misses_a_sampler_takes_no_loras(
+    client: AsyncClient,
+) -> None:
+    """A stack chosen for it would be refused, even one the person never asked for."""
+
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        watercolor = _asset(session, "Watercolor", "d" * 64)
+        watercolor.use_case = "watercolor landscapes"
+        watercolor.auto_apply = True
+        session.flush()
+        prompt = "Create watercolor landscapes"
+        assert select_automatic_lora_stack(session, revision, prompt).settings
+
+        revision.api_graph_json = {
+            **revision.api_graph_json,
+            "4": {"class_type": "UNETLoader", "inputs": {}},
+            "5": {"class_type": "KSampler", "inputs": {"model": ["4", 0]}},
+        }
+        stack = [
+            {
+                "asset_id": watercolor.id,
+                "model_strength": 0.8,
+                "clip_strength": 0.7,
+                "enabled": True,
+            }
+        ]
+
+        assert revision_accepts_added_loras(revision) is False
+        assert select_automatic_lora_stack(session, revision, prompt).settings == []
+        with pytest.raises(ValueError, match="model of every supported sampler"):
+            resolve_lora_stack(session, revision, stack)
+        assert resolve_lora_stack(session, revision, []).settings == []
+        session.rollback()
+
+
+def test_checkpoint_reach_is_measured_in_linear_time() -> None:
+    import time
+
+    size = 40_000
+    chain = {
+        f"m{index}": {
+            "class_type": "ModelSamplingSD3",
+            "inputs": {"model": ["u" if index == 0 else f"m{index - 1}", 0]},
+        }
+        for index in range(size)
+    }
+    graph = _checkpoint_graph(**chain, second=_sampled([f"m{size - 1}", 0]))
+    reached = _checkpoint_graph(
+        **{**chain, "m0": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["ck", 0]}}},
+        second=_sampled([f"m{size - 1}", 0]),
+    )
+
+    started = time.perf_counter()
+    assert checkpoint_lora_extension(graph) is None
+    assert checkpoint_lora_extension(reached) == _CHECKPOINT_LORAS
+    assert time.perf_counter() - started < 3
 
 
 async def test_a_graph_holding_a_reserved_identifier_offers_nothing(
