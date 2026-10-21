@@ -137,6 +137,9 @@ _MODEL_PATCH_CLASS_TYPES = frozenset(
 # A workflow names its custom samplers' model inputs explicitly; the node and input
 # names are bounded like the graph's own.
 _MAX_DECLARED_SAMPLER_INPUTS = 64
+# The inputs through which core nodes pass a model on: patches take "model", merges
+# "model1" and "model2", and switches choose between "on_true" and "on_false".
+_MODEL_CARRYING_INPUTS = ("model", "model1", "model2", "on_true", "on_false")
 
 
 class LoraWorkflowDocument(Protocol):
@@ -327,7 +330,9 @@ def select_automatic_lora_stack(
 ) -> AutomaticLoraSelection:
     """Select a small deterministic LoRA stack from saved use cases."""
 
-    if not workflow_lora_extension(revision):
+    # The run validates the stack against the workflow's contract, so a stack chosen
+    # for a workflow the contract refuses would fail a turn that asked for no LoRAs.
+    if not revision_accepts_added_loras(revision):
         return AutomaticLoraSelection([], _automatic_selection_provenance([]))
     prompt_text = _normalized_match_text(prompt)
     prompt_terms = set(_meaningful_terms(prompt_text))
@@ -466,6 +471,8 @@ def checkpoint_lora_extension(graph: dict[str, Any]) -> dict[str, list[Any]] | N
     model = [matches[0], 0]
     clip = [matches[0], 1]
     if not _graph_contains_link(graph, model) or not _graph_contains_link(graph, clip):
+        return None
+    if _a_sampler_misses_the_link(graph, model):
         return None
     return {
         "model": model,
@@ -695,6 +702,10 @@ def validate_lora_workflow_contract(
         if not _graph_contains_link(graph, model) or not _graph_contains_link(graph, clip):
             raise ValueError(
                 "The LoRA workflow extension must feed both model and CLIP graph inputs."
+            )
+        if _a_sampler_misses_the_link(graph, model):
+            raise ValueError(
+                "The LoRA workflow extension must feed the model of every supported sampler."
             )
 
 
@@ -1511,6 +1522,137 @@ def _nearest_shared_model_link(
             joins[step] = joined
         deepest = max(deepest, joined)
     return first[deepest]
+
+
+def _a_sampler_misses_the_link(graph: dict[str, Any], model: list[Any]) -> bool:
+    """Whether a recognised sampler provably samples a model that LoRAs at this link miss.
+
+    A checkpoint extension sits behind LoRA loaders, image adapters and control
+    patches that take more than a model, and it has always passed over samplers it
+    cannot recognise, so it is refused only on proof. Insertion rewires the link's
+    consumers, so only they and what descends from them receive the stack. Walking
+    up from a sampler through the inputs that carry a model, a node misses the stack
+    when every one of those inputs misses it, and a node with none of them, such as a
+    second loader, misses it when it does not descend from the link at all.
+    """
+
+    target = (model[0], model[1])
+    sampled = [link for link in _recognised_sampler_model_links(graph) if link != target]
+    if not sampled:
+        return False
+    reached = _descendants_of_link(graph, target)
+    memo: dict[str, bool] = {}
+    return any(
+        _model_misses_the_link(graph, node_id, target, reached, memo) for node_id, _ in sampled
+    )
+
+
+def _recognised_sampler_model_links(graph: dict[str, Any]) -> list[tuple[str, int]]:
+    """The model links of every sampler that can be read, passing over the rest.
+
+    An unknown guider holds whatever model it samples with, so its own link stands
+    in for that model.
+    """
+
+    links: list[tuple[str, int]] = []
+    for node in graph.values():
+        class_type = node.get("class_type") if isinstance(node, dict) else None
+        if not isinstance(class_type, str) or class_type not in _MODEL_SAMPLER_CLASS_TYPES:
+            continue
+        inputs = node.get("inputs")
+        inputs = inputs if isinstance(inputs, dict) else {}
+        names: tuple[str, ...] = ("model",)
+        if class_type == "SamplerCustomAdvanced":
+            guider_link = inputs.get("guider")
+            if not _valid_link(guider_link):
+                continue
+            assert isinstance(guider_link, list)
+            guider = graph.get(guider_link[0])
+            guider = guider if isinstance(guider, dict) else {}
+            guider_type = guider.get("class_type")
+            guided = _GUIDER_MODEL_INPUTS.get(guider_type) if isinstance(guider_type, str) else None
+            if guided is None:
+                links.append((guider_link[0], guider_link[1]))
+                continue
+            guider_inputs = guider.get("inputs")
+            inputs = guider_inputs if isinstance(guider_inputs, dict) else {}
+            names = (*guided[0], *guided[1])
+        for name in names:
+            value = inputs.get(name)
+            if _valid_link(value):
+                assert isinstance(value, list)
+                links.append((value[0], value[1]))
+    return list(dict.fromkeys(links))
+
+
+def _descendants_of_link(graph: dict[str, Any], target: tuple[str, int]) -> set[str]:
+    """The nodes that consume a link, and every node that descends from them."""
+
+    consumers: dict[str, list[str]] = {}
+    reached: set[str] = set()
+    for node_id, node in graph.items():
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict):
+            continue
+        for value in inputs.values():
+            if not _valid_link(value):
+                continue
+            if (value[0], value[1]) == target:
+                reached.add(node_id)
+            consumers.setdefault(value[0], []).append(node_id)
+    pending = list(reached)
+    while pending:
+        for child in consumers.get(pending.pop(), ()):
+            if child not in reached:
+                reached.add(child)
+                pending.append(child)
+    return reached
+
+
+def _model_misses_the_link(
+    graph: dict[str, Any],
+    start: str,
+    target: tuple[str, int],
+    reached: set[str],
+    memo: dict[str, bool],
+) -> bool:
+    """Whether the model a node passes on provably misses LoRAs inserted at the link.
+
+    A node that cannot be followed, missing from the graph or met again inside a
+    cycle, proves nothing either way.
+    """
+
+    stack: list[tuple[str, bool]] = [(start, False)]
+    open_nodes: set[str] = set()
+    while stack:
+        node_id, expanded = stack.pop()
+        if node_id in memo or (not expanded and node_id in open_nodes):
+            continue
+        node = graph.get(node_id)
+        if not isinstance(node, dict):
+            memo[node_id] = False
+            continue
+        inputs = node.get("inputs")
+        inputs = inputs if isinstance(inputs, dict) else {}
+        carried: list[tuple[str, int]] = []
+        for name in _MODEL_CARRYING_INPUTS:
+            value = inputs.get(name)
+            if _valid_link(value):
+                assert isinstance(value, list)
+                carried.append((value[0], value[1]))
+        if not expanded:
+            open_nodes.add(node_id)
+            stack.append((node_id, True))
+            stack.extend(
+                (link[0], False) for link in carried if link != target and link[0] not in memo
+            )
+            continue
+        open_nodes.discard(node_id)
+        if carried:
+            memo[node_id] = all(link != target and memo.get(link[0], False) for link in carried)
+        else:
+            memo[node_id] = node_id not in reached
+    return memo.get(start, False)
 
 
 def _graph_contains_link(value: object, link: list[Any]) -> bool:
