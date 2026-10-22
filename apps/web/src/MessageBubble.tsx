@@ -102,6 +102,7 @@ export function MessageBubble({
   onDeleteExchange,
   onRemoveItem,
   onForkThread,
+  threadActionsDisabled = false,
   onFeedback,
   compareSourceUrl,
   lineage,
@@ -124,6 +125,7 @@ export function MessageBubble({
   onDeleteExchange?: (messageId: string) => void;
   onRemoveItem?: (messageId: string) => void;
   onForkThread?: (messageId: string) => void;
+  threadActionsDisabled?: boolean;
   onFeedback?: (messageId: string, revisionId: string | null, rating: "up" | "down" | null) => void;
   compareSourceUrl?: string | null;
   lineage?: EditLineageStep[];
@@ -222,7 +224,7 @@ export function MessageBubble({
   const otherActivity = otherAttempt?.activity?.message_id === message.id
     && otherAttempt.activity.response_revision_id === otherAttempt.id ? otherAttempt.activity : null;
   const removalConfirmation = confirmingRemoval ? (
-    <MessageRemovalConfirmation messageId={message.id} onRemove={(id) => { setConfirmingRemoval(false); onRemoveItem?.(id); }} onKeep={() => setConfirmingRemoval(false)} />
+    <MessageRemovalConfirmation messageId={message.id} disabled={threadActionsDisabled} onRemove={(id) => { setConfirmingRemoval(false); onRemoveItem?.(id); }} onKeep={() => setConfirmingRemoval(false)} />
   ) : null;
   const userMessageMeta = !contentRemoved && message.role === "user" && message.status === "complete" && !editing ? (
     <UserMessageControls
@@ -232,6 +234,7 @@ export function MessageBubble({
       onEdit={onOpenEdit ? () => onOpenEdit(message.id) : onEdit ? () => setEditing(true) : undefined}
       onRemoveItem={onRemoveItem}
       onDeleteExchange={onDeleteExchange}
+      disabled={threadActionsDisabled}
     />
   ) : null;
   const messageActionPartIndex = userMessageMeta ? renderedParts.map((part) => part.type).lastIndexOf("text") : -1;
@@ -367,12 +370,12 @@ export function MessageBubble({
                 </button>
               )}
               {onForkThread && (
-                <button onClick={() => onForkThread(message.id)} aria-label="Start a new thread here" title="New thread from here">
+                <button aria-disabled={threadActionsDisabled} onClick={() => { if (threadActionsDisabled) return; onForkThread(message.id); }} aria-label="Start a new thread here" title="New thread from here">
                   <GitBranch size={14} />
                 </button>
               )}
               {onRemoveItem && (
-                <button aria-label="Remove this item, keep replies" title="Remove this item, keep replies" onClick={() => setConfirmingRemoval(true)}>
+                <button aria-disabled={threadActionsDisabled} aria-label="Remove this item, keep replies" title="Remove this item, keep replies" onClick={() => { if (threadActionsDisabled) return; setConfirmingRemoval(true); }}>
                   <X size={14} />
                 </button>
               )}
