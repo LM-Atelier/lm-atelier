@@ -8,6 +8,12 @@ of the model: the stored picture is the relit result mixed back toward the
 source by the chosen intensity. A mix keeps the source's own detail and adds
 nothing the model did not draw. Warmth is a white-balance grade applied last.
 
+Given only its instruction, the adapter lights from the side the instruction
+names; inside the longer instruction an ordinary edit is given, it leaves the
+light where it was. So the workflow is given the instruction the adapter was
+trained on, for the chosen direction, in place of the request, followed only by
+the trigger words of the LoRAs applied with it.
+
 Which LoRA is the lighting adapter is declared here, by exact content identity.
 A name, a trigger word or a repository alone never qualifies an asset, because
 none of them says the file is the one whose behaviour was checked.
@@ -70,6 +76,11 @@ LIGHTING_ADAPTER = LoraIdentity(
     filename="多角度灯光-251121.safetensors",
     sha256="cffb85904608283d3920fee2f0e9e74af0712008fd29edb33042742f5fbce6ce",
 )
+#: The instruction that adapter was trained on: "Relight Figure 1 using the
+#: luminance map from Figure 2 (light source from the ...)", with the direction
+#: named in the same words.
+_ADAPTER_INSTRUCTION = "使用图2的亮度贴图对图1重新照明(光源来自{direction})"
+_ADAPTER_DIRECTIONS = {"left": "左方", "right": "右方", "top": "上方"}
 
 
 def is_lighting_adapter(*, provider: str, remote_id: str, revision: str, manifest: object) -> bool:
@@ -128,7 +139,9 @@ def parse_relight_setting(settings: Mapping[str, Any]) -> RelightSetting | None:
     if (
         isinstance(intensity, bool)
         or not isinstance(intensity, int | float)
-        or not math.isfinite(intensity)
+        # Only a float can be infinite or not a number. An integer too large for a
+        # float overflows inside isfinite instead; the range check refuses it.
+        or (isinstance(intensity, float) and not math.isfinite(intensity))
         or not MIN_INTENSITY <= intensity <= MAX_INTENSITY
     ):
         raise RelightContractError(
@@ -146,6 +159,26 @@ def parse_relight_setting(settings: Mapping[str, Any]) -> RelightSetting | None:
             f"Relight warmth must be between {MIN_KELVIN} K and {MAX_KELVIN} K, or left out.",
         )
     return RelightSetting(direction=str(direction), intensity=float(intensity), kelvin=kelvin)
+
+
+def adapter_instruction(setting: RelightSetting) -> str:
+    """The words the lighting adapter relights from, for this setting's direction."""
+    return _ADAPTER_INSTRUCTION.format(direction=_ADAPTER_DIRECTIONS[setting.direction])
+
+
+def workflow_instruction(operation: str, settings: Mapping[str, Any]) -> str | None:
+    """What a relight's workflow is given in place of the request, or None for any other edit.
+
+    A relight setting the run refuses gives None here: the run says why when it
+    executes, and until then the request is treated as an ordinary edit's.
+    """
+    if operation != "image_to_image":
+        return None
+    try:
+        setting = parse_relight_setting(settings)
+    except RelightContractError:
+        return None
+    return adapter_instruction(setting) if setting is not None else None
 
 
 def require_relight_turn(

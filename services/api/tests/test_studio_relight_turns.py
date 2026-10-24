@@ -103,7 +103,10 @@ def _relight_workflow() -> str:
 
 
 def _lora(
-    *, sha256: str = LIGHTING_ADAPTER.sha256, revision: str = LIGHTING_ADAPTER.revision
+    *,
+    sha256: str = LIGHTING_ADAPTER.sha256,
+    revision: str = LIGHTING_ADAPTER.revision,
+    trigger_words: tuple[str, ...] = (),
 ) -> str:
     with SessionLocal() as session:
         source = ModelSource(
@@ -124,7 +127,7 @@ def _lora(
                 "sha256": sha256,
                 "comfy_name": LIGHTING_ADAPTER.filename,
                 "expected_sha256": {LIGHTING_ADAPTER.filename: sha256},
-                "metadata": {"trigger_words": []},
+                "metadata": {"trigger_words": list(trigger_words)},
             },
             active=True,
             verified_at=utcnow(),
@@ -300,6 +303,8 @@ async def test_the_stored_picture_is_the_relit_result_mixed_toward_the_source(
     assert len(seen) == 1
     assert "relight" not in seen[0].parameters
     assert len(seen[0].input_paths) == 2
+    # The workflow gets the adapter's own words; the request keeps its own.
+    assert seen[0].prompt == "使用图2的亮度贴图对图1重新照明(光源来自左方)"
     expected = finish_relight(
         RelightFinish(
             setting=RelightSetting("left", 0.5, None),
@@ -331,6 +336,118 @@ async def test_the_stored_picture_is_the_relit_result_mixed_toward_the_source(
         assert not any(
             "relight" in entry for entry in outputs if entry["artifact_id"] == throwaway.id
         )
+        assert run.standalone_prompt == "Relight from the left"
+
+
+@pytest.mark.parametrize(
+    ("direction", "words"),
+    [
+        ("left", "使用图2的亮度贴图对图1重新照明(光源来自左方)"),
+        ("right", "使用图2的亮度贴图对图1重新照明(光源来自右方)"),
+        ("top", "使用图2的亮度贴图对图1重新照明(光源来自上方)"),
+    ],
+    ids=["left", "right", "top"],
+)
+def test_a_relight_gives_the_workflow_the_adapters_trained_words(
+    direction: str, words: str
+) -> None:
+    """The workflow gets only the adapter's trained instruction, without the edit preamble."""
+    run = Run(
+        operation=Operation.IMAGE_TO_IMAGE.value,
+        standalone_prompt="Relight Figure 1 using the luminance map from Figure 2.",
+        settings_json={"relight": {**RELIGHT, "direction": direction}},
+        provenance_json={"image_edit": {"policy": "preserve_unrequested_details_v1"}},
+    )
+    assert ConversationOrchestrator._media_prompt(run) == words
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {},
+        {"relight": {"direction": "below", "intensity": 0.5}},
+        {"relight": {"direction": "left", "intensity": 10**400}},
+    ],
+    ids=["no-relight", "unknown-direction", "intensity-too-large-for-a-float"],
+)
+def test_any_other_edit_keeps_its_own_words_inside_the_edit_preamble(
+    settings: dict[str, Any],
+) -> None:
+    run = Run(
+        operation=Operation.IMAGE_TO_IMAGE.value,
+        standalone_prompt="Make the sky a deeper blue.",
+        settings_json=settings,
+        provenance_json={"image_edit": {"policy": "preserve_unrequested_details_v1"}},
+    )
+    prompt = ConversationOrchestrator._media_prompt(run)
+    assert prompt.startswith("Apply the requested edit visibly to the supplied image.")
+    assert prompt.endswith("Requested edit: Make the sky a deeper blue.")
+
+
+async def test_a_trigger_word_the_request_carries_still_reaches_the_relight_workflow(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A trigger word is left out only when the prompt the workflow reads carries it.
+
+    The request names the luminance map, but the workflow reads the adapter's own
+    instruction instead, so the adapter's trigger word is still added after it.
+    """
+    orchestrator = app.state.services.orchestrator
+    revision_id = _relight_workflow()
+    adapter_id = _lora(trigger_words=("luminance map",))
+    source_id = await _upload(client, "source.png", _png(_source()))
+    map_id = await _upload(client, "light.png", _png(_light_map()))
+    seen: list[MediaRequest] = []
+
+    async def generate(request: MediaRequest) -> Any:
+        seen.append(request)
+        yield MediaEvent(
+            type="complete",
+            assets=[
+                GeneratedAsset(
+                    content=_png(Image.new("RGB", (64, 48), RELIT)),
+                    kind="image",
+                    media_type="image/png",
+                    name="relit.png",
+                    origin={"node_id": "9", "output_type": "output", "collection": "images"},
+                )
+            ],
+        )
+
+    monkeypatch.setattr(orchestrator.engines.media, "generate", generate)
+    chat = (await client.post("/api/chats", json={"title": "Relight"})).json()
+    async with app.state.services.scheduler.lease("primary"):
+        with SessionLocal() as session:
+            accepted = await orchestrator.create_turn(
+                session,
+                chat["id"],
+                TurnRequest(
+                    text=(
+                        "Relight Figure 1 using the luminance map from Figure 2 "
+                        "(light source from the left)."
+                    ),
+                    mode="image",
+                    input_artifact_ids=[source_id, map_id],
+                    workflow_revision_id=revision_id,
+                    settings={
+                        "relight": RELIGHT,
+                        "loras": [{"asset_id": adapter_id, "model_strength": 1}],
+                    },
+                ),
+                freeze_context=True,
+                activate_branch=False,
+            )
+            job = session.scalar(select(Job).where(Job.run_id == accepted.run.id))
+            assert job is not None
+            claim = JobClaim(token="relight-trigger-attempt", attempt=1)
+            job.status = "running"
+            job.claim_owner, job.attempt = claim.token, claim.attempt
+            job_id, run_id = job.id, accepted.run.id
+            session.commit()
+        await orchestrator._execute_media(job_id, run_id, claim)
+
+    assert len(seen) == 1
+    assert seen[0].prompt == "使用图2的亮度贴图对图1重新照明(光源来自左方), luminance map"
 
 
 async def test_relight_then_the_selection_blend_in_one_pipeline() -> None:
