@@ -544,6 +544,10 @@ def _check_record(
     if (
         operation == Operation.IMAGE_TO_IMAGE
         and isinstance(positive, str)
+        # A relight's workflow is given the lighting adapter's own instruction
+        # rather than the request inside this wording. Its result was finished
+        # after generation, which is refused on its own.
+        and "settings.relight" not in record["removed"]
         and (
             not positive.startswith(edit_prompt_preamble())
             or not positive.removeprefix(edit_prompt_preamble()).strip()
@@ -793,7 +797,10 @@ class ReplayDiffers(Exception):
 
 
 def edit_prompt_preamble() -> str:
-    """The wording every picture edit's prompt starts with, written as a run writes it."""
+    """The wording a picture edit's prompt starts with, written as a run writes it.
+
+    A relight's prompt is the lighting adapter's own instruction instead.
+    """
 
     probe = Run(
         operation=Operation.IMAGE_TO_IMAGE.value,
@@ -919,7 +926,7 @@ async def _record_turn_request(
         settings[MASK_SETTING_KEY] = {"artifact_id": resolved["mask_artifact_id"]}
     text = record["prompt"]["positive"]
     if record["operation"] == Operation.IMAGE_TO_IMAGE.value:
-        # A run adds this wording to every edit; the turn carries only the request.
+        # A run adds this wording to an edit; the turn carries only the request.
         text = text.removeprefix(edit_prompt_preamble())
     turn = TurnRequest(
         text=text,

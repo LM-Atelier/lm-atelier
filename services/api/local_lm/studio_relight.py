@@ -10,8 +10,9 @@ nothing the model did not draw. Warmth is a white-balance grade applied last.
 
 Given only its instruction, the adapter lights from the side the instruction
 names; inside the longer instruction an ordinary edit is given, it leaves the
-light where it was. So the workflow is given only the instruction the adapter
-was trained on, for the chosen direction, whatever the request said.
+light where it was. So the workflow is given the instruction the adapter was
+trained on, for the chosen direction, in place of the request, followed only by
+the trigger words of the LoRAs applied with it.
 
 Which LoRA is the lighting adapter is declared here, by exact content identity.
 A name, a trigger word or a repository alone never qualifies an asset, because
@@ -138,7 +139,9 @@ def parse_relight_setting(settings: Mapping[str, Any]) -> RelightSetting | None:
     if (
         isinstance(intensity, bool)
         or not isinstance(intensity, int | float)
-        or not math.isfinite(intensity)
+        # Only a float can be infinite or not a number. An integer too large for a
+        # float overflows inside isfinite instead; the range check refuses it.
+        or (isinstance(intensity, float) and not math.isfinite(intensity))
         or not MIN_INTENSITY <= intensity <= MAX_INTENSITY
     ):
         raise RelightContractError(
@@ -161,6 +164,21 @@ def parse_relight_setting(settings: Mapping[str, Any]) -> RelightSetting | None:
 def adapter_instruction(setting: RelightSetting) -> str:
     """The words the lighting adapter relights from, for this setting's direction."""
     return _ADAPTER_INSTRUCTION.format(direction=_ADAPTER_DIRECTIONS[setting.direction])
+
+
+def workflow_instruction(operation: str, settings: Mapping[str, Any]) -> str | None:
+    """What a relight's workflow is given in place of the request, or None for any other edit.
+
+    A relight setting the run refuses gives None here: the run says why when it
+    executes, and until then the request is treated as an ordinary edit's.
+    """
+    if operation != "image_to_image":
+        return None
+    try:
+        setting = parse_relight_setting(settings)
+    except RelightContractError:
+        return None
+    return adapter_instruction(setting) if setting is not None else None
 
 
 def require_relight_turn(

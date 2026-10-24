@@ -288,13 +288,13 @@ from .studio_relight import (
     RELIGHT_SETTING_KEY,
     RelightContractError,
     RelightFinish,
-    adapter_instruction,
     finish_relight,
     is_lighting_adapter,
     parse_relight_setting,
     require_relight_turn,
     split_relight_setting,
 )
+from .studio_relight import workflow_instruction as relight_workflow_instruction
 from .turn_inheritance import TurnInheritance, TurnSourceResolver, inherited_profile_configuration
 from .turn_workflow_kinds import ANY_TURN, TurnWorkflowKinds, turn_workflow_kinds
 from .upscale_preview import UpscalePreviewOut, UpscaleSelectionUnavailable, project_upscale_preview
@@ -2980,7 +2980,11 @@ class ConversationOrchestrator:
         trigger_word_provenance = prompt_trigger_word_provenance(
             turn.model_provenance if turn.plan.operation != Operation.TEXT else None,
             output_lora_resolution.provenance if output_lora_resolution else [],
-            per_output_prompt,
+            # A word is left out when the prompt already carries it, so it is
+            # checked against the prompt the workflow will read: a relight's is
+            # the lighting adapter's instruction, not the request.
+            relight_workflow_instruction(turn.plan.operation.value, output_settings)
+            or per_output_prompt,
         )
         provenance: dict[str, Any] = {
             "routing": {
@@ -12253,18 +12257,12 @@ class ConversationOrchestrator:
     @staticmethod
     def _media_prompt(run: Run) -> str:
         edit = run.provenance_json.get("image_edit")
-        relight = None
-        if run.operation == Operation.IMAGE_TO_IMAGE.value:
-            try:
-                relight = parse_relight_setting(run.settings_json or {})
-            except RelightContractError:
-                # The run refuses it, with the reason, when it executes.
-                relight = None
+        relight = relight_workflow_instruction(run.operation, run.settings_json or {})
         if relight is not None:
             # Inside the edit preamble below, the lighting adapter leaves the
             # light where it was. Given only the instruction it was trained on,
             # it lights from the side that instruction names.
-            prompt = adapter_instruction(relight)
+            prompt = relight
         elif (
             run.operation != Operation.IMAGE_TO_IMAGE.value
             or not isinstance(edit, dict)
