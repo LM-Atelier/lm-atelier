@@ -9,7 +9,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .domain import Operation
-from .matting_workflows import workflow_declares_matting
 from .models import (
     ModelInstall,
     ModelProfile,
@@ -21,8 +20,8 @@ from .models import (
     WorkflowProfileCompatibility,
     WorkflowRevision,
 )
-from .outpaint_workflows import workflow_declares_outpaint
 from .prompt_binding import ignores_the_description
+from .turn_workflow_kinds import ANY_TURN, TurnWorkflowKinds
 from .workflow_recovery_visibility import workflow_family_deleted
 from .workflow_revision_reviews import review_is_current
 
@@ -210,22 +209,23 @@ def resolve_workflow_family(
     legacy_revision_resolver: LegacyRevisionResolver | None = None,
     preferred_revision: RevisionPreference | None = None,
     revision_eligibility: RevisionEligibility | None = None,
-    skip_outpaint: bool = False,
+    kinds: TurnWorkflowKinds = ANY_TURN,
 ) -> ResolvedWorkflowFamily:
     """Resolve one broad selector to an exact operation variant without guessing.
 
     `preferred_revision` orders automatic candidates it accepts ahead of the
-    rest, before any other ranking. It never touches an explicit or default
-    choice, and it never makes an unready workflow eligible.
+    rest, before any other ranking but the turn's own kinds. It never touches
+    an explicit or default choice, and it never makes an unready workflow
+    eligible.
 
     `revision_eligibility` can refuse a ready revision before variant ambiguity
     and ranking. Explicit and default choices stay within their chosen family.
     Graphless compatibility profiles are presented as None to this check.
 
-    `skip_outpaint` leaves a workflow that paints past the edge out of an
-    automatic choice, for a turn that names no margins: run without them it pads
-    by whatever its graph was saved with. Explicit and default choices are not
-    affected.
+    `kinds` leaves out of an automatic choice a workflow that declares an input
+    the turn leaves empty, such as a mask for an edit that brings no selection,
+    and puts first one that takes what the turn brings. Explicit and default
+    choices are not affected.
     """
 
     if operation not in _CAPABILITY_OPERATIONS[capability]:
@@ -314,20 +314,10 @@ def resolve_workflow_family(
         except WorkflowFamilySelectionError as exc:
             candidate_reasons.append(exc.reason)
             continue
-        # A workflow that only cuts a subject out is never chosen for a request:
-        # it answers the one tool that asks for a cutout, and picked for any other
-        # edit it would return a cutout instead of the edit.
-        if candidate.revision is not None and workflow_declares_matting(
+        # A cutout workflow, or one waiting for an input the turn leaves empty,
+        # would hand back something other than what was asked for.
+        if candidate.revision is not None and not kinds.admits(
             candidate.revision.input_schema_json
-        ):
-            continue
-        # The same for one that paints past the edge, when the turn names no
-        # margins: it would return a larger picture, or with nothing to pad, the
-        # source unchanged.
-        if (
-            skip_outpaint
-            and candidate.revision is not None
-            and workflow_declares_outpaint(candidate.revision.input_schema_json)
         ):
             continue
         candidates.append(candidate)
@@ -340,6 +330,7 @@ def resolve_workflow_family(
         )
     candidates.sort(
         key=lambda item: (
+            not (item.revision is not None and kinds.prefers(item.revision.input_schema_json)),
             not (
                 preferred_revision is not None
                 and item.revision is not None

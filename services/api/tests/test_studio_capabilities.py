@@ -275,3 +275,45 @@ async def test_the_report_reads_what_is_installed_on_this_machine(
 def test_studio_capability_kinds_match_the_tools_the_server_reports() -> None:
     schema = StudioToolCapability.model_json_schema()
     assert set(schema["properties"]["kind"].get("enum", [])) == set(TOOL_WORKFLOW_CLASSES)
+
+
+def test_an_inpainter_or_an_upscaler_alone_carries_out_no_instruction() -> None:
+    """An instruction brings neither a selection for the workflow nor a size.
+
+    Its turn passes over a workflow that waits for either, so one installed
+    alone leaves Instruct, Text and Remove asking for an editing workflow.
+    """
+
+    for schema in (MASK_SCHEMA, UPSCALE_SCHEMA):
+        tools = _by_kind([schema])
+        for kind in ("instruct", "text", "remove"):
+            assert tools[kind].available is False
+            assert tools[kind].reason == "Install an image editing workflow to change a picture."
+    assert _by_kind([MASK_SCHEMA])["brush"].available is True
+    assert _by_kind([UPSCALE_SCHEMA])["enhance"].available is True
+    assert _by_kind([MASK_SCHEMA, UPSCALE_SCHEMA, PLAIN_SCHEMA])["instruct"].available is True
+    waiting = {
+        tool.kind: tool
+        for tool in tool_capabilities(edit_input_schemas=[], waiting_input_schemas=[MASK_SCHEMA])
+    }
+    assert waiting["instruct"].reason == "Install an image editing workflow to change a picture."
+    assert waiting["brush"].reason is not None and "reviewed" in waiting["brush"].reason
+
+
+def test_a_selection_or_margins_need_a_workflow_that_waits_for_nothing_else() -> None:
+    """A workflow that also waits for an input the turn never fills is passed over."""
+
+    mask = MASK_SCHEMA["properties"]["mask"]
+    factor = UPSCALE_SCHEMA["properties"]["upscale_factor"]
+    margins = {"type": "object", "x-lm-atelier-kind": "outpaint"}
+
+    def schema(**properties: Any) -> dict[str, Any]:
+        return {"type": "object", "properties": properties}
+
+    assert _by_kind([schema(mask=mask, upscale_factor=factor)])["brush"].available is False
+    assert _by_kind([schema(outpaint_margins=margins, mask=mask)])["extend"].available is False
+    assert (
+        _by_kind([schema(outpaint_margins=margins, upscale_factor=factor)])["extend"].available
+        is False
+    )
+    assert _by_kind([schema(outpaint_margins=margins)])["extend"].available is True

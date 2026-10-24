@@ -4,6 +4,12 @@ Run without margins, an outpainter pads the picture by whatever its graph was
 saved with, so an ordinary edit comes back on a larger canvas, or, padded by
 nothing, unchanged. Only a turn that names margins, or a canvas to extend onto,
 asks for one. A workflow someone names keeps running whatever the turn asks.
+
+The other inputs a workflow declares follow the same rule. An inpainter run
+without a selection, or an upscaler run for an ordinary edit, does what the
+turn never asked, so only a turn that brings a selection for the workflow, or
+asks for a larger picture, is given one. A turn that brings a selection or
+margins looks first for a workflow that takes them.
 """
 
 from __future__ import annotations
@@ -53,6 +59,22 @@ OUTPAINT_SCHEMA: dict[str, Any] = {
 }
 PLAIN_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}}
 MARGINS = {OUTPAINT_SETTING_KEY: {"right": 0.25}}
+INPAINT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"mask": {"type": "object", "x-lm-atelier-kind": "mask"}},
+}
+UPSCALE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "upscale_factor": {
+            "type": "number",
+            "default": 2,
+            "minimum": 1,
+            "maximum": 8,
+            "x-lm-atelier-kind": "upscale",
+        }
+    },
+}
 
 
 def _fill_graphs() -> tuple[dict[str, Any], dict[str, Any]]:
@@ -514,3 +536,194 @@ async def test_a_selection_is_never_placed_back_through_a_workflow_that_extends_
 
     assert response.status_code == 422, response.text
     assert "cannot be placed back through a selection" in response.json()["detail"]
+
+
+_EDIT_GRAPH: dict[str, Any] = {"nodes": [{"inputs": {"image": "${input_image}"}}]}
+_INPAINT_GRAPH: dict[str, Any] = {
+    "nodes": [{"inputs": {"image": "${input_image}", "mask": "${mask}"}}]
+}
+_UPSCALE_GRAPH: dict[str, Any] = {
+    "nodes": [{"inputs": {"image": "${input_image}", "scale_by": "${upscale_factor}"}}]
+}
+_A_SELECTION = {"mask": {"artifact_id": f"sha256:{'0' * 64}", "feather_px": 0, "invert": False}}
+
+
+def _instruction(source_id: str) -> dict[str, Any]:
+    return {
+        "text": "Make the sky a deeper blue.",
+        "mode": "image",
+        "input_artifact_ids": [source_id],
+    }
+
+
+def _brushed(source_id: str, mask_id: str) -> dict[str, Any]:
+    """A selection drawn with a brush, handed to the workflow's own mask input."""
+
+    return {
+        "text": "Paint the marked part green.",
+        "mode": "image",
+        "input_artifact_ids": [source_id],
+        "settings": {"mask": {"artifact_id": mask_id, "feather_px": 4, "invert": False}},
+    }
+
+
+async def _chosen(client: AsyncClient, body: dict[str, Any]) -> str:
+    """The workflow the app picks for a turn that names none."""
+
+    chat = (await client.post("/api/chats", json={"title": "Studio"})).json()
+    response = await client.post(f"/api/chats/{chat['id']}/turns", json=body)
+    assert response.status_code == 202, response.text
+    return str(response.json()["run"]["workflow_revision_id"])
+
+
+async def test_an_edit_without_a_selection_passes_over_a_newer_inpainter(
+    app: FastAPI, client: AsyncClient, tmp_path: Path
+) -> None:
+    """Run without a selection, an inpainter has nothing to give its mask input."""
+
+    install_id = await _import_model(client, tmp_path)
+    _clear_seeded_edit_workflows()
+    editor = _mock_workflow(
+        "Neutral editor", install_id, _EDIT_GRAPH, PLAIN_SCHEMA, datetime(2026, 1, 1, tzinfo=UTC)
+    )
+    inpainter = _mock_workflow(
+        "Neutral inpainter",
+        install_id,
+        _INPAINT_GRAPH,
+        INPAINT_SCHEMA,
+        datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    source_id = await _upload(client, "source.png", _png(_source()))
+    mask_id = await _upload(client, "selection.png", _mask())
+
+    async with app.state.services.scheduler.lease("primary"):
+        assert await _chosen(client, _instruction(source_id)) == editor
+        # Remove keeps its selection out of the workflow and places it back after.
+        assert await _chosen(client, _removal(source_id, mask_id)) == editor
+        assert await _chosen(client, _brushed(source_id, mask_id)) == inpainter
+
+
+async def test_a_selection_for_the_workflow_finds_an_inpainter_older_than_the_editor(
+    app: FastAPI, client: AsyncClient, tmp_path: Path
+) -> None:
+    """The newest editor has nowhere to put the selection, so it would refuse the turn."""
+
+    install_id = await _import_model(client, tmp_path)
+    _clear_seeded_edit_workflows()
+    inpainter = _mock_workflow(
+        "Neutral inpainter",
+        install_id,
+        _INPAINT_GRAPH,
+        INPAINT_SCHEMA,
+        datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    editor = _mock_workflow(
+        "Neutral editor", install_id, _EDIT_GRAPH, PLAIN_SCHEMA, datetime(2026, 1, 2, tzinfo=UTC)
+    )
+    source_id = await _upload(client, "source.png", _png(_source()))
+    mask_id = await _upload(client, "selection.png", _mask())
+
+    async with app.state.services.scheduler.lease("primary"):
+        assert await _chosen(client, _brushed(source_id, mask_id)) == inpainter
+        assert await _chosen(client, _instruction(source_id)) == editor
+
+
+async def test_an_edit_that_asks_for_no_enlargement_passes_over_a_newer_upscaler(
+    app: FastAPI, client: AsyncClient, tmp_path: Path
+) -> None:
+    """Chosen for an instruction, an upscaler hands the picture back at twice its size."""
+
+    install_id = await _import_model(client, tmp_path)
+    _clear_seeded_edit_workflows()
+    editor = _mock_workflow(
+        "Neutral editor", install_id, _EDIT_GRAPH, PLAIN_SCHEMA, datetime(2026, 1, 1, tzinfo=UTC)
+    )
+    upscaler = _mock_workflow(
+        "Neutral upscaler",
+        install_id,
+        _UPSCALE_GRAPH,
+        UPSCALE_SCHEMA,
+        datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    source_id = await _upload(client, "source.png", _png(_source()))
+    mask_id = await _upload(client, "selection.png", _mask())
+
+    async with app.state.services.scheduler.lease("primary"):
+        assert await _chosen(client, _instruction(source_id)) == editor
+        assert await _chosen(client, _removal(source_id, mask_id)) == editor
+        # Asked for a larger picture, the same choice still finds the upscaler.
+        enlarge = {**_instruction(source_id), "text": "Enlarge the picture.", "upscale": True}
+        assert await _chosen(client, enlarge) == upscaler
+
+
+async def test_margins_find_an_outpainter_older_than_the_editor(
+    app: FastAPI, client: AsyncClient, tmp_path: Path
+) -> None:
+    """The newest editor cannot paint past the edge, so it would refuse the margins."""
+
+    install_id = await _import_model(client, tmp_path)
+    _clear_seeded_edit_workflows()
+    outpainter = _mock_workflow(
+        "Neutral outpainter",
+        install_id,
+        _outpaint_graph(),
+        OUTPAINT_SCHEMA,
+        datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    editor = _mock_workflow(
+        "Neutral editor", install_id, _EDIT_GRAPH, PLAIN_SCHEMA, datetime(2026, 1, 2, tzinfo=UTC)
+    )
+    source_id = await _upload(client, "source.png", _png(_source()))
+
+    async with app.state.services.scheduler.lease("primary"):
+        assert await _chosen(client, _extension(source_id)) == outpainter
+        assert await _chosen(client, _instruction(source_id)) == editor
+
+
+@pytest.mark.parametrize("schema", [INPAINT_SCHEMA, UPSCALE_SCHEMA], ids=["mask", "upscale"])
+def test_auto_passes_over_a_default_workflow_whose_input_the_edit_leaves_empty(
+    session: Session, schema: dict[str, Any]
+) -> None:
+    specialist = _family(
+        session, "Specialist", _graphs(instruction=True), schema, is_default=True, use_case=""
+    )
+    # A use case makes the family one Auto may choose; it matches nothing in the words.
+    plain = _family(
+        session,
+        "Plain",
+        _graphs(instruction=True),
+        PLAIN_SCHEMA,
+        is_default=False,
+        use_case="studio photos",
+    )
+    chat = _chat(session, "automatic")
+
+    _profile, selection, revision = _execution(session, chat, GLOBAL)
+    assert revision == plain
+    assert selection["workflow_family_id"] == plain.definition.family_id
+    # A choice someone made is kept: the specialist still runs when its family is named.
+    family_id = specialist.definition.family_id
+    assert _execution(session, _chat(session, "family", family_id), GLOBAL)[2] == specialist
+
+
+def test_auto_puts_an_inpainter_first_for_a_selection_it_is_handed(session: Session) -> None:
+    inpainter = _family(
+        session,
+        "Inpainter",
+        _graphs(instruction=True),
+        INPAINT_SCHEMA,
+        is_default=False,
+        use_case="studio photos",
+    )
+    plain = _family(
+        session, "Plain", _graphs(instruction=True), PLAIN_SCHEMA, is_default=True, use_case=""
+    )
+    chat = _chat(session, "automatic")
+
+    _profile, selection, revision = _execution(session, chat, GLOBAL, settings=_A_SELECTION)
+    assert revision == inpainter
+    assert selection["workflow_family_id"] == inpainter.definition.family_id
+    # A selection placed back after the edit never reaches the workflow.
+    blend = {"mask": {**_A_SELECTION["mask"], "apply": "blend"}}
+    assert _execution(session, chat, GLOBAL, settings=blend)[2] == plain
+    assert _execution(session, chat, GLOBAL)[2] == plain

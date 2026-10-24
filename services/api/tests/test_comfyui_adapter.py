@@ -2060,3 +2060,50 @@ async def test_stale_upload_sweep_keeps_directories_outside_selected_root(
                 link.rmdir()
         elif link.is_symlink():
             link.unlink()
+
+
+async def test_a_workflow_input_nothing_fills_is_refused_before_the_prompt_is_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sent as written, an inpainting graph run without a selection loads "${mask}".
+
+    The compiler leaves a placeholder it has no value for exactly as it was, so
+    the engine would be asked for an image by that name. The run stops first
+    and says why in words.
+    """
+
+    source = tmp_path / "source-artifact"
+    source.write_bytes(b"\x89PNG\r\n\x1a\n" + b"source")
+    requested: list[str] = []
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        if request.url.path == "/upload/image":
+            return httpx.Response(
+                200, json={"name": "source.png", "subfolder": "lm-atelier", "type": "temp"}
+            )
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    def connect(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("the graph was submitted")
+
+    monkeypatch.setattr("local_lm.adapters.comfyui.websockets.connect", connect)
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    workflow = {
+        "1": {"class_type": "LoadImage", "inputs": {"image": "${input_image}"}},
+        "2": {"class_type": "LoadImageMask", "inputs": {"image": "${mask}", "channel": "alpha"}},
+        "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "${prompt}"}},
+    }
+    try:
+        with pytest.raises(ValueError, match="leaves empty"):
+            async for _event in adapter.generate(media_request(source, workflow=workflow)):
+                pass
+    finally:
+        await adapter.close()
+
+    assert requested == ["/upload/image"]
