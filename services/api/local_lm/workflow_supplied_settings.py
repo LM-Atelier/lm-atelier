@@ -51,6 +51,52 @@ def bind_supplied_workflow_settings(
     operation: Operation | str = Operation.TEXT_TO_IMAGE,
 ) -> BoundWorkflowSettings:
     """Verify executable parity before replacing only generated declarations."""
+    graph, schema, generated, explicit = _matched_supplied_graph(
+        compilation, api_graph, input_schema
+    )
+    properties = schema.get("properties", {})
+    for node_id, node in graph.items():
+        if "_meta" in api_graph[node_id]:
+            node["_meta"] = deepcopy(api_graph[node_id]["_meta"])
+    for _, placeholder in generated:
+        properties.pop(placeholder[2:-1])
+    schema.pop(GRAPH_SETTINGS_SCHEMA_KEY, None)
+    return bind_compiled_workflow_settings(
+        replace(
+            compilation,
+            inputs=tuple(
+                item for item in compilation.inputs if (item.node_id, item.name) not in explicit
+            ),
+        ),
+        graph,
+        schema,
+        operation=operation,
+    )
+
+
+def verify_supplied_workflow_graph(
+    compilation: ComfyWorkflowCompilation,
+    api_graph: Mapping[str, Mapping[str, Any]],
+    input_schema: Mapping[str, Any],
+) -> None:
+    """Refuse a visual workflow that does not compile to its executable graph.
+
+    The saved settings are not derived again, so a control whose range or
+    choices differ on this runtime does not fail the comparison.
+    """
+    _matched_supplied_graph(compilation, api_graph, input_schema)
+
+
+def _matched_supplied_graph(
+    compilation: ComfyWorkflowCompilation,
+    api_graph: Mapping[str, Mapping[str, Any]],
+    input_schema: Mapping[str, Any],
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, Any],
+    frozenset[tuple[tuple[str | int, ...], str]],
+    set[tuple[str, str]],
+]:
     graph = {key: deepcopy(dict(value)) for key, value in api_graph.items()}
     schema = deepcopy(dict(input_schema))
     generated = generated_workflow_setting_paths(schema, graph)
@@ -96,20 +142,4 @@ def bind_supplied_workflow_settings(
             "workflow-setting-graph-mismatch",
             "The visual workflow does not match its executable inputs.",
         )
-    for node_id, node in graph.items():
-        if "_meta" in api_graph[node_id]:
-            node["_meta"] = deepcopy(api_graph[node_id]["_meta"])
-    for _, placeholder in generated:
-        properties.pop(placeholder[2:-1])
-    schema.pop(GRAPH_SETTINGS_SCHEMA_KEY, None)
-    return bind_compiled_workflow_settings(
-        replace(
-            compilation,
-            inputs=tuple(
-                item for item in compilation.inputs if (item.node_id, item.name) not in explicit
-            ),
-        ),
-        graph,
-        schema,
-        operation=operation,
-    )
+    return graph, schema, generated, explicit
