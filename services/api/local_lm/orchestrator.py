@@ -288,6 +288,7 @@ from .studio_relight import (
     RELIGHT_SETTING_KEY,
     RelightContractError,
     RelightFinish,
+    adapter_instruction,
     finish_relight,
     is_lighting_adapter,
     parse_relight_setting,
@@ -12252,7 +12253,19 @@ class ConversationOrchestrator:
     @staticmethod
     def _media_prompt(run: Run) -> str:
         edit = run.provenance_json.get("image_edit")
-        if (
+        relight = None
+        if run.operation == Operation.IMAGE_TO_IMAGE.value:
+            try:
+                relight = parse_relight_setting(run.settings_json or {})
+            except RelightContractError:
+                # The run refuses it, with the reason, when it executes.
+                relight = None
+        if relight is not None:
+            # Inside the edit preamble below, the lighting adapter leaves the
+            # light where it was. Given only the instruction it was trained on,
+            # it lights from the side that instruction names.
+            prompt = adapter_instruction(relight)
+        elif (
             run.operation != Operation.IMAGE_TO_IMAGE.value
             or not isinstance(edit, dict)
             or edit.get("policy") != "preserve_unrequested_details_v1"

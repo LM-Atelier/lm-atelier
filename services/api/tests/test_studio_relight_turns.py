@@ -300,6 +300,8 @@ async def test_the_stored_picture_is_the_relit_result_mixed_toward_the_source(
     assert len(seen) == 1
     assert "relight" not in seen[0].parameters
     assert len(seen[0].input_paths) == 2
+    # The workflow gets the adapter's own words; the request keeps its own.
+    assert seen[0].prompt == "使用图2的亮度贴图对图1重新照明(光源来自左方)"
     expected = finish_relight(
         RelightFinish(
             setting=RelightSetting("left", 0.5, None),
@@ -331,6 +333,48 @@ async def test_the_stored_picture_is_the_relit_result_mixed_toward_the_source(
         assert not any(
             "relight" in entry for entry in outputs if entry["artifact_id"] == throwaway.id
         )
+        assert run.standalone_prompt == "Relight from the left"
+
+
+@pytest.mark.parametrize(
+    ("direction", "words"),
+    [
+        ("left", "使用图2的亮度贴图对图1重新照明(光源来自左方)"),
+        ("right", "使用图2的亮度贴图对图1重新照明(光源来自右方)"),
+        ("top", "使用图2的亮度贴图对图1重新照明(光源来自上方)"),
+    ],
+    ids=["left", "right", "top"],
+)
+def test_a_relight_gives_the_workflow_the_adapters_trained_words(
+    direction: str, words: str
+) -> None:
+    """The workflow gets only the adapter's trained instruction, without the edit preamble."""
+    run = Run(
+        operation=Operation.IMAGE_TO_IMAGE.value,
+        standalone_prompt="Relight Figure 1 using the luminance map from Figure 2.",
+        settings_json={"relight": {**RELIGHT, "direction": direction}},
+        provenance_json={"image_edit": {"policy": "preserve_unrequested_details_v1"}},
+    )
+    assert ConversationOrchestrator._media_prompt(run) == words
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [{}, {"relight": {"direction": "below", "intensity": 0.5}}],
+    ids=["no-relight", "unknown-direction"],
+)
+def test_any_other_edit_keeps_its_own_words_inside_the_edit_preamble(
+    settings: dict[str, Any],
+) -> None:
+    run = Run(
+        operation=Operation.IMAGE_TO_IMAGE.value,
+        standalone_prompt="Make the sky a deeper blue.",
+        settings_json=settings,
+        provenance_json={"image_edit": {"policy": "preserve_unrequested_details_v1"}},
+    )
+    prompt = ConversationOrchestrator._media_prompt(run)
+    assert prompt.startswith("Apply the requested edit visibly to the supplied image.")
+    assert prompt.endswith("Requested edit: Make the sky a deeper blue.")
 
 
 async def test_relight_then_the_selection_blend_in_one_pipeline() -> None:
