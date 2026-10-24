@@ -12,6 +12,7 @@ from typing import Any, Never
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .comfy_workflow_compiler import WorkflowCompilationError, saved_runtime_inputs
 from .custom_nodes import reviewed_custom_node_types
 from .domain import utcnow
 from .models import (
@@ -160,18 +161,21 @@ def _validate_review_structure(
             _invalid_structure()
         inputs = node["inputs"]
         info = object_info.get(node["class_type"]) if object_info is not None else None
-        input_contract = info.get("input") if isinstance(info, dict) else None
-        if isinstance(input_contract, dict):
-            required_inputs = input_contract.get("required", {})
-            optional_inputs = input_contract.get("optional", {})
-            if not isinstance(required_inputs, dict) or not isinstance(optional_inputs, dict):
+        if isinstance(info, dict) and isinstance(info.get("input"), dict):
+            # Inputs the runtime grows from the saved graph are judged under the
+            # names it gives them, the same way the compiler reads them.
+            try:
+                expected = saved_runtime_inputs(identifier, node["class_type"], info, inputs)
+            except WorkflowCompilationError:
+                raise WorkflowReviewError("workflow_review_structure_invalid") from None
+            if any(required and name not in inputs for name, required in expected.items()):
                 _invalid_structure()
-            if not required_inputs.keys() <= inputs.keys():
-                _invalid_structure()
-            if not inputs.keys() <= required_inputs.keys() | optional_inputs.keys():
+            if not inputs.keys() <= expected.keys():
                 _invalid_structure()
         for name, value in inputs.items():
-            if not _IDENTIFIER.fullmatch(name) or name.lower() in _CODE_INPUTS:
+            if not _IDENTIFIER.fullmatch(name) or any(
+                part.lower() in _CODE_INPUTS for part in name.split(".")
+            ):
                 _invalid_structure()
             if isinstance(value, list):
                 if (

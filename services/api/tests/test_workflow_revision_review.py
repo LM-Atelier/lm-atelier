@@ -540,3 +540,166 @@ def test_canonical_encoding_stops_at_byte_budget(value: str) -> None:
     finally:
         tracemalloc.stop()
     assert peak < 256 * 1024
+
+
+def _grown_runtime(app: FastAPI, monkeypatch: pytest.MonkeyPatch, *, minimum: int) -> None:
+    """A runtime whose combining node grows sockets and whose choice brings inputs."""
+
+    async def object_info() -> dict[str, Any]:
+        return {
+            "EmptyLatentImage": {
+                "python_module": "nodes",
+                "input": {
+                    "required": {
+                        "width": ["INT", {"default": 512}],
+                        "height": ["INT", {"default": 512}],
+                        "batch_size": ["INT", {"default": 1}],
+                    }
+                },
+                "output": ["LATENT"],
+            },
+            "SolidImage": {
+                "python_module": "nodes",
+                "input": {"required": {"size": ["INT", {"default": 64}]}},
+                "output": ["IMAGE"],
+            },
+            "CombineImages": {
+                "python_module": "nodes",
+                "input": {
+                    "required": {
+                        "images": [
+                            "COMFY_AUTOGROW_V3",
+                            {
+                                "template": {
+                                    "input": {"required": {"image": ["IMAGE", {}]}},
+                                    "names": ["image_1", "image_2", "image_3"],
+                                    "min": minimum,
+                                }
+                            },
+                        ],
+                        "layout": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {"key": "stack"},
+                                    {
+                                        "key": "grid",
+                                        "inputs": {
+                                            "required": {"columns": ["INT", {"default": 2}]},
+                                            "optional": {"script": ["STRING", {}]},
+                                        },
+                                    },
+                                ]
+                            },
+                        ],
+                    },
+                    "optional": {
+                        "order": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {"options": [{"key": "forward"}, {"key": "reverse"}]},
+                        ]
+                    },
+                },
+                "output": ["IMAGE"],
+            },
+        }
+
+    monkeypatch.setattr(app.state.services.engines.media, "object_info", object_info)
+
+
+_SOLID_IMAGE = {"class_type": "SolidImage", "inputs": {"size": 64}}
+
+
+@pytest.mark.parametrize(
+    "minimum,inputs,accepted",
+    [
+        (0, {"layout": "stack"}, True),
+        (1, {"layout": "stack"}, False),
+        (1, {"images.image_1": ["1", 0], "images.image_3": ["1", 0], "layout": "stack"}, True),
+        (0, {"images.image_9": ["1", 0], "layout": "stack"}, False),
+        (0, {"pictures.image_1": ["1", 0], "layout": "stack"}, False),
+        (0, {"images": ["1", 0], "layout": "stack"}, False),
+        (0, {"layout": "grid", "layout.columns": 3}, True),
+        (0, {"layout": "grid"}, False),
+        (0, {"layout": "stack", "layout.columns": 3}, False),
+        (0, {"layout": "spiral"}, False),
+        (0, {"layout": "grid", "layout.columns": 3, "layout.script": "x"}, False),
+        (0, {"layout": "stack", "order": "${order}"}, True),
+        (0, {"layout": "${layout}", "layout.columns": 3}, False),
+    ],
+    ids=[
+        "empty-optional-sockets",
+        "empty-required-socket",
+        "filled-sockets",
+        "unnamed-socket",
+        "unknown-group",
+        "group-own-name",
+        "chosen-option-input",
+        "chosen-option-input-missing",
+        "unchosen-option-input",
+        "unknown-choice",
+        "code-named-option-input",
+        "mapped-choice",
+        "input-of-mapped-choice",
+    ],
+)
+async def test_review_reads_grown_inputs_by_their_runtime_names(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    minimum: int,
+    inputs: dict[str, object],
+    accepted: bool,
+) -> None:
+    workflow, revision = await _created(client)
+    _grown_runtime(app, monkeypatch, minimum=minimum)
+    with SessionLocal() as session:
+        row = session.get(WorkflowRevision, revision)
+        assert row is not None
+        row.api_graph_json = {
+            "1": _SOLID_IMAGE,
+            "2": {"class_type": "CombineImages", "inputs": inputs},
+        }
+        row.input_schema_json = {
+            "properties": {"layout": {"type": "string"}, "order": {"type": "string"}},
+            "required": [],
+        }
+        session.commit()
+    response = await client.get(_url(workflow, revision))
+    if accepted:
+        assert response.status_code == 200, response.text
+        assert response.json()["can_approve"] is True
+    else:
+        assert response.status_code == 422
+        assert response.json()["code"] == "workflow-review-invalid"
+
+
+@pytest.mark.parametrize(
+    "inputs",
+    [
+        {"layout": "stack"},
+        {"images.image_1": ["1", 0], "layout": "grid", "layout.columns": 3},
+    ],
+    ids=["empty-sockets", "filled-sockets-and-choice"],
+)
+async def test_saved_revision_with_grown_inputs_can_be_reviewed(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    inputs: dict[str, object],
+) -> None:
+    workflow, _ = await _created(client)
+    _grown_runtime(app, monkeypatch, minimum=0)
+    saved = await client.post(
+        f"/api/workflows/{workflow}/revisions",
+        json={
+            "api_graph": {
+                "1": _SOLID_IMAGE,
+                "2": {"class_type": "CombineImages", "inputs": inputs},
+            }
+        },
+    )
+    assert saved.status_code == 201, saved.text
+    preview = await client.get(_url(workflow, saved.json()["id"]))
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["can_approve"] is True

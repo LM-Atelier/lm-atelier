@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any, Literal
@@ -309,19 +309,12 @@ def describe_comfyui_api_graph(
         title = str(meta.get("title") or node_type) if isinstance(meta, Mapping) else node_type
         if info.get("output_node") is True:
             outputs.add(node_id)
-        pending = list(_input_definitions(node_type, info))
         known: set[str] = set()
-        while pending:
-            definition = pending.pop(0)
+        for definition in _saved_input_definitions(node_id, node_type, info, values):
             name, spec = definition.name, definition.spec
-            if name in known:
-                raise WorkflowCompilationError(
-                    "invalid_node_definition", "A runtime input is declared more than once"
-                )
             known.add(name)
             kind = spec[0]
             if kind == _AUTOGROW:
-                pending.extend(_autogrow_inputs(node_id, definition))
                 continue
             if name not in values:
                 if definition.required:
@@ -330,15 +323,14 @@ def describe_comfyui_api_graph(
                     )
                 continue
             value = values[name]
-            explicit = isinstance(value, str) and value.startswith("${") and value.endswith("}")
-            if explicit:
+            if _is_placeholder(value):
                 if kind == _DYNAMIC_COMBO:
                     raise WorkflowCompilationError(
                         "unsupported_widget",
                         "A dynamic input needs a saved choice before its controls can be mapped",
                     )
                 continue
-            linked = isinstance(value, list) and len(value) == 2 and isinstance(value[0], str)
+            linked = _is_saved_link(value)
             if linked:
                 source_id = value[0]
                 source = copied.get(source_id)
@@ -362,8 +354,6 @@ def describe_comfyui_api_graph(
                 raise WorkflowCompilationError(
                     "invalid_link", "An expanded workflow socket requires a connection"
                 )
-            elif kind == _DYNAMIC_COMBO:
-                pending.extend(_dynamic_combo_inputs(node_id, definition, value))
             if _is_widget_spec(spec):
                 records.append(
                     CompiledWorkflowInput(
@@ -391,6 +381,25 @@ def describe_comfyui_api_graph(
         order,
         tuple(replace(item, reaches_output=item.node_id in outputs) for item in records),
     )
+
+
+def saved_runtime_inputs(
+    node_id: str,
+    node_type: str,
+    node_info: Mapping[str, object],
+    values: Mapping[str, object],
+) -> dict[str, bool]:
+    """The inputs a saved node can carry, by runtime name, and whether each is required.
+
+    An autogrow input carries nothing under its own name: the sockets it grows
+    are the inputs. A dynamic combo adds the inputs of the option saved for it.
+    """
+
+    return {
+        definition.name: definition.required
+        for definition in _saved_input_definitions(node_id, node_type, node_info, values)
+        if definition.spec[0] != _AUTOGROW
+    }
 
 
 def _nodes_by_id(workflow: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
@@ -1258,6 +1267,48 @@ def _input_definitions(
                 )
             result.append(_InputDefinition(name, spec, required))
     return tuple(result)
+
+
+def _saved_input_definitions(
+    node_id: str,
+    node_type: str,
+    node_info: Mapping[str, object],
+    values: Mapping[str, object],
+) -> Iterator[_InputDefinition]:
+    """Every input a saved API node can carry, grown as its saved values choose.
+
+    An autogrow input is followed by the sockets it stands for, and a dynamic
+    combo by the inputs of its saved choice. A choice left to a link or a
+    placeholder grows nothing, because its option is only known when the graph
+    runs. Each input is grown after the caller has read it, so a caller that
+    refuses the saved choice does so before the choice is looked up.
+    """
+
+    pending = list(_input_definitions(node_type, node_info))
+    known: set[str] = set()
+    while pending:
+        definition = pending.pop(0)
+        if definition.name in known:
+            raise WorkflowCompilationError(
+                "invalid_node_definition", "A runtime input is declared more than once"
+            )
+        known.add(definition.name)
+        yield definition
+        kind = definition.spec[0]
+        if kind == _AUTOGROW:
+            pending.extend(_autogrow_inputs(node_id, definition))
+        elif kind == _DYNAMIC_COMBO and definition.name in values:
+            value = values[definition.name]
+            if not _is_saved_link(value) and not _is_placeholder(value):
+                pending.extend(_dynamic_combo_inputs(node_id, definition, value))
+
+
+def _is_placeholder(value: object) -> bool:
+    return isinstance(value, str) and value.startswith("${") and value.endswith("}")
+
+
+def _is_saved_link(value: object) -> bool:
+    return isinstance(value, list) and len(value) == 2 and isinstance(value[0], str)
 
 
 def _grows_from(name: str, definitions: Mapping[str, _InputDefinition]) -> bool:
