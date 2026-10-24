@@ -48,6 +48,9 @@ MAX_BLEND_READ_BYTES = 256 * 1024 * 1024
 RESULT_RESAMPLER = "lanczos"
 MASK_RESAMPLER = "bilinear"
 BLEND_MEDIA_TYPE = "image/png"
+#: The largest selection read here before a workflow is handed it: the
+#: Studio's own largest mask. A larger one is handed as it was drawn.
+MAX_WORKFLOW_MASK_PIXELS = 8192 * 8192
 _EXIF_ORIENTATION = 0x0112
 
 
@@ -255,13 +258,98 @@ def _composable(image: Image.Image) -> Image.Image:
     return image.convert("RGB")
 
 
+def _drawn_selection(mask: Image.Image) -> Image.Image:
+    """Where a drawn mask selects, as one channel: white is selected.
+
+    A mask with transparency carries the selection in its alpha. One that is
+    opaque everywhere carries nothing there, so, like a mask without alpha, it
+    is read by brightness: a black-and-white mask selects its white.
+    """
+    if mask.mode in {"RGBA", "LA", "PA"} or "transparency" in mask.info:
+        alpha = mask.convert("RGBA").getchannel("A")
+        if alpha.getextrema() != (255, 255):
+            return alpha
+    return mask.convert("L")
+
+
+def workflow_selection_mask(edit: RegionEdit) -> bytes | None:
+    """The selection a workflow's mask input is handed, or None to hand the drawn file.
+
+    Read as a blend reads it, from transparency or, on an opaque mask, from
+    brightness; checked against the source's upright shape; and turned round
+    when the selection asks to be. It is handed at the size it was drawn,
+    carrying the selection in its brightness and in its alpha, the two places
+    the Studio's own masks carry it, so a workflow reading either finds it.
+
+    Only the source's header is read, never its pixels, so a picture too large
+    to blend can still be edited this way. A mask too large to read here, or a
+    source whose header cannot be read, is handed as drawn.
+    """
+    upright = _upright_shape(edit.source)
+    mask = _readable_selection(edit.mask)
+    if upright is None or mask is None:
+        return None
+    (width, height), orientation = upright
+    selected = _drawn_selection(mask)
+    try:
+        mask_geometry(
+            source_width=width,
+            source_height=height,
+            mask_width=selected.width,
+            mask_height=selected.height,
+            orientation=orientation,
+            resampler=MASK_RESAMPLER,
+            threshold=0,
+        )
+    except MaskContractError as exc:
+        raise RegionEditError(exc.code, str(exc)) from exc
+    if edit.selection.invert:
+        selected = ImageOps.invert(selected)
+    if selected.getextrema()[1] == 0:
+        raise RegionEditError(
+            "region-selection-empty",
+            "The selection covers nothing; select the part of the picture to change.",
+        )
+    return encode_png(Image.merge("RGBA", (selected, selected, selected, selected)), None)
+
+
+def _upright_shape(payload: bytes) -> tuple[tuple[int, int], int] | None:
+    """A picture's upright size and recorded orientation, from its header alone."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+            image = Image.open(io.BytesIO(payload))
+            orientation = _orientation(image)
+            width, height = image.size
+    except (Image.DecompressionBombError, UnidentifiedImageError, OSError):
+        return None
+    # Orientations 5 to 8 turn the picture on its side.
+    return ((height, width) if orientation >= 5 else (width, height)), orientation
+
+
+def _readable_selection(payload: bytes) -> Image.Image | None:
+    """A drawn selection, decoded, or None when it is too large or unreadable to read here."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            image = Image.open(io.BytesIO(payload))
+            if not 0 < image.width * image.height <= MAX_WORKFLOW_MASK_PIXELS:
+                return None
+            image.load()
+    except (
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+        UnidentifiedImageError,
+        OSError,
+    ):
+        return None
+    return image
+
+
 def _selection_alpha(
     mask: Image.Image, size: tuple[int, int], *, invert: bool, orientation: int
 ) -> _Alpha:
-    if mask.mode in {"RGBA", "LA", "PA"} or "transparency" in mask.info:
-        alpha = mask.convert("RGBA").getchannel("A")
-    else:
-        alpha = mask.convert("L")
+    alpha = _drawn_selection(mask)
     try:
         geometry = mask_geometry(
             source_width=size[0],

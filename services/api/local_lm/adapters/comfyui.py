@@ -357,7 +357,10 @@ class ComfyUIAdapter:
         raw_path = setting.get("path")
         if not isinstance(raw_path, str) or not raw_path:
             raise ValueError("The selection for this edit has no resolved file")
-        return (await self._upload_files(request, [Path(raw_path)], label="mask"))[0]
+        contents = (request.mask_content,) if request.mask_content is not None else None
+        return (
+            await self._upload_files(request, [Path(raw_path)], label="mask", contents=contents)
+        )[0]
 
     async def _upload_inputs(self, request: MediaRequest) -> list[str]:
         return await self._upload_files(

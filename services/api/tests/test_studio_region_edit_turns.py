@@ -232,6 +232,157 @@ async def test_the_stored_picture_is_the_source_outside_the_selection(
             assert out.getpixel((x, y)) == (EDITED if inside else source.getpixel((x, y)))
 
 
+def _masked_edit_workflow() -> str:
+    """An edit workflow whose own mask input takes the selection."""
+    with SessionLocal() as session:
+        definition = WorkflowDefinition(name="Masked editor", operation="image_to_image")
+        session.add(definition)
+        session.flush()
+        revision = WorkflowRevision(
+            workflow_id=definition.id,
+            version=1,
+            engine="mock",
+            trusted=True,
+            api_graph_json={"nodes": [{"inputs": {"image": "${input_image}", "mask": "${mask}"}}]},
+            input_schema_json={
+                "type": "object",
+                "properties": {"mask": {"type": "object", "x-lm-atelier-kind": "mask"}},
+            },
+            dependencies_json={},
+        )
+        session.add(revision)
+        session.flush()
+        definition.current_revision_id = revision.id
+        session.commit()
+        return revision.id
+
+
+@pytest.mark.parametrize("invert", [False, True], ids=["as-drawn", "turned-round"])
+async def test_a_workflow_is_handed_the_selection_as_a_blend_would_read_it(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch, invert: bool
+) -> None:
+    """Drawn white on opaque black, the selection reaches the workflow in its alpha.
+
+    A workflow reads its mask input one way. Without this, an opaque mask
+    selects the whole picture, and turning the selection round does nothing.
+    """
+    orchestrator = app.state.services.orchestrator
+    revision_id = _masked_edit_workflow()
+    source_id = await _upload(client, "source.png", _png(_source()))
+    drawn = Image.new("RGBA", (64, 48), (0, 0, 0, 255))
+    ImageDraw.Draw(drawn).rectangle(BOX, fill=(255, 255, 255, 255))
+    mask_id = await _upload(client, "selection.png", _png(drawn))
+    seen: list[MediaRequest] = []
+
+    async def generate(request: MediaRequest) -> Any:
+        seen.append(request)
+        yield MediaEvent(
+            type="complete",
+            assets=[
+                GeneratedAsset(
+                    content=_png(Image.new("RGB", (64, 48), (10, 200, 30))),
+                    kind="image",
+                    media_type="image/png",
+                    name="edited.png",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(orchestrator.engines.media, "generate", generate)
+    chat = (await client.post("/api/chats", json={"title": "Paint"})).json()
+    with SessionLocal() as session:
+        accepted = await orchestrator.create_turn(
+            session,
+            chat["id"],
+            TurnRequest(
+                text="Paint the marked part green.",
+                mode="image",
+                input_artifact_ids=[source_id],
+                workflow_revision_id=revision_id,
+                settings={"mask": {"artifact_id": mask_id, "feather_px": 0, "invert": invert}},
+            ),
+            freeze_context=True,
+            activate_branch=False,
+        )
+        job = session.scalar(select(Job).where(Job.run_id == accepted.run.id))
+        assert job is not None
+        claim = JobClaim(token="workflow-selection-attempt", attempt=1)
+        job.status = "running"
+        job.claim_owner, job.attempt = claim.token, claim.attempt
+        job_id, run_id = job.id, accepted.run.id
+        session.commit()
+    await orchestrator._execute_media(job_id, run_id, claim)
+
+    assert len(seen) == 1
+    # The stored selection is still named; the workflow reads the selection as read.
+    assert seen[0].parameters["mask"]["artifact_id"] == mask_id
+    assert seen[0].mask_content is not None
+    handed = Image.open(io.BytesIO(seen[0].mask_content))
+    assert handed.mode == "RGBA"
+    assert handed.size == (64, 48)
+    for y in range(48):
+        for x in range(64):
+            inside = BOX[0] <= x <= BOX[2] and BOX[1] <= y <= BOX[3]
+            selected = 255 if inside != invert else 0
+            assert handed.getpixel((x, y)) == (selected,) * 4, (x, y)
+
+
+async def test_a_selection_too_large_to_read_here_is_handed_to_the_workflow_as_drawn(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As before this was read here: the stored file goes, and the edit still runs."""
+    orchestrator = app.state.services.orchestrator
+    monkeypatch.setattr("local_lm.orchestrator.MAX_BLEND_READ_BYTES", 10)
+    revision_id = _masked_edit_workflow()
+    source_id = await _upload(client, "source.png", _png(_source()))
+    mask_id = await _upload(client, "selection.png", _mask())
+    seen: list[MediaRequest] = []
+
+    async def generate(request: MediaRequest) -> Any:
+        seen.append(request)
+        yield MediaEvent(
+            type="complete",
+            assets=[
+                GeneratedAsset(
+                    content=_png(Image.new("RGB", (64, 48), (10, 200, 30))),
+                    kind="image",
+                    media_type="image/png",
+                    name="edited.png",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(orchestrator.engines.media, "generate", generate)
+    chat = (await client.post("/api/chats", json={"title": "Paint"})).json()
+    with SessionLocal() as session:
+        accepted = await orchestrator.create_turn(
+            session,
+            chat["id"],
+            TurnRequest(
+                text="Paint the marked part green.",
+                mode="image",
+                input_artifact_ids=[source_id],
+                workflow_revision_id=revision_id,
+                settings={"mask": {"artifact_id": mask_id, "feather_px": 0, "invert": False}},
+            ),
+            freeze_context=True,
+            activate_branch=False,
+        )
+        job = session.scalar(select(Job).where(Job.run_id == accepted.run.id))
+        assert job is not None
+        claim = JobClaim(token="large-selection-attempt", attempt=1)
+        job.status = "running"
+        job.claim_owner, job.attempt = claim.token, claim.attempt
+        job_id, run_id = job.id, accepted.run.id
+        session.commit()
+    await orchestrator._execute_media(job_id, run_id, claim)
+
+    assert len(seen) == 1
+    assert seen[0].mask_content is None
+    assert seen[0].parameters["mask"]["artifact_id"] == mask_id
+    assert seen[0].parameters["mask"]["path"]
+
+
 async def test_a_selection_drawn_on_another_shape_refuses_before_the_model_runs(
     app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

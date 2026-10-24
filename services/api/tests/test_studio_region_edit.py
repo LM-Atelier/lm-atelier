@@ -15,6 +15,7 @@ from local_lm.studio_region_edit import (
     RegionEditError,
     blend_through_selection,
     prepare_selection,
+    workflow_selection_mask,
 )
 
 SOURCE_ID = f"sha256:{'b' * 64}"
@@ -209,6 +210,121 @@ def test_the_source_is_used_the_way_up_it_was_seen() -> None:
     assert out.getpixel((10, 10)) == (10, 200, 30)
     assert out.getpixel((10, 50)) == upright_pixels.getpixel((10, 50))
     assert prepare_selection(_edit(source_bytes, mask)).coverage > 0
+
+
+def _opaque_mask(fill: tuple[int, int, int] = (0, 0, 0)) -> bytes:
+    """A mask opaque everywhere, its selection drawn white over the rest."""
+    mask = Image.new("RGBA", (64, 48), (*fill, 255))
+    ImageDraw.Draw(mask).rectangle(BOX, fill=(255, 255, 255, 255))
+    return _png(mask)
+
+
+def _greyscale_mask() -> bytes:
+    """A mask with no alpha at all, its selection drawn white on black."""
+    mask = Image.new("L", (64, 48), 0)
+    ImageDraw.Draw(mask).rectangle(BOX, fill=255)
+    return _png(mask)
+
+
+@pytest.mark.parametrize(
+    "mask",
+    [
+        pytest.param(_mask(), id="in-alpha"),
+        pytest.param(_opaque_mask(), id="white-on-opaque-black"),
+        pytest.param(_greyscale_mask(), id="greyscale"),
+    ],
+)
+def test_a_selection_drawn_in_transparency_or_in_brightness_selects_the_same_part(
+    mask: bytes,
+) -> None:
+    """An opaque mask carries nothing in its alpha, so its brightness says what is selected."""
+    source = _source()
+    edited = Image.new("RGB", (64, 48), (10, 200, 30))
+
+    out = _pixels(blend_through_selection(_edit(_png(source), mask), _png(edited)).content)
+
+    for y in range(48):
+        for x in range(64):
+            inside = BOX[0] <= x <= BOX[2] and BOX[1] <= y <= BOX[3]
+            expected = (10, 200, 30) if inside else source.getpixel((x, y))
+            assert out.getpixel((x, y)) == expected, (x, y)
+
+
+def test_an_opaque_mask_selects_all_of_a_white_picture_and_none_of_a_black_one() -> None:
+    whole = _png(Image.new("RGBA", (64, 48), (255, 255, 255, 255)))
+    assert prepare_selection(_edit(mask=whole)).coverage == 1
+    with pytest.raises(RegionEditError) as raised:
+        prepare_selection(_edit(mask=_png(Image.new("RGBA", (64, 48), (0, 0, 0, 255)))))
+    assert raised.value.code == "region-selection-empty"
+
+
+def _handed(edit: RegionEdit) -> Image.Image:
+    content = workflow_selection_mask(edit)
+    assert content is not None
+    return _pixels(content)
+
+
+@pytest.mark.parametrize("mask", [_mask(), _opaque_mask()], ids=["in-alpha", "opaque"])
+@pytest.mark.parametrize("invert", [False, True], ids=["as-drawn", "turned-round"])
+def test_a_workflow_is_handed_the_selection_in_its_brightness_and_its_alpha(
+    mask: bytes, invert: bool
+) -> None:
+    """However it was drawn, a workflow reading either brightness or alpha finds the selection."""
+    handed = _handed(_edit(mask=mask, invert=invert))
+
+    assert handed.format == "PNG"
+    assert handed.mode == "RGBA"
+    assert handed.size == (64, 48)
+    for y in range(48):
+        for x in range(64):
+            inside = BOX[0] <= x <= BOX[2] and BOX[1] <= y <= BOX[3]
+            selected = 255 if inside != invert else 0
+            assert handed.getpixel((x, y)) == (selected,) * 4, (x, y)
+
+
+def test_a_workflow_selection_is_checked_against_the_upright_source() -> None:
+    stored = _source((64, 48))
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    half = Image.new("L", (48, 64), 0)
+    ImageDraw.Draw(half).rectangle((0, 0, 47, 31), fill=255)
+    top_half = Image.new("RGBA", (48, 64), (255, 255, 255, 0))
+    top_half.putalpha(half)
+
+    handed = _handed(_edit(_png(stored, exif=exif.tobytes()), _png(top_half)))
+
+    assert handed.size == (48, 64)
+    assert handed.getchannel("A").getpixel((10, 10)) == 255
+    assert handed.getchannel("A").getpixel((10, 50)) == 0
+    # Drawn the stored way round, it is drawn on another picture than the one seen.
+    with pytest.raises(RegionEditError):
+        workflow_selection_mask(_edit(_png(stored, exif=exif.tobytes()), _mask((64, 48))))
+
+
+def test_a_workflow_selection_reads_only_the_source_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A picture too large to blend can still be edited by a workflow through a selection."""
+    monkeypatch.setattr(studio_region_edit, "MAX_BLEND_PIXELS", 100)
+    with pytest.raises(RegionEditError):
+        prepare_selection(_edit(mask=_opaque_mask()))
+
+    assert workflow_selection_mask(_edit(mask=_opaque_mask())) is not None
+
+
+def test_a_selection_too_large_or_unreadable_here_is_handed_as_drawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert workflow_selection_mask(_edit(b"not a picture", _opaque_mask())) is None
+    assert workflow_selection_mask(_edit(mask=b"not a picture")) is None
+    monkeypatch.setattr(studio_region_edit, "MAX_WORKFLOW_MASK_PIXELS", 100)
+    assert workflow_selection_mask(_edit(mask=_opaque_mask())) is None
+
+
+def test_a_workflow_selection_covering_nothing_refuses() -> None:
+    with pytest.raises(RegionEditError) as raised:
+        workflow_selection_mask(_edit(mask=_png(Image.new("RGBA", (64, 48), (0, 0, 0, 255)))))
+    assert raised.value.code == "region-selection-empty"
 
 
 def test_a_transparent_source_stays_transparent_where_it_was() -> None:
