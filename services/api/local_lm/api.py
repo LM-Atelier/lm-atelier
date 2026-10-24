@@ -59,7 +59,12 @@ from .artifacts import (
     RETENTION_BATCH_SECONDS,
     RetentionCleanupSummary,
 )
-from .asset_adoption import AssetAdoptionError, adoptable_roots, measure_adoptable_file
+from .asset_adoption import (
+    AssetAdoptionError,
+    adoptable_roots,
+    imported_comfy_paths,
+    measure_adoptable_file,
+)
 from .auxiliary_assets import (
     AUXILIARY_ASSET_KINDS,
     normalize_typed_trigger_words,
@@ -9834,6 +9839,14 @@ async def check_model_updates(request: Request, session: SessionDep) -> list[Mod
 
 @router.post("/models/import", response_model=ModelInstallOut, status_code=201)
 async def import_model(payload: ModelImport, session: SessionDep) -> ModelInstall:
+    """Record a model a person already keeps on disk, without moving or copying it.
+
+    An imported ComfyUI directory also records the runtime model folders it
+    holds, so the runtime is told to load from them and a file placed in one
+    can then be adopted with the family it belongs to. Naming the directory
+    here is what widens the runtime's reach; adoption never does.
+    """
+
     path = Path(payload.local_path).expanduser().resolve(strict=True)
     blocked = {".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle"}
     files = [child for child in path.rglob("*") if child.is_file()] if path.is_dir() else [path]
@@ -9843,6 +9856,16 @@ async def import_model(payload: ModelImport, session: SessionDep) -> ModelInstal
             422, "model-file-format-blocked", "pickle-compatible model files are blocked by default"
         )
     size = sum(child.stat().st_size for child in files)
+    manifest: dict[str, Any] = {
+        "imported": True,
+        "path_type": "directory" if path.is_dir() else "file",
+        "file_count": len(files),
+        "pickle_compatible_weights": False,
+    }
+    if payload.engine == "comfyui" and path.is_dir():
+        comfy_paths = imported_comfy_paths(path)
+        if comfy_paths:
+            manifest["comfy_paths"] = comfy_paths
     install = ModelInstall(
         id=new_id("model"),
         name=payload.name,
@@ -9851,12 +9874,7 @@ async def import_model(payload: ModelImport, session: SessionDep) -> ModelInstal
         local_path=str(path),
         size_bytes=size,
         compatibility=CompatibilityLevel.ADVANCED.value,
-        manifest_json={
-            "imported": True,
-            "path_type": "directory" if path.is_dir() else "file",
-            "file_count": len(files),
-            "pickle_compatible_weights": False,
-        },
+        manifest_json=manifest,
     )
     session.add(install)
     session.flush()

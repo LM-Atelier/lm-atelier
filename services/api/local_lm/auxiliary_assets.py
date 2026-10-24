@@ -1136,9 +1136,10 @@ def workflow_model_family(session: Session, revision: WorkflowRevision) -> str |
     A revision with a dependency contract answers only through its current ready
     activation, the same binding automatic LoRA selection reads; one without a
     contract falls back to its legacy install ids, or, declaring none, to the
-    installed model its checkpoint loader names or, with no checkpoint loader,
-    the registered diffusion model its model loader names. Anything partial,
-    mixed or invalid is unknown rather than a guess.
+    installed model its checkpoint loader names or, when no installed model
+    holds that file, the registered checkpoint or diffusion model its one model
+    loader names. Anything partial, mixed or invalid is unknown rather than a
+    guess.
     """
 
     activation_id: str | None = None
@@ -1171,12 +1172,12 @@ def _workflow_families(
     An activation is the authoritative local binding for a portable workflow.
     Legacy install IDs are only a fallback for revisions without a typed
     activation, and a revision without a contract that declares none answers
-    through the one installed model its checkpoint loader names or, with no
-    checkpoint loader, the one registered diffusion model its model loader
-    names. Every model binding must resolve and agree: an empty, partial, or
-    mixed-family answer cannot safely authorize an automatic LoRA. Bindings
-    agree when their families differ only in case and punctuation, and the
-    answer is then one of their spellings.
+    through the one installed model its checkpoint loader names or, when no
+    installed model holds that file, the one registered checkpoint or diffusion
+    model its one model loader names. Every model binding must resolve and
+    agree: an empty, partial, or mixed-family answer cannot safely authorize
+    an automatic LoRA. Bindings agree when their families differ only in case
+    and punctuation, and the answer is then one of their spellings.
     """
 
     install_ids: list[str] = []
@@ -1224,7 +1225,7 @@ def _workflow_families(
             # rather than being read past.
             raw_ids = _checkpoint_install_ids(session, revision)
             if not raw_ids:
-                family = _diffusion_model_family(session, revision)
+                family = _registered_model_family(session, revision)
                 return {family} if family is not None else set()
         if not isinstance(raw_ids, list) or not raw_ids:
             return set()
@@ -1267,6 +1268,13 @@ def _checkpoint_install_ids(session: Session, revision: WorkflowRevision) -> lis
     named = inputs.get("ckpt_name") if isinstance(inputs, dict) else None
     if not isinstance(named, str) or not named.strip():
         return []
+    holders = _installs_holding(session, named)
+    return holders if len(holders) == 1 else []
+
+
+def _installs_holding(session: Session, named: str) -> list[str]:
+    """Every installed model whose recorded files include the file ``named`` names."""
+
     wanted = _file_name(named)
     holders: list[str] = []
     for install in session.scalars(select(ModelInstall)).all():
@@ -1275,44 +1283,58 @@ def _checkpoint_install_ids(session: Session, revision: WorkflowRevision) -> lis
             isinstance(entry, str) and _file_name(entry) == wanted for entry in files
         ):
             holders.append(install.id)
-    return holders if len(holders) == 1 else []
+    return holders
 
 
 def _file_name(path: str) -> str:
     return path.replace("\\", "/").rsplit("/", 1)[-1]
 
 
-def _diffusion_model_family(session: Session, revision: WorkflowRevision) -> str | None:
-    """The family of the one registered diffusion model a graph's model loader names.
+#: The registered kind each model loader names, and the input that carries the name.
+_MODEL_LOADERS = {
+    "CheckpointLoaderSimple": ("checkpoint", "ckpt_name"),
+    "UNETLoader": ("diffusion_model", "unet_name"),
+}
 
-    A graph that builds its model from a diffusion-model loader, rather than a
-    checkpoint, names the file by the name the runtime loads it under. A
-    registered diffusion model records exactly that name, beside the digest of
-    the file it measured and the family recorded for it. One such loader in a
-    graph with no checkpoint loader, naming a file exactly one registered
-    diffusion model answers to, is the only answer, and that model has to be
-    active, verified and carry a family. Anything else leaves the family
-    unknown, which is what it was.
+
+def _registered_model_family(session: Session, revision: WorkflowRevision) -> str | None:
+    """The family of the one registered model a graph's one model loader names.
+
+    A graph builds its model from a checkpoint loader or a diffusion-model
+    loader, and names the file by the name the runtime loads it under. A
+    registered checkpoint or diffusion model records exactly that name, beside
+    the digest of the file it measured and the family recorded for it. One
+    such loader in the whole graph, naming a file exactly one registered model
+    of that loader's kind answers to, is the only answer, and that model has to
+    be active, verified and carry a family. A checkpoint some installed model
+    also holds is that install's to answer for, so a registration never
+    overrides it. Anything else leaves the family unknown, which is what it was.
     """
 
     graph = revision.api_graph_json
     if not isinstance(graph, dict):
         return None
-    nodes = [node for node in graph.values() if isinstance(node, dict)]
-    if any(node.get("class_type") == "CheckpointLoaderSimple" for node in nodes):
-        return None
-    loaders = [node for node in nodes if node.get("class_type") == "UNETLoader"]
+    loaders = [
+        node
+        for node in graph.values()
+        if isinstance(node, dict)
+        and isinstance(node.get("class_type"), str)
+        and node["class_type"] in _MODEL_LOADERS
+    ]
     if len(loaders) != 1:
         return None
+    kind, name_input = _MODEL_LOADERS[loaders[0]["class_type"]]
     inputs = loaders[0].get("inputs")
-    named = inputs.get("unet_name") if isinstance(inputs, dict) else None
+    named = inputs.get(name_input) if isinstance(inputs, dict) else None
     if not isinstance(named, str) or not named.strip():
+        return None
+    if kind == "checkpoint" and _installs_holding(session, named):
         return None
     wanted = _loader_name(named)
     holders = [
         asset
         for asset in session.scalars(
-            select(ModelAssetInstall).where(ModelAssetInstall.kind == "diffusion_model")
+            select(ModelAssetInstall).where(ModelAssetInstall.kind == kind)
         ).all()
         if isinstance(asset.manifest_json.get("comfy_name"), str)
         and _loader_name(asset.manifest_json["comfy_name"]) == wanted

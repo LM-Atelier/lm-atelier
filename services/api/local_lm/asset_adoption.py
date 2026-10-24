@@ -39,7 +39,7 @@ from sqlalchemy.orm import Session
 from .auxiliary_assets import MAX_LORA_TRIGGER_WORD_LENGTH, MAX_LORA_TRIGGER_WORDS
 from .config import Settings
 from .filesystem_links import is_link_or_reparse
-from .model_manifests import comfy_folder_for_kind
+from .model_manifests import COMFY_MODEL_FOLDERS, comfy_folder_for_kind
 from .models import ModelAssetInstall, ModelInstall
 
 #: How much of a safetensors header to read. The header is a length-prefixed
@@ -179,6 +179,36 @@ def adoptable_roots(session: Session, settings: Settings, kind: str) -> list[Pat
     for asset in assets:
         remember(Path(asset.local_path))
     return roots
+
+
+def imported_comfy_paths(path: Path) -> dict[str, str]:
+    """The runtime model folders an imported directory holds, as its install records them.
+
+    Importing a directory is how a person points the application at models it
+    already keeps elsewhere, such as a model library shared between tools. The
+    runtime loads only from folders it is told about, and an import recorded
+    none, so an imported ComfyUI directory stayed invisible to it, and so did
+    every file inside: none of them could be adopted either, because adoption
+    reaches only folders the runtime already reads.
+
+    A directory named for one of the runtime's model folders is that folder;
+    any other directory exposes each such folder directly inside it. The import
+    is the deliberate step that widens what the runtime reads, so a link among
+    those folders is left out: what is exposed is the directory that was named,
+    not wherever a link inside it points.
+    """
+
+    if path.name in COMFY_MODEL_FOLDERS:
+        return {path.name: "."}
+    try:
+        children = sorted(path.iterdir())
+    except OSError:
+        return {}
+    return {
+        child.name: child.name
+        for child in children
+        if child.name in COMFY_MODEL_FOLDERS and not _is_link(child) and child.is_dir()
+    }
 
 
 def _is_link(path: Path) -> bool:
