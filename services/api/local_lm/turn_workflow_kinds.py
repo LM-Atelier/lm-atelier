@@ -7,8 +7,9 @@ Chosen for a turn that leaves one of its inputs empty, a workflow does what
 nobody asked, or cannot run at all: an instruction comes back at twice the
 size, or an inpainter waits for a mask that never comes. So the app's own
 choice passes such a workflow over. A turn that brings a selection or margins
-is refused by a workflow with nowhere to put them, so the choice looks first
-for one that declares them.
+is refused by a workflow with nowhere to put them, and one that asks for a
+larger picture by a workflow with no factor to enlarge by, so the choice looks
+first for one that declares what the turn brings.
 
 This decides the app's own choice only. A workflow someone names runs as
 named, and the run's own checks refuse what it cannot honor. The studio's
@@ -79,18 +80,17 @@ def turn_workflow_kinds(
     picture.
     """
     outpaint_filled = margins or extends_canvas
-    if enlargement:
-        # The workflow an enlargement runs on is the one its own check accepts,
-        # and Enhance shows that choice before anything is sent, so it is left
-        # as that check finds it.
-        return TurnWorkflowKinds(
-            unfilled=frozenset() if outpaint_filled else frozenset({"outpaint"})
-        )
-    unfilled: set[DeclaredKind] = {"upscale"}
+    unfilled: set[DeclaredKind] = set()
     if not outpaint_filled:
         unfilled.add("outpaint")
     if not selection:
         unfilled.add("mask")
+    if enlargement:
+        # Brought rather than left open: otherwise the newest workflow bound to
+        # the model comes first, and an editor bound to it is chosen over an
+        # upscaler bound to none, which the studio offered Enhance for.
+        return TurnWorkflowKinds(unfilled=frozenset(unfilled), brings="upscale")
+    unfilled.add("upscale")
     # A canvas to extend onto is checked against the workflow's own route, so it
     # lets an outpainter be chosen without asking for one first.
     brings: DeclaredKind | None = "mask" if selection else "outpaint" if margins else None

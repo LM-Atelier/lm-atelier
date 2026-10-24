@@ -387,8 +387,17 @@ async def _import_model(client: AsyncClient, tmp_path: Path) -> str:
 
 
 def _mock_workflow(
-    name: str, install_id: str, graph: dict[str, Any], schema: dict[str, Any], created: datetime
+    name: str,
+    install_id: str | None,
+    graph: dict[str, Any],
+    schema: dict[str, Any],
+    created: datetime,
+    *,
+    components: list[dict[str, str]] | None = None,
 ) -> str:
+    dependencies: dict[str, Any] = {"model_install_ids": [install_id]} if install_id else {}
+    if components:
+        dependencies["model_components"] = components
     with SessionLocal() as db:
         definition = WorkflowDefinition(
             name=name, operation=Operation.IMAGE_TO_IMAGE.value, created_at=created
@@ -402,7 +411,7 @@ def _mock_workflow(
             trusted=True,
             api_graph_json=graph,
             input_schema_json=schema,
-            dependencies_json={"model_install_ids": [install_id]},
+            dependencies_json=dependencies,
             created_at=created,
         )
         db.add(revision)
@@ -654,6 +663,52 @@ async def test_an_edit_that_asks_for_no_enlargement_passes_over_a_newer_upscaler
         # Asked for a larger picture, the same choice still finds the upscaler.
         enlarge = {**_instruction(source_id), "text": "Enlarge the picture.", "upscale": True}
         assert await _chosen(client, enlarge) == upscaler
+
+
+async def test_an_enlargement_finds_an_upscaler_bound_to_no_model_before_the_models_newer_ones(
+    app: FastAPI, client: AsyncClient, tmp_path: Path
+) -> None:
+    """An upscaler built on an upscaling model alone names no image model.
+
+    A workflow bound to the model by its files runs on whichever install holds
+    them, so the model's newer workflows are found first, and neither can
+    enlarge: its editor has no factor to enlarge by, and its inpainter waits
+    for a selection an enlargement never brings.
+    """
+
+    await _import_model(client, tmp_path)
+    _clear_seeded_edit_workflows()
+    files = [{"target_folder": "diffusion_models", "sha256": "a" * 64}]
+    upscaler = _mock_workflow(
+        "Neutral upscaler", None, _UPSCALE_GRAPH, UPSCALE_SCHEMA, datetime(2026, 1, 1, tzinfo=UTC)
+    )
+    editor = _mock_workflow(
+        "Neutral editor",
+        None,
+        _EDIT_GRAPH,
+        PLAIN_SCHEMA,
+        datetime(2026, 1, 2, tzinfo=UTC),
+        components=files,
+    )
+    _mock_workflow(
+        "Neutral inpainter",
+        None,
+        _INPAINT_GRAPH,
+        INPAINT_SCHEMA,
+        datetime(2026, 1, 3, tzinfo=UTC),
+        components=files,
+    )
+    source_id = await _upload(client, "source.png", _png(_source()))
+    enlarge = {**_instruction(source_id), "text": "Enlarge the picture.", "upscale": True}
+    chat = (await client.post("/api/chats", json={"title": "Studio"})).json()
+
+    # Enhance asks which workflow it would run before anything is sent.
+    preview = await client.post(f"/api/chats/{chat['id']}/upscale/preview", json=enlarge)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["workflow_revision_id"] == upscaler
+    async with app.state.services.scheduler.lease("primary"):
+        assert await _chosen(client, enlarge) == upscaler
+        assert await _chosen(client, _instruction(source_id)) == editor
 
 
 async def test_margins_find_an_outpainter_older_than_the_editor(
