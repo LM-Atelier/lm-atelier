@@ -978,7 +978,11 @@ from .workflow_summary_reads import (
     load_workflow_detail,
     load_workflow_revision_schema,
 )
-from .workflow_supplied_settings import bind_api_workflow_settings, bind_supplied_workflow_settings
+from .workflow_supplied_settings import (
+    bind_api_workflow_settings,
+    bind_supplied_workflow_settings,
+    verify_supplied_workflow_graph,
+)
 from .workflow_trust import (
     TRUST_DERIVATION_VERSION,
     TrustDecision,
@@ -12033,23 +12037,29 @@ async def _map_workflow_write[T: (WorkflowCreate, WorkflowRevisionCreate)](
         edit_calibration_reaches_graph(payload.api_graph, payload.input_schema)
     except ValueError as exc:
         raise api_error(422, code, str(exc)) from exc
+    keep_saved_settings = False
     if GRAPH_SETTINGS_SCHEMA_KEY in payload.input_schema:
         try:
             generated_workflow_setting_paths(payload.input_schema, payload.api_graph)
         except WorkflowPackageInputError as exc:
             raise api_error(422, code, str(exc)) from exc
         if not changed_native_graph:
-            return payload
+            # Saved settings are kept, so an unchanged executable graph needs no
+            # runtime. A new visual graph is still compiled: the editor and edit
+            # classification read it, and only compilation ties it to the graph
+            # that runs. A revision reaches here only with its stored graphs.
+            if isinstance(payload, WorkflowRevisionCreate) or not payload.ui_graph:
+                return payload
+            keep_saved_settings = True
+    purpose = "check this visual workflow" if keep_saved_settings else "map workflow settings"
     describe_nodes = getattr(_services(request).engines.media, "object_info", None)
     if not callable(describe_nodes):
-        raise api_error(
-            503, "media-runtime-unavailable", "Start the media worker to map workflow settings"
-        )
+        raise api_error(503, "media-runtime-unavailable", f"Start the media worker to {purpose}")
     try:
         object_info = await describe_nodes()
     except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
         raise api_error(
-            503, "media-runtime-unavailable", "Start the media worker to map workflow settings"
+            503, "media-runtime-unavailable", f"Start the media worker to {purpose}"
         ) from exc
     if not isinstance(object_info, Mapping):
         raise api_error(
@@ -12061,6 +12071,9 @@ async def _map_workflow_write[T: (WorkflowCreate, WorkflowRevisionCreate)](
                 payload.ui_graph, object_info, operation, payload.api_graph, payload.input_schema
             )
             compilation = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
+            if keep_saved_settings:
+                verify_supplied_workflow_graph(compilation, payload.api_graph, payload.input_schema)
+                return payload
             bound = bind_supplied_workflow_settings(
                 compilation, payload.api_graph, payload.input_schema, operation=operation
             )

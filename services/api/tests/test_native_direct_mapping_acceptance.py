@@ -117,7 +117,15 @@ async def test_mapped_workflows_remain_portable_offline_but_native_edits_need_ma
     revision = workflow["revisions"][0]
     monkeypatch.setattr(app.state.services.engines.media, "object_info", None)
     bundle = (await client.get(f"/api/workflows/{workflow['id']}/export")).json()
-    imported = await client.post("/api/workflows/import", json=bundle)
+    bundle["name"] = "Imported mapped workflow"
+    unchecked = await client.post("/api/workflows/import", json=bundle)
+    assert unchecked.status_code == 503, "A visual graph was imported without being compiled"
+    assert unchecked.json()["code"] == "media-runtime-unavailable"
+    assert all(
+        item["name"] != "Imported mapped workflow"
+        for item in (await client.get("/api/workflows")).json()
+    )
+    imported = await client.post("/api/workflows/import", json={**bundle, "ui_graph": {}})
     assert imported.status_code == 201, imported.text
     cloned = await client.post(f"/api/workflows/{workflow['id']}/clone", json={})
     assert cloned.status_code == 201, cloned.text

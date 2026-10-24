@@ -38,9 +38,13 @@ node's inputs must be changed in the native editor.
 
 The media worker must be available when mapping a new workflow or changed graph.
 This applies to both visual workflows and API-only graphs. An unchanged workflow
-with saved mappings can be exported, imported or cloned while the worker is
-offline. Saving a changed graph derives its mappings again, so controls do not
-keep references to a previous revision.
+with saved mappings can be exported, cloned or given a new revision while the
+worker is offline, and an API-only one can also be imported. Importing a visual
+workflow needs the worker even when its mappings are saved, because its visual
+graph must compile to exactly the executable graph: the native editor opens the
+visual graph, and Auto reads it to tell what kind of image edit the workflow
+makes. The saved mappings are kept as exported. Saving a changed graph derives
+its mappings again, so controls do not keep references to a previous revision.
 
 ## Preparing an exact version
 
