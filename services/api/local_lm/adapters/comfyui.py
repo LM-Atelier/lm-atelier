@@ -301,6 +301,26 @@ class ComfyUIAdapter:
             return parameters.get(value[2:-1], value)
         return value
 
+    @staticmethod
+    def _leaves_unfilled(value: Any, parameters: dict[str, Any]) -> bool:
+        """Whether compiling this graph would keep a placeholder as written.
+
+        `_compile` keeps one it has no value for, and ComfyUI would then be
+        sent the placeholder itself, such as an image to load named "${mask}".
+        Asked of the graph before compiling, by the same test, so a prompt that
+        happens to look like a placeholder is never mistaken for one.
+        """
+        if isinstance(value, dict):
+            return any(ComfyUIAdapter._leaves_unfilled(item, parameters) for item in value.values())
+        if isinstance(value, list):
+            return any(ComfyUIAdapter._leaves_unfilled(item, parameters) for item in value)
+        return (
+            isinstance(value, str)
+            and value.startswith("${")
+            and value.endswith("}")
+            and value[2:-1] not in parameters
+        )
+
     def _websocket_url(self, client_id: str) -> str:
         parsed = urlparse(self.base_url)
         scheme = "wss" if parsed.scheme == "https" else "ws"
@@ -505,6 +525,11 @@ class ComfyUIAdapter:
             if cancel_event.is_set():
                 yield MediaEvent(type="cancelled")
                 return
+            if self._leaves_unfilled(request.workflow, parameters):
+                raise ValueError(
+                    "This workflow has an input this request leaves empty, so it was not sent "
+                    "to ComfyUI. Choose a workflow made for this kind of request."
+                )
             graph = self._compile(request.workflow, parameters)
             graph = await self._runtime_lora_graph(graph, cancel_event)
             yield MediaEvent(

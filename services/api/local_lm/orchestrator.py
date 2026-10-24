@@ -271,6 +271,7 @@ from .source_fit_recipe import SourceExtensionRecipe, plan_source_extension
 from .source_fit_recipes import SourceFitRecipe
 from .source_fit_restore import SourceRestore, fit_to_canvas, fits, restore_source, restores
 from .studio_masks import (
+    MASK_APPLY_BLEND,
     MASK_SETTING_KEY,
     MaskContractError,
     parse_mask_setting,
@@ -294,6 +295,7 @@ from .studio_relight import (
     split_relight_setting,
 )
 from .turn_inheritance import TurnInheritance, TurnSourceResolver, inherited_profile_configuration
+from .turn_workflow_kinds import ANY_TURN, TurnWorkflowKinds, turn_workflow_kinds
 from .upscale_preview import UpscalePreviewOut, UpscaleSelectionUnavailable, project_upscale_preview
 from .upscale_workflows import (
     UPSCALE_SETTING_KEY,
@@ -10893,13 +10895,22 @@ class ConversationOrchestrator:
                 )
         # Run without margins, an outpainter pads the picture by whatever its graph
         # was saved with, so an edit comes back on a larger canvas or, padded by
-        # nothing, unchanged. Only named margins or a canvas to extend onto ask
-        # for one.
-        skip_outpaint = (
-            operation == Operation.IMAGE_TO_IMAGE
-            and OUTPAINT_SETTING_KEY not in request.settings
-            and (request.source_fit is None or request.source_fit.mode != "extend")
-        )
+        # nothing, unchanged. Run without a selection, an inpainter has nothing for
+        # its mask input, and an upscaler enlarges an edit nobody asked to enlarge.
+        # So each is chosen only for the turn that fills its input.
+        kinds = ANY_TURN
+        if operation == Operation.IMAGE_TO_IMAGE:
+            mask = request.settings.get(MASK_SETTING_KEY)
+            kinds = turn_workflow_kinds(
+                margins=OUTPAINT_SETTING_KEY in request.settings,
+                extends_canvas=request.source_fit is not None
+                and request.source_fit.mode == "extend",
+                # A blend selection is placed back after a whole-picture edit and
+                # never reaches the workflow.
+                selection=mask is not None
+                and not (isinstance(mask, dict) and mask.get("apply") == MASK_APPLY_BLEND),
+                enlargement=request.upscale,
+            )
         result = self._profile_and_workflow_for_operation(
             session,
             chat,
@@ -10909,7 +10920,7 @@ class ConversationOrchestrator:
             preferred_profile_id=profile_id,
             workflow_choice=choice,
             revision_eligibility=revision_eligibility,
-            skip_outpaint=skip_outpaint,
+            kinds=kinds,
         )
         if revision_id is not None and (result[2] is None or result[2].id != revision_id):
             raise ValueError("The selected turn workflow revision is not ready for this operation.")
@@ -11028,7 +11039,7 @@ class ConversationOrchestrator:
         preferred_profile_id: str | None = None,
         workflow_choice: TurnWorkflowSelectionIn | None = None,
         revision_eligibility: RevisionEligibility | None = None,
-        skip_outpaint: bool = False,
+        kinds: TurnWorkflowKinds = ANY_TURN,
     ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None]:
         if preferred_revision_id is not None and preferred_profile_id is None:
             preferred_profile_id = self._profile_bound_by_revision(
@@ -11053,7 +11064,7 @@ class ConversationOrchestrator:
                 preferred_revision_id=preferred_revision_id,
                 workflow_choice=workflow_choice,
                 revision_eligibility=revision_eligibility,
-                skip_outpaint=skip_outpaint,
+                kinds=kinds,
             )
             if selected_workflow is not None:
                 selected_profile = selected_workflow[0]
@@ -11088,7 +11099,7 @@ class ConversationOrchestrator:
                 project_id=chat.project_id,
                 model_install_id=selected.model_install_id,
                 preferred_revision_id=preferred_revision_id,
-                skip_outpaint=skip_outpaint,
+                kinds=kinds,
             )
             _require_revision_eligibility(operation, workflow, revision_eligibility)
             return (
@@ -11109,7 +11120,7 @@ class ConversationOrchestrator:
             preferred_revision_id=preferred_revision_id,
             workflow_choice=workflow_choice,
             revision_eligibility=revision_eligibility,
-            skip_outpaint=skip_outpaint,
+            kinds=kinds,
         )
         if workflow_first is not None:
             return workflow_first
@@ -11122,7 +11133,7 @@ class ConversationOrchestrator:
             project_id=chat.project_id,
             model_install_id=profile.model_install_id if profile else None,
             preferred_revision_id=preferred_revision_id,
-            skip_outpaint=skip_outpaint,
+            kinds=kinds,
         )
         if (
             operation == Operation.TEXT
@@ -11151,7 +11162,7 @@ class ConversationOrchestrator:
                 session,
                 operation,
                 model_install_id=candidate.model_install_id,
-                skip_outpaint=skip_outpaint,
+                kinds=kinds,
             )
             if (
                 candidate_workflow
@@ -11383,7 +11394,7 @@ class ConversationOrchestrator:
         preferred_revision_id: str | None,
         workflow_choice: TurnWorkflowSelectionIn | None = None,
         revision_eligibility: RevisionEligibility | None = None,
-        skip_outpaint: bool = False,
+        kinds: TurnWorkflowKinds = ANY_TURN,
     ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None] | None:
         """Resolve new workflow choices before entering the legacy compatibility path."""
 
@@ -11451,7 +11462,7 @@ class ConversationOrchestrator:
                 legacy_session,
                 legacy_operation,
                 model_install_id=profile.model_install_id,
-                skip_outpaint=skip_outpaint,
+                kinds=kinds,
             )
 
         combined_eligibility = (
@@ -11472,7 +11483,7 @@ class ConversationOrchestrator:
                 legacy_revision_resolver=legacy_revision,
                 preferred_revision=self._instruction_edit_preference(operation, prompt),
                 revision_eligibility=combined_eligibility,
-                skip_outpaint=skip_outpaint,
+                kinds=kinds,
             )
         except WorkflowFamilySelectionError as exc:
             reasons = (
@@ -12289,7 +12300,7 @@ class ConversationOrchestrator:
         project_id: str | None = None,
         model_install_id: str | None = None,
         preferred_revision_id: str | None = None,
-        skip_outpaint: bool = False,
+        kinds: TurnWorkflowKinds = ANY_TURN,
     ) -> WorkflowRevision | None:
         if operation == Operation.TEXT:
             return None
@@ -12331,7 +12342,12 @@ class ConversationOrchestrator:
                     model_install_id=model_install_id,
                     role="video" if is_video else "image",
                 )
+        # Newest first, and one that runs on this model before one that names
+        # none. A workflow that takes what the turn brings comes before both:
+        # any other would refuse the selection or margins it has nowhere to put.
         generic: WorkflowRevision | None = None
+        preferred_generic: WorkflowRevision | None = None
+        bound_fallback: WorkflowRevision | None = None
         with session.scalars(
             select(WorkflowDefinition)
             .where(
@@ -12348,22 +12364,25 @@ class ConversationOrchestrator:
                 if not revision or not self._workflow_matches_engine(revision):
                     continue
                 # A workflow that only cuts a subject out is chosen by name, by the
-                # tool that asks for a cutout. Picked for an ordinary edit it would
-                # hand back a cutout instead of the edit asked for, and it declares
-                # no model, so without this it would be the first generic choice.
-                if workflow_declares_matting(revision.input_schema_json):
+                # tool that asks for a cutout, and it declares no model, so without
+                # this it would be the first generic choice. One that waits for an
+                # input the turn leaves empty would run without it.
+                if not kinds.admits(revision.input_schema_json):
                     continue
-                # Asked for no margins, an outpainter pads by what its graph was saved
-                # with, so a turn that names none is given an edit workflow or nothing.
-                if skip_outpaint and workflow_declares_outpaint(revision.input_schema_json):
-                    continue
+                preferred = kinds.prefers(revision.input_schema_json)
                 if self._revision_declares_a_model(revision):
-                    if self._revision_accepts_install(session, revision, model_install_id):
+                    if not self._revision_accepts_install(session, revision, model_install_id):
+                        continue
+                    if preferred or kinds.brings is None:
                         return revision
+                    if bound_fallback is None:
+                        bound_fallback = revision
                     continue
+                if preferred and preferred_generic is None:
+                    preferred_generic = revision
                 if generic is None:
                     generic = revision
-        return generic
+        return preferred_generic or bound_fallback or generic
 
     def installed_lighting_adapter_ids(self, session: Session) -> list[str]:
         """Installed, verified LoRAs that are exactly the declared lighting adapter."""

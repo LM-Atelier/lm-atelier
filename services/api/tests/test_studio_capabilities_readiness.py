@@ -92,14 +92,18 @@ async def test_a_workflow_waiting_for_review_offers_no_tool_until_it_is_reviewed
     assert waiting["brush"]["available"] is False
     assert waiting["instruct"]["available"] is False
     assert waiting["brush"]["reason"] == WAITING
-    assert waiting["instruct"]["reason"] == WAITING
     # Nothing installed can enlarge a picture, so that tool still asks for an install.
     assert waiting["enhance"]["reason"] == "Install an upscaling workflow to enlarge a picture."
+    # An instruction brings no selection, so its turn is never given an inpainter,
+    # reviewed or not: Instruct asks for an editing workflow either way.
+    editing = "Install an image editing workflow to change a picture."
+    assert waiting["instruct"]["reason"] == editing
 
     seed_workflow_trust(revision_id)
     reviewed = await _tools(client)
     assert reviewed["brush"]["available"] is True
-    assert reviewed["instruct"]["available"] is True
+    assert reviewed["instruct"]["available"] is False
+    assert reviewed["instruct"]["reason"] == editing
 
 
 async def test_a_cutout_runs_on_a_reviewed_workflow_even_when_an_unreviewed_one_comes_first(

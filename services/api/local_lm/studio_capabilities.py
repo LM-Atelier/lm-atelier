@@ -18,8 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from .matting_workflows import workflow_declares_matting
-from .outpaint_workflows import workflow_declares_outpaint
-from .studio_masks import workflow_accepts_mask
+from .turn_workflow_kinds import ENLARGEMENT, EXTENSION, SELECTION_EDIT, WHOLE_PICTURE_EDIT
 from .upscale_workflows import workflow_declares_upscale
 
 StudioToolKind = Literal[
@@ -53,8 +52,8 @@ StudioToolKind = Literal[
 #: The tool kinds the surface offers, paired with what each needs installed.
 #: Selection tools share one class: they are six ways to draw one mask. Text
 #: and Remove mark a selection too, but it is placed back after a whole-picture
-#: edit rather than given to the workflow, so any edit workflow but one that
-#: only paints past the edge can run them.
+#: edit rather than given to the workflow, so any edit workflow that waits for
+#: no mask, margins or enlargement can run them.
 TOOL_WORKFLOW_CLASSES: dict[StudioToolKind, str] = {
     "instruct": "image_to_image",
     "brush": "inpaint",
@@ -125,6 +124,11 @@ class ToolCapability:
     adapter_asset_id: str | None = None
 
 
+def _enlarges(schema: dict[str, Any] | None) -> bool:
+    """Whether Enhance's turn, which asks for a larger picture, could run on this."""
+    return ENLARGEMENT.serves(schema) and workflow_declares_upscale(schema)
+
+
 def tool_capabilities(
     *,
     edit_input_schemas: list[dict[str, Any] | None],
@@ -145,19 +149,12 @@ def tool_capabilities(
     no tool ready, but a tool one of them would serve says so, rather than
     asking for an install that has already happened.
     """
-    # Only Extend names margins. Every other tool's turn names none and is never
-    # given a workflow that paints past the edge, so one does not make those
-    # tools ready.
-    ordinary = [schema for schema in edit_input_schemas if not workflow_declares_outpaint(schema)]
-    ordinary_waiting = [
-        schema for schema in waiting_input_schemas if not workflow_declares_outpaint(schema)
-    ]
-    # A workflow that only cuts a subject out cannot carry out an instruction,
-    # so on its own it does not make the instructed tools usable.
-    can_edit = any(not workflow_declares_matting(schema) for schema in ordinary)
-    can_mask = any(workflow_accepts_mask(schema) for schema in ordinary)
-    can_upscale = any(workflow_declares_upscale(schema) for schema in ordinary)
-    can_outpaint = any(workflow_declares_outpaint(schema) for schema in edit_input_schemas)
+    # A tool is ready when the turn it sends would be given a workflow, judged by
+    # the rules the run's own choice reads, so the report and the run agree.
+    can_edit = any(WHOLE_PICTURE_EDIT.serves(schema) for schema in edit_input_schemas)
+    can_mask = any(SELECTION_EDIT.serves(schema) for schema in edit_input_schemas)
+    can_upscale = any(_enlarges(schema) for schema in edit_input_schemas)
+    can_outpaint = any(EXTENSION.serves(schema) for schema in edit_input_schemas)
     can_matte = any(workflow_declares_matting(schema) for schema in edit_input_schemas)
     available = {
         "image_to_image": can_edit,
@@ -172,10 +169,12 @@ def tool_capabilities(
         "local": True,
     }
     waiting = {
-        "image_to_image": any(not workflow_declares_matting(schema) for schema in ordinary_waiting),
-        "inpaint": any(workflow_accepts_mask(schema) for schema in ordinary_waiting),
-        "upscale": any(workflow_declares_upscale(schema) for schema in ordinary_waiting),
-        "outpaint": any(workflow_declares_outpaint(schema) for schema in waiting_input_schemas),
+        "image_to_image": any(
+            WHOLE_PICTURE_EDIT.serves(schema) for schema in waiting_input_schemas
+        ),
+        "inpaint": any(SELECTION_EDIT.serves(schema) for schema in waiting_input_schemas),
+        "upscale": any(_enlarges(schema) for schema in waiting_input_schemas),
+        "outpaint": any(EXTENSION.serves(schema) for schema in waiting_input_schemas),
         "matting": any(workflow_declares_matting(schema) for schema in waiting_input_schemas),
     }
 
