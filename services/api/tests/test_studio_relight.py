@@ -108,6 +108,8 @@ def test_a_valid_relight_request_normalizes() -> None:
         ({"direction": "left", "intensity": 1.5}, "relight-intensity-invalid"),
         ({"direction": "left", "intensity": True}, "relight-intensity-invalid"),
         ({"direction": "left", "intensity": float("nan")}, "relight-intensity-invalid"),
+        # Too large for a float: refused, not an overflow.
+        ({"direction": "left", "intensity": 10**400}, "relight-intensity-invalid"),
         ({"direction": "left", "kelvin": 2700}, "relight-warmth-invalid"),
         ({"direction": "left", "kelvin": 4500.5}, "relight-warmth-invalid"),
         ({"direction": "left", "kelvin": True}, "relight-warmth-invalid"),

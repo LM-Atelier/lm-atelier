@@ -520,6 +520,34 @@ async def test_an_edit_worded_by_another_version_is_not_replayed(client: AsyncCl
     assert unsupported[0]["reasons"] == ["edit_prompt_wording"]
 
 
+async def test_a_relight_record_is_not_said_to_be_worded_by_another_version(
+    client: AsyncClient,
+) -> None:
+    """A relight's prompt is the lighting adapter's instruction, not the edit wording.
+
+    Its stored picture was finished after generation, which is the refusal it gets.
+    """
+    profile_id = _profile()
+    _, content = await _recorded(client, profile_id)
+
+    def relit(record: dict[str, Any]) -> None:
+        record["operation"] = "image_to_image"
+        record["inputs"] = [
+            {"sha256": "5" * 64, "role": "source", "size_bytes": 10, "media_type": "image/png"}
+        ]
+        record["prompt"]["positive"] = "使用图2的亮度贴图对图1重新照明(光源来自左方)"
+        record["removed"] = sorted({*record["removed"], "settings.relight"})
+        missing = record["reproducibility"]["missing"]
+        record["reproducibility"]["missing"] = sorted({*missing, "finished_after_generation"})
+
+    response = await _replay(client, await _new_chat(client), _resealed(content, relit))
+
+    assert response.status_code == 409
+    reasons = [reason for item in response.json()["refusals"] for reason in item.get("reasons", [])]
+    assert "edit_prompt_wording" not in reasons
+    assert "finished_after_generation" in reasons
+
+
 async def test_a_replay_says_whether_it_came_out_as_the_record_did(client: AsyncClient) -> None:
     profile_id = _profile()
     original, content = await _recorded(client, profile_id)
