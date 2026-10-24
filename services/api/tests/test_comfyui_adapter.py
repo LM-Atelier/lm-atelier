@@ -1756,6 +1756,45 @@ async def test_a_selection_without_a_resolved_file_refuses(tmp_path: Path) -> No
         await adapter.close()
 
 
+async def test_a_selection_read_by_the_server_is_uploaded_in_place_of_the_stored_file(
+    tmp_path: Path,
+) -> None:
+    """The stored file stays as drawn; the workflow receives the selection as read."""
+
+    source = tmp_path / "source-artifact"
+    source.write_bytes(b"\x89PNG\r\n\x1a\n" + b"source")
+    mask = tmp_path / "mask-artifact"
+    mask.write_bytes(b"\x89PNG\r\n\x1a\n" + b"as-drawn")
+    uploads: dict[str, bytes] = {}
+
+    async def upload(request: httpx.Request) -> httpx.Response:
+        body = await request.aread()
+        text = body.decode("latin-1")
+        marker = 'filename="'
+        start = text.index(marker) + len(marker)
+        name = text[start : text.index('"', start)]
+        uploads[name] = body
+        return httpx.Response(200, json={"name": name, "subfolder": "lm-atelier", "type": "temp"})
+
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(upload),
+    )
+    request = media_request(source)
+    request.parameters["mask"] = {"artifact_id": f"sha256:{'a' * 64}", "path": str(mask)}
+    request.mask_content = b"\x89PNG\r\n\x1a\n" + b"as-read"
+    try:
+        await adapter._request_parameters(request)
+    finally:
+        await adapter.close()
+
+    sent = next(body for name, body in uploads.items() if "-mask-" in name)
+    assert b"as-read" in sent
+    assert b"as-drawn" not in sent
+
+
 MINE = "prompt-reply-lost"
 OTHER = "prompt-someone-else"
 

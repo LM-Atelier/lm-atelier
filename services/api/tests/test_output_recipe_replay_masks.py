@@ -40,6 +40,19 @@ async def _picture(client: AsyncClient, colour: tuple[int, int, int]) -> str:
     return cast(str, uploaded.json()["id"])
 
 
+async def _half_selection(client: AsyncClient) -> str:
+    """The left half selected: turned round, it still selects the other half."""
+    picture = io.BytesIO()
+    selection = Image.new("RGB", (8, 6), (0, 0, 0))
+    selection.paste((255, 255, 255), (0, 0, 4, 6))
+    selection.save(picture, format="PNG")
+    uploaded = await client.post(
+        "/api/artifacts", files={"file": ("selection.png", picture.getvalue(), "image/png")}
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    return cast(str, uploaded.json()["id"])
+
+
 async def _masked_edit(
     client: AsyncClient, selection: dict[str, Any], *, also_a_picture: bool = False
 ) -> tuple[str, bytes]:
@@ -104,7 +117,7 @@ async def test_an_edit_of_a_selection_generates_again_with_that_selection(
 async def test_a_selection_the_record_does_not_hold_whole_is_refused(
     client: AsyncClient,
 ) -> None:
-    mask = await _picture(client, (255, 255, 255))
+    mask = await _half_selection(client)
     _, feathered = await _masked_edit(
         client, {"artifact_id": mask, "feather_px": 4, "invert": True}
     )

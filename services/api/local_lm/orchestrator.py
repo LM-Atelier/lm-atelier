@@ -283,6 +283,7 @@ from .studio_region_edit import (
     RegionEditError,
     blend_through_selection,
     prepare_selection,
+    workflow_selection_mask,
 )
 from .studio_relight import (
     RELIGHT_SETTING_KEY,
@@ -7101,6 +7102,65 @@ class ConversationOrchestrator:
             for generated, measurement in zip(completed_assets, measurements, strict=True)
         ]
 
+    def _execution_selection(
+        self,
+        session: Session,
+        mask_artifact: Artifact,
+        settings: dict[str, Any],
+        operation: str,
+        input_ids: list[str],
+        *,
+        source_count: int,
+        schema: dict[str, Any] | None,
+    ) -> RegionEdit | None:
+        """A run's selection, with the stored bytes of the picture it selects from.
+
+        Checked again against the inputs this execution resolved: a blend places
+        the result back into them, and a workflow is handed the selection placed
+        on them. A workflow's selection whose files are too large to read here
+        is None: it is handed as drawn.
+        """
+        try:
+            selection = parse_mask_setting(
+                settings, schema, operation=operation, source_count=source_count
+            )
+        except MaskContractError as exc:
+            raise RuntimeError(str(exc)) from exc
+        source_artifact = session.get(Artifact, input_ids[0])
+        if selection is None or source_artifact is None:
+            raise RuntimeError("The picture this edit selects from is unavailable.")
+        if (
+            not selection.blend
+            and max(source_artifact.size_bytes, mask_artifact.size_bytes) > MAX_BLEND_READ_BYTES
+        ):
+            return None
+        return RegionEdit(
+            selection=selection,
+            source_artifact_id=source_artifact.id,
+            source=self.artifacts.verified_bytes(
+                source_artifact, maximum_bytes=MAX_BLEND_READ_BYTES
+            ),
+            mask=self.artifacts.verified_bytes(mask_artifact, maximum_bytes=MAX_BLEND_READ_BYTES),
+        )
+
+    @staticmethod
+    async def _checked_selection(
+        region_edit: RegionEdit | None, workflow_selection: RegionEdit | None
+    ) -> bytes | None:
+        """Check a run's selection before any model time, and make a workflow's mask.
+
+        A selection drawn on another picture, or one covering nothing, can be
+        neither placed back nor handed to a workflow.
+        """
+        try:
+            if region_edit is not None:
+                await asyncio.to_thread(prepare_selection, region_edit)
+            if workflow_selection is not None:
+                return await asyncio.to_thread(workflow_selection_mask, workflow_selection)
+        except RegionEditError as exc:
+            raise RuntimeError(str(exc)) from exc
+        return None
+
     async def _execute_media(self, job_id: str, run_id: str, claim: JobClaim) -> str | None:
         activation_scope: WorkflowActivationLaunchScope | None = None
         with self.session_factory() as session:
@@ -7303,6 +7363,7 @@ class ConversationOrchestrator:
                 parameters.pop(VIDEO_DURATION_SETTING_KEY, None)
             mask_setting = execution_settings.get(MASK_SETTING_KEY)
             region_edit: RegionEdit | None = None
+            workflow_selection: RegionEdit | None = None
             relight_finish: RelightFinish | None = None
             if RELIGHT_SETTING_KEY in execution_settings:
                 # The workflow never reads this: it says how the relit result is
@@ -7335,38 +7396,32 @@ class ConversationOrchestrator:
                 mask_artifact = session.get(Artifact, str(mask_setting.get("artifact_id") or ""))
                 if not mask_artifact:
                     raise RuntimeError("The selection for this edit is no longer stored.")
+                selected = self._execution_selection(
+                    session,
+                    mask_artifact,
+                    execution_settings,
+                    execution_operation,
+                    input_ids,
+                    source_count=len(input_ids) if len(input_paths) == len(input_ids) else 0,
+                    # A blend needs no mask input; a workflow's selection does.
+                    schema=(
+                        None
+                        if "apply" in mask_setting or revision is None
+                        else revision.input_schema_json
+                    ),
+                )
                 if "apply" in mask_setting:
                     # A blend selection never reaches the workflow: it edits the
                     # whole picture, and the selection decides afterwards which
-                    # of its pixels are kept. Checked again against the inputs
-                    # this execution resolved, because those are what the
-                    # result is placed back into.
+                    # of its pixels are kept.
                     parameters.pop(MASK_SETTING_KEY, None)
-                    try:
-                        selection = parse_mask_setting(
-                            execution_settings,
-                            None,
-                            operation=execution_operation,
-                            source_count=(
-                                len(input_ids) if len(input_paths) == len(input_ids) else 0
-                            ),
-                        )
-                    except MaskContractError as exc:
-                        raise RuntimeError(str(exc)) from exc
-                    source_artifact = session.get(Artifact, input_ids[0])
-                    if selection is None or source_artifact is None:
-                        raise RuntimeError("The picture this edit selects from is unavailable.")
-                    region_edit = RegionEdit(
-                        selection=selection,
-                        source_artifact_id=source_artifact.id,
-                        source=self.artifacts.verified_bytes(
-                            source_artifact, maximum_bytes=MAX_BLEND_READ_BYTES
-                        ),
-                        mask=self.artifacts.verified_bytes(
-                            mask_artifact, maximum_bytes=MAX_BLEND_READ_BYTES
-                        ),
-                    )
+                    region_edit = selected
                 else:
+                    # A selection may be drawn in transparency or in brightness,
+                    # and asked to be turned round, but a workflow reads its mask
+                    # input one way. So it is handed the selection as the blend
+                    # would have read it.
+                    workflow_selection = selected
                     parameters[MASK_SETTING_KEY] = {
                         **mask_setting,
                         "path": str(
@@ -7389,13 +7444,9 @@ class ConversationOrchestrator:
             )
             assistant_id = run.assistant_message_id
 
-        if region_edit is not None:
-            # Before any model time is spent: a selection drawn on another
-            # picture, or one covering nothing, cannot be placed back.
-            try:
-                await asyncio.to_thread(prepare_selection, region_edit)
-            except RegionEditError as exc:
-                raise RuntimeError(str(exc)) from exc
+        mask_content = await self._checked_selection(region_edit, workflow_selection)
+        if mask_content is not None:
+            request = replace(request, mask_content=mask_content)
 
         completed_assets = []
         preview_artifact_id: str | None = None

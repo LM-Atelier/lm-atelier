@@ -19,6 +19,10 @@ from local_lm.schemas import TurnRequest
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+#: A one-pixel selection, white: it selects the whole picture.
+SELECTION = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGP4DwABAQEAsTj2FAAAAABJRU5ErkJggg=="
+)
 
 
 @pytest.mark.parametrize(
@@ -40,10 +44,12 @@ async def test_accepted_media_request_uses_frozen_inputs(
 ) -> None:
     orchestrator = app.state.services.orchestrator
     artifacts = []
-    for index in range(2):
+    # The selection is white, so it selects the whole one-pixel picture: an
+    # opaque black one selects nothing and is refused before the run.
+    for content in (PNG + bytes([0]), SELECTION):
         response = await client.post(
             "/api/artifacts",
-            files={"file": ("neutral.png", PNG + bytes([index]), "image/png")},
+            files={"file": ("neutral.png", content, "image/png")},
         )
         assert response.status_code == 201
         artifacts.append(response.json()["id"])

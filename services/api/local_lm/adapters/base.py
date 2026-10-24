@@ -67,6 +67,9 @@ class MediaRequest:
     # source through upload without reopening its pathname. This field is
     # transport data; accepted-source and workflow authority remain upstream.
     input_contents: tuple[bytes, ...] | None = field(default=None, repr=False)
+    # The selection a workflow's mask input receives, already read the way a
+    # blend reads it. Without it the selection's stored file is sent as drawn.
+    mask_content: bytes | None = field(default=None, repr=False)
 
 
 @dataclass
