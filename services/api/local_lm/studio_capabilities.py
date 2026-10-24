@@ -19,7 +19,6 @@ from typing import Any, Literal
 
 from .matting_workflows import workflow_declares_matting
 from .turn_workflow_kinds import ENLARGEMENT, EXTENSION, SELECTION_EDIT, WHOLE_PICTURE_EDIT
-from .upscale_workflows import workflow_declares_upscale
 
 StudioToolKind = Literal[
     "instruct",
@@ -124,11 +123,6 @@ class ToolCapability:
     adapter_asset_id: str | None = None
 
 
-def _enlarges(schema: dict[str, Any] | None) -> bool:
-    """Whether Enhance's turn, which asks for a larger picture, could run on this."""
-    return ENLARGEMENT.serves(schema) and workflow_declares_upscale(schema)
-
-
 def tool_capabilities(
     *,
     edit_input_schemas: list[dict[str, Any] | None],
@@ -153,7 +147,7 @@ def tool_capabilities(
     # the rules the run's own choice reads, so the report and the run agree.
     can_edit = any(WHOLE_PICTURE_EDIT.serves(schema) for schema in edit_input_schemas)
     can_mask = any(SELECTION_EDIT.serves(schema) for schema in edit_input_schemas)
-    can_upscale = any(_enlarges(schema) for schema in edit_input_schemas)
+    can_upscale = any(ENLARGEMENT.serves(schema) for schema in edit_input_schemas)
     can_outpaint = any(EXTENSION.serves(schema) for schema in edit_input_schemas)
     can_matte = any(workflow_declares_matting(schema) for schema in edit_input_schemas)
     available = {
@@ -173,7 +167,7 @@ def tool_capabilities(
             WHOLE_PICTURE_EDIT.serves(schema) for schema in waiting_input_schemas
         ),
         "inpaint": any(SELECTION_EDIT.serves(schema) for schema in waiting_input_schemas),
-        "upscale": any(_enlarges(schema) for schema in waiting_input_schemas),
+        "upscale": any(ENLARGEMENT.serves(schema) for schema in waiting_input_schemas),
         "outpaint": any(EXTENSION.serves(schema) for schema in waiting_input_schemas),
         "matting": any(workflow_declares_matting(schema) for schema in waiting_input_schemas),
     }
