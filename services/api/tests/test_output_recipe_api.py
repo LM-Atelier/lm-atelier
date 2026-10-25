@@ -317,15 +317,16 @@ async def test_a_step_fed_by_another_output_names_it_and_says_so(client: AsyncCl
     assert "depends_on_other_outputs" in record["reproducibility"]["missing"]
 
 
+@pytest.mark.parametrize("finishing", ["region_edit", "selection_crop"])
 async def test_a_picture_finished_after_generation_is_never_called_recorded(
-    client: AsyncClient,
+    client: AsyncClient, finishing: str
 ) -> None:
     run, artifact_id = await _generated(client)
     with SessionLocal() as session:
         stored = session.get(Run, run["id"])
         assert stored is not None
         outputs = [dict(item) for item in stored.provenance_json["outputs"]]
-        outputs[0]["region_edit"] = {"version": 1}
+        outputs[0][finishing] = {"version": 1}
         stored.provenance_json = {**stored.provenance_json, "outputs": outputs}
         session.commit()
 

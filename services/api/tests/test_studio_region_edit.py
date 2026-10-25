@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import io
+import random
 
 import pytest
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 from local_lm import studio_region_edit
 from local_lm.studio_masks import MaskSelection
@@ -14,9 +15,12 @@ from local_lm.studio_region_edit import (
     RegionEdit,
     RegionEditError,
     blend_through_selection,
+    crop_selection,
     prepare_selection,
+    stitch_selection,
     workflow_selection_mask,
 )
+from local_lm.workflow_source_geometry import SelectionRoute
 
 SOURCE_ID = f"sha256:{'b' * 64}"
 MASK_ID = f"sha256:{'c' * 64}"
@@ -325,6 +329,178 @@ def test_a_workflow_selection_covering_nothing_refuses() -> None:
     with pytest.raises(RegionEditError) as raised:
         workflow_selection_mask(_edit(mask=_png(Image.new("RGBA", (64, 48), (0, 0, 0, 255)))))
     assert raised.value.code == "region-selection-empty"
+
+
+#: A small selection on a larger picture: 40 x 30 pixels of a 512 x 384 picture.
+SMALL = (200, 150, 239, 179)
+#: A graph whose pictures all come back the crop's size; only pixels are tested here.
+ROUTE = SelectionRoute(source_node_id="source", save_node_ids=frozenset({"save"}))
+PAINTED = (10, 200, 30)
+
+
+def _smooth_source() -> Image.Image:
+    """A 512 x 384 picture of soft gradients, whose colours survive being resized."""
+    picture = Image.new("RGB", (512, 384))
+    picture.putdata(
+        [(x // 2, y * 255 // 383, 128 + (x + y) // 16) for y in range(384) for x in range(512)]
+    )
+    return picture
+
+
+def _grain(mean: tuple[int, int, int], deviation: float) -> Image.Image:
+    """Fine grain around one colour, which enlarging and shrinking back softens."""
+    rng = random.Random(7)
+    picture = Image.new("RGB", (512, 384))
+    picture.putdata(
+        [
+            (
+                max(0, min(255, round(rng.gauss(mean[0], deviation)))),
+                max(0, min(255, round(rng.gauss(mean[1], deviation)))),
+                max(0, min(255, round(rng.gauss(mean[2], deviation)))),
+            )
+            for _ in range(512 * 384)
+        ]
+    )
+    return picture
+
+
+def _small_mask() -> bytes:
+    alpha = Image.new("L", (512, 384), 0)
+    ImageDraw.Draw(alpha).rectangle(SMALL, fill=255)
+    mask = Image.new("RGBA", (512, 384), (255, 255, 255, 0))
+    mask.putalpha(alpha)
+    return _png(mask)
+
+
+def test_a_selection_with_its_surroundings_past_half_the_picture_is_not_cropped() -> None:
+    assert crop_selection(_edit(), ROUTE) is None
+
+
+def test_a_small_selection_is_cropped_with_room_around_it_and_enlarged() -> None:
+    crop = crop_selection(_edit(_png(_smooth_source()), _small_mask()), ROUTE)
+
+    assert crop is not None
+    assert crop.route == ROUTE
+    # The selection's own bounds, widened by at least 32 pixels on each side.
+    assert crop.box == (168, 118, 272, 212)
+    # Enlarged toward a megapixel, in whole blocks of 64.
+    assert crop.size == (1088, 960)
+    picture = _pixels(crop.picture)
+    mask = _pixels(crop.mask)
+    assert picture.size == mask.size == crop.size
+    assert picture.mode == "RGB"
+    # The selection in its brightness and its alpha, as the whole picture's is handed.
+    assert mask.getpixel((crop.size[0] // 2, crop.size[1] // 2)) == (255, 255, 255, 255)
+    assert mask.getpixel((5, 5)) == (0, 0, 0, 0)
+
+
+def test_a_picture_too_large_to_place_an_edit_back_into_is_not_cropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(studio_region_edit, "MAX_BLEND_PIXELS", 512 * 384 - 1)
+    assert crop_selection(_edit(_png(_smooth_source()), _small_mask()), ROUTE) is None
+
+
+def test_a_source_that_does_not_read_whole_is_edited_whole() -> None:
+    """A photo cut short still opens, so the whole picture is handed and its own checks decide."""
+    buffer = io.BytesIO()
+    _grain((90, 140, 70), 14).save(buffer, format="JPEG", quality=90)
+    whole = buffer.getvalue()
+    assert crop_selection(_edit(whole[: len(whole) // 2], _small_mask()), ROUTE) is None
+
+
+def _faithful_edit(
+    crop: studio_region_edit.SelectionCrop,
+    painted: tuple[int, int, int],
+    *,
+    drift: tuple[int, int, int] = (0, 0, 0),
+    shading: int = 0,
+) -> bytes:
+    """What a faithful workflow returns: the crop it was given, painted where its mask selects.
+
+    `drift` moves every pixel, as a model that shifts colour does; `shading`
+    adds a gentle left-to-right ramp that averages to nothing.
+    """
+    given = _pixels(crop.picture).convert("RGB")
+    selected = _pixels(crop.mask).getchannel("A").point(lambda value: 255 if value >= 128 else 0)
+    result = Image.composite(Image.new("RGB", given.size, painted), given, selected)
+    if shading:
+        width = given.width
+        ramp = Image.new("L", (width, 1))
+        ramp.putdata([round(shading * 2 * x / (width - 1)) for x in range(width)])
+        ramp = ramp.resize(given.size, Image.Resampling.NEAREST)
+        result = ImageChops.add(result, Image.merge("RGB", (ramp, ramp, ramp)), offset=-shading)
+    table = [min(255, max(0, value + offset)) for offset in drift for value in range(256)]
+    return _png(result.point(table))
+
+
+def _kept_outside_and_inside(
+    source: Image.Image, content: bytes, painted: tuple[int, int, int], tolerance: int
+) -> None:
+    out = _pixels(content)
+    assert out.size == (512, 384)
+    for y in range(0, 384, 3):
+        for x in range(0, 512, 3):
+            if not (SMALL[0] <= x <= SMALL[2] and SMALL[1] <= y <= SMALL[3]):
+                assert out.getpixel((x, y)) == source.getpixel((x, y)), (x, y)
+    inside = _pixel_channels(out, (219, 164))
+    assert all(abs(got - want) <= tolerance for got, want in zip(inside, painted, strict=True)), (
+        inside
+    )
+
+
+@pytest.mark.parametrize(
+    "surroundings", ["grain", "dark-grain", "every-pixel-different", "shaded-wall"]
+)
+def test_a_faithful_edit_on_fine_texture_is_kept_as_drawn(surroundings: str) -> None:
+    """Resampling softens fine texture, and shading may come and go; neither moves the edit."""
+    source, painted, shading = {
+        "grain": (_grain((90, 140, 70), 14), (40, 40, 40), 0),
+        "dark-grain": (_grain((14, 14, 14), 4), (235, 225, 190), 0),
+        "every-pixel-different": (_source((512, 384)), PAINTED, 0),
+        "shaded-wall": (_grain((200, 200, 200), 0.6), (20, 20, 20), 4),
+    }[surroundings]
+    crop = crop_selection(_edit(_png(source), _small_mask()), ROUTE)
+    assert crop is not None
+
+    blend = stitch_selection(crop, _faithful_edit(crop, painted, shading=shading))
+
+    _kept_outside_and_inside(source, blend.content, painted, tolerance=1)
+    assert blend.record["colour_shift"] == [0, 0, 0]
+
+
+def test_a_small_drift_around_the_selection_is_taken_out_of_the_edit() -> None:
+    source = _grain((90, 140, 70), 14)
+    crop = crop_selection(_edit(_png(source), _small_mask()), ROUTE)
+    assert crop is not None
+
+    blend = stitch_selection(crop, _faithful_edit(crop, PAINTED, drift=(5, -3, 4)))
+
+    _kept_outside_and_inside(source, blend.content, PAINTED, tolerance=1)
+    assert blend.record["mode"] == "crop"
+    assert blend.record["box"] == list(crop.box)
+    assert (blend.record["working_width"], blend.record["working_height"]) == crop.size
+    assert blend.record["colour_shift"] == [-5, 3, -4]
+
+
+def test_a_large_change_around_the_selection_is_the_workflow_s_own_and_kept() -> None:
+    """Past a few levels it is not drift, such as light the edit cast, and is left as drawn."""
+    source = _smooth_source()
+    crop = crop_selection(_edit(_png(source), _small_mask()), ROUTE)
+    assert crop is not None
+
+    blend = stitch_selection(crop, _faithful_edit(crop, PAINTED, drift=(30, 30, 30)))
+
+    _kept_outside_and_inside(source, blend.content, (40, 230, 60), tolerance=1)
+    assert blend.record["colour_shift"] == [0, 0, 0]
+
+
+def test_a_crop_that_comes_back_reshaped_cannot_be_placed_back() -> None:
+    crop = crop_selection(_edit(_png(_smooth_source()), _small_mask()), ROUTE)
+    assert crop is not None
+    with pytest.raises(RegionEditError) as raised:
+        stitch_selection(crop, _png(Image.new("RGB", (crop.size[0], crop.size[0]), (1, 2, 3))))
+    assert raised.value.code == "region-result-reshaped"
 
 
 def test_a_transparent_source_stays_transparent_where_it_was() -> None:

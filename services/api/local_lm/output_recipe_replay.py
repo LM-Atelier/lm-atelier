@@ -57,7 +57,7 @@ from .models import (
 from .orchestrator import ConversationOrchestrator
 from .output_origin import names_a_preview
 from .output_recipe import describe_run
-from .output_recipe_v1 import canonical_bytes
+from .output_recipe_v1 import REPLAY_RECEIPT_KEY, canonical_bytes
 from .schemas import TurnRequest
 from .settings_registry import workflow_settings
 from .setup_verification import setup_verification_for_chat
@@ -83,8 +83,6 @@ REPLAYED_SECTIONS: Final = (
     "model",
     "loras",
 )
-#: Where a replayed run keeps what it was generated again from.
-REPLAY_RECEIPT_KEY: Final = "replay"
 ReplayOutcome = Literal["pending", "identical", "different", "output_missing", "adapted"]
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")

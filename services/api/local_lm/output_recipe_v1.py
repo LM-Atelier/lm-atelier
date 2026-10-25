@@ -68,6 +68,8 @@ MISSING_REASONS: Final = frozenset(
 
 #: What no run records today, named so a record never implies it was checked.
 NOT_RECORDED: Final = ("executed_graph_sha256", "runtime_version")
+#: Where a run generated again from a record keeps which record it was.
+REPLAY_RECEIPT_KEY: Final = "replay"
 
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
