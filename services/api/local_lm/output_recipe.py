@@ -742,12 +742,14 @@ def _finished_after_generation(entry: Mapping[str, Any], snapshot: AcceptedConte
     """Whether the stored picture is the workflow's output after more work on it.
 
     A fitted source is padded or cropped before the engine sees it and put back
-    afterwards, a small selection is edited on a crop and placed back, and a
+    afterwards, an extension is cut back from the canvas it was made on, a
+    small selection is edited on a crop and placed back, and a
     selection, relight or restore composites the result into the source. A
     replay of the workflow alone does not make those bytes.
     """
 
     finishing = {
+        "extension_finish",
         "region_edit",
         "relight",
         "selection_crop",

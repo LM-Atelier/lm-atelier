@@ -540,3 +540,44 @@ def test_only_the_route_s_own_save_nodes_wrote_its_edits(origin: Any, saved: boo
     route = trace_selection_route(masked_edit_graph())
     assert route is not None
     assert route.saved(origin) is saved
+
+
+@pytest.mark.parametrize("shape", ["decoded", "composited", "conditioned"])
+def test_an_outpainter_whose_saves_are_its_canvas_has_an_outpaint_route(shape: str) -> None:
+    from local_lm.workflow_source_geometry import trace_outpaint_route
+
+    value = {
+        "decoded": graph,
+        "composited": composited_graph,
+        "conditioned": inpaint_conditioning_graph,
+    }[shape]()
+    route = trace_outpaint_route(value, "pad")
+    assert route is not None
+    assert route.save_node_ids == frozenset({"save"})
+
+
+@pytest.mark.parametrize(
+    "change", ["enlarges", "saves_its_mask", "previews", "composites_the_source", "other_pad"]
+)
+def test_an_outpainter_that_may_save_another_size_has_no_outpaint_route(change: str) -> None:
+    from local_lm.workflow_source_geometry import trace_outpaint_route
+
+    value = composited_graph()
+    if change == "enlarges":
+        value["enlarge"] = {
+            "class_type": "ImageScaleBy",
+            "inputs": {"image": ["composite", 0], "upscale_method": "lanczos", "scale_by": 2.0},
+        }
+        value["save"]["inputs"]["images"] = ["enlarge", 0]
+    elif change == "saves_its_mask":
+        value["shown"] = {"class_type": "MaskToImage", "inputs": {"mask": ["pad", 1]}}
+        value["save_mask"] = {
+            "class_type": "SaveImage",
+            "inputs": {"images": ["shown", 0], "filename_prefix": "mask"},
+        }
+    elif change == "previews":
+        value["preview"] = {"class_type": "PreviewImage", "inputs": {"images": ["decode", 0]}}
+    elif change == "composites_the_source":
+        # Pasted over the unpadded source, the result is the source's size, not the canvas's.
+        value["composite"]["inputs"]["destination"] = ["source", 0]
+    assert trace_outpaint_route(value, "other" if change == "other_pad" else "pad") is None

@@ -317,7 +317,7 @@ async def test_a_step_fed_by_another_output_names_it_and_says_so(client: AsyncCl
     assert "depends_on_other_outputs" in record["reproducibility"]["missing"]
 
 
-@pytest.mark.parametrize("finishing", ["region_edit", "selection_crop"])
+@pytest.mark.parametrize("finishing", ["region_edit", "selection_crop", "extension_finish"])
 async def test_a_picture_finished_after_generation_is_never_called_recorded(
     client: AsyncClient, finishing: str
 ) -> None:

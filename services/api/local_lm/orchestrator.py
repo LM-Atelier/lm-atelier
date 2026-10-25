@@ -184,6 +184,7 @@ from .models import (
 )
 from .network import OutboundPolicy, OutboundRefused, outbound_client
 from .ordered_planning import OrderedPlanCompiler, OrderedPlanConfirmationRequired
+from .outpaint_finish import MAX_PAD_PX, ExtensionFinish, finish_extension, prepare_source
 from .outpaint_workflows import (
     OUTPAINT_SETTING_KEY,
     extends_by_nothing,
@@ -193,6 +194,7 @@ from .outpaint_workflows import (
     pad_the_source,
     source_pad_node,
     workflow_declares_outpaint,
+    working_pixels,
 )
 from .output_measurement import Budget, measure_output, record_to_keep
 from .output_origin import names_a_preview, record_for
@@ -279,6 +281,7 @@ from .studio_masks import (
     split_mask_setting,
 )
 from .studio_region_edit import (
+    MAX_BLEND_PIXELS,
     MAX_BLEND_READ_BYTES,
     RegionEdit,
     RegionEditError,
@@ -420,7 +423,11 @@ from .workflow_selection import (
     resolve_exact_workflow_revision,
     resolve_workflow_family,
 )
-from .workflow_source_geometry import SelectionRoute, trace_selection_route
+from .workflow_source_geometry import (
+    SelectionRoute,
+    trace_outpaint_route,
+    trace_selection_route,
+)
 from .workflow_use_case_execution import (
     InheritedWorkflowUseCasePreset,
     WorkflowUseCaseExecution,
@@ -6813,10 +6820,13 @@ class ConversationOrchestrator:
         source_fit: SourceFitRecipe | None = None,
         prepared_source: PreparedSourceImage | None = None,
         selection_crop: SelectionCrop | None = None,
+        extension_finish: ExtensionFinish | None = None,
     ) -> list[GeneratedAsset]:
         """Each kept picture finished against its source, in one fixed order.
 
-        An extension's source is put back first, on the picture its own save
+        An extension made on a canvas grown to whole blocks is cut back to the
+        canvas that was asked for first, on the pictures its traced saves wrote.
+        An extension's source is put back next, on the picture its own save
         node wrote, so every later step starts from the accepted source. A
         crop has nothing to put back, and is only brought back to its canvas
         when the VAE rounded the canvas down. A small selection edited on a
@@ -6846,6 +6856,10 @@ class ConversationOrchestrator:
             content = generated.content
             records: dict[str, Any] = {}
             try:
+                if extension_finish is not None and extension_finish.route.saved(origin):
+                    extended = await asyncio.to_thread(finish_extension, extension_finish, content)
+                    if extended is not None:
+                        content, records["extension_finish"] = extended.content, extended.record
                 if restore is not None and restores(restore, origin):
                     restored = await asyncio.to_thread(restore_source, restore, content)
                     if restored is not None:
@@ -7159,6 +7173,60 @@ class ConversationOrchestrator:
             mask=self.artifacts.verified_bytes(mask_artifact, maximum_bytes=MAX_BLEND_READ_BYTES),
         )
 
+    def _extension_finish(
+        self,
+        session: Session,
+        workflow: dict[str, Any],
+        media_engine: str,
+        operation: str,
+        input_ids: Sequence[str],
+        size: tuple[int, int],
+        requested: dict[str, int],
+    ) -> ExtensionFinish | None:
+        """How an extension is made on a canvas of whole blocks, or None to pad as asked.
+
+        Only ComfyUI crops a canvas to whole blocks. The canvas can be cut back
+        only when every picture the graph saves is that canvas, padded, filled
+        and decoded in place; and the source is replaced only by the same
+        picture as ComfyUI would read it. Anything else is padded as asked.
+        """
+        pad = source_pad_node(workflow)
+        source = session.get(Artifact, input_ids[0]) if len(input_ids) == 1 else None
+        if (
+            media_engine != "comfyui"
+            or operation != Operation.IMAGE_TO_IMAGE.value
+            or pad is None
+            or source is None
+            or source.size_bytes > MAX_BLEND_READ_BYTES
+        ):
+            return None
+        route = trace_outpaint_route(workflow, pad)
+        working, grown = working_pixels(requested, *size)
+        canvas = (
+            size[0] + grown["right"] + working["left"] + working["right"],
+            size[1] + grown["bottom"] + working["top"] + working["bottom"],
+        )
+        if (
+            route is None
+            or max(working.values()) > MAX_PAD_PX
+            or canvas[0] * canvas[1] > MAX_BLEND_PIXELS
+        ):
+            return None
+        prepared = prepare_source(
+            self.artifacts.verified_bytes(source, maximum_bytes=MAX_BLEND_READ_BYTES), grown
+        )
+        if prepared is None or prepared[1] != size:
+            return None
+        return ExtensionFinish(
+            source_artifact_id=source.id,
+            prepared=prepared[0],
+            route=route,
+            size=size,
+            requested=requested,
+            working=working,
+            grown=grown,
+        )
+
     @staticmethod
     def _selection_route(
         run: Run, media_engine: str, workflow: dict[str, Any], selection: RegionEdit | None
@@ -7382,15 +7450,32 @@ class ConversationOrchestrator:
             # Margins are fractions of the source as it is shown; the padding
             # node takes whole pixels. They are spent on this run's graph here,
             # and never passed on as a setting that no graph input reads.
+            extension_finish: ExtensionFinish | None = None
             if revision and OUTPAINT_SETTING_KEY in execution_settings:
                 if not input_paths:
                     raise RuntimeError("Extending a picture needs its source image.")
-                workflow = pad_the_source(
-                    workflow,
-                    margin_pixels(
-                        execution_settings[OUTPAINT_SETTING_KEY], *oriented_size(input_paths[0])
-                    ),
+                size = oriented_size(input_paths[0])
+                requested = margin_pixels(execution_settings[OUTPAINT_SETTING_KEY], *size)
+                extension_finish = (
+                    self._extension_finish(
+                        session,
+                        workflow,
+                        media_engine,
+                        execution_operation,
+                        input_ids,
+                        size,
+                        requested,
+                    )
+                    if input_contents is None
+                    else None
                 )
+                workflow = pad_the_source(
+                    workflow, extension_finish.working if extension_finish else requested
+                )
+                if extension_finish is not None:
+                    # The source as ComfyUI would read it, grown on any axis
+                    # nobody extended, so the canvas is the one cut back.
+                    input_contents = [extension_finish.prepared]
             if source_fit is not None:
                 # The accepted canvas goes into the same source padding, and
                 # the sampler is written at full strength. The saved recipe
@@ -7669,6 +7754,7 @@ class ConversationOrchestrator:
             or region_edit is not None
             or source_fit is not None
             or selection_crop is not None
+            or extension_finish is not None
         ):
             # Before measurement, so the measurement, the library, provenance
             # and verification all describe the picture that is kept.
@@ -7680,6 +7766,7 @@ class ConversationOrchestrator:
                 prepared_source=prepared_source,
                 media_engine=media_engine,
                 selection_crop=selection_crop,
+                extension_finish=extension_finish,
             )
         media_capabilities = (
             await self._successful_media_capabilities() if completed_assets else None
@@ -7883,6 +7970,14 @@ class ConversationOrchestrator:
                         **(
                             {"region_edit": generated.metadata["region_edit"]}
                             if region_edit is not None and "region_edit" in generated.metadata
+                            else {}
+                        ),
+                        # How an extension was cut back from the canvas it was
+                        # made on, present only when one was.
+                        **(
+                            {"extension_finish": generated.metadata["extension_finish"]}
+                            if extension_finish is not None
+                            and "extension_finish" in generated.metadata
                             else {}
                         ),
                         # How a small selection edited on a crop was placed back
