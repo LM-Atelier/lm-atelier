@@ -381,8 +381,9 @@ def test_a_small_selection_is_cropped_with_room_around_it_and_enlarged() -> None
 
     assert crop is not None
     assert crop.route == ROUTE
-    # The selection's own bounds, widened by at least 32 pixels on each side.
-    assert crop.box == (168, 118, 272, 212)
+    # The selection's own bounds, widened by at least 32 pixels on each side,
+    # then to the working size's shape.
+    assert crop.box == (167, 118, 274, 212)
     # Enlarged toward a megapixel, in whole blocks of 64.
     assert crop.size == (1088, 960)
     picture = _pixels(crop.picture)
@@ -401,6 +402,51 @@ def test_a_picture_too_large_to_place_an_edit_back_into_is_not_cropped(
     assert crop_selection(_edit(_png(_smooth_source()), _small_mask()), ROUTE) is None
 
 
+def _round_drawing(crop: studio_region_edit.SelectionCrop) -> bytes:
+    """A faithful workflow that draws a disc as tall as the selection it was handed."""
+    given = _pixels(crop.picture).convert("RGB")
+    selected = _pixels(crop.mask).getchannel("A").point(lambda value: 255 if value >= 128 else 0)
+    bounds = selected.getbbox()
+    assert bounds is not None
+    middle_x, top, bottom = (bounds[0] + bounds[2]) / 2, bounds[1], bounds[3]
+    radius = (bottom - top) / 2
+    ImageDraw.Draw(given).ellipse((middle_x - radius, top, middle_x + radius, bottom), fill=PAINTED)
+    return _png(given)
+
+
+@pytest.mark.parametrize("selected", [(824, 738, 1223, 797), (874, 748, 1173, 787)])
+def test_a_long_thin_selection_comes_back_in_its_own_shape(
+    selected: tuple[int, int, int, int],
+) -> None:
+    """Rounding each side to whole blocks on its own would squash what the workflow draws."""
+    source = Image.new("RGB", (2048, 1536), (128, 128, 128))
+    alpha = Image.new("L", source.size, 0)
+    ImageDraw.Draw(alpha).rectangle(selected, fill=255)
+    drawn = Image.new("RGBA", source.size, (255, 255, 255, 0))
+    drawn.putalpha(alpha)
+    crop = crop_selection(_edit(_png(source), _png(drawn)), ROUTE)
+    assert crop is not None
+    across = crop.size[0] / (crop.box[2] - crop.box[0])
+    down = crop.size[1] / (crop.box[3] - crop.box[1])
+    assert abs(across / down - 1) <= 0.01
+
+    out = _pixels(stitch_selection(crop, _round_drawing(crop)).content).convert("RGB")
+
+    disc = Image.eval(out, lambda value: 255 if value < 60 else 0).getchannel("R").getbbox()
+    assert disc is not None
+    assert abs((disc[2] - disc[0]) - (disc[3] - disc[1])) <= 1, disc
+
+
+def test_a_long_selection_whose_shape_does_not_fit_the_picture_is_edited_whole() -> None:
+    """Across nearly the whole width, the crop cannot be widened to the working size's shape."""
+    source = Image.new("RGB", (600, 2000), (128, 128, 128))
+    alpha = Image.new("L", source.size, 0)
+    ImageDraw.Draw(alpha).rectangle((10, 1000, 589, 1059), fill=255)
+    drawn = Image.new("RGBA", source.size, (255, 255, 255, 0))
+    drawn.putalpha(alpha)
+    assert crop_selection(_edit(_png(source), _png(drawn)), ROUTE) is None
+
+
 def test_a_source_that_does_not_read_whole_is_edited_whole() -> None:
     """A photo cut short still opens, so the whole picture is handed and its own checks decide."""
     buffer = io.BytesIO()
@@ -415,11 +461,13 @@ def _faithful_edit(
     *,
     drift: tuple[int, int, int] = (0, 0, 0),
     shading: int = 0,
+    light: int = 0,
 ) -> bytes:
     """What a faithful workflow returns: the crop it was given, painted where its mask selects.
 
     `drift` moves every pixel, as a model that shifts colour does; `shading`
-    adds a gentle left-to-right ramp that averages to nothing.
+    adds a gentle left-to-right ramp that averages to nothing; `light`
+    brightens the right two fifths, as light cast by the edit would.
     """
     given = _pixels(crop.picture).convert("RGB")
     selected = _pixels(crop.mask).getchannel("A").point(lambda value: 255 if value >= 128 else 0)
@@ -430,6 +478,13 @@ def _faithful_edit(
         ramp.putdata([round(shading * 2 * x / (width - 1)) for x in range(width)])
         ramp = ramp.resize(given.size, Image.Resampling.NEAREST)
         result = ImageChops.add(result, Image.merge("RGB", (ramp, ramp, ramp)), offset=-shading)
+    if light:
+        lit = Image.new("L", given.size, 0)
+        ImageDraw.Draw(lit).rectangle(
+            (given.width * 3 // 5, 0, given.width, given.height), fill=light
+        )
+        lit = ImageChops.subtract(lit, selected)
+        result = ImageChops.add(result, Image.merge("RGB", (lit, lit, lit)))
     table = [min(255, max(0, value + offset)) for offset in drift for value in range(256)]
     return _png(result.point(table))
 
@@ -449,21 +504,45 @@ def _kept_outside_and_inside(
     )
 
 
+def _specks(colour: tuple[int, int, int]) -> Image.Image:
+    """A dark picture with a scattering of bright specks, as stars or dust are."""
+    rng = random.Random(5)
+    picture = Image.new("RGB", (512, 384), (8, 8, 8))
+    for _ in range(2000):
+        picture.putpixel((rng.randrange(512), rng.randrange(384)), colour)
+    return picture
+
+
 @pytest.mark.parametrize(
-    "surroundings", ["grain", "dark-grain", "every-pixel-different", "shaded-wall"]
+    "surroundings",
+    [
+        "grain",
+        "dark-grain",
+        "every-pixel-different",
+        "shaded-wall",
+        "white-specks",
+        "red-specks",
+        "light-cast",
+    ],
 )
 def test_a_faithful_edit_on_fine_texture_is_kept_as_drawn(surroundings: str) -> None:
-    """Resampling softens fine texture, and shading may come and go; neither moves the edit."""
-    source, painted, shading = {
-        "grain": (_grain((90, 140, 70), 14), (40, 40, 40), 0),
-        "dark-grain": (_grain((14, 14, 14), 4), (235, 225, 190), 0),
-        "every-pixel-different": (_source((512, 384)), PAINTED, 0),
-        "shaded-wall": (_grain((200, 200, 200), 0.6), (20, 20, 20), 4),
+    """Resampling softens and clips fine texture, and light may fall around the edit.
+
+    None of it is drift, and none of it moves the edit.
+    """
+    source, painted, shading, light = {
+        "grain": (_grain((90, 140, 70), 14), (40, 40, 40), 0, 0),
+        "dark-grain": (_grain((14, 14, 14), 4), (235, 225, 190), 0, 0),
+        "every-pixel-different": (_source((512, 384)), PAINTED, 0, 0),
+        "shaded-wall": (_grain((200, 200, 200), 0.6), (20, 20, 20), 4, 0),
+        "white-specks": (_specks((255, 255, 255)), (200, 170, 150), 0, 0),
+        "red-specks": (_specks((255, 0, 0)), (200, 170, 150), 0, 0),
+        "light-cast": (_grain((90, 140, 70), 14), (230, 220, 120), 0, 15),
     }[surroundings]
     crop = crop_selection(_edit(_png(source), _small_mask()), ROUTE)
     assert crop is not None
 
-    blend = stitch_selection(crop, _faithful_edit(crop, painted, shading=shading))
+    blend = stitch_selection(crop, _faithful_edit(crop, painted, shading=shading, light=light))
 
     _kept_outside_and_inside(source, blend.content, painted, tolerance=1)
     assert blend.record["colour_shift"] == [0, 0, 0]
@@ -483,16 +562,16 @@ def test_a_small_drift_around_the_selection_is_taken_out_of_the_edit() -> None:
     assert blend.record["colour_shift"] == [-5, 3, -4]
 
 
-def test_a_large_change_around_the_selection_is_the_workflow_s_own_and_kept() -> None:
-    """Past a few levels it is not drift, such as light the edit cast, and is left as drawn."""
+def test_a_large_change_all_around_the_selection_is_taken_back_by_a_few_levels_only() -> None:
+    """Past a few levels it may be the workflow's own, so only that much is taken back."""
     source = _smooth_source()
     crop = crop_selection(_edit(_png(source), _small_mask()), ROUTE)
     assert crop is not None
 
     blend = stitch_selection(crop, _faithful_edit(crop, PAINTED, drift=(30, 30, 30)))
 
-    _kept_outside_and_inside(source, blend.content, (40, 230, 60), tolerance=1)
-    assert blend.record["colour_shift"] == [0, 0, 0]
+    _kept_outside_and_inside(source, blend.content, (32, 222, 52), tolerance=1)
+    assert blend.record["colour_shift"] == [-8, -8, -8]
 
 
 def test_a_crop_that_comes_back_reshaped_cannot_be_placed_back() -> None:

@@ -4,13 +4,18 @@ An instruction-edit model re-renders every pixel of the picture it is given,
 even when the words only asked about one part of it, and it hands the result
 back at its own working size. For a tool whose promise is that only the
 selection changes, that is not good enough. Cropping the selection out before
-the edit is worse: the model returns the crop at a different shape, and
+such an edit is worse: the model returns the crop at a different shape, and
 anything written in it stretches.
 
 So the edit runs on the whole picture, and afterwards the result is resized
 to the source and composited over it through the selection's alpha. Outside
 the selection the stored picture is the source's own pixels, inside it is the
 edit, and along a feathered edge it is a mix of the two.
+
+A workflow with its own mask input is different when every picture it saves
+is its source edited in place: it returns exactly the shape it was given. So
+a small selection is edited on a crop around it, in the shape of the
+workflow's working size, and placed back the same way.
 
 Pure work on bytes: nothing here opens a session or a file.
 """
@@ -24,7 +29,7 @@ import warnings
 from dataclasses import dataclass
 from typing import Any
 
-from PIL import Image, ImageFilter, ImageOps, ImageStat, UnidentifiedImageError
+from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat, UnidentifiedImageError
 
 from .studio_masks import (
     MaskContractError,
@@ -68,11 +73,13 @@ CROP_ALIGN = 64
 #: Below this share of the crop the surroundings say too little about colour
 #: to match the edit to them.
 MIN_COLOUR_RING_SHARE = 0.01
-#: The most, in levels of each channel, an edit is shifted to match what
+#: The most, in levels of each channel, an edit is shifted back toward what
 #: surrounds it. A model's encode and decode move colours by a few levels; a
-#: larger change around the selection is the workflow's own, such as light it
-#: cast, and is left as drawn.
+#: larger change all around the selection may be the workflow's own.
 MAX_COLOUR_SHIFT = 8
+#: How far a crop may be stretched more one way than the other on its way to
+#: the working size, past which the selection is edited whole.
+MAX_CROP_STRETCH = 0.01
 #: How far from the selection colour is measured. Resizing spreads the edit a
 #: few pixels past the selection's edge, and measured there it would read as
 #: the surroundings' own colour.
@@ -326,11 +333,14 @@ def crop_selection(edit: RegionEdit, route: SelectionRoute) -> SelectionCrop | N
     bounds = alpha.image.getbbox()
     if bounds is None:
         return None
-    box = _context_box(bounds, source.image.size)
+    context = _context_box(bounds, source.image.size)
+    size = _working_size(context[2] - context[0], context[3] - context[1])
+    box = _shaped_box(context, size, source.image.size)
+    if box is None:
+        return None
     width, height = box[2] - box[0], box[3] - box[1]
     if width * height > MAX_CROP_SHARE * source.image.width * source.image.height:
         return None
-    size = _working_size(width, height)
     picture = source.image.crop(box).convert("RGB").resize(size, Image.Resampling.LANCZOS)
     selected = alpha.image.crop(box).resize(size, Image.Resampling.BILINEAR)
     # In brightness and in alpha, as the whole picture's selection is handed.
@@ -348,10 +358,10 @@ def crop_selection(edit: RegionEdit, route: SelectionRoute) -> SelectionCrop | N
 def stitch_selection(crop: SelectionCrop, result: bytes) -> RegionBlend:
     """Place a crop's edit back into its picture through the selection, as a PNG.
 
-    The edit is brought back to the crop's size, and shifted by however little
-    the model moved the colours around the selection, so it does not stand out
-    from what surrounds it. Outside the selection the stored picture is the
-    source's own pixels.
+    The edit is brought back to the crop's size, and shifted back by however
+    little the model moved the colours around the selection, so it does not
+    stand out from what surrounds it. Outside the selection the stored picture
+    is the source's own pixels.
     """
     source = load_source(crop.edit.source)
     alpha = _selection_alpha(
@@ -372,7 +382,14 @@ def stitch_selection(crop: SelectionCrop, result: bytes) -> RegionBlend:
     original = source.image.crop(crop.box)
     selection = alpha.image.crop(crop.box)
     fitted = edited.convert("RGB").resize((right - left, bottom - top), Image.Resampling.LANCZOS)
-    matched, colour_shift = _matched_colours(fitted, original.convert("RGB"), selection)
+    # What the workflow was given, brought back the same way, so resampling
+    # alone reads as no change.
+    given = (
+        decode_picture(crop.picture, "crop")
+        .convert("RGB")
+        .resize((right - left, bottom - top), Image.Resampling.LANCZOS)
+    )
+    matched, colour_shift = _matched_colours(fitted, given, selection)
     if original.mode == "RGBA":
         matched.putalpha(original.getchannel("A"))
     stitched = source.image.copy()
@@ -414,6 +431,28 @@ def _context_box(
     )
 
 
+def _shaped_box(
+    box: tuple[int, int, int, int], size: tuple[int, int], picture: tuple[int, int]
+) -> tuple[int, int, int, int] | None:
+    """The box widened or heightened to the working size's shape, inside the picture.
+
+    Each side of the working size is rounded to whole blocks on its own, so a
+    long, thin crop would otherwise be stretched more one way than the other,
+    and anything the workflow draws in it would come back squashed. None where
+    the shape does not fit in the picture closely enough.
+    """
+    left, top, right, bottom = box
+    width, height = right - left, bottom - top
+    wanted_width = min(picture[0], max(width, round(height * size[0] / size[1])))
+    wanted_height = min(picture[1], max(height, round(width * size[1] / size[0])))
+    stretch = (size[0] / wanted_width) / (size[1] / wanted_height)
+    if abs(stretch - 1) > MAX_CROP_STRETCH:
+        return None
+    left = min(max(0, left - (wanted_width - width) // 2), picture[0] - wanted_width)
+    top = min(max(0, top - (wanted_height - height) // 2), picture[1] - wanted_height)
+    return left, top, left + wanted_width, top + wanted_height
+
+
 def _working_size(width: int, height: int) -> tuple[int, int]:
     """A crop's size enlarged toward the working size, in whole blocks."""
     scale = max(1.0, math.sqrt(CROP_WORKING_PIXELS / (width * height)))
@@ -425,23 +464,26 @@ def _working_size(width: int, height: int) -> tuple[int, int]:
 
 
 def _matched_colours(
-    edited: Image.Image, original: Image.Image, selection: Image.Image
+    edited: Image.Image, given: Image.Image, selection: Image.Image
 ) -> tuple[Image.Image, list[int]]:
-    """The edit shifted by how far its surroundings drifted from the source, and that shift.
+    """The edit shifted back by how far its surroundings drifted, and that shift.
 
     Measured only where nothing is selected, a little way from the selection,
-    which the edit was not asked to change: what is taken out is the model's
-    drift, not the edit. Only the average moves. Resampling softens fine
-    texture, so the spread around the selection says nothing about the edit.
+    which the edit was not asked to change, against the crop the workflow was
+    given: what is taken out is the model's drift, not the edit. The drift is
+    the middle of the differences there, so a change over less than half the
+    surroundings, such as light the edit cast, moves nothing. A drift past
+    MAX_COLOUR_SHIFT is taken back by that much only.
     """
     grown = selection.filter(ImageFilter.MaxFilter(2 * COLOUR_RING_GAP_PX + 1))
     ring = grown.point(lambda value: 255 if value == 0 else 0)
     if ImageStat.Stat(ring).mean[0] / 255 < MIN_COLOUR_RING_SHARE:
         return edited, [0, 0, 0]
-    drifted = ImageStat.Stat(edited, ring).mean
-    wanted = ImageStat.Stat(original, ring).mean
-    shift = [round(target - mean) for mean, target in zip(drifted, wanted, strict=True)]
-    if not any(shift) or max(abs(value) for value in shift) > MAX_COLOUR_SHIFT:
+    # Centred on 128, so a drift either way of up to 127 levels is kept exactly.
+    difference = ImageChops.subtract(edited, given, scale=1.0, offset=128)
+    drift = [value - 128 for value in ImageStat.Stat(difference, ring).median]
+    shift = [max(-MAX_COLOUR_SHIFT, min(MAX_COLOUR_SHIFT, -value)) for value in drift]
+    if not any(shift):
         return edited, [0, 0, 0]
     table = [min(255, max(0, value + offset)) for offset in shift for value in range(256)]
     return edited.point(table), shift

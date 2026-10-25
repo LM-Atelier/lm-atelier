@@ -13,16 +13,26 @@ from fastapi import FastAPI
 from httpx2 import AsyncClient
 from PIL import Image, ImageDraw
 from sqlalchemy import select
-from test_studio_region_edit_turns import _masked_edit_workflow
 from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
 from test_workflow_source_geometry import masked_edit_graph, object_info
 
 from local_lm.adapters.base import GeneratedAsset, MediaEvent, MediaRequest
 from local_lm.db import SessionLocal
-from local_lm.models import Artifact, Job, ModelProfile, Run
+from local_lm.models import (
+    Artifact,
+    Job,
+    ModelProfile,
+    Run,
+    WorkflowDefinition,
+    WorkflowRevision,
+)
+from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.output_origin import stated_origin
 from local_lm.output_recipe_replay import mark_replay
 from local_lm.scheduler import JobClaim
+from local_lm.studio_masks import MaskSelection
+from local_lm.studio_region_edit import RegionEdit, crop_selection
+from local_lm.workflow_source_geometry import trace_selection_route
 
 SIZE = (512, 384)
 #: A 40 x 30 selection, small enough to be edited on a crop.
@@ -231,7 +241,7 @@ async def test_a_small_selection_is_edited_on_a_crop_and_placed_back(
     handed = Image.open(io.BytesIO(request.mask_content))
     assert given.size == handed.size == (1088, 960)
     placed = run.provenance_json["outputs"][0]["selection_crop"]
-    assert placed["box"] == [168, 118, 272, 212]
+    assert placed["box"] == [167, 118, 274, 212]
     assert placed["colour_shift"] == [0, 0, 0]
     assert out.size == SIZE
     for y in range(0, SIZE[1], 3):
@@ -243,8 +253,20 @@ async def test_a_small_selection_is_edited_on_a_crop_and_placed_back(
 
 @pytest.mark.parametrize(
     "shape,scale",
-    [("enlarges", 2), ("sets_its_own_size", 1), ("saves_its_mask", 1)],
-    ids=["enlarges", "sets-its-own-size", "saves-another-picture"],
+    [
+        ("enlarges", 2),
+        ("sets_its_own_size", 1),
+        ("saves_its_mask", 1),
+        ("saves_an_animation", 1),
+        ("previews", 1),
+    ],
+    ids=[
+        "enlarges",
+        "sets-its-own-size",
+        "saves-another-picture",
+        "saves-an-animation",
+        "previews",
+    ],
 )
 async def test_a_workflow_whose_pictures_may_change_size_is_handed_the_whole_picture(
     app: FastAPI,
@@ -283,17 +305,71 @@ async def test_generating_a_record_again_edits_the_whole_picture(
 async def test_an_engine_that_reads_files_is_handed_the_whole_picture(
     app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Only ComfyUI is handed the crop's own bytes; another engine reads the stored picture."""
+    """Only ComfyUI is handed the crop's own bytes; another engine reads the stored picture.
+
+    The graph is one that would be cropped on ComfyUI.
+    """
     picture = _grain()
+    with SessionLocal() as session:
+        definition = WorkflowDefinition(name="Masked editor", operation="image_to_image")
+        session.add(definition)
+        session.flush()
+        revision = WorkflowRevision(
+            workflow_id=definition.id,
+            version=1,
+            engine="mock",
+            trusted=True,
+            api_graph_json=masked_edit_graph("inpaint"),
+            input_schema_json={
+                "type": "object",
+                "properties": {"mask": {"type": "object", "x-lm-atelier-kind": "mask"}},
+            },
+            dependencies_json={},
+        )
+        session.add(revision)
+        session.flush()
+        definition.current_revision_id = revision.id
+        session.commit()
+        revision_id = revision.id
 
     request, run, out = await _edited(
-        app,
-        client,
-        monkeypatch,
-        picture,
-        {"workflow_revision_id": _masked_edit_workflow()},
+        app, client, monkeypatch, picture, {"workflow_revision_id": revision_id}
     )
 
     assert request.input_contents is None
     assert "selection_crop" not in run.provenance_json["outputs"][0]
     assert out.size == SIZE
+
+
+async def test_only_a_picture_the_traced_save_wrote_is_placed_back() -> None:
+    """A picture another node wrote is kept as it came, never pasted into the source."""
+    route = trace_selection_route(masked_edit_graph())
+    assert route is not None
+    edit = RegionEdit(
+        selection=MaskSelection(
+            artifact_id=f"sha256:{'c' * 64}", feather_px=0, invert=False, blend=False
+        ),
+        source_artifact_id=f"sha256:{'b' * 64}",
+        source=_png(_grain()),
+        mask=_selection(),
+    )
+    crop = crop_selection(edit, route)
+    assert crop is not None
+    assets = [
+        GeneratedAsset(
+            content=crop.picture,
+            kind="image",
+            media_type="image/png",
+            name=f"{node}.png",
+            origin=stated_origin(node, "output", "images"),
+        )
+        for node in ("save", "other")
+    ]
+
+    finished = await ConversationOrchestrator._studio_finished_outputs(
+        assets, relight=None, region_edit=None, media_engine="comfyui", selection_crop=crop
+    )
+
+    assert "selection_crop" in finished[0].metadata
+    assert Image.open(io.BytesIO(finished[0].content)).size == SIZE
+    assert finished[1] is assets[1]
