@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import math
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,10 @@ _SIDES = ("top", "right", "bottom", "left")
 #: and height are seen swapped. ComfyUI's LoadImage applies the orientation too.
 _QUARTER_TURNS = frozenset({5, 6, 7, 8})
 _ORIENTATION_TAG = 0x0112
+#: ComfyUI encodes a picture in whole blocks and crops what is left over, so an
+#: extension runs on a canvas grown to whole blocks of this many pixels, which
+#: every latent model's encoder divides evenly, and is cut back afterwards.
+EXTENSION_BLOCK = 64
 
 
 def graph_can_outpaint(graph: dict[str, Any]) -> bool:
@@ -155,7 +160,33 @@ def margin_pixels(margins: dict[str, float], width: int, height: int) -> dict[st
     }
 
 
-def pad_the_source(graph: dict[str, Any], pixels: dict[str, int]) -> dict[str, Any]:
+def working_pixels(
+    pixels: dict[str, int], width: int, height: int, block: int = EXTENSION_BLOCK
+) -> tuple[dict[str, int], dict[str, int]]:
+    """The padding, and how far the source itself grows, so the canvas is whole blocks.
+
+    An extended axis takes its extra on the outer edge of an extended side,
+    the right or the bottom when both are extended, so it lies away from the
+    source. An axis nobody extended is not padded at all, because ComfyUI
+    feathers every edge it pads into the source: the source itself grows
+    there, on the right or at the bottom. Both are cut off afterwards.
+    """
+    working = dict(pixels)
+    grown = {"right": 0, "bottom": 0}
+    across = -(width + pixels["left"] + pixels["right"]) % block
+    down = -(height + pixels["top"] + pixels["bottom"]) % block
+    if pixels["left"] or pixels["right"]:
+        working["left" if pixels["left"] and not pixels["right"] else "right"] += across
+    else:
+        grown["right"] = across
+    if pixels["top"] or pixels["bottom"]:
+        working["top" if pixels["top"] and not pixels["bottom"] else "bottom"] += down
+    else:
+        grown["bottom"] = down
+    return working, grown
+
+
+def pad_the_source(graph: dict[str, Any], pixels: Mapping[str, int]) -> dict[str, Any]:
     """A copy of the graph whose source padding is the requested number of pixels."""
     node_id = source_pad_node(graph)
     if node_id is None:

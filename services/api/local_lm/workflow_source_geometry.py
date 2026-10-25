@@ -323,6 +323,34 @@ def trace_selection_route(api_graph: object) -> SelectionRoute | None:
 
 
 def _trace_selection(api_graph: object) -> SelectionRoute:
+    graph, saves = _graph_ending_in_saves(api_graph)
+    sources = {_selection_source(graph, save_id) for save_id in saves}
+    if len(sources) != 1:
+        _refuse()
+    return SelectionRoute(source_node_id=sources.pop(), save_node_ids=saves)
+
+
+def trace_outpaint_route(api_graph: object, pad_node_id: str) -> SelectionRoute | None:
+    """Trace every SaveImage of an outpainter back to its padded canvas, or answer no route.
+
+    An extension made on a canvas grown to whole blocks is cut back afterwards,
+    which needs each saved picture to come back the canvas's size. So the
+    padded canvas must be encoded for the fill, sampled in place and decoded by
+    the same VAE, and at most pasted over the padded canvas at its corner, and
+    every node the graph ends with must be one of those saves.
+    """
+    try:
+        graph, saves = _graph_ending_in_saves(api_graph)
+        if {_edited_in_place(graph, save_id) for save_id in saves} != {pad_node_id}:
+            _refuse()
+        _inputs(graph, pad_node_id, "ImagePadForOutpaint")
+    except _UnboundRoute:
+        return None
+    return SelectionRoute(source_node_id=pad_node_id, save_node_ids=saves)
+
+
+def _graph_ending_in_saves(api_graph: object) -> tuple[dict[str, object], frozenset[str]]:
+    """The graph and its SaveImage nodes, when those are the only nodes it ends with."""
     if type(api_graph) is not dict or not 1 <= len(api_graph) <= 512:
         _refuse()
     graph = cast(dict[str, object], api_graph)
@@ -340,10 +368,7 @@ def _trace_selection(api_graph: object) -> SelectionRoute:
         # A node that saves or previews and passes its picture on is not an ending.
         if key not in saves and isinstance(kind, str) and ("Save" in kind or "Preview" in kind):
             _refuse()
-    sources = {_selection_source(graph, save_id) for save_id in saves}
-    if len(sources) != 1:
-        _refuse()
-    return SelectionRoute(source_node_id=sources.pop(), save_node_ids=saves)
+    return graph, saves
 
 
 def _read_nodes(graph: dict[str, object]) -> set[object]:
@@ -359,6 +384,15 @@ def _read_nodes(graph: dict[str, object]) -> set[object]:
 
 
 def _selection_source(graph: dict[str, object], save_id: str) -> str:
+    source_id = _edited_in_place(graph, save_id)
+    source = _inputs(graph, source_id, "LoadImage")
+    if source.get("image") != "$" + "{input_image}":
+        _refuse()
+    return source_id
+
+
+def _edited_in_place(graph: dict[str, object], save_id: str) -> str:
+    """The node whose picture this save is, encoded, sampled and decoded at its own size."""
     save = _inputs(graph, save_id, "SaveImage")
     decode_id = _image_edge(save, "images")
     destination_id: str | None = None
@@ -393,8 +427,5 @@ def _selection_source(graph: dict[str, object], save_id: str) -> str:
     _inputs(graph, vae_id, vae_kind)
     source_id = _image_edge(encode, "pixels")
     if destination_id is not None and destination_id != source_id:
-        _refuse()
-    source = _inputs(graph, source_id, "LoadImage")
-    if source.get("image") != "$" + "{input_image}":
         _refuse()
     return source_id
