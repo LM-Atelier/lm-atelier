@@ -30,6 +30,21 @@ async def _page(client: AsyncClient, kind: str, **params: object) -> dict[str, o
     return cast(dict[str, object], response.json())
 
 
+def _catalog_order(kind: str, ids: list[str]) -> list[str]:
+    """Order identities by stored creation time, then identity, as the catalog pages them.
+
+    Rows created within one clock tick share a creation time, so creation order alone is
+    not the order the catalog promises.
+    """
+    table = "media_collections" if kind == "albums" else "media_tags"
+    with db.SessionLocal() as session:
+        created = {
+            str(identity): str(stamp)
+            for identity, stamp in session.execute(text(f"SELECT id, created_at FROM {table}"))
+        }
+    return sorted(ids, key=lambda identity: (created[identity], identity))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["albums", "tags"])
 async def test_catalog_pages_visit_each_identity_once_with_bounded_results(
@@ -47,7 +62,7 @@ async def test_catalog_pages_visit_each_identity_once_with_bounded_results(
         assert len(cast(list[object], pages[-1]["items"])) <= 2
         assert len(pages) <= 3
     seen = [row["id"] for page in pages for row in cast(list[dict[str, object]], page["items"])]
-    assert seen == ids
+    assert seen == _catalog_order(kind, ids)
 
 
 @pytest.mark.asyncio
@@ -140,10 +155,14 @@ async def test_catalog_cursors_are_bound_to_the_exact_page_request(
 async def test_catalog_search_escapes_wildcards_and_keeps_queries_out_of_cursors(
     client: AsyncClient,
 ) -> None:
+    identities: dict[str, str] = {}
     for name in ("50% Study", "50% Sketch", "500 Study", "Different"):
-        assert (await client.post("/api/media-collections", json={"name": name})).status_code == 201
+        response = await client.post("/api/media-collections", json={"name": name})
+        assert response.status_code == 201
+        identities[name] = cast(str, response.json()["id"])
+    matches = _catalog_order("albums", [identities["50% Study"], identities["50% Sketch"]])
     first = await _page(client, "albums", query=" 50% ", limit=1)
-    assert cast(list[dict[str, object]], first["items"])[0]["name"] == "50% Study"
+    assert [item["id"] for item in cast(list[dict[str, object]], first["items"])] == matches[:1]
     cursor = cast(str, first["next_cursor"])
     payload = base64.urlsafe_b64decode(
         cursor.split(".")[0] + "=" * (-len(cursor.split(".")[0]) % 4)
@@ -151,9 +170,7 @@ async def test_catalog_search_escapes_wildcards_and_keeps_queries_out_of_cursors
     assert b"50%" not in payload
     assert len(json.loads(payload)["filters"]["query"]) == 64
     second = await _page(client, "albums", query="50%", limit=1, cursor=cursor)
-    assert [item["name"] for item in cast(list[dict[str, object]], second["items"])] == [
-        "50% Sketch"
-    ]
+    assert [item["id"] for item in cast(list[dict[str, object]], second["items"])] == matches[1:]
     assert second["next_cursor"] is None
 
 
