@@ -170,6 +170,12 @@ width and height, no smaller than the picture, and puts the new room away from
 where you place the picture. Either way the edges can still be dragged
 afterwards.
 
+Where the workflow pastes its result back over the picture through its own
+padding mask, the new area is matched to the picture's colour along each
+extended edge: fully beside the picture, and less toward the outer edge, so a
+deliberately different region such as an added sky keeps its colour. A workflow
+that saves its result straight keeps the colour the model painted.
+
 ## The subject and the scene around it
 
 These tools find the picture's subject themselves, so there is nothing to

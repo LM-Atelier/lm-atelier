@@ -581,3 +581,34 @@ def test_an_outpainter_that_may_save_another_size_has_no_outpaint_route(change: 
         # Pasted over the unpadded source, the result is the source's size, not the canvas's.
         value["composite"]["inputs"]["destination"] = ["source", 0]
     assert trace_outpaint_route(value, "other" if change == "other_pad" else "pad") is None
+
+
+@pytest.mark.parametrize(
+    "shape,blended",
+    [
+        ("composited", {"save"}),
+        ("decoded", set()),
+        ("conditioned", set()),
+        ("composited_through_another_mask", set()),
+    ],
+)
+def test_only_saves_pasted_through_the_paddings_own_mask_are_blended(
+    shape: str, blended: set[str]
+) -> None:
+    from local_lm.workflow_source_geometry import blended_outpaint_saves, trace_outpaint_route
+
+    value = {
+        "decoded": graph,
+        "composited": composited_graph,
+        "conditioned": inpaint_conditioning_graph,
+        "composited_through_another_mask": composited_graph,
+    }[shape]()
+    if shape == "composited_through_another_mask":
+        value["grown"] = {
+            "class_type": "GrowMask",
+            "inputs": {"mask": ["pad", 1], "expand": 4, "tapered_corners": True},
+        }
+        value["composite"]["inputs"]["mask"] = ["grown", 0]
+    route = trace_outpaint_route(value, "pad")
+    assert route is not None
+    assert blended_outpaint_saves(value, route) == frozenset(blended)

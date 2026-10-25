@@ -349,6 +349,28 @@ def trace_outpaint_route(api_graph: object, pad_node_id: str) -> SelectionRoute 
     return SelectionRoute(source_node_id=pad_node_id, save_node_ids=saves)
 
 
+def blended_outpaint_saves(api_graph: object, route: SelectionRoute) -> frozenset[str]:
+    """The outpaint route's saves that paste the decode over its canvas through the padding's mask.
+
+    Only there is each pixel of the feathered band the source and the decode
+    mixed by a weight the padding alone decides, so only there can the decode
+    be read back out of the saved picture.
+    """
+    blended: set[str] = set()
+    graph = cast(dict[str, object], api_graph)
+    for save_id in route.save_node_ids:
+        try:
+            composite_id = _image_edge(_inputs(graph, save_id, "SaveImage"), "images")
+            composite = _inputs(graph, composite_id, "ImageCompositeMasked")
+            destination = _edge(composite, "destination")
+            mask = _edge(composite, "mask")
+        except _UnboundRoute:
+            continue
+        if destination == (route.source_node_id, 0) and mask == (route.source_node_id, 1):
+            blended.add(save_id)
+    return frozenset(blended)
+
+
 def _graph_ending_in_saves(api_graph: object) -> tuple[dict[str, object], frozenset[str]]:
     """The graph and its SaveImage nodes, when those are the only nodes it ends with."""
     if type(api_graph) is not dict or not 1 <= len(api_graph) <= 512:

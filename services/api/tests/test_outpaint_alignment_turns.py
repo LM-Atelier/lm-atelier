@@ -44,10 +44,14 @@ def _source() -> Image.Image:
     return picture
 
 
-def _outpainter(shape: str) -> dict[str, Any]:
+def _outpainter(shape: str, feathering: object = 0) -> dict[str, Any]:
     graph = composited_graph()
     graph["positive"]["inputs"]["text"] = "${prompt}"
-    if shape == "enlarges":
+    graph["pad"]["inputs"]["feathering"] = feathering
+    if shape == "decoded":
+        del graph["composite"]
+        graph["save"]["inputs"]["images"] = ["decode", 0]
+    elif shape == "enlarges":
         graph["enlarge"] = {
             "class_type": "ImageScaleBy",
             "inputs": {"image": ["composite", 0], "upscale_method": "lanczos", "scale_by": 2.0},
@@ -70,9 +74,16 @@ async def _extended(
     shape: str = "composited",
     source: bytes | None = None,
     keeps_the_asked_size: bool = False,
+    feathering: object = 0,
 ) -> tuple[MediaRequest, dict[str, Any], Image.Image]:
     """An Extend turn on a reviewed ComfyUI outpainter, run through to its stored picture."""
-    graph = _outpainter(shape)
+    graph = _outpainter(shape, feathering)
+    # A feather mapped to a setting takes that setting's saved value.
+    settable = (
+        {"feathering": {"type": "integer", "default": 32}}
+        if feathering == "$" + "{feathering}"
+        else {}
+    )
 
     async def describe() -> dict[str, Any]:
         return object_info(graph)
@@ -105,6 +116,7 @@ async def _extended(
                         "x-lm-atelier-kind": OUTPAINT_SCHEMA_KIND,
                         "default": {"top": 0, "right": 0, "bottom": 0, "left": 0},
                     },
+                    **settable,
                 },
             },
         },
@@ -272,3 +284,34 @@ async def test_a_side_that_would_grow_past_comfyuis_largest_padding_is_padded_as
 
     assert _sides(request) == {"top": 0, "right": 129, "bottom": 0, "left": 0}
     assert "extension_finish" not in output
+
+
+@pytest.mark.parametrize(
+    "shape,feathering,colour",
+    [
+        ("composited", "$" + "{feathering}", None),
+        ("composited", 32.0, {"applied": False, "reason": "feather_unknown"}),
+        ("decoded", 32, {"applied": False, "reason": "not_blended"}),
+    ],
+    ids=["feather-from-its-setting", "feather-not-a-whole-number", "decoded-straight-to-its-save"],
+)
+async def test_only_a_picture_pasted_through_its_padding_mask_has_its_colour_matched(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+    feathering: object,
+    colour: dict[str, object] | None,
+) -> None:
+    """The decode reads back only where the padding's own mask, at a known feather, mixed it in."""
+    _, output, picture = await _extended(
+        app, client, monkeypatch, shape=shape, feathering=feathering
+    )
+
+    recorded = output["extension_finish"]["colour"]
+    if colour is None:
+        assert recorded["applied"] is True
+        assert recorded["feather_px"] == 32
+    else:
+        assert recorded == colour
+    assert picture.crop((0, 0, *SIZE)).tobytes() == _source().tobytes()
