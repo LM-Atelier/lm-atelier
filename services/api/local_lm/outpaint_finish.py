@@ -12,7 +12,9 @@ nobody extended, the source itself grows instead, by repeating its last column
 or row, because ComfyUI feathers every edge it pads into the source. The
 workflow is handed that grown source as it is read here: upright, one frame,
 eight bits a channel. A picture that would be read differently is sent as it
-is stored, on the canvas that was asked for.
+is stored, on the canvas that was asked for. Once cut back, a picture the
+workflow pasted back over its padded canvas through the padding's own mask has
+its new area matched to the colour of the source along each extended edge.
 
 Pure work on bytes: nothing here opens a session or a file.
 """
@@ -23,10 +25,12 @@ import hashlib
 import io
 import warnings
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from PIL import Image, UnidentifiedImageError
 
+from .outpaint_colour import match_extension_colour
 from .source_fit_restore import RestoredPicture
 from .studio_region_edit import RegionEditError, decode_picture, encode_png, load_source
 from .workflow_source_geometry import SelectionRoute
@@ -58,6 +62,18 @@ class ExtensionFinish:
     working: Mapping[str, int]
     #: Columns on the right and rows at the bottom the source itself grew by.
     grown: Mapping[str, int]
+    #: The saves that paste the decode over the padded canvas through the padding's mask.
+    blended_saves: frozenset[str] = field(default_factory=frozenset)
+    #: How far the padding feathers the source, when the run states it as a whole number.
+    feathering: int | None = None
+
+    def blends(self, origin: object) -> bool:
+        """Whether this output is a picture one of the blended saves wrote."""
+        return (
+            self.route.saved(origin)
+            and isinstance(origin, Mapping)
+            and origin.get("node_id") in self.blended_saves
+        )
 
     @property
     def canvas(self) -> tuple[int, int]:
@@ -113,11 +129,16 @@ def prepare_source(source: bytes, grown: Mapping[str, int]) -> tuple[bytes, tupl
     return encode_png(grown_picture, loaded.icc_profile), (width, height)
 
 
-def finish_extension(finish: ExtensionFinish, result: bytes) -> RestoredPicture | None:
+def finish_extension(
+    finish: ExtensionFinish, result: bytes, blended: bool = False
+) -> RestoredPicture | None:
     """The extension cut back to the canvas that was asked for.
 
     None keeps the picture as the workflow made it: one that does not read, or
     that is not the canvas the workflow ran on, is not this extension's canvas.
+    Its colour is matched only when `blended` says a save pasted it over the
+    padded canvas through the padding's mask, and the run states the feather:
+    only then is the decode known in the band where it mixes with the source.
     """
     try:
         made = decode_picture(result, "extended picture")
@@ -131,6 +152,19 @@ def finish_extension(finish: ExtensionFinish, result: bytes) -> RestoredPicture 
     width = finish.size[0] + requested["left"] + requested["right"]
     height = finish.size[1] + requested["top"] + requested["bottom"]
     picture = made.crop((left, top, left + width, top + height))
+    colour: dict[str, Any]
+    if not blended:
+        colour = {"applied": False, "reason": "not_blended"}
+    elif finish.feathering is None:
+        colour = {"applied": False, "reason": "feather_unknown"}
+    else:
+        handed = decode_picture(finish.prepared, "prepared source").convert("RGB")
+        picture, colour = match_extension_colour(
+            picture.convert("RGB"),
+            handed.crop((0, 0, *finish.size)),
+            requested,
+            feathered_px(finish.feathering, handed.size),
+        )
     return RestoredPicture(
         content=encode_png(picture, None),
         record={
@@ -140,9 +174,30 @@ def finish_extension(finish: ExtensionFinish, result: bytes) -> RestoredPicture 
             "working": {side: working[side] for side in _SIDES},
             "grown": {"right": finish.grown["right"], "bottom": finish.grown["bottom"]},
             "result_sha256": hashlib.sha256(result).hexdigest(),
+            "colour": colour,
             "result_width": made.width,
             "result_height": made.height,
             "width": width,
             "height": height,
         },
     )
+
+
+def stated_feathering(value: object, settings: Mapping[str, Any]) -> int | None:
+    """The feather a padding runs with, when written or set as a whole number; else None.
+
+    A feather another node supplies, or one the run would pass on as anything
+    but a whole number, is not known exactly here.
+    """
+    if isinstance(value, str) and value.startswith("$" + "{") and value.endswith("}"):
+        value = settings.get(value[2:-1])
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def feathered_px(feathering: int, size: tuple[int, int]) -> int:
+    """How far ComfyUI's padding feathers into the picture it pads: nothing unless twice it fits."""
+    if feathering <= 0 or feathering * 2 >= size[0] or feathering * 2 >= size[1]:
+        return 0
+    return feathering

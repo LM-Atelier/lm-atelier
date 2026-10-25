@@ -184,7 +184,13 @@ from .models import (
 )
 from .network import OutboundPolicy, OutboundRefused, outbound_client
 from .ordered_planning import OrderedPlanCompiler, OrderedPlanConfirmationRequired
-from .outpaint_finish import MAX_PAD_PX, ExtensionFinish, finish_extension, prepare_source
+from .outpaint_finish import (
+    MAX_PAD_PX,
+    ExtensionFinish,
+    finish_extension,
+    prepare_source,
+    stated_feathering,
+)
 from .outpaint_workflows import (
     OUTPAINT_SETTING_KEY,
     extends_by_nothing,
@@ -425,6 +431,7 @@ from .workflow_selection import (
 )
 from .workflow_source_geometry import (
     SelectionRoute,
+    blended_outpaint_saves,
     trace_outpaint_route,
     trace_selection_route,
 )
@@ -6857,7 +6864,12 @@ class ConversationOrchestrator:
             records: dict[str, Any] = {}
             try:
                 if extension_finish is not None and extension_finish.route.saved(origin):
-                    extended = await asyncio.to_thread(finish_extension, extension_finish, content)
+                    extended = await asyncio.to_thread(
+                        finish_extension,
+                        extension_finish,
+                        content,
+                        extension_finish.blends(origin),
+                    )
                     if extended is not None:
                         content, records["extension_finish"] = extended.content, extended.record
                 if restore is not None and restores(restore, origin):
@@ -7182,6 +7194,7 @@ class ConversationOrchestrator:
         input_ids: Sequence[str],
         size: tuple[int, int],
         requested: dict[str, int],
+        settings: Mapping[str, Any],
     ) -> ExtensionFinish | None:
         """How an extension is made on a canvas of whole blocks, or None to pad as asked.
 
@@ -7225,6 +7238,8 @@ class ConversationOrchestrator:
             requested=requested,
             working=working,
             grown=grown,
+            blended_saves=blended_outpaint_saves(workflow, route),
+            feathering=stated_feathering(workflow[pad]["inputs"].get("feathering"), settings),
         )
 
     @staticmethod
@@ -7465,6 +7480,7 @@ class ConversationOrchestrator:
                         input_ids,
                         size,
                         requested,
+                        execution_settings,
                     )
                     if input_contents is None
                     else None

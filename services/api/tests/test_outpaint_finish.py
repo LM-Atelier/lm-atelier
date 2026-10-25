@@ -4,11 +4,26 @@ from __future__ import annotations
 
 import io
 from collections.abc import Callable
+from dataclasses import replace
 
 import pytest
 from PIL import Image
+from test_outpaint_colour import (
+    cast_by,
+    comfy_extended,
+    largest_difference,
+    picture_of,
+    placed,
+    scene,
+)
 
-from local_lm.outpaint_finish import ExtensionFinish, finish_extension, prepare_source
+from local_lm.outpaint_finish import (
+    ExtensionFinish,
+    feathered_px,
+    finish_extension,
+    prepare_source,
+    stated_feathering,
+)
 from local_lm.outpaint_workflows import working_pixels
 from local_lm.workflow_source_geometry import SelectionRoute
 
@@ -187,3 +202,106 @@ def test_a_picture_that_is_not_the_canvas_the_workflow_ran_on_is_kept_as_made(
     )
 
     assert finish_extension(finish, result) is None
+
+
+def _scene_finish(requested: dict[str, int]) -> ExtensionFinish:
+    working, grown = working_pixels(requested, *SIZE)
+    prepared = prepare_source(_png(picture_of(SIZE, scene)), grown)
+    assert prepared is not None
+    return ExtensionFinish(
+        source_artifact_id=SOURCE_ID,
+        prepared=prepared[0],
+        route=ROUTE,
+        size=SIZE,
+        requested=requested,
+        working=working,
+        grown=grown,
+        blended_saves=frozenset({"save"}),
+        feathering=64,
+    )
+
+
+def _made_with_a_cast(finish: ExtensionFinish, cast: tuple[int, int, int]) -> bytes:
+    """The working canvas as ComfyUI saves it, its decode the scene continued a few levels off."""
+    handed = Image.open(io.BytesIO(finish.prepared)).convert("RGB")
+    continued = placed(scene, finish.working)
+    return _png(comfy_extended(handed, finish.working, 64, cast_by(cast, continued)))
+
+
+def test_a_blended_extension_takes_the_colour_of_its_source() -> None:
+    requested = {"top": 0, "right": 129, "bottom": 0, "left": 0}
+    finish = _scene_finish(requested)
+    cast = (12, -8, 16)
+
+    finished = finish_extension(finish, _made_with_a_cast(finish, cast), blended=True)
+
+    assert finished is not None
+    out = Image.open(io.BytesIO(finished.content)).convert("RGB")
+    assert out.size == (646, 383)
+    assert largest_difference(out.crop((0, 0, *SIZE)), picture_of(SIZE, scene)) <= 1
+    beside = picture_of((1, 383), lambda _x, y: scene(517, y))
+    assert largest_difference(out.crop((517, 0, 518, 383)), beside) <= 1
+    colour = finished.record["colour"]
+    assert colour["applied"] is True and colour["feather_px"] == 64
+    assert colour["sides"] == {"right": {"largest_shift": list(cast)}}
+
+
+@pytest.mark.parametrize(
+    "blended,feathering,reason",
+    [(False, 64, "not_blended"), (True, None, "feather_unknown")],
+    ids=["decoded-straight-to-its-save", "feather-not-stated"],
+)
+def test_an_extension_whose_decode_cannot_be_read_back_keeps_its_colour(
+    blended: bool, feathering: int | None, reason: str
+) -> None:
+    requested = {"top": 0, "right": 129, "bottom": 0, "left": 0}
+    finish = replace(_scene_finish(requested), feathering=feathering)
+    made = _made_with_a_cast(finish, (12, -8, 16))
+
+    finished = finish_extension(finish, made, blended=blended)
+
+    assert finished is not None
+    out = Image.open(io.BytesIO(finished.content)).convert("RGB")
+    assert (
+        out.tobytes()
+        == Image.open(io.BytesIO(made)).convert("RGB").crop((0, 0, 646, 383)).tobytes()
+    )
+    assert finished.record["colour"] == {"applied": False, "reason": reason}
+
+
+def test_a_picture_whose_colour_is_not_matched_is_cut_back_as_it_was_saved() -> None:
+    finish = _finish({"top": 0, "right": 129, "bottom": 0, "left": 0})
+
+    finished = finish_extension(finish, _png(_made(finish).convert("RGBA")))
+
+    assert finished is not None
+    assert Image.open(io.BytesIO(finished.content)).mode == "RGBA"
+
+
+@pytest.mark.parametrize(
+    "value,settings,stated",
+    [
+        (64, {}, 64),
+        (0, {}, 0),
+        ("$" + "{feathering}", {"feathering": 48}, 48),
+        ("$" + "{feathering}", {}, None),
+        ("$" + "{feathering}", {"feathering": 48.0}, None),
+        (["feather", 0], {}, None),
+        (64.0, {}, None),
+        ("64", {}, None),
+        (True, {}, None),
+        (-1, {}, None),
+        (None, {}, None),
+    ],
+)
+def test_a_feather_is_known_only_as_a_whole_number_the_run_states(
+    value: object, settings: dict[str, object], stated: int | None
+) -> None:
+    assert stated_feathering(value, settings) == stated
+
+
+def test_comfyui_feathers_only_where_twice_the_feather_fits_the_picture_it_pads() -> None:
+    assert feathered_px(64, (517, 384)) == 64
+    assert feathered_px(64, (128, 384)) == 0
+    assert feathered_px(64, (517, 128)) == 0
+    assert feathered_px(0, (517, 384)) == 0
