@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
 import warnings
 from dataclasses import dataclass
 from typing import Any
 
-from PIL import Image, ImageOps, ImageStat, UnidentifiedImageError
+from PIL import Image, ImageFilter, ImageOps, ImageStat, UnidentifiedImageError
 
 from .studio_masks import (
     MaskContractError,
@@ -32,6 +33,7 @@ from .studio_masks import (
     mask_geometry,
     mask_provenance,
 )
+from .workflow_source_geometry import SelectionRoute
 
 #: How far the edited picture's shape may drift from the source's and still be
 #: placed back. Edit models round their working size to a multiple of their
@@ -51,6 +53,30 @@ BLEND_MEDIA_TYPE = "image/png"
 #: The largest selection read here before a workflow is handed it: the
 #: Studio's own largest mask. A larger one is handed as it was drawn.
 MAX_WORKFLOW_MASK_PIXELS = 8192 * 8192
+#: A selection is edited on a crop only when the crop, with its surroundings,
+#: is at most this share of the picture. Past it the whole picture is as good.
+MAX_CROP_SHARE = 0.5
+#: Room left around a selection on each side, as a share of its own size, so
+#: the workflow sees what the selection sits in.
+CROP_CONTEXT = 0.5
+MIN_CROP_CONTEXT_PX = 32
+#: About the size image workflows are made for; a smaller crop is enlarged to it.
+CROP_WORKING_PIXELS = 1024 * 1024
+#: A crop's sides are whole blocks of this many pixels, which every latent
+#: model's encoder divides evenly, so the edit decodes to exactly its size.
+CROP_ALIGN = 64
+#: Below this share of the crop the surroundings say too little about colour
+#: to match the edit to them.
+MIN_COLOUR_RING_SHARE = 0.01
+#: The most, in levels of each channel, an edit is shifted to match what
+#: surrounds it. A model's encode and decode move colours by a few levels; a
+#: larger change around the selection is the workflow's own, such as light it
+#: cast, and is left as drawn.
+MAX_COLOUR_SHIFT = 8
+#: How far from the selection colour is measured. Resizing spreads the edit a
+#: few pixels past the selection's edge, and measured there it would read as
+#: the surroundings' own colour.
+COLOUR_RING_GAP_PX = 4
 _EXIF_ORIENTATION = 0x0112
 
 
@@ -256,6 +282,169 @@ def _composable(image: Image.Image) -> Image.Image:
     if image.mode in {"RGBA", "LA", "PA"} or "transparency" in image.info:
         return image.convert("RGBA")
     return image.convert("RGB")
+
+
+@dataclass(frozen=True)
+class SelectionCrop:
+    """The part of a picture a workflow is given for a small selection, and where it goes."""
+
+    edit: RegionEdit
+    #: Which of the workflow's pictures are edits of the crop, to be placed back.
+    route: SelectionRoute
+    #: Left, top, right and bottom, in the upright source's pixels.
+    box: tuple[int, int, int, int]
+    #: What the workflow is given: the crop enlarged to about its working size.
+    picture: bytes
+    #: The selection cropped the same way, in its brightness and its alpha.
+    mask: bytes
+    size: tuple[int, int]
+
+
+def crop_selection(edit: RegionEdit, route: SelectionRoute) -> SelectionCrop | None:
+    """The crop a small selection is edited on, or None when the whole picture is as good.
+
+    A workflow draws the picture it is given at its own working size, so a
+    selection a few dozen pixels across is drawn with a few dozen pixels and
+    comes back soft. Given only the selection and its surroundings, enlarged
+    to that size, it draws the selection with all of them. A picture too large
+    to place an edit back into, or one that does not read whole here, is
+    edited whole instead, where the whole picture's own checks decide.
+    """
+    upright = _upright_shape(edit.source)
+    if upright is None or upright[0][0] * upright[0][1] > MAX_BLEND_PIXELS:
+        return None
+    try:
+        source = load_source(edit.source)
+        alpha = _selection_alpha(
+            decode_picture(edit.mask, "selection"),
+            source.image.size,
+            invert=edit.selection.invert,
+            orientation=source.orientation,
+        )
+    except RegionEditError:
+        return None
+    bounds = alpha.image.getbbox()
+    if bounds is None:
+        return None
+    box = _context_box(bounds, source.image.size)
+    width, height = box[2] - box[0], box[3] - box[1]
+    if width * height > MAX_CROP_SHARE * source.image.width * source.image.height:
+        return None
+    size = _working_size(width, height)
+    picture = source.image.crop(box).convert("RGB").resize(size, Image.Resampling.LANCZOS)
+    selected = alpha.image.crop(box).resize(size, Image.Resampling.BILINEAR)
+    # In brightness and in alpha, as the whole picture's selection is handed.
+    mask = Image.merge("RGBA", (selected, selected, selected, selected))
+    return SelectionCrop(
+        edit=edit,
+        route=route,
+        box=box,
+        picture=encode_png(picture, source.icc_profile),
+        mask=encode_png(mask, None),
+        size=size,
+    )
+
+
+def stitch_selection(crop: SelectionCrop, result: bytes) -> RegionBlend:
+    """Place a crop's edit back into its picture through the selection, as a PNG.
+
+    The edit is brought back to the crop's size, and shifted by however little
+    the model moved the colours around the selection, so it does not stand out
+    from what surrounds it. Outside the selection the stored picture is the
+    source's own pixels.
+    """
+    source = load_source(crop.edit.source)
+    alpha = _selection_alpha(
+        decode_picture(crop.edit.mask, "selection"),
+        source.image.size,
+        invert=crop.edit.selection.invert,
+        orientation=source.orientation,
+    )
+    edited = decode_picture(result, "edited picture")
+    sent_ratio = crop.size[0] / crop.size[1]
+    if abs(edited.width / edited.height - sent_ratio) > MAX_SHAPE_DRIFT * sent_ratio:
+        raise RegionEditError(
+            "region-result-reshaped",
+            "The edited part came back in a different shape, so it cannot be placed back "
+            "into the selection.",
+        )
+    left, top, right, bottom = crop.box
+    original = source.image.crop(crop.box)
+    selection = alpha.image.crop(crop.box)
+    fitted = edited.convert("RGB").resize((right - left, bottom - top), Image.Resampling.LANCZOS)
+    matched, colour_shift = _matched_colours(fitted, original.convert("RGB"), selection)
+    if original.mode == "RGBA":
+        matched.putalpha(original.getchannel("A"))
+    stitched = source.image.copy()
+    stitched.paste(Image.composite(matched, original, selection), (left, top))
+    return RegionBlend(
+        content=encode_png(stitched, source.icc_profile),
+        media_type=BLEND_MEDIA_TYPE,
+        record={
+            "mode": "crop",
+            "source_artifact_id": crop.edit.source_artifact_id,
+            "selection": mask_provenance(
+                crop.edit.selection, alpha.prepared.geometry, coverage=alpha.prepared.coverage
+            ),
+            "box": list(crop.box),
+            "working_width": crop.size[0],
+            "working_height": crop.size[1],
+            "colour_shift": colour_shift,
+            "result_sha256": hashlib.sha256(result).hexdigest(),
+            "result_width": edited.width,
+            "result_height": edited.height,
+            "result_resampler": RESULT_RESAMPLER,
+            "width": source.image.width,
+            "height": source.image.height,
+        },
+    )
+
+
+def _context_box(
+    selected: tuple[int, int, int, int], size: tuple[int, int]
+) -> tuple[int, int, int, int]:
+    left, top, right, bottom = selected
+    across = max(MIN_CROP_CONTEXT_PX, round((right - left) * CROP_CONTEXT))
+    down = max(MIN_CROP_CONTEXT_PX, round((bottom - top) * CROP_CONTEXT))
+    return (
+        max(0, left - across),
+        max(0, top - down),
+        min(size[0], right + across),
+        min(size[1], bottom + down),
+    )
+
+
+def _working_size(width: int, height: int) -> tuple[int, int]:
+    """A crop's size enlarged toward the working size, in whole blocks."""
+    scale = max(1.0, math.sqrt(CROP_WORKING_PIXELS / (width * height)))
+
+    def side(length: int) -> int:
+        return max(CROP_ALIGN, round(length * scale / CROP_ALIGN) * CROP_ALIGN)
+
+    return side(width), side(height)
+
+
+def _matched_colours(
+    edited: Image.Image, original: Image.Image, selection: Image.Image
+) -> tuple[Image.Image, list[int]]:
+    """The edit shifted by how far its surroundings drifted from the source, and that shift.
+
+    Measured only where nothing is selected, a little way from the selection,
+    which the edit was not asked to change: what is taken out is the model's
+    drift, not the edit. Only the average moves. Resampling softens fine
+    texture, so the spread around the selection says nothing about the edit.
+    """
+    grown = selection.filter(ImageFilter.MaxFilter(2 * COLOUR_RING_GAP_PX + 1))
+    ring = grown.point(lambda value: 255 if value == 0 else 0)
+    if ImageStat.Stat(ring).mean[0] / 255 < MIN_COLOUR_RING_SHARE:
+        return edited, [0, 0, 0]
+    drifted = ImageStat.Stat(edited, ring).mean
+    wanted = ImageStat.Stat(original, ring).mean
+    shift = [round(target - mean) for mean, target in zip(drifted, wanted, strict=True)]
+    if not any(shift) or max(abs(value) for value in shift) > MAX_COLOUR_SHIFT:
+        return edited, [0, 0, 0]
+    table = [min(255, max(0, value + offset)) for offset in shift for value in range(256)]
+    return edited.point(table), shift
 
 
 def _drawn_selection(mask: Image.Image) -> Image.Image:

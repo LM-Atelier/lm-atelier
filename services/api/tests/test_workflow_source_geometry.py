@@ -306,6 +306,12 @@ def object_info(value: dict[str, Any] | None = None) -> dict[str, Any]:
     arities = {
         "InpaintModelConditioning": 3,
         "LoadImage": 2,
+        "LoadImageMask": 1,
+        "VAEEncode": 1,
+        "SetLatentNoiseMask": 1,
+        "ImageScale": 1,
+        "ImageScaleBy": 1,
+        "MaskToImage": 1,
         "ImagePadForOutpaint": 2,
         "CheckpointLoaderSimple": 3,
         "CLIPTextEncode": 1,
@@ -323,3 +329,179 @@ def object_info(value: dict[str, Any] | None = None) -> dict[str, Any]:
         }
         for node in (composited_graph() if value is None else value).values()
     }
+
+
+def masked_edit_graph(shape: str = "inpaint") -> dict[str, Any]:
+    """An edit with its own mask input, built the way inpainting workflows are."""
+    value = graph()
+    del value["pad"]
+    value["mask"] = {
+        "class_type": "LoadImageMask",
+        "inputs": {"image": "${mask}", "channel": "alpha"},
+    }
+    value["positive"]["inputs"]["text"] = "${prompt}"
+    value["encode"]["inputs"].update(pixels=["source", 0], mask=["mask", 0])
+    if shape == "conditioning":
+        # The fill-model shape, with its decode pasted back over the source.
+        del value["encode"]
+        value["condition"] = {
+            "class_type": "InpaintModelConditioning",
+            "inputs": {
+                "positive": ["positive", 0],
+                "negative": ["negative", 0],
+                "vae": ["checkpoint", 2],
+                "pixels": ["source", 0],
+                "mask": ["mask", 0],
+                "noise_mask": True,
+            },
+        }
+        value["sample"]["inputs"].update(
+            positive=["condition", 0], negative=["condition", 1], latent_image=["condition", 2]
+        )
+        value["composite"] = {
+            "class_type": "ImageCompositeMasked",
+            "inputs": {
+                "destination": ["source", 0],
+                "source": ["decode", 0],
+                "mask": ["mask", 0],
+                "x": 0,
+                "y": 0,
+                "resize_source": False,
+            },
+        }
+        value["save"]["inputs"]["images"] = ["composite", 0]
+    elif shape == "noise_mask":
+        value["encode"] = {
+            "class_type": "VAEEncode",
+            "inputs": {"pixels": ["source", 0], "vae": ["checkpoint", 2]},
+        }
+        value["noise"] = {
+            "class_type": "SetLatentNoiseMask",
+            "inputs": {"samples": ["encode", 0], "mask": ["mask", 0]},
+        }
+        value["sample"]["inputs"]["latent_image"] = ["noise", 0]
+    elif shape == "enlarges":
+        value["enlarge"] = {
+            "class_type": "ImageScaleBy",
+            "inputs": {"image": ["decode", 0], "upscale_method": "lanczos", "scale_by": 2.0},
+        }
+        value["save"]["inputs"]["images"] = ["enlarge", 0]
+    elif shape == "sets_its_own_size":
+        value["resize"] = {
+            "class_type": "ImageScale",
+            "inputs": {
+                "image": ["source", 0],
+                "upscale_method": "lanczos",
+                "width": "${width}",
+                "height": "${height}",
+                "crop": "disabled",
+            },
+        }
+        value["encode"]["inputs"]["pixels"] = ["resize", 0]
+    elif shape == "saves_its_mask":
+        value["shown"] = {"class_type": "MaskToImage", "inputs": {"mask": ["mask", 0]}}
+        value["save_mask"] = {
+            "class_type": "SaveImage",
+            "inputs": {"images": ["shown", 0], "filename_prefix": "mask"},
+        }
+    else:
+        assert shape == "inpaint"
+    return value
+
+
+@pytest.mark.parametrize("shape", ["inpaint", "conditioning", "noise_mask"])
+def test_a_masked_edit_that_keeps_its_source_size_has_a_selection_route(shape: str) -> None:
+    from local_lm.workflow_source_geometry import trace_selection_route
+
+    value = masked_edit_graph(shape)
+    before = deepcopy(value)
+    route = trace_selection_route(value)
+    assert route is not None
+    assert route.source_node_id == "source"
+    assert route.save_node_ids == frozenset({"save"})
+    assert value == before
+
+
+@pytest.mark.parametrize(
+    "shape", ["enlarges", "sets_its_own_size", "saves_its_mask"], ids=lambda shape: shape
+)
+def test_a_masked_edit_that_may_change_its_size_has_no_selection_route(shape: str) -> None:
+    from local_lm.workflow_source_geometry import trace_selection_route
+
+    assert trace_selection_route(masked_edit_graph(shape)) is None
+
+
+@pytest.mark.parametrize(
+    "node,field,replacement",
+    [
+        ("composite", "x", 8),
+        ("composite", "y", "${offset}"),
+        ("composite", "destination", ["mask", 0]),
+        ("decode", "vae", ["other_vae", 0]),
+        ("source", "image", "${reference_image}"),
+        ("sample", "latent_image", ["condition", 0]),
+    ],
+)
+def test_a_masked_edit_placed_anywhere_else_has_no_selection_route(
+    node: str, field: str, replacement: Any
+) -> None:
+    from local_lm.workflow_source_geometry import trace_selection_route
+
+    value = masked_edit_graph("conditioning")
+    value["other_vae"] = {"class_type": "VAELoader", "inputs": {"vae_name": "other.safetensors"}}
+    value[node]["inputs"][field] = replacement
+    assert trace_selection_route(value) is None
+
+
+def test_a_latent_drawn_from_nothing_has_no_selection_route() -> None:
+    from local_lm.workflow_source_geometry import trace_selection_route
+
+    value = masked_edit_graph()
+    value["empty"] = {
+        "class_type": "EmptyLatentImage",
+        "inputs": {"width": 512, "height": 512, "batch_size": 1},
+    }
+    value["sample"]["inputs"]["latent_image"] = ["empty", 0]
+    assert trace_selection_route(value) is None
+
+
+@pytest.mark.parametrize(
+    "origin,saved",
+    [
+        (
+            {
+                "state": "attributed",
+                "node_id": "save",
+                "output_type": "output",
+                "collection": "images",
+            },
+            True,
+        ),
+        (
+            {
+                "state": "attributed",
+                "node_id": "save",
+                "output_type": "temp",
+                "collection": "images",
+            },
+            False,
+        ),
+        (
+            {
+                "state": "attributed",
+                "node_id": "other",
+                "output_type": "output",
+                "collection": "images",
+            },
+            False,
+        ),
+        ({"state": "unattributed", "reason": "engine_does_not_attribute"}, False),
+        (None, False),
+    ],
+)
+def test_only_the_route_s_own_save_nodes_wrote_its_edits(origin: Any, saved: bool) -> None:
+    from local_lm.workflow_source_geometry import trace_selection_route
+
+    route = trace_selection_route(masked_edit_graph())
+    assert route is not None
+    assert route.saved(origin) is saved

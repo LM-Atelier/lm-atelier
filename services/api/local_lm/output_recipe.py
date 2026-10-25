@@ -742,11 +742,18 @@ def _finished_after_generation(entry: Mapping[str, Any], snapshot: AcceptedConte
     """Whether the stored picture is the workflow's output after more work on it.
 
     A fitted source is padded or cropped before the engine sees it and put back
-    afterwards, and a selection, relight or restore composites the result into
-    the source. A replay of the workflow alone does not make those bytes.
+    afterwards, a small selection is edited on a crop and placed back, and a
+    selection, relight or restore composites the result into the source. A
+    replay of the workflow alone does not make those bytes.
     """
 
-    finishing = {"region_edit", "relight", "source_restore", "source_fit_agreement"}
+    finishing = {
+        "region_edit",
+        "relight",
+        "selection_crop",
+        "source_restore",
+        "source_fit_agreement",
+    }
     return bool(finishing & set(entry)) or (
         snapshot is not None and snapshot.source_fit is not None
     )

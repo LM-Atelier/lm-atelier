@@ -11,6 +11,7 @@ the graph, or mapped to a setting no other input reads, which the run pins.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal, Never, cast
 
@@ -21,6 +22,11 @@ MAX_OUTPAINT_PIXELS = 16384
 # sample fills it.
 FULL_STRENGTH = 1
 _VAE_OUTPUTS = {"CheckpointLoaderSimple": 2, "VAELoader": 0}
+# How many latents each sampler a masked edit may use puts out; each keeps
+# the size of the latent it is given.
+_SELECTION_SAMPLERS = {"KSampler": 1, "KSamplerAdvanced": 1, "SamplerCustomAdvanced": 2}
+# The steps that encode the source for an edit, and the output each gives the sampler.
+_SELECTION_ENCODES = {"VAEEncode": 0, "VAEEncodeForInpaint": 0, "InpaintModelConditioning": 2}
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,3 +284,96 @@ def _trace_crop(api_graph: object, save_node_id: object) -> SourceCropRoute:
         vae_node_id=vae_id,
         vae_output_index=vae_port,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class SelectionRoute:
+    """Every picture a masked edit saves, each its source edited in place at its own size."""
+
+    source_node_id: str
+    save_node_ids: frozenset[str]
+
+    def saved(self, origin: object) -> bool:
+        """Whether this output is a picture one of the route's own save nodes wrote."""
+        return (
+            isinstance(origin, Mapping)
+            and origin.get("state") == "attributed"
+            and origin.get("node_id") in self.save_node_ids
+            and origin.get("output_type") == "output"
+            and origin.get("collection") == "images"
+        )
+
+
+def trace_selection_route(api_graph: object) -> SelectionRoute | None:
+    """Trace every SaveImage of a masked edit back to its source, or answer no route.
+
+    A small selection is edited on a crop of its picture, and the edit can be
+    placed back only if each saved picture comes back the crop's size. So the
+    source must be encoded for the edit, sampled in place and decoded by the
+    same VAE, and at most pasted over the source at its corner. A graph that
+    saves any other picture, or takes any other step on the way, answers no
+    route rather than a guess.
+    """
+    try:
+        return _trace_selection(api_graph)
+    except _UnboundRoute:
+        return None
+
+
+def _trace_selection(api_graph: object) -> SelectionRoute:
+    if type(api_graph) is not dict or not 1 <= len(api_graph) <= 512:
+        _refuse()
+    graph = cast(dict[str, object], api_graph)
+    for key in graph:
+        _identifier(key)
+    saves = frozenset(
+        key
+        for key, node in graph.items()
+        if type(node) is dict and cast(dict[str, object], node).get("class_type") == "SaveImage"
+    )
+    sources = {_selection_source(graph, save_id) for save_id in saves}
+    if len(sources) != 1:
+        _refuse()
+    return SelectionRoute(source_node_id=sources.pop(), save_node_ids=saves)
+
+
+def _selection_source(graph: dict[str, object], save_id: str) -> str:
+    save = _inputs(graph, save_id, "SaveImage")
+    decode_id = _image_edge(save, "images")
+    destination_id: str | None = None
+    if _node(graph, decode_id).get("class_type") == "ImageCompositeMasked":
+        # Pasted at the source's corner, the decode leaves the source's size.
+        composite = _inputs(graph, decode_id, "ImageCompositeMasked")
+        _zero(composite.get("x"))
+        _zero(composite.get("y"))
+        destination_id = _image_edge(composite, "destination")
+        decode_id = _image_edge(composite, "source")
+    decode = _inputs(graph, decode_id, "VAEDecode")
+    sampler_id, sampler_port = _edge(decode, "samples")
+    sampler_kind = _node(graph, sampler_id).get("class_type")
+    if not isinstance(sampler_kind, str) or not (
+        sampler_port < _SELECTION_SAMPLERS.get(sampler_kind, 0)
+    ):
+        _refuse()
+    sampler = _inputs(graph, sampler_id, sampler_kind)
+    encode_id, encode_port = _edge(sampler, "latent_image")
+    if _node(graph, encode_id).get("class_type") == "SetLatentNoiseMask" and encode_port == 0:
+        encode_id, encode_port = _edge(_inputs(graph, encode_id, "SetLatentNoiseMask"), "samples")
+    encode_kind = _node(graph, encode_id).get("class_type")
+    if not isinstance(encode_kind, str) or _SELECTION_ENCODES.get(encode_kind) != encode_port:
+        _refuse()
+    encode = _inputs(graph, encode_id, encode_kind)
+    vae_id, vae_port = _edge(encode, "vae")
+    if _edge(decode, "vae") != (vae_id, vae_port):
+        _refuse()
+    vae_kind = _node(graph, vae_id).get("class_type")
+    if not isinstance(vae_kind, str) or _VAE_OUTPUTS.get(vae_kind) != vae_port:
+        _refuse()
+    _inputs(graph, vae_id, vae_kind)
+    source_id = _image_edge(encode, "pixels")
+    if destination_id is not None and destination_id != source_id:
+        _refuse()
+    source = _inputs(graph, source_id, "LoadImage")
+    if source.get("image") != "$" + "{input_image}":
+        _refuse()
+    return source_id

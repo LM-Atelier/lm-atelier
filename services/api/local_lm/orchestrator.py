@@ -196,6 +196,7 @@ from .outpaint_workflows import (
 )
 from .output_measurement import Budget, measure_output, record_to_keep
 from .output_origin import names_a_preview, record_for
+from .output_recipe_v1 import REPLAY_RECEIPT_KEY
 from .output_size_agreement import size_agreement
 from .processes import ProcessSupervisor, WorkerStartRefused
 from .profile_service import AUTO_PROFILE_ID
@@ -281,8 +282,11 @@ from .studio_region_edit import (
     MAX_BLEND_READ_BYTES,
     RegionEdit,
     RegionEditError,
+    SelectionCrop,
     blend_through_selection,
+    crop_selection,
     prepare_selection,
+    stitch_selection,
     workflow_selection_mask,
 )
 from .studio_relight import (
@@ -416,6 +420,7 @@ from .workflow_selection import (
     resolve_exact_workflow_revision,
     resolve_workflow_family,
 )
+from .workflow_source_geometry import SelectionRoute, trace_selection_route
 from .workflow_use_case_execution import (
     InheritedWorkflowUseCasePreset,
     WorkflowUseCaseExecution,
@@ -6807,13 +6812,16 @@ class ConversationOrchestrator:
         media_engine: str,
         source_fit: SourceFitRecipe | None = None,
         prepared_source: PreparedSourceImage | None = None,
+        selection_crop: SelectionCrop | None = None,
     ) -> list[GeneratedAsset]:
         """Each kept picture finished against its source, in one fixed order.
 
         An extension's source is put back first, on the picture its own save
         node wrote, so every later step starts from the accepted source. A
         crop has nothing to put back, and is only brought back to its canvas
-        when the VAE rounded the canvas down.
+        when the VAE rounded the canvas down. A small selection edited on a
+        crop around it is placed back into its picture through the selection,
+        from each picture the traced graph saved.
         Relight next, because its mix and grade are about the whole picture
         and its source. The selection blend last, so a selection keeps
         everything outside it as the source, including from the relight. Each
@@ -6846,6 +6854,9 @@ class ConversationOrchestrator:
                     fitted = await asyncio.to_thread(fit_to_canvas, crop, content)
                     if fitted is not None:
                         content, records["source_crop"] = fitted.content, fitted.record
+                if selection_crop is not None and selection_crop.route.saved(origin):
+                    stitched = await asyncio.to_thread(stitch_selection, selection_crop, content)
+                    content, records["selection_crop"] = stitched.content, stitched.record
                 if relight is not None:
                     relit = await asyncio.to_thread(finish_relight, relight, content)
                     content, records["relight"] = relit.content, relit.record
@@ -7149,22 +7160,59 @@ class ConversationOrchestrator:
         )
 
     @staticmethod
-    async def _checked_selection(
-        region_edit: RegionEdit | None, workflow_selection: RegionEdit | None
-    ) -> bytes | None:
-        """Check a run's selection before any model time, and make a workflow's mask.
+    def _selection_route(
+        run: Run, media_engine: str, workflow: dict[str, Any], selection: RegionEdit | None
+    ) -> SelectionRoute | None:
+        """Where a small selection's edit could be placed back from a crop; None edits it whole.
 
-        A selection drawn on another picture, or one covering nothing, can be
-        neither placed back nor handed to a workflow.
+        ComfyUI is the engine handed the crop's own bytes, and every picture its
+        graph saves must be the source edited in place, so that it comes back
+        the crop's size. An exact replay repeats a record, and a record of a
+        cropped edit is never exactly replayable, so a replay is edited whole.
+        """
+        if (
+            selection is None
+            or media_engine != "comfyui"
+            or REPLAY_RECEIPT_KEY in run.provenance_json
+        ):
+            return None
+        return trace_selection_route(workflow)
+
+    @staticmethod
+    async def _selected_request(
+        request: MediaRequest,
+        region_edit: RegionEdit | None,
+        workflow_selection: RegionEdit | None,
+        route: SelectionRoute | None,
+    ) -> tuple[MediaRequest, SelectionCrop | None]:
+        """The request with a workflow's selection made, after any selection is checked.
+
+        Checked before any model time: a selection drawn on another picture, or
+        one covering nothing, can be neither placed back nor handed to a
+        workflow. A small selection is edited on a crop around it where its
+        route says the edit can be placed back, and the workflow takes the one
+        picture as it is stored.
         """
         try:
             if region_edit is not None:
                 await asyncio.to_thread(prepare_selection, region_edit)
-            if workflow_selection is not None:
-                return await asyncio.to_thread(workflow_selection_mask, workflow_selection)
+            if workflow_selection is None:
+                return request, None
+            crop = (
+                await asyncio.to_thread(crop_selection, workflow_selection, route)
+                if route is not None
+                and request.input_contents is None
+                and len(request.input_paths) == 1
+                else None
+            )
+            if crop is not None:
+                return replace(
+                    request, input_contents=(crop.picture,), mask_content=crop.mask
+                ), crop
+            mask = await asyncio.to_thread(workflow_selection_mask, workflow_selection)
         except RegionEditError as exc:
             raise RuntimeError(str(exc)) from exc
-        return None
+        return replace(request, mask_content=mask), None
 
     async def _execute_media(self, job_id: str, run_id: str, claim: JobClaim) -> str | None:
         activation_scope: WorkflowActivationLaunchScope | None = None
@@ -7435,6 +7483,7 @@ class ConversationOrchestrator:
                             else self.artifacts.resolve(mask_artifact)
                         ),
                     }
+            selection_route = self._selection_route(run, media_engine, workflow, workflow_selection)
             request = MediaRequest(
                 run_id=run.id,
                 operation=execution_operation,
@@ -7449,9 +7498,9 @@ class ConversationOrchestrator:
             )
             assistant_id = run.assistant_message_id
 
-        mask_content = await self._checked_selection(region_edit, workflow_selection)
-        if mask_content is not None:
-            request = replace(request, mask_content=mask_content)
+        request, selection_crop = await self._selected_request(
+            request, region_edit, workflow_selection, selection_route
+        )
 
         completed_assets = []
         preview_artifact_id: str | None = None
@@ -7615,7 +7664,12 @@ class ConversationOrchestrator:
             # ended this execution; the shared bounded close does both.
             await close_iterator(producer)
 
-        if relight_finish is not None or region_edit is not None or source_fit is not None:
+        if (
+            relight_finish is not None
+            or region_edit is not None
+            or source_fit is not None
+            or selection_crop is not None
+        ):
             # Before measurement, so the measurement, the library, provenance
             # and verification all describe the picture that is kept.
             completed_assets = await self._studio_finished_outputs(
@@ -7625,6 +7679,7 @@ class ConversationOrchestrator:
                 source_fit=source_fit,
                 prepared_source=prepared_source,
                 media_engine=media_engine,
+                selection_crop=selection_crop,
             )
         media_capabilities = (
             await self._successful_media_capabilities() if completed_assets else None
@@ -7828,6 +7883,13 @@ class ConversationOrchestrator:
                         **(
                             {"region_edit": generated.metadata["region_edit"]}
                             if region_edit is not None and "region_edit" in generated.metadata
+                            else {}
+                        ),
+                        # How a small selection edited on a crop was placed back
+                        # into its source, present only when one was.
+                        **(
+                            {"selection_crop": generated.metadata["selection_crop"]}
+                            if selection_crop is not None and "selection_crop" in generated.metadata
                             else {}
                         ),
                         # How the relit picture was finished against its source,
