@@ -11527,20 +11527,44 @@ class ConversationOrchestrator:
             else revision_eligibility
         )
         requires_instruction_edit = combined_eligibility is not revision_eligibility
-        try:
-            resolved = resolve_workflow_family(
+
+        def resolve(
+            chosen: WorkflowSelectionMode,
+            family_id: str | None,
+            eligibility: RevisionEligibility | None,
+        ) -> ResolvedWorkflowFamily:
+            return resolve_workflow_family(
                 session,
                 capability=capability,
                 operation=operation,
-                mode=mode,
-                workflow_family_id=workflow_family_id,
+                mode=chosen,
+                workflow_family_id=family_id,
                 prompt=prompt,
                 engine=engine,
                 legacy_revision_resolver=legacy_revision,
                 preferred_revision=self._instruction_edit_preference(operation, prompt),
-                revision_eligibility=combined_eligibility,
+                revision_eligibility=eligibility,
                 kinds=kinds,
             )
+
+        try:
+            try:
+                resolved = resolve(mode, workflow_family_id, combined_eligibility)
+            except WorkflowFamilySelectionError as exc:
+                if not (
+                    mode == "default"
+                    and revision_eligibility is not None
+                    and exc.reason == "variant_missing"
+                ):
+                    raise
+                # A default family with no workflow at all for this operation,
+                # such as one that only makes pictures from words when an
+                # enlargement is asked for, says nothing about this turn. So it is
+                # chosen for as an automatic choice is, from every ready family and
+                # with each candidate checked, rather than refused. A turn without
+                # a requirement already falls back below.
+                mode = "automatic"
+                resolved = resolve(mode, None, revision_eligibility)
         except WorkflowFamilySelectionError as exc:
             reasons = (
                 set(exc.candidate_reasons) if exc.reason == "no_ready_workflow" else {exc.reason}

@@ -9,7 +9,18 @@ from sqlalchemy import func, select
 from test_workflow_recipe_request_cases import _picture, _workflow
 
 from local_lm.db import SessionLocal
-from local_lm.models import Chat, Job, Message, Run, RunContextSnapshot, WorkflowRevision, WorkPlan
+from local_lm.models import (
+    Chat,
+    Job,
+    Message,
+    Run,
+    RunContextSnapshot,
+    WorkflowDefinition,
+    WorkflowFamily,
+    WorkflowPreference,
+    WorkflowRevision,
+    WorkPlan,
+)
 
 
 async def _selection(client: AsyncClient, *, adjustable: bool) -> tuple[str, str, dict[str, Any]]:
@@ -152,6 +163,139 @@ async def test_unavailable_preview_returns_guidance_without_queuing_work(
     response = await client.post(f"/api/chats/{chat_id}/upscale/preview", json=payload)
     assert response.status_code == 409, response.text
     assert response.json()["code"] == "upscale-preview-unavailable"
+    assert _writes(chat_id) == before
+
+
+def _default_family_that_only_generates() -> None:
+    """The default image family, its one workflow making pictures from words."""
+    with SessionLocal() as session:
+        for preference in session.scalars(
+            select(WorkflowPreference).where(WorkflowPreference.selector_capability == "image")
+        ):
+            preference.is_default = False
+        family = WorkflowFamily(name="Words only", use_case="")
+        definition = WorkflowDefinition(
+            family=family,
+            name="Words only",
+            operation="text_to_image",
+            variant_key="generate",
+        )
+        revision = WorkflowRevision(
+            definition=definition,
+            version=1,
+            engine="mock",
+            trusted=True,
+            api_graph_json={"nodes": [{"inputs": {"text": "${prompt}"}}]},
+            input_schema_json={"type": "object", "properties": {}},
+            dependencies_json={},
+        )
+        session.add_all(
+            [
+                family,
+                definition,
+                revision,
+                WorkflowPreference(family=family, selector_capability="image", is_default=True),
+            ]
+        )
+        session.flush()
+        definition.current_revision_id = revision.id
+        session.commit()
+
+
+def _upscaler_in_no_family(*, trusted: bool = True) -> str:
+    """An enlargement workflow installed on its own, as one built on an upscaling model is."""
+    with SessionLocal() as session:
+        definition = WorkflowDefinition(name="Upscaler", operation="image_to_image")
+        session.add(definition)
+        session.flush()
+        revision = WorkflowRevision(
+            workflow_id=definition.id,
+            version=1,
+            engine="mock",
+            trusted=trusted,
+            api_graph_json={
+                "source": {"class_type": "LoadImage", "inputs": {"image": "${input_image}"}},
+                "scale": {
+                    "class_type": "ImageScaleBy",
+                    "inputs": {"image": ["source", 0], "scale_by": "${upscale_factor}"},
+                },
+                "output": {"class_type": "SaveImage", "inputs": {"images": ["scale", 0]}},
+            },
+            input_schema_json={
+                "type": "object",
+                "properties": {
+                    "upscale_factor": {
+                        "type": "number",
+                        "default": 2,
+                        "minimum": 1,
+                        "maximum": 4,
+                        "x-lm-atelier-kind": "upscale",
+                    }
+                },
+            },
+            dependencies_json={},
+        )
+        session.add(revision)
+        session.flush()
+        definition.current_revision_id = revision.id
+        session.commit()
+        return revision.id
+
+
+async def _default_choice_enlargement(client: AsyncClient) -> tuple[str, dict[str, Any]]:
+    """A chat as a Studio session leaves it, its image choice the default family."""
+    chat = (await client.post("/api/chats", json={"title": "Enhance"})).json()
+    chosen = await client.put(
+        f"/api/chats/{chat['id']}/workflow-selections/image", json={"mode": "default"}
+    )
+    assert chosen.status_code == 200, chosen.text
+    return chat["id"], {
+        "text": "Enlarge this picture",
+        "mode": "image",
+        "upscale": True,
+        "input_artifact_ids": [await _picture(client)],
+    }
+
+
+async def test_an_enlargement_runs_past_a_default_family_that_cannot_edit(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    """A default family with no edit says nothing about Enhance, so a ready upscaler is chosen."""
+    _default_family_that_only_generates()
+    upscaler = _upscaler_in_no_family()
+    chat_id, payload = await _default_choice_enlargement(client)
+
+    preview = await client.post(f"/api/chats/{chat_id}/upscale/preview", json=payload)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["workflow_revision_id"] == upscaler
+    async with app.state.services.scheduler.lease("primary"):
+        accepted = await client.post(f"/api/chats/{chat_id}/turns", json=payload)
+    assert accepted.status_code == 202, accepted.text
+    assert accepted.json()["run"]["workflow_revision_id"] == upscaler
+
+
+@pytest.mark.parametrize("problem", ["unreviewed", "turned-off"])
+async def test_an_enlargement_past_a_default_family_needs_a_ready_upscaler(
+    client: AsyncClient, problem: str
+) -> None:
+    """Nothing unreviewed or turned off is offered as ready, so Enhance never loops on it."""
+    _default_family_that_only_generates()
+    if problem == "unreviewed":
+        _upscaler_in_no_family(trusted=False)
+    else:
+        family_id, _ = _workflow("image_upscale", "image_to_image", "image")
+        turned_off = await client.patch(
+            f"/api/workflow-families/{family_id}", json={"enabled": False}
+        )
+        assert turned_off.status_code == 200, turned_off.text
+    chat_id, payload = await _default_choice_enlargement(client)
+    before = _writes(chat_id)
+
+    preview = await client.post(f"/api/chats/{chat_id}/upscale/preview", json=payload)
+    turn = await client.post(f"/api/chats/{chat_id}/turns", json=payload)
+
+    assert preview.status_code == 409, preview.text
+    assert turn.status_code in {409, 422}, turn.text
     assert _writes(chat_id) == before
 
 
