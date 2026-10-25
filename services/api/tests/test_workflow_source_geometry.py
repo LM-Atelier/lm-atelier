@@ -312,6 +312,10 @@ def object_info(value: dict[str, Any] | None = None) -> dict[str, Any]:
         "ImageScale": 1,
         "ImageScaleBy": 1,
         "MaskToImage": 1,
+        "ImageToMask": 1,
+        "SaveAnimatedWEBP": 0,
+        "PreviewImage": 0,
+        "PreviewBridge": 1,
         "ImagePadForOutpaint": 2,
         "CheckpointLoaderSimple": 3,
         "CLIPTextEncode": 1,
@@ -404,6 +408,27 @@ def masked_edit_graph(shape: str = "inpaint") -> dict[str, Any]:
             "class_type": "SaveImage",
             "inputs": {"images": ["shown", 0], "filename_prefix": "mask"},
         }
+    elif shape == "saves_an_animation":
+        value["animation"] = {
+            "class_type": "SaveAnimatedWEBP",
+            "inputs": {"images": ["decode", 0], "filename_prefix": "animation"},
+        }
+    elif shape == "previews":
+        value["preview"] = {"class_type": "PreviewImage", "inputs": {"images": ["decode", 0]}}
+    elif shape == "leaves_a_node_unread":
+        value["spare"] = {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "spare.safetensors"},
+        }
+    elif shape == "previews_on_the_way":
+        # A node that shows the selection and passes it on is read, but still writes a picture.
+        value["shown"] = {"class_type": "MaskToImage", "inputs": {"mask": ["mask", 0]}}
+        value["bridge"] = {"class_type": "PreviewBridge", "inputs": {"images": ["shown", 0]}}
+        value["masked"] = {
+            "class_type": "ImageToMask",
+            "inputs": {"image": ["bridge", 0], "channel": "red"},
+        }
+        value["encode"]["inputs"]["mask"] = ["masked", 0]
     else:
         assert shape == "inpaint"
     return value
@@ -423,7 +448,17 @@ def test_a_masked_edit_that_keeps_its_source_size_has_a_selection_route(shape: s
 
 
 @pytest.mark.parametrize(
-    "shape", ["enlarges", "sets_its_own_size", "saves_its_mask"], ids=lambda shape: shape
+    "shape",
+    [
+        "enlarges",
+        "sets_its_own_size",
+        "saves_its_mask",
+        "saves_an_animation",
+        "previews",
+        "leaves_a_node_unread",
+        "previews_on_the_way",
+    ],
+    ids=lambda shape: shape,
 )
 def test_a_masked_edit_that_may_change_its_size_has_no_selection_route(shape: str) -> None:
     from local_lm.workflow_source_geometry import trace_selection_route

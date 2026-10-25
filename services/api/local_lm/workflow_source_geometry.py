@@ -310,8 +310,10 @@ def trace_selection_route(api_graph: object) -> SelectionRoute | None:
     A small selection is edited on a crop of its picture, and the edit can be
     placed back only if each saved picture comes back the crop's size. So the
     source must be encoded for the edit, sampled in place and decoded by the
-    same VAE, and at most pasted over the source at its corner. A graph that
-    saves any other picture, or takes any other step on the way, answers no
+    same VAE, and at most pasted over the source at its corner. Every node the
+    graph ends with must be one of those saves: any other ending may write a
+    picture of its own, at the crop's size, which could not be placed back. A
+    graph with any other ending, or any other step on the way, answers no
     route rather than a guess.
     """
     try:
@@ -331,10 +333,29 @@ def _trace_selection(api_graph: object) -> SelectionRoute:
         for key, node in graph.items()
         if type(node) is dict and cast(dict[str, object], node).get("class_type") == "SaveImage"
     )
+    if set(graph) - _read_nodes(graph) != saves:
+        _refuse()
+    for key, node in graph.items():
+        kind = cast(dict[str, object], node).get("class_type") if type(node) is dict else None
+        # A node that saves or previews and passes its picture on is not an ending.
+        if key not in saves and isinstance(kind, str) and ("Save" in kind or "Preview" in kind):
+            _refuse()
     sources = {_selection_source(graph, save_id) for save_id in saves}
     if len(sources) != 1:
         _refuse()
     return SelectionRoute(source_node_id=sources.pop(), save_node_ids=saves)
+
+
+def _read_nodes(graph: dict[str, object]) -> set[object]:
+    """Every node another node reads from."""
+    read: set[object] = set()
+    for node in graph.values():
+        inputs = cast(dict[str, object], node).get("inputs") if type(node) is dict else None
+        if type(inputs) is dict:
+            for value in cast(dict[str, object], inputs).values():
+                if type(value) is list and len(cast(list[object], value)) == 2:
+                    read.add(cast(list[object], value)[0])
+    return read
 
 
 def _selection_source(graph: dict[str, object], save_id: str) -> str:
