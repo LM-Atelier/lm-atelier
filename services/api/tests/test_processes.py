@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import json
 import os
 import socket
 import subprocess
 import sys
 import time
+import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +52,7 @@ from local_lm.processes import (
     WORKER_STDERR_TAIL_BYTES,
     ProcessSupervisor,
     WorkerRecord,
+    _comfy_preview_method,
     _ProcessIdentity,
     _RotatingWorkerLog,
     _with_comfy_registry_overlays,
@@ -2186,6 +2189,220 @@ async def test_media_start_disables_unapproved_custom_nodes(
     assert command[command.index("--preview-method") + 1] == "latent2rgb"
     assert "--disable-all-custom-nodes" in command
     assert command[command.index("--whitelist-custom-nodes") + 1 :] == ["lm-atelier-node_reviewed"]
+
+
+async def test_media_start_draws_previews_with_a_decoder_the_runtime_holds(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "comfyui"
+    decoders = runtime / "models" / "vae_approx"
+    decoders.mkdir(parents=True)
+    (runtime / "main.py").touch()
+    (decoders / "taeh3.safetensors").write_bytes(_safetensors())
+    executable = tmp_path / "python.exe"
+    executable.touch()
+    model_paths = tmp_path / "extra-model-paths.yaml"
+    model_paths.touch()
+    settings.comfy_directory = runtime
+    settings.comfy_executable = executable
+    supervisor = ProcessSupervisor(settings)
+    captured: dict[str, list[str]] = {}
+
+    async def trusted_nodes() -> list[str]:
+        return []
+
+    async def replace(
+        name: str,
+        command: list[str],
+        _health_url: str,
+        _profile_id: str | None = None,
+        **_options: object,
+    ) -> None:
+        assert name == "media"
+        captured["command"] = command
+
+    monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", trusted_nodes)
+    monkeypatch.setattr(supervisor, "_write_comfy_model_paths", lambda: model_paths)
+    monkeypatch.setattr(supervisor, "_replace", replace)
+
+    await supervisor.start_media()
+
+    command = captured["command"]
+    assert command[command.index("--preview-method") + 1] == "taesd"
+
+
+def _safetensors(payload: bytes = bytes(8)) -> bytes:
+    header = json.dumps(
+        {
+            "__metadata__": {"format": "pt"},
+            "weight": {
+                "dtype": "F32",
+                "shape": [len(payload) // 4],
+                "data_offsets": [0, len(payload)],
+            },
+        }
+    ).encode()
+    return len(header).to_bytes(8, "little") + header + payload
+
+
+def _header_only(header: bytes) -> bytes:
+    return len(header).to_bytes(8, "little") + header
+
+
+def _archive(*members: str) -> bytes:
+    """A zip archive, the form PyTorch saves weights in."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name in members:
+            archive.writestr(name, bytes(64))
+    return buffer.getvalue()
+
+
+_WHOLE = _safetensors()
+# The tensor listed last is not the one that ends the file.
+_TWO_TENSORS = _header_only(
+    b'{"b": {"dtype": "F32", "shape": [1], "data_offsets": [8, 12]},'
+    b' "a": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]}}'
+) + bytes(12)
+_ARCHIVE = _archive("decoder/data.pkl", "decoder/data/0")
+
+
+@pytest.mark.parametrize(
+    ("entries", "method"),
+    [
+        ({}, "latent2rgb"),
+        ({"put_taesd_encoder_pth_and_taesd_decoder_pth_here": b"", "notes.txt": b""}, "latent2rgb"),
+        ({"taesd_encoder.safetensors": _WHOLE, "taesdxl_encoder.pth": _ARCHIVE}, "latent2rgb"),
+        ({"TAESDXL_DECODER.PTH": _ARCHIVE}, "taesd"),
+        ({"taeh3.pt2": _ARCHIVE}, "taesd"),
+        ({"taeh3.sft": _WHOLE}, "taesd"),
+        (
+            {"notes.txt": b"", "lighttaew2_2.safetensors": _WHOLE, "taesd_encoder.pth": b"w"},
+            "taesd",
+        ),
+        ({"taeh3.safetensors": _TWO_TENSORS}, "taesd"),
+        ({"taeh3.safetensors": _WHOLE, "taesd_encoder.safetensors": _WHOLE[:3]}, "taesd"),
+        ({"taeh3.safetensors": _WHOLE[:-1]}, "latent2rgb"),
+        ({"taeh3.sft": _WHOLE[:-1]}, "latent2rgb"),
+        ({"taeh3.safetensors": _WHOLE + b"\x00"}, "latent2rgb"),
+        ({"taeh3.safetensors": _WHOLE, "taesd_decoder.safetensors": _WHOLE[:40]}, "latent2rgb"),
+        ({"taeh3.safetensors": b""}, "latent2rgb"),
+        ({"taesd_decoder.pth": _ARCHIVE[:-1]}, "latent2rgb"),
+        (
+            {"taeh3.safetensors": _WHOLE, "taesd_decoder.pth": _ARCHIVE[: len(_ARCHIVE) // 2]},
+            "latent2rgb",
+        ),
+        ({"taesd_decoder.pth": b""}, "latent2rgb"),
+        ({"taesd_decoder.pkl": b"\x80\x04K\x01."}, "latent2rgb"),
+        ({"taesd_decoder.pth": _archive()}, "latent2rgb"),
+        ({"taeh3.safetensors": _header_only(b"not a header")}, "latent2rgb"),
+        ({"taeh3.safetensors": _header_only(b"[1, 2]")}, "latent2rgb"),
+        ({"taeh3.safetensors": _header_only(b'{"w": {"data_offsets": [4, 0]}}')}, "latent2rgb"),
+        ({"taeh3.safetensors": _header_only(b'{"w": {"data_offsets": [-4, 0]}}')}, "latent2rgb"),
+        (
+            {"taeh3.safetensors": _header_only(b'{"w": {"data_offsets": [0, 4.0]}}') + bytes(4)},
+            "latent2rgb",
+        ),
+        ({"taeh3.safetensors": _header_only(b'{"w": [0, 4]}') + bytes(4)}, "latent2rgb"),
+        ({"taeh3.safetensors": _header_only(b"[" * 100_000 + b"]" * 100_000)}, "latent2rgb"),
+        ({"taeh3.safetensors": (64).to_bytes(8, "little") + b"{}"}, "latent2rgb"),
+    ],
+    ids=[
+        "empty",
+        "no-weights",
+        "encoders-only",
+        "upper-case-suffix",
+        "pt2",
+        "sft",
+        "among-other-files",
+        "two-tensors-out-of-order",
+        "an-encoder-cut-short",
+        "cut-short",
+        "sft-cut-short",
+        "longer-than-its-header",
+        "one-of-two-cut-short",
+        "empty-file",
+        "archive-cut-short",
+        "archive-cut-short-beside-a-whole-decoder",
+        "archive-empty-file",
+        "not-an-archive",
+        "archive-with-nothing-in-it",
+        "header-not-json",
+        "header-not-an-object",
+        "offsets-reversed",
+        "offset-negative",
+        "offset-not-an-integer",
+        "tensor-not-an-object",
+        "header-nested-too-deep",
+        "header-cut-short",
+    ],
+)
+def test_previews_use_a_decoder_only_when_every_decoder_is_whole(
+    tmp_path: Path, entries: dict[str, bytes], method: str
+) -> None:
+    decoders = tmp_path / "models" / "vae_approx"
+    decoders.mkdir(parents=True)
+    for name, content in entries.items():
+        (decoders / name).write_bytes(content)
+
+    assert _comfy_preview_method(tmp_path) == method
+
+
+def test_previews_refuse_a_safetensors_header_over_the_format_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    decoders = tmp_path / "models" / "vae_approx"
+    decoders.mkdir(parents=True)
+    (decoders / "taeh3.safetensors").write_bytes(_WHOLE)
+    header_bytes = int.from_bytes(_WHOLE[:8], "little")
+
+    monkeypatch.setattr(processes_module, "_SAFETENSORS_HEADER_MAX_BYTES", header_bytes)
+    assert _comfy_preview_method(tmp_path) == "taesd"
+
+    monkeypatch.setattr(processes_module, "_SAFETENSORS_HEADER_MAX_BYTES", header_bytes - 1)
+    assert _comfy_preview_method(tmp_path) == "latent2rgb"
+
+
+def test_previews_keep_the_colour_mapping_without_a_decoder_folder(tmp_path: Path) -> None:
+    assert _comfy_preview_method(tmp_path) == "latent2rgb"
+
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "vae_approx").write_bytes(b"")
+    assert _comfy_preview_method(tmp_path) == "latent2rgb"
+
+    (tmp_path / "models" / "vae_approx").unlink()
+    (tmp_path / "models" / "vae_approx" / "taeh3.safetensors").mkdir(parents=True)
+    assert _comfy_preview_method(tmp_path) == "latent2rgb"
+
+
+@pytest.mark.parametrize(
+    ("refused", "decoder"),
+    [
+        ("is_file", "taeh3.safetensors"),
+        ("open", "taeh3.safetensors"),
+        ("open", "taesd_decoder.pth"),
+    ],
+    ids=["is-file", "open-safetensors", "open-archive"],
+)
+def test_previews_keep_the_colour_mapping_when_a_decoder_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refused: str, decoder: str
+) -> None:
+    """A decoder that cannot be read keeps the colour mapping."""
+    decoders = tmp_path / "models" / "vae_approx"
+    decoders.mkdir(parents=True)
+    (decoders / decoder).write_bytes(_ARCHIVE if decoder.endswith(".pth") else _WHOLE)
+    assert _comfy_preview_method(tmp_path) == "taesd"
+
+    def refuse(*_args: object, **_kwargs: object) -> bool:
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(Path, refused, refuse)
+    if refused == "open":
+        monkeypatch.setattr(io, "open", refuse)
+
+    assert _comfy_preview_method(tmp_path) == "latent2rgb"
 
 
 async def test_media_start_retains_a_bridge_staging_refusal_without_blocking_media(

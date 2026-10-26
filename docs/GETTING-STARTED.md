@@ -364,6 +364,22 @@ before/after view helps compare the result.
 Reference support depends on the workflow. Merely selecting an image does not
 make every model or workflow capable of using it.
 
+While a picture or video is generating, its previews are drawn from the
+model's unfinished work. When the media engine starts and the ComfyUI runtime's
+`models/vae_approx` folder holds a tiny preview decoder (TAESD or one of its
+video counterparts), the engine uses decoder previews, which look much like the
+finished result. Otherwise previews use a fixed colour mapping that gives only
+a blurred impression, and a model with no decoder of its own keeps the colour
+mapping either way. If any decoder in the folder is incomplete, such as an
+interrupted download, the engine starts with the colour mapping for every
+model. A decoder added while the colour mapping is in use takes effect the next
+time the media engine starts.
+
+While decoder previews are on, each run looks for its model's decoder afresh,
+so put only complete files in that folder. A decoder still downloading there,
+or one made for a different model than its name says, makes that model's runs
+fail until it is finished or removed.
+
 ### Prepare a demonstration
 
 1. Use a fresh chat and neutral sample requests that you are comfortable sharing.
