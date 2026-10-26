@@ -13,6 +13,7 @@ import socket
 import sys
 import threading
 import time
+import zipfile
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -248,6 +249,96 @@ def _with_comfy_registry_overlays(
         *overlays,
         *command[1:],
     ]
+
+
+# The file types ComfyUI loads weights from, preview decoders among them.
+_COMFY_WEIGHT_SUFFIXES = frozenset(
+    {".ckpt", ".pt", ".pt2", ".bin", ".pth", ".safetensors", ".pkl", ".sft"}
+)
+_SAFETENSORS_SUFFIXES = frozenset({".safetensors", ".sft"})
+# The safetensors format caps its header at 100 MB.
+_SAFETENSORS_HEADER_MAX_BYTES = 100_000_000
+
+
+def _comfy_preview_method(directory: Path) -> str:
+    """How ComfyUI should draw the live previews of a sampling run.
+
+    A tiny preview decoder in the runtime's own ``models/vae_approx`` folder
+    draws each preview much as the finished picture will look, where the
+    fixed colour mapping gives only a blurred impression of it. ComfyUI picks
+    the decoder trained for the model being sampled and falls back to the
+    colour mapping for any model without one, so a single decoder is reason
+    enough to ask for decoder previews. Encoders in the same folder are never
+    used for previews.
+
+    ComfyUI loads a decoder on every sampling run without checking it first,
+    so a decoder cut short, as by an interrupted download, would fail every
+    run of its model. Any decoder that is not whole keeps the colour mapping
+    for every model instead, as does a folder that cannot be read.
+    """
+    try:
+        decoders = [
+            entry
+            for entry in (directory / "models" / "vae_approx").iterdir()
+            if entry.suffix.casefold() in _COMFY_WEIGHT_SUFFIXES
+            and not entry.stem.casefold().endswith("_encoder")
+            and entry.is_file()
+        ]
+        if decoders and all(_holds_whole_weights(entry) for entry in decoders):
+            return "taesd"
+    except OSError:
+        pass
+    return "latent2rgb"
+
+
+def _holds_whole_weights(path: Path) -> bool:
+    """Whether a weights file still holds the index that describes its contents.
+
+    A safetensors file states its length in its header. PyTorch writes the
+    other formats as zip archives, whose directory is the last thing in the
+    file, so a file cut short has none. A file in neither form is not taken
+    as whole.
+    """
+    if path.suffix.casefold() in _SAFETENSORS_SUFFIXES:
+        return _holds_whole_safetensors(path)
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return bool(archive.infolist())
+    except (zipfile.BadZipFile, ValueError, EOFError):
+        return False
+
+
+def _holds_whole_safetensors(path: Path) -> bool:
+    """Whether a safetensors file is exactly as long as its header says it is."""
+    with path.open("rb") as handle:
+        prefix = handle.read(8)
+        if len(prefix) != 8:
+            return False
+        length = int.from_bytes(prefix, "little")
+        if length > _SAFETENSORS_HEADER_MAX_BYTES:
+            return False
+        encoded = handle.read(length)
+        size = os.fstat(handle.fileno()).st_size
+    try:
+        header = json.loads(encoded)
+    except (ValueError, RecursionError):
+        return False
+    if len(encoded) != length or not isinstance(header, dict):
+        return False
+    end = 0
+    for name, tensor in header.items():
+        if name == "__metadata__":
+            continue
+        offsets = tensor.get("data_offsets") if isinstance(tensor, dict) else None
+        if not (
+            isinstance(offsets, list)
+            and len(offsets) == 2
+            and all(type(offset) is int and offset >= 0 for offset in offsets)
+            and offsets[0] <= offsets[1]
+        ):
+            return False
+        end = max(end, offsets[1])
+    return size == 8 + length + end
 
 
 _ANSI_ESCAPE = re.compile(r"\x1b(?:[@-_][0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
@@ -892,6 +983,7 @@ class ProcessSupervisor:
                 if provisional_model_paths is not None
                 else self._write_comfy_model_paths()
             )
+        preview_method = await asyncio.to_thread(_comfy_preview_method, directory)
         command = [
             str(executable.expanduser().resolve(strict=True)),
             str(entrypoint),
@@ -904,7 +996,7 @@ class ProcessSupervisor:
             "--output-directory",
             str(output_directory),
             "--preview-method",
-            "latent2rgb",
+            preview_method,
             "--disable-all-custom-nodes",
         ]
         if registry_contract.site_packages:
