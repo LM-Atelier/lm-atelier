@@ -1055,6 +1055,37 @@ SELECTION_TERM_ALIASES = {
 }
 
 
+#: More steps than any sampler runs; a larger count is not a step count.
+_MAX_REPORTED_STEPS = 100_000
+
+
+def _reported_step(data: Mapping[str, Any]) -> dict[str, int]:
+    """The step and step count an engine reported with a progress event, or nothing.
+
+    ComfyUI reports a running node's progress as a value out of a maximum,
+    which for a sampler is its step out of its steps. Only whole, finite
+    numbers with the step inside the count are passed on.
+    """
+    value, maximum = data.get("value"), data.get("max")
+    numbers = []
+    for number in (value, maximum):
+        if isinstance(number, bool):
+            return {}
+        if isinstance(number, float):
+            # An integer is already whole; only a float can be a fraction,
+            # and a huge integer must not be made a float to find out.
+            if not math.isfinite(number) or not number.is_integer():
+                return {}
+            number = int(number)
+        if not isinstance(number, int):
+            return {}
+        numbers.append(number)
+    step, steps = numbers
+    if not 0 <= step <= steps or not 1 <= steps <= _MAX_REPORTED_STEPS:
+        return {}
+    return {"step": step, "steps": steps}
+
+
 def _preview_media_type(content: bytes) -> str:
     if content.startswith(b"\x89PNG"):
         return "image/png"
@@ -7605,6 +7636,9 @@ class ConversationOrchestrator:
 
         completed_assets = []
         preview_artifact_id: str | None = None
+        # The step the engine last reported, which a preview frame is a
+        # picture of: ComfyUI sends the frame after the step's progress.
+        last_step: dict[str, int] = {}
         # The producer is closed the moment a write refuses: a refused
         # progress, preview or completion means the row belongs to a later
         # attempt, and a superseded execution neither consumes nor holds
@@ -7623,6 +7657,9 @@ class ConversationOrchestrator:
             async for event in producer:
                 if event.type in {"progress", "queued"}:
                     indeterminate = event.type == "queued" or bool(event.data.get("indeterminate"))
+                    reported = _reported_step(event.data)
+                    if reported:
+                        last_step = reported
                     with self.session_factory() as session:
                         job = session.get(Job, job_id)
                         message = session.get(Message, assistant_id)
@@ -7664,6 +7701,7 @@ class ConversationOrchestrator:
                             "progress": event.progress,
                             "phase": event.phase,
                             "job_id": job_id,
+                            **reported,
                         },
                     )
                 elif event.type == "preview" and event.preview:
@@ -7729,6 +7767,7 @@ class ConversationOrchestrator:
                             "job_id": job_id,
                             "bytes": len(event.preview),
                             "artifact_id": preview_artifact_id,
+                            **last_step,
                         },
                     )
                 elif event.type == "cancelled":

@@ -258,7 +258,14 @@ class MockMediaAdapter:
                 self._cancelled.discard(request.run_id)
                 yield MediaEvent(type="cancelled", progress=progress, phase="cancelled")
                 return
-            yield MediaEvent(type="progress", progress=progress, phase=phase, engine_sourced=True)
+            yield MediaEvent(
+                type="progress",
+                progress=progress,
+                phase=phase,
+                # Sampling reports a step out of its steps, as ComfyUI does.
+                data={"value": 7, "max": 10} if phase == "sampling" else {},
+                engine_sourced=True,
+            )
             await asyncio.sleep(0.05)
 
         preview = self._mock_image(request)
