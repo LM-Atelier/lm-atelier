@@ -149,7 +149,12 @@ from .image_edit_verification import (
     without_contradicted,
 )
 from .matting_workflows import workflow_declares_matting
-from .media_references import exceeds_capacity
+from .media_references import (
+    GUIDE_VIDEO_MEDIA_TYPES,
+    exceeds_capacity,
+    guide_video_refusal,
+    videos_required,
+)
 from .message_references import (
     carry_message_references_if_absent,
     record_message_references,
@@ -1963,17 +1968,49 @@ class ConversationOrchestrator:
             if prior_prompt:
                 plan.standalone_prompt = f"{prior_prompt}. Follow-up instruction: {request.text}"
         plan.input_artifact_ids = resolved_input_ids
+        # How many guide videos the turn brings, where a video can be one: None
+        # where videos play no part, so the workflow is chosen as before.
+        guide_videos: int | None = None
         if (
             plan.operation in {Operation.IMAGE_TO_IMAGE, Operation.IMAGE_TO_VIDEO}
             and self.engines.settings.media_engine == "comfyui"
-            and any(
-                not artifact.media_type.casefold().startswith("image/")
+        ):
+            video_ids = [
+                artifact.id
+                for artifact in explicit_artifacts.values()
+                if artifact.media_type.casefold().startswith("video/")
+            ]
+            pictures = sum(
+                artifact.media_type.casefold().startswith("image/")
                 for artifact in explicit_artifacts.values()
             )
-        ):
-            # ComfyUI is handed pictures only, so another kind of file would
-            # be queued and then fail when the run starts.
-            raise ValueError("This media step requires image-compatible inputs.")
+            if pictures + len(video_ids) != len(explicit_artifacts) or (
+                video_ids and (plan.operation != Operation.IMAGE_TO_VIDEO or not pictures)
+            ):
+                # ComfyUI is handed pictures, and beside a picture a video turn
+                # may hand it guide videos. Any other file, or a video with no
+                # picture to start from, would be queued and then fail when the
+                # run starts.
+                raise ValueError("This media step requires image-compatible inputs.")
+            if any(
+                artifact.media_type.split(";")[0].strip().casefold() not in GUIDE_VIDEO_MEDIA_TYPES
+                for artifact in explicit_artifacts.values()
+                if artifact.id in video_ids
+            ):
+                raise ValueError(
+                    "This video cannot guide a workflow. Attach an MP4, MOV, WebM, MKV or AVI file."
+                )
+            if plan.operation == Operation.IMAGE_TO_VIDEO:
+                guide_videos = len(video_ids)
+            if video_ids:
+                # Pictures first: the run records its first input as the
+                # picture it starts from, whatever order they were attached in.
+                resolved_input_ids = [
+                    artifact_id
+                    for artifact_id in resolved_input_ids
+                    if artifact_id not in video_ids
+                ] + [artifact_id for artifact_id in resolved_input_ids if artifact_id in video_ids]
+                plan.input_artifact_ids = resolved_input_ids
         visual_prompt = (
             None
             if prompt_batch_selection is not None
@@ -2014,6 +2051,7 @@ class ConversationOrchestrator:
             revision_eligibility=(
                 use_case_execution.eligibility(session) if use_case_execution else None
             ),
+            guide_videos=guide_videos,
         )
         if inherited_profile is not None:
             if profile is None or profile.id != inherited_profile.id:
@@ -2171,6 +2209,7 @@ class ConversationOrchestrator:
             effective_settings,
             workflow_revision,
             resolved_input_ids,
+            guide_videos=guide_videos or 0,
         )
         lora_resolution: ResolvedLoraStack | None = None
         workflow_lora_outcome: _WorkflowLoraOutcome | None = None
@@ -2814,8 +2853,10 @@ class ConversationOrchestrator:
         effective_settings: dict[str, Any],
         workflow_revision: WorkflowRevision | None,
         resolved_input_ids: list[str],
+        *,
+        guide_videos: int = 0,
     ) -> None:
-        """Refuse a selection, relight, margins or references the chosen workflow cannot take.
+        """Refuse a selection, relight, margins, references or videos the workflow cannot take.
 
         Each is checked here, where the workflow is known, so the turn is refused
         before it exists rather than after a generation. Margins of nothing that
@@ -2897,14 +2938,32 @@ class ConversationOrchestrator:
         # saying nothing. Silently using one of four is indistinguishable from
         # a bad model, which is the worst kind of failure to debug.
         if plan.operation != Operation.TEXT and workflow_revision:
-            over = exceeds_capacity(workflow_revision.api_graph_json, len(resolved_input_ids))
+            # Guide videos have slots of their own, so only pictures count here.
+            pictures = len(resolved_input_ids) - guide_videos
+            over = exceeds_capacity(workflow_revision.api_graph_json, pictures)
             if over is not None:
                 raise ValueError(
                     f"This workflow uses {over or 'no'} reference image"
-                    f"{'' if over == 1 else 's'}, and {len(resolved_input_ids)} were "
+                    f"{'' if over == 1 else 's'}, and {pictures} were "
                     "attached. Choose a workflow built for multiple references, or "
                     "attach fewer."
                 )
+        # ComfyUI fills each video slot a graph names from the videos attached,
+        # and nothing else fills it. A slot left empty, or a video with no slot,
+        # would be queued and then fail when the run starts, so either is
+        # refused now.
+        if (
+            plan.operation != Operation.TEXT
+            and workflow_revision
+            and self.engines.settings.media_engine == "comfyui"
+        ):
+            refusal = guide_video_refusal(
+                workflow_revision.api_graph_json,
+                guide_videos,
+                can_bring=plan.operation == Operation.IMAGE_TO_VIDEO,
+            )
+            if refusal is not None:
+                raise ValueError(refusal)
 
     def _materialize_turn_output(
         self,
@@ -3414,6 +3473,9 @@ class ConversationOrchestrator:
                 revision_eligibility=(
                     use_case_execution.eligibility(session) if use_case_execution else None
                 ),
+                # A step is handed pictures only, so a workflow that waits for a
+                # guide video is passed over as for a turn that brings none.
+                guide_videos=0 if self.engines.settings.media_engine == "comfyui" else None,
             )
             if inherited is not None:
                 if inherited.profile is not None:
@@ -3428,6 +3490,17 @@ class ConversationOrchestrator:
                     workflow_revision = resolve_accepted_workflow(session, inherited.workflow)
             if workflow_revision:
                 model_selection = {**model_selection, "compatibility_only": True}
+            if (
+                workflow_revision
+                and self.engines.settings.media_engine == "comfyui"
+                and videos_required(workflow_revision.api_graph_json)
+            ):
+                # One named for the step, which nothing passes over, would be
+                # queued and then fail when the step starts.
+                raise ValueError(
+                    f"Ordered step {index + 1} selected a workflow that needs a guide video, "
+                    "which no step of a longer request can bring."
+                )
             if profile and profile.model_install_id:
                 install = session.get(ModelInstall, profile.model_install_id)
                 if not install or not install.active:
@@ -11069,6 +11142,7 @@ class ConversationOrchestrator:
         *,
         ordered: bool = False,
         revision_eligibility: RevisionEligibility | None = None,
+        guide_videos: int | None = None,
     ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None]:
         revision_eligibility = enlargement_revision_eligibility(
             session, operation, request, revision_eligibility
@@ -11198,6 +11272,10 @@ class ConversationOrchestrator:
                 and not (isinstance(mask, dict) and mask.get("apply") == MASK_APPLY_BLEND),
                 enlargement=request.upscale,
             )
+        elif operation == Operation.IMAGE_TO_VIDEO and guide_videos is not None:
+            # A workflow that waits for a guide video would run without one, and
+            # one that reads the videos a turn brings is what it asked for.
+            kinds = TurnWorkflowKinds(videos=guide_videos)
         result = self._profile_and_workflow_for_operation(
             session,
             chat,
@@ -12684,13 +12762,15 @@ class ConversationOrchestrator:
                 # tool that asks for a cutout, and it declares no model, so without
                 # this it would be the first generic choice. One that waits for an
                 # input the turn leaves empty would run without it.
-                if not kinds.admits(revision.input_schema_json):
+                if not kinds.admits_workflow(revision.input_schema_json, revision.api_graph_json):
                     continue
-                preferred = kinds.prefers(revision.input_schema_json)
+                preferred = kinds.prefers_workflow(
+                    revision.input_schema_json, revision.api_graph_json
+                )
                 if self._revision_declares_a_model(revision):
                     if not self._revision_accepts_install(session, revision, model_install_id):
                         continue
-                    if preferred or kinds.brings is None:
+                    if preferred or not kinds.brings_input:
                         return revision
                     if bound_fallback is None:
                         bound_fallback = revision

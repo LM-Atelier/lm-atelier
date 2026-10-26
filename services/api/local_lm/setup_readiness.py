@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from .capability_evidence import current_capability_evidence
 from .config import Settings
 from .generation_queue import generation_dispatch
+from .media_references import videos_required
 from .model_planner import revision_accepts_install
 from .models import (
     Job,
@@ -463,6 +464,10 @@ def _workflow_check(
         for revision in candidates
         if revision.trusted and (revision.engine == "mock" or bool(revision.api_graph_json))
     ]
+    # The quick test hands a workflow one picture and no video, so one that
+    # waits for a guide video would fail it; such a workflow is chosen only when
+    # no other is ready. The sort is stable, so the newest stays first.
+    executable.sort(key=lambda revision: videos_required(revision.api_graph_json or {}) > 0)
     valid = next(
         (revision for revision in executable if _workflow_activation_is_ready(session, revision)),
         None,

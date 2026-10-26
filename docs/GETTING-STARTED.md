@@ -364,6 +364,15 @@ before/after view helps compare the result.
 Reference support depends on the workflow. Merely selecting an image does not
 make every model or workflow capable of using it.
 
+A video made from a picture can also follow one or more guide videos: attach
+the picture and the videos to the same video request. Only a workflow that
+reads a guide video can use one. When LM Atelier chooses the workflow itself,
+it prefers such a workflow when a video is attached and passes it over when
+none is. A request whose videos do not fit its workflow, leaving one unread or
+a slot it needs empty, is refused before anything runs. A guide video can be an
+MP4, MOV, WebM, MKV or AVI file. Picture edits, requests of several steps, and
+video requests with no picture take pictures only.
+
 While a picture or video is generating, its previews are drawn from the
 model's unfinished work. When the media engine starts and the ComfyUI runtime's
 `models/vae_approx` folder holds a tiny preview decoder (TAESD or one of its
