@@ -223,9 +223,9 @@ def resolve_workflow_family(
     Graphless compatibility profiles are presented as None to this check.
 
     `kinds` leaves out of an automatic choice a workflow that declares an input
-    the turn leaves empty, such as a mask for an edit that brings no selection,
-    and puts first one that takes what the turn brings. Explicit and default
-    choices are not affected.
+    the turn leaves empty, such as a mask for an edit that brings no selection
+    or a guide video for a video turn that brings none, and puts first one that
+    takes what the turn brings. Explicit and default choices are not affected.
     """
 
     if operation not in _CAPABILITY_OPERATIONS[capability]:
@@ -316,8 +316,8 @@ def resolve_workflow_family(
             continue
         # A cutout workflow, or one waiting for an input the turn leaves empty,
         # would hand back something other than what was asked for.
-        if candidate.revision is not None and not kinds.admits(
-            candidate.revision.input_schema_json
+        if candidate.revision is not None and not kinds.admits_workflow(
+            candidate.revision.input_schema_json, candidate.revision.api_graph_json
         ):
             continue
         candidates.append(candidate)
@@ -330,7 +330,12 @@ def resolve_workflow_family(
         )
     candidates.sort(
         key=lambda item: (
-            not (item.revision is not None and kinds.prefers(item.revision.input_schema_json)),
+            not (
+                item.revision is not None
+                and kinds.prefers_workflow(
+                    item.revision.input_schema_json, item.revision.api_graph_json
+                )
+            ),
             not (
                 preferred_revision is not None
                 and item.revision is not None

@@ -11,6 +11,11 @@ is refused by a workflow with nowhere to put them, and one that asks for a
 larger picture by a workflow with no factor to enlarge by, so the choice looks
 first for one that declares what the turn brings.
 
+A video turn that starts from a picture may also bring a guide video. A
+workflow reads one through its graph rather than its settings, so that kind is
+judged from the graph: a workflow waiting for a video the turn does not bring
+is passed over, and one that reads the videos a turn brings comes first.
+
 This decides the app's own choice only. A workflow someone names runs as
 named, and the run's own checks refuse what it cannot honor. The studio's
 report reads the same rules, so a tool is offered when its turn would find a
@@ -24,6 +29,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from .matting_workflows import workflow_declares_matting
+from .media_references import unread_videos, videos_required
 from .outpaint_workflows import workflow_declares_outpaint
 from .studio_masks import workflow_accepts_mask
 from .upscale_workflows import workflow_declares_upscale
@@ -45,9 +51,59 @@ class TurnWorkflowKinds:
     unfilled: frozenset[DeclaredKind] = frozenset()
     #: A workflow declaring this is chosen ahead of the rest: the turn brings it.
     brings: DeclaredKind | None = None
+    #: How many guide videos the turn brings, or None for a turn videos play no part in.
+    videos: int | None = None
+
+    @property
+    def brings_input(self) -> bool:
+        """Whether a workflow that takes something this turn brings comes first."""
+        return self.brings is not None or bool(self.videos)
 
     def admits(self, input_schema: dict[str, Any] | None) -> bool:
         """Whether the app may choose this workflow for the turn at all."""
+        self._judged_without_a_graph()
+        return self._admits_settings(input_schema)
+
+    def prefers(self, input_schema: dict[str, Any] | None) -> bool:
+        """Whether this workflow takes what the turn brings."""
+        self._judged_without_a_graph()
+        return self._prefers_settings(input_schema)
+
+    def serves(self, input_schema: dict[str, Any] | None) -> bool:
+        """Whether this workflow alone can carry the turn out."""
+        return self.admits(input_schema) and (self.brings is None or self.prefers(input_schema))
+
+    def admits_workflow(
+        self, input_schema: dict[str, Any] | None, api_graph: dict[str, Any] | None
+    ) -> bool:
+        """Whether the app may choose this workflow, judged by its settings and its graph.
+
+        One that reads no video stays a choice for a turn that brings one, so a
+        turn whose only workflow cannot take its video is refused for that
+        reason rather than told nothing is installed.
+        """
+        if not self._admits_settings(input_schema):
+            return False
+        if self.videos is None:
+            return True
+        required = videos_required(api_graph or {})
+        if required == 0:
+            return True
+        return required <= self.videos and not unread_videos(api_graph or {}, self.videos)
+
+    def prefers_workflow(
+        self, input_schema: dict[str, Any] | None, api_graph: dict[str, Any] | None
+    ) -> bool:
+        """Whether this workflow takes what the turn brings, judged by settings and graph."""
+        if self._prefers_settings(input_schema):
+            return True
+        return (
+            bool(self.videos)
+            and self.admits_workflow(input_schema, api_graph)
+            and (videos_required(api_graph or {}) > 0)
+        )
+
+    def _admits_settings(self, input_schema: dict[str, Any] | None) -> bool:
         # A workflow that only cuts a subject out is chosen by name, by the tool
         # that asks for a cutout. Picked for any other turn it would hand back a
         # cutout instead of the edit asked for.
@@ -55,13 +111,12 @@ class TurnWorkflowKinds:
             return False
         return not any(_DECLARES[kind](input_schema) for kind in self.unfilled)
 
-    def prefers(self, input_schema: dict[str, Any] | None) -> bool:
-        """Whether this workflow takes what the turn brings."""
+    def _prefers_settings(self, input_schema: dict[str, Any] | None) -> bool:
         return self.brings is not None and _DECLARES[self.brings](input_schema)
 
-    def serves(self, input_schema: dict[str, Any] | None) -> bool:
-        """Whether this workflow alone can carry the turn out."""
-        return self.admits(input_schema) and (self.brings is None or self.prefers(input_schema))
+    def _judged_without_a_graph(self) -> None:
+        if self.videos is not None:
+            raise ValueError("Whether a workflow reads a video is judged from its graph.")
 
 
 #: A choice made with no turn to describe passes over only a cutout.

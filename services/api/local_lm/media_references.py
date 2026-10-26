@@ -97,6 +97,97 @@ def unread_videos(workflow: dict[str, Any], supplied: int) -> list[int]:
     return [index for index in range(supplied) if index not in read]
 
 
+def videos_required(workflow: dict[str, Any]) -> int:
+    """How many videos must be attached before every video slot the graph names is filled.
+
+    `${input_video}` and `${input_videos}` need one, and `${input_video_N}`
+    needs N + 1, because no slot repeats an earlier video. A graph naming none
+    of them needs none: it reads no video at all.
+    """
+    required = 0
+    stack: list[Any] = [workflow]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+        elif isinstance(value, str):
+            if _ALL_VIDEOS.fullmatch(value) or _FIRST_VIDEO.fullmatch(value):
+                required = max(required, 1)
+            elif match := _NUMBERED_VIDEO.fullmatch(value):
+                required = max(required, int(match.group("index")) + 1)
+    return required
+
+
+#: The video types ComfyUI's LoadVideo is handed: the MP4 family, QuickTime,
+#: Matroska and WebM, and AVI. A file stored as any other video type is not
+#: one LM Atelier can send it.
+GUIDE_VIDEO_MEDIA_TYPES = frozenset(
+    {
+        "video/mp4",
+        "video/x-m4v",
+        "video/3gpp",
+        "video/3gpp2",
+        "video/quicktime",
+        "video/webm",
+        "video/x-matroska",
+        "video/x-msvideo",
+        "video/avi",
+        "video/msvideo",
+    }
+)
+
+
+def guide_video_refusal(workflow: dict[str, Any], supplied: int, *, can_bring: bool) -> str | None:
+    """Why the videos a turn attaches do not fit the workflow's video slots, or None.
+
+    `can_bring` says whether the turn could bring a guide video at all: only a
+    video made from a picture can. The advice in each refusal is one the
+    person can follow from where they are.
+    """
+    required = videos_required(workflow)
+    if required and not supplied:
+        if not can_bring:
+            return (
+                "This workflow needs a guide video, which only a video made from a picture "
+                "can bring. Choose another workflow."
+            )
+        if required == 1:
+            return (
+                "This workflow needs a guide video. Attach one beside the picture, or choose "
+                "another workflow."
+            )
+        return (
+            f"This workflow needs {required} guide videos. Attach them beside the picture, "
+            "or choose another workflow."
+        )
+    if supplied and not required:
+        return (
+            "This workflow does not take a guide video. Choose a workflow built for one, or "
+            "attach only pictures."
+        )
+    if supplied and required > supplied:
+        return (
+            f"This workflow needs {required} guide videos, and {supplied} "
+            f"{'was' if supplied == 1 else 'were'} attached."
+        )
+    unread = unread_videos(workflow, supplied)
+    if not unread:
+        return None
+    if unread[0] >= required:
+        # Past the last slot the graph names: fewer videos would fit.
+        return (
+            f"This workflow does not read attached video {unread[0] + 1} of {supplied}. "
+            "Choose a workflow built for more guide videos, or attach fewer."
+        )
+    # A slot the graph skips: no number of videos fills it.
+    return (
+        f"This workflow does not read attached video {unread[0] + 1} of {supplied}. "
+        "Choose a workflow that reads every attached video."
+    )
+
+
 def exceeds_capacity(workflow: dict[str, Any], supplied: int) -> int | None:
     """The capacity that was overrun, or `None` when everything fits.
 
