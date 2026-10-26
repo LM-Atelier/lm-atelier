@@ -55,6 +55,13 @@ its dependencies need, verifies hashes end to end, and assembles an offline
 environment. Progress shows in the jobs panel stage by stage, and the job can
 be cancelled at any point.
 
+Wheels come from the Python Package Index, with one exception: `nvidia-vfx`,
+which the RTX video nodes need and NVIDIA publishes only on its own index, comes
+from `pypi.nvidia.com` and never from anywhere else. That index lists each
+wheel's hash but not its size or metadata, so preparation reads both from a few
+small parts of the wheel, and checks the metadata again against the whole wheel
+once it is downloaded.
+
 Preparation first commits the downloaded package inactive and untrusted.
 The installation then verifies its exact Registry identity, archive, files,
 and dependency environment before recording trust and enabling eligible

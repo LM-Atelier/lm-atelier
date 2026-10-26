@@ -20,6 +20,13 @@ from .comfy_registry_dependencies import (
     ComfyRegistryDependencyPlan,
     plan_comfy_registry_dependencies,
 )
+from .comfy_registry_package_indexes import (
+    REMOTE_READ_BUDGET_EXCEEDED,
+    ComfyRegistryPackageIndexError,
+    RemoteReadBudget,
+    read_remote_wheel_metadata,
+    served_by_nvidia_index,
+)
 from .comfy_registry_runtime import (
     ComfyRegistryRuntimeDistribution,
     ComfyRegistryRuntimeError,
@@ -125,6 +132,7 @@ class ComfyRegistryWheelMetadataClient:
         artifacts = _manifest_artifacts(manifest)
         documents: dict[str, bytes] = {}
         total_bytes = 0
+        budget = RemoteReadBudget(MAX_REGISTRY_WHEEL_METADATA_TOTAL_BYTES)
         for artifact in artifacts:
             expected_sha256 = artifact.metadata_sha256
             if expected_sha256 is None:
@@ -133,13 +141,23 @@ class ComfyRegistryWheelMetadataClient:
                     f"Wheel {artifact.filename} lacks hash-bound core metadata",
                 )
             try:
-                content = await self._fetch_one(
-                    f"{artifact.url}.metadata",
-                    artifact.filename,
-                    expected_sha256,
-                )
+                if served_by_nvidia_index(artifact.name):
+                    content = await self._read_from_wheel(artifact, expected_sha256, budget)
+                else:
+                    content = await self._fetch_one(
+                        f"{artifact.url}.metadata",
+                        artifact.filename,
+                        expected_sha256,
+                    )
             except ComfyRegistryWheelClosureDriverError:
                 raise
+            except ComfyRegistryPackageIndexError as exc:
+                if exc.code == REMOTE_READ_BUDGET_EXCEEDED:
+                    raise ComfyRegistryWheelClosureDriverError(
+                        "metadata_total_too_large",
+                        "Wheel core metadata exceeds the aggregate size limit",
+                    ) from exc
+                raise ComfyRegistryWheelClosureDriverError(exc.code, str(exc)) from exc
             except httpx.HTTPError as exc:
                 raise ComfyRegistryWheelClosureDriverError(
                     "metadata_network_error",
@@ -153,6 +171,33 @@ class ComfyRegistryWheelMetadataClient:
                 )
             documents[artifact.filename] = content
         return documents
+
+    async def _read_from_wheel(
+        self,
+        artifact: ComfyRegistryWheelArtifact,
+        expected_sha256: str,
+        budget: RemoteReadBudget,
+    ) -> bytes:
+        # This index serves no metadata files, so read the member from the wheel.
+        remote = await read_remote_wheel_metadata(
+            self._client, artifact.url, artifact.filename, budget
+        )
+        if remote.size_bytes != artifact.size_bytes:
+            raise ComfyRegistryWheelClosureDriverError(
+                "core_metadata_size_mismatch",
+                f"Wheel {artifact.filename} no longer matches its listed size",
+            )
+        if len(remote.metadata) > MAX_WHEEL_CORE_METADATA_BYTES:
+            raise ComfyRegistryWheelClosureDriverError(
+                "core_metadata_too_large",
+                f"Wheel core metadata for {artifact.filename} exceeds the size limit",
+            )
+        if not hmac.compare_digest(hashlib.sha256(remote.metadata).hexdigest(), expected_sha256):
+            raise ComfyRegistryWheelClosureDriverError(
+                "core_metadata_hash_mismatch",
+                f"Wheel core metadata hash for {artifact.filename} does not match",
+            )
+        return remote.metadata
 
     async def _fetch_one(
         self,

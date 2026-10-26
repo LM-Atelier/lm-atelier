@@ -8,12 +8,13 @@ import logging
 import os
 import shutil
 import tempfile
+import zlib
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from functools import partial
-from pathlib import Path
-from urllib.parse import unquote, urlparse
+from pathlib import Path, PurePosixPath
+from zipfile import ZIP_DEFLATED, ZIP_STORED, BadZipFile, ZipFile
 
 import httpx
 from packaging.requirements import InvalidRequirement, Requirement
@@ -23,6 +24,7 @@ from packaging.version import InvalidVersion, Version
 from sqlalchemy.orm import Session
 
 from .artifacts import ArtifactStore
+from .comfy_registry_package_indexes import served_by_nvidia_index, wheel_url_allowed
 from .comfy_registry_source_artifacts import VerifiedSourceWheel, verified_reviewed_source_wheel
 from .comfy_registry_wheel_artifacts import (
     MAX_WHEEL_ARTIFACT_BYTES,
@@ -154,21 +156,34 @@ class ComfyRegistryWheelDownloader:
                 metadata_size: int | None = None
                 if artifact.metadata_sha256 is not None:
                     metadata_filename = f"{artifact.filename}.metadata"
-                    metadata_size = await self._download(
-                        f"{artifact.url}.metadata",
-                        staging / metadata_filename,
-                        expected_sha256=artifact.metadata_sha256,
-                        expected_size=None,
-                        maximum_size=(
-                            MAX_REGISTRY_WHEEL_METADATA_BYTES
-                            if inputs is None
-                            else min(
-                                MAX_REGISTRY_WHEEL_METADATA_BYTES,
-                                MAX_REGISTRY_WHEEL_STAGE_BYTES - total_bytes - wheel_size,
-                            )
-                        ),
-                        progress=progress,
+                    metadata_maximum = (
+                        MAX_REGISTRY_WHEEL_METADATA_BYTES
+                        if inputs is None
+                        else min(
+                            MAX_REGISTRY_WHEEL_METADATA_BYTES,
+                            MAX_REGISTRY_WHEEL_STAGE_BYTES - total_bytes - wheel_size,
+                        )
                     )
+                    if served_by_nvidia_index(artifact.name):
+                        # This index serves no metadata files; the verified wheel holds it.
+                        metadata_size = await _local_stage_work(
+                            partial(
+                                _write_wheel_metadata,
+                                wheel_path,
+                                staging / metadata_filename,
+                                expected_sha256=artifact.metadata_sha256,
+                                maximum_size=metadata_maximum,
+                            )
+                        )
+                    else:
+                        metadata_size = await self._download(
+                            f"{artifact.url}.metadata",
+                            staging / metadata_filename,
+                            expected_sha256=artifact.metadata_sha256,
+                            expected_size=None,
+                            maximum_size=metadata_maximum,
+                            progress=progress,
+                        )
                 total_bytes += wheel_size + (metadata_size or 0)
                 staged.append(
                     ComfyRegistryStagedWheel(
@@ -460,7 +475,7 @@ def _validated_artifact(artifact: object) -> ComfyRegistryWheelArtifact:
         raise ComfyRegistryWheelDownloadError(
             "invalid_wheel_artifact", "Registry wheel size is invalid"
         )
-    _wheel_url(artifact.url, filename)
+    _wheel_url(name, artifact.url, filename)
     _digest(artifact.sha256, "wheel")
     if artifact.metadata_sha256 is not None:
         _digest(artifact.metadata_sha256, "wheel metadata")
@@ -524,25 +539,9 @@ def _hold_stage_lock(parent: Path, name: str) -> Iterator[None]:
         yield
 
 
-def _wheel_url(value: object, filename: str) -> str:
+def _wheel_url(name: str, value: object, filename: str) -> str:
     url = _text(value, "wheel URL", 2_000)
-    parsed = urlparse(url)
-    decoded = [unquote(segment) for segment in parsed.path.split("/") if segment]
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname != "files.pythonhosted.org"
-        or parsed.username
-        or parsed.password
-        or parsed.port
-        or parsed.query
-        or parsed.fragment
-        or not parsed.path.startswith("/packages/")
-        or not decoded
-        or decoded[-1] != filename
-        or any(
-            segment in {".", ".."} or "/" in segment or chr(92) in segment for segment in decoded
-        )
-    ):
+    if not wheel_url_allowed(name, url, filename):
         raise ComfyRegistryWheelDownloadError(
             "invalid_wheel_artifact", "Registry wheel URL is not allowlisted"
         )
@@ -623,6 +622,60 @@ def _write_new_file(path: Path, content: bytes) -> None:
         output.write(content)
         output.flush()
         os.fsync(output.fileno())
+
+
+def _write_wheel_metadata(
+    wheel_path: Path,
+    destination: Path,
+    *,
+    expected_sha256: str,
+    maximum_size: int,
+) -> int:
+    try:
+        with ZipFile(wheel_path) as archive:
+            entries = [
+                entry
+                for entry in archive.infolist()
+                if len(PurePosixPath(entry.filename).parts) == 2
+                and PurePosixPath(entry.filename).parts[0].endswith(".dist-info")
+                and PurePosixPath(entry.filename).name == "METADATA"
+            ]
+            # Resolution read METADATA stored or deflated and unencrypted; anything
+            # else is not the member it read.
+            if (
+                len(entries) != 1
+                or entries[0].file_size > maximum_size
+                or entries[0].compress_type not in {ZIP_STORED, ZIP_DEFLATED}
+                or entries[0].flag_bits & 1
+            ):
+                raise ComfyRegistryWheelDownloadError(
+                    "invalid_wheel_metadata", "Package wheel must hold one bounded METADATA file"
+                )
+            with archive.open(entries[0]) as member:
+                content = member.read(maximum_size + 1)
+    except ComfyRegistryWheelDownloadError:
+        raise
+    except (
+        BadZipFile,
+        EOFError,
+        NotImplementedError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        zlib.error,
+    ) as exc:
+        raise ComfyRegistryWheelDownloadError(
+            "invalid_wheel_metadata", "Package wheel metadata could not be read"
+        ) from exc
+    if len(content) > maximum_size or not hmac.compare_digest(
+        hashlib.sha256(content).hexdigest(), expected_sha256
+    ):
+        raise ComfyRegistryWheelDownloadError(
+            "download_hash_mismatch",
+            "Package wheel metadata does not match the locked SHA-256 hash",
+        )
+    _write_new_file(destination, content)
+    return len(content)
 
 
 async def _local_stage_work[T](work: Callable[[], T]) -> T:

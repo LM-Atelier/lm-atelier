@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -7,6 +8,19 @@ from collections.abc import Mapping, Sequence
 import httpx
 from packaging.utils import canonicalize_name
 
+from .comfy_registry_package_indexes import (
+    MAX_SIMPLE_HTML_PAGE_BYTES,
+    REMOTE_READ_BUDGET_EXCEEDED,
+    SIMPLE_HTML_MEDIA_TYPES,
+    UNREAD_WHEEL_KEY,
+    ComfyRegistryPackageIndexError,
+    RemoteReadBudget,
+    project_index_url,
+    read_remote_wheel_metadata,
+    served_by_nvidia_index,
+    simple_index_files,
+    wheel_url_allowed,
+)
 from .comfy_registry_wheel_artifacts import MAX_PYPI_PROJECT_DOCUMENT_BYTES
 from .network import shared_tls_context
 
@@ -61,9 +75,13 @@ class ComfyRegistryWheelProjectClient:
         total_bytes = 0
         for name in names:
             try:
-                document, downloaded = await self._fetch_one(name)
+                document, downloaded = await self._fetch_one(
+                    name, MAX_REGISTRY_WHEEL_PROJECT_TOTAL_BYTES - total_bytes
+                )
             except ComfyRegistryWheelProjectError:
                 raise
+            except ComfyRegistryPackageIndexError as exc:
+                raise ComfyRegistryWheelProjectError(exc.code, str(exc)) from exc
             except httpx.HTTPError as exc:
                 raise ComfyRegistryWheelProjectError(
                     "project_network_error",
@@ -78,9 +96,12 @@ class ComfyRegistryWheelProjectClient:
             documents[name] = document
         return documents
 
-    async def _fetch_one(self, name: str) -> tuple[object, int]:
-        url = f"https://pypi.org/simple/{name}/"
-        async with self._client.stream("GET", url) as response:
+    async def _fetch_one(self, name: str, remaining_bytes: int) -> tuple[object, int]:
+        url = project_index_url(name)
+        simple_html = served_by_nvidia_index(name)
+        headers = {"accept": "text/html"} if simple_html else None
+        maximum = MAX_SIMPLE_HTML_PAGE_BYTES if simple_html else MAX_REGISTRY_WHEEL_PROJECT_BYTES
+        async with self._client.stream("GET", url, headers=headers) as response:
             if response.status_code == 404:
                 raise ComfyRegistryWheelProjectError(
                     "project_not_found", f"PyPI project {name} does not exist"
@@ -96,7 +117,11 @@ class ComfyRegistryWheelProjectClient:
                     "project_http_error",
                     f"PyPI project metadata returned HTTP {response.status_code}",
                 )
-            if _media_type(response) != _SIMPLE_JSON_MEDIA_TYPE:
+            if (
+                _media_type(response) not in SIMPLE_HTML_MEDIA_TYPES
+                if simple_html
+                else _media_type(response) != _SIMPLE_JSON_MEDIA_TYPE
+            ):
                 raise ComfyRegistryWheelProjectError(
                     "invalid_project_content_type",
                     "PyPI project metadata used an unsupported content type",
@@ -107,13 +132,13 @@ class ComfyRegistryWheelProjectClient:
                     "encoded_project_metadata",
                     "PyPI project metadata used unsupported content encoding",
                 )
-            expected = _content_length(response)
+            expected = _content_length(response, maximum)
             body = bytearray()
             async for chunk in response.aiter_bytes(PROJECT_DOWNLOAD_CHUNK_BYTES):
                 if not chunk:
                     continue
                 body.extend(chunk)
-                if len(body) > MAX_REGISTRY_WHEEL_PROJECT_BYTES:
+                if len(body) > maximum:
                     raise ComfyRegistryWheelProjectError(
                         "project_metadata_too_large",
                         f"PyPI project metadata for {name} exceeds the size limit",
@@ -123,7 +148,58 @@ class ComfyRegistryWheelProjectClient:
                     "project_size_mismatch",
                     f"PyPI project metadata size for {name} does not match Content-Length",
                 )
+        if simple_html:
+            return await self._simple_html_document(
+                name, url, bytes(body), RemoteReadBudget(remaining_bytes - len(body))
+            )
         return _document(name, bytes(body)), len(body)
+
+    async def _simple_html_document(
+        self,
+        name: str,
+        url: str,
+        body: bytes,
+        budget: RemoteReadBudget,
+    ) -> tuple[object, int]:
+        # Shape the page like the JSON index, reading each wheel's size and core
+        # metadata from the wheel itself. A link outside this project's index is
+        # never requested, and it and any wheel that cannot be read keep the reason
+        # instead, which refuses resolution only if that is the wheel selected. A
+        # transport failure still refuses the project: it is likely to recur for
+        # every wheel, and the preparation can simply be retried.
+        files: list[object] = []
+        for item in simple_index_files(url, body):
+            record: dict[str, object] = {
+                "filename": item.filename,
+                "url": item.url,
+                "hashes": {} if item.sha256 is None else {"sha256": item.sha256},
+                "yanked": item.yanked,
+            }
+            if item.requires_python is not None:
+                record["requires-python"] = item.requires_python
+            files.append(record)
+            if not item.filename.endswith(".whl") or item.yanked:
+                continue
+            if not wheel_url_allowed(name, item.url, item.filename):
+                record[UNREAD_WHEEL_KEY] = {
+                    "code": "invalid_wheel_url",
+                    "message": f"Package index link for {item.filename} is not allowlisted",
+                }
+                continue
+            try:
+                remote = await read_remote_wheel_metadata(
+                    self._client, item.url, item.filename, budget
+                )
+            except ComfyRegistryPackageIndexError as exc:
+                if exc.code == REMOTE_READ_BUDGET_EXCEEDED:
+                    raise
+                record[UNREAD_WHEEL_KEY] = {"code": exc.code, "message": str(exc)}
+                continue
+            record["size"] = remote.size_bytes
+            record["core-metadata"] = {"sha256": hashlib.sha256(remote.metadata).hexdigest()}
+        return {"meta": {"api-version": "1.0"}, "name": name, "files": files}, (
+            len(body) + budget.spent
+        )
 
 
 def _project_names(value: Sequence[str]) -> tuple[str, ...]:
@@ -159,7 +235,7 @@ def _media_type(response: httpx.Response) -> str:
     return raw.split(";", 1)[0].strip().lower()
 
 
-def _content_length(response: httpx.Response) -> int | None:
+def _content_length(response: httpx.Response, maximum: int) -> int | None:
     raw = response.headers.get("content-length")
     if raw is None:
         return None
@@ -175,7 +251,7 @@ def _content_length(response: httpx.Response) -> int | None:
             "invalid_project_content_length",
             "PyPI project metadata returned an invalid Content-Length",
         )
-    if size > MAX_REGISTRY_WHEEL_PROJECT_BYTES:
+    if size > maximum:
         raise ComfyRegistryWheelProjectError(
             "project_metadata_too_large",
             "PyPI project metadata exceeds the size limit",
