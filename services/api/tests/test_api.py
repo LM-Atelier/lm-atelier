@@ -9373,7 +9373,12 @@ async def test_real_adapter_backend_events_reach_the_writer_with_provenance(
         return {}
 
     async def _stub_collect(  # type: ignore[no-untyped-def]
-        self: object, prompt_id: str, operation: str, cancel_event: object = None
+        self: object,
+        prompt_id: str,
+        operation: str,
+        cancel_event: object = None,
+        *,
+        run_id: object = None,
     ):
         return [
             GeneratedAsset(

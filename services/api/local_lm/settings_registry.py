@@ -548,6 +548,8 @@ ROLE_SETTINGS: dict[str, list[SettingField]] = {
 _RESERVED_SETTING_KEYS = {
     "input_image",
     "input_images",
+    "input_video",
+    "input_videos",
     "messages",
     "operation",
     "parameters",
@@ -557,7 +559,7 @@ _RESERVED_SETTING_KEYS = {
     "workflow",
     WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
 }
-_NUMBERED_INPUT_IMAGE_KEY = re.compile(r"input_image_[0-9]+", re.IGNORECASE)
+_NUMBERED_INPUT_KEY = re.compile(r"input_(?:image|video)_[0-9]+", re.IGNORECASE)
 
 
 def builtin_settings_for_role(role: str) -> list[SettingField]:
@@ -756,7 +758,7 @@ def _reject_reserved_setting_key(key: str, *, source: str) -> None:
     if (
         normalized.startswith("_")
         or normalized in _RESERVED_SETTING_KEYS
-        or _NUMBERED_INPUT_IMAGE_KEY.fullmatch(normalized)
+        or _NUMBERED_INPUT_KEY.fullmatch(normalized)
     ):
         raise ValueError(f"{source} cannot declare reserved setting key {key}")
 

@@ -43,8 +43,8 @@ async def test_reference_capacity_matches_every_consumed_attachment(
 
             async def upload_inputs(
                 _request: MediaRequest, values: list[str] = uploaded
-            ) -> list[str]:
-                return values
+            ) -> list[tuple[str, str]]:
+                return [("image", value) for value in values]
 
             async def upload_mask(_request: MediaRequest) -> str | None:
                 return None
