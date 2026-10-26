@@ -1932,6 +1932,17 @@ class ConversationOrchestrator:
             if prior_prompt:
                 plan.standalone_prompt = f"{prior_prompt}. Follow-up instruction: {request.text}"
         plan.input_artifact_ids = resolved_input_ids
+        if (
+            plan.operation in {Operation.IMAGE_TO_IMAGE, Operation.IMAGE_TO_VIDEO}
+            and self.engines.settings.media_engine == "comfyui"
+            and any(
+                not artifact.media_type.casefold().startswith("image/")
+                for artifact in explicit_artifacts.values()
+            )
+        ):
+            # ComfyUI is handed pictures only, so another kind of file would
+            # be queued and then fail when the run starts.
+            raise ValueError("This media step requires image-compatible inputs.")
         visual_prompt = (
             None
             if prompt_batch_selection is not None
@@ -3293,6 +3304,14 @@ class ConversationOrchestrator:
             and not first_explicit_images
         ):
             raise ValueError("The first media step requires an image-compatible input.")
+        if (
+            first_step.mode in {"image", "video"}
+            and self.engines.settings.media_engine == "comfyui"
+            and len(first_explicit_images) != len(explicit_artifacts)
+        ):
+            # The first step is handed every input the turn names, and
+            # ComfyUI takes pictures only.
+            raise ValueError("The first media step requires image-compatible inputs.")
 
         resolved_steps: list[dict[str, Any]] = []
         intent_by_id = {step.id: step for step in intent.steps}
