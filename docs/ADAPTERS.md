@@ -64,7 +64,7 @@ Role settings are overlaid on LM Atelier's built-ins. Adapters may add bounded
 fields, narrow a built-in range or enum, or mark a field unavailable. They may
 not remove built-ins, change a built-in type or scope, broaden its constraints,
 duplicate a key across scopes, or declare runtime bindings such as `prompt`,
-`input_image`, and underscore-prefixed internal keys.
+`input_image`, `input_video`, and underscore-prefixed internal keys.
 
 ## Conformance
 

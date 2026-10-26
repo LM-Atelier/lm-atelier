@@ -11,7 +11,7 @@ import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
-from typing import Any, TypeGuard
+from typing import Any, BinaryIO, TypeGuard
 from urllib.parse import quote, urlencode, urlparse, urlunparse
 from uuid import uuid4
 
@@ -35,6 +35,7 @@ from ..filesystem_links import (
     remove_directory_entry,
     remove_entry,
 )
+from ..media_references import unread_videos
 from ..network import shared_tls_context
 from ..output_origin import stated_origin
 from ..schemas import EngineCapabilities
@@ -58,6 +59,46 @@ _UPLOAD_SUBFOLDER = "lm-atelier"
 _ERROR_LABEL = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,79}\Z")
 _ERRNO = re.compile(r"\[Errno (?P<number>\d{1,5})\]")
 _NUMBERED_INPUT_IMAGE = re.compile(r"\$\{input_image_(?P<index>\d{1,2})\}\Z")
+#: How much of an input is read to tell a picture from a video.
+_INPUT_HEAD_BYTES = 4096
+#: MP4-family major brands of video files. The same box also holds HEIF and
+#: AVIF pictures, sound and camera raw files, so any other brand is neither.
+_VIDEO_BRANDS = frozenset(
+    {
+        b"isom",
+        b"iso2",
+        b"iso4",
+        b"iso5",
+        b"iso6",
+        b"mp41",
+        b"mp42",
+        b"avc1",
+        b"M4V ",
+        b"M4VH",
+        b"M4VP",
+        b"mmp4",
+        b"3gp4",
+        b"3gp5",
+        b"3gp6",
+        b"3g2a",
+        b"dash",
+        b"f4v ",
+        b"XAVC",
+        b"MSNV",
+    }
+)
+
+
+def _is_own_upload(item: dict[str, Any], run_id: str) -> bool:
+    """Whether a history entry names a file this adapter uploaded for this run."""
+    subfolder = str(item.get("subfolder") or "").replace("\\", "/").strip("/")
+    filename = str(item.get("filename") or "")
+    return subfolder == _UPLOAD_SUBFOLDER and filename.startswith(f"lm-atelier-{run_id}-")
+
+
+def _read_head(path: Path) -> bytes:
+    with path.open("rb") as handle:
+        return handle.read(_INPUT_HEAD_BYTES)
 
 
 def _numbered_input_image_indices(workflow: dict[str, Any]) -> list[int]:
@@ -344,6 +385,33 @@ class ComfyUIAdapter:
             return ".tiff", "image/tiff"
         raise ValueError("ComfyUI conditioning inputs must be supported raster images")
 
+    @classmethod
+    def _input_format(cls, head: bytes) -> tuple[str, str, str]:
+        """Whether an input is a picture or a video, with the extension and type to send it as.
+
+        A video is told by its container's leading bytes, which ComfyUI's
+        LoadVideo reads through its own decoder. A picture container that
+        ComfyUI's LoadImage cannot read, such as AVIF or HEIC, is neither.
+        """
+        try:
+            extension, media_type = cls._image_format(head)
+        except ValueError:
+            pass
+        else:
+            return "image", extension, media_type
+        if len(head) >= 12 and head[4:8] == b"ftyp":
+            if head[8:12] == b"qt  ":
+                return "video", ".mov", "video/quicktime"
+            if head[8:12] in _VIDEO_BRANDS:
+                return "video", ".mp4", "video/mp4"
+        if head.startswith(b"\x1aE\xdf\xa3"):
+            if b"webm" in head:
+                return "video", ".webm", "video/webm"
+            return "video", ".mkv", "video/x-matroska"
+        if head.startswith(b"RIFF") and head[8:12] == b"AVI ":
+            return "video", ".avi", "video/x-msvideo"
+        raise ValueError("ComfyUI conditioning inputs must be supported pictures or videos")
+
     async def _upload_mask(self, request: MediaRequest) -> str | None:
         """Upload the studio selection, if this turn carries one.
 
@@ -362,10 +430,62 @@ class ComfyUIAdapter:
             await self._upload_files(request, [Path(raw_path)], label="mask", contents=contents)
         )[0]
 
-    async def _upload_inputs(self, request: MediaRequest) -> list[str]:
-        return await self._upload_files(
-            request, request.input_paths, label="", contents=request.input_contents
-        )
+    async def _upload_inputs(self, request: MediaRequest) -> list[tuple[str, str]]:
+        """Each input's kind, picture or video, and the name it was uploaded under, in order.
+
+        Every input is identified before any is sent, so a turn that must start
+        from a picture and names none is refused without uploading anything.
+        """
+        paths, contents = request.input_paths, request.input_contents
+        self._check_contents(paths, contents)
+        heads = [
+            contents[index][:_INPUT_HEAD_BYTES]
+            if contents is not None
+            else await asyncio.to_thread(_read_head, path)
+            for index, path in enumerate(paths)
+        ]
+        formats = [self._input_format(head) for head in heads]
+        if request.operation in {
+            Operation.IMAGE_TO_IMAGE.value,
+            Operation.IMAGE_TO_VIDEO.value,
+        } and not any(kind == "image" for kind, _, _ in formats):
+            raise ValueError(f"{request.operation} requires a conditioning image")
+        videos = sum(kind == "video" for kind, _, _ in formats)
+        if unread := unread_videos(request.workflow, videos):
+            # No slot repeats a video, so one the graph does not name would be
+            # attached and silently left out.
+            raise ValueError(
+                f"This workflow does not read attached video {unread[0] + 1} of {videos}"
+            )
+        uploaded: list[tuple[str, str]] = []
+        for index, (path, (kind, extension, media_type)) in enumerate(
+            zip(paths, formats, strict=True)
+        ):
+            filename = f"lm-atelier-{request.run_id}-{index}{extension}"
+            if contents is not None:
+                reference = await self._upload_one(filename, contents[index], media_type)
+            elif kind == "video":
+                # A video can be far larger than a picture, so it is streamed
+                # from disk rather than read whole into memory.
+                handle = await asyncio.to_thread(path.open, "rb")
+                try:
+                    reference = await self._upload_one(filename, handle, media_type)
+                finally:
+                    handle.close()
+            else:
+                content = await asyncio.to_thread(path.read_bytes)
+                reference = await self._upload_one(filename, content, media_type)
+            uploaded.append((kind, reference))
+        return uploaded
+
+    @staticmethod
+    def _check_contents(paths: list[Path], contents: tuple[bytes, ...] | None) -> None:
+        if contents is not None and (
+            type(contents) is not tuple
+            or len(contents) != len(paths)
+            or any(type(content) is not bytes for content in contents)
+        ):
+            raise ValueError("The input bytes do not match the conditioning images")
 
     async def _upload_files(
         self,
@@ -375,14 +495,9 @@ class ComfyUIAdapter:
         label: str,
         contents: tuple[bytes, ...] | None = None,
     ) -> list[str]:
-        if contents is not None and (
-            type(contents) is not tuple
-            or len(contents) != len(paths)
-            or any(type(content) is not bytes for content in contents)
-        ):
-            raise ValueError("The input bytes do not match the conditioning images")
+        """Upload pictures, such as a selection's mask, that may only ever be pictures."""
+        self._check_contents(paths, contents)
         uploaded: list[str] = []
-        upload_subfolder = _UPLOAD_SUBFOLDER
         for index, path in enumerate(paths):
             content = (
                 contents[index]
@@ -392,45 +507,49 @@ class ComfyUIAdapter:
             extension, media_type = self._image_format(content)
             suffix = f"{label}-{index}" if label else str(index)
             filename = f"lm-atelier-{request.run_id}-{suffix}{extension}"
-            response = await self._client.post(
-                "/upload/image",
-                data={
-                    "type": "temp",
-                    "subfolder": upload_subfolder,
-                    "overwrite": "true",
-                },
-                files={"image": (filename, content, media_type)},
-                timeout=120,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            if not isinstance(payload, dict):
-                raise ValueError("ComfyUI returned an invalid conditioning-image upload")
-            uploaded_name = str(payload.get("name") or "")
-            upload_type = str(payload.get("type") or "")
-            if (
-                not uploaded_name
-                or len(uploaded_name) > 255
-                or "/" in uploaded_name
-                or "\\" in uploaded_name
-                or uploaded_name in {".", ".."}
-                or upload_type not in {"input", "temp"}
-            ):
-                raise ValueError("ComfyUI returned an invalid conditioning-image upload")
-            raw_subfolder = str(payload.get("subfolder") or "").replace("\\", "/")
-            subfolder_path = PurePosixPath(raw_subfolder)
-            if subfolder_path.is_absolute() or any(
-                part in {"", ".", ".."} or ":" in part for part in subfolder_path.parts
-            ):
-                raise ValueError("ComfyUI returned an invalid conditioning-image upload")
-            response_subfolder = "/".join(subfolder_path.parts)
-            reference = (
-                f"{response_subfolder}/{uploaded_name}" if response_subfolder else uploaded_name
-            )
-            if upload_type == "temp":
-                reference = f"{reference} [temp]"
-            uploaded.append(reference)
+            uploaded.append(await self._upload_one(filename, content, media_type))
         return uploaded
+
+    async def _upload_one(self, filename: str, content: bytes | BinaryIO, media_type: str) -> str:
+        """Send one file to ComfyUI's temporary uploads and return the name a graph loads it by."""
+        response = await self._client.post(
+            "/upload/image",
+            data={
+                "type": "temp",
+                "subfolder": _UPLOAD_SUBFOLDER,
+                "overwrite": "true",
+            },
+            files={"image": (filename, content, media_type)},
+            timeout=120 if isinstance(content, bytes) else 600,
+        )
+        if response.status_code == 413:
+            raise ValueError("ComfyUI refused an input larger than its upload limit")
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("ComfyUI returned an invalid conditioning-image upload")
+        uploaded_name = str(payload.get("name") or "")
+        upload_type = str(payload.get("type") or "")
+        if (
+            not uploaded_name
+            or len(uploaded_name) > 255
+            or "/" in uploaded_name
+            or "\\" in uploaded_name
+            or uploaded_name in {".", ".."}
+            or upload_type not in {"input", "temp"}
+        ):
+            raise ValueError("ComfyUI returned an invalid conditioning-image upload")
+        raw_subfolder = str(payload.get("subfolder") or "").replace("\\", "/")
+        subfolder_path = PurePosixPath(raw_subfolder)
+        if subfolder_path.is_absolute() or any(
+            part in {"", ".", ".."} or ":" in part for part in subfolder_path.parts
+        ):
+            raise ValueError("ComfyUI returned an invalid conditioning-image upload")
+        response_subfolder = "/".join(subfolder_path.parts)
+        reference = f"{response_subfolder}/{uploaded_name}" if response_subfolder else uploaded_name
+        if upload_type == "temp":
+            reference = f"{reference} [temp]"
+        return reference
 
     async def _request_parameters(self, request: MediaRequest) -> dict[str, Any]:
         if (
@@ -453,17 +572,27 @@ class ComfyUIAdapter:
             # the resolved local path never leaves this adapter.
             parameters["mask"] = mask_reference
         uploaded = await self._upload_inputs(request)
-        if uploaded:
-            parameters["input_image"] = uploaded[0]
-            parameters["input_images"] = uploaded
+        # Pictures and videos are bound under names of their own, so a graph's
+        # LoadImage is never handed a video, nor its LoadVideo a picture.
+        images = [reference for kind, reference in uploaded if kind == "image"]
+        videos = [reference for kind, reference in uploaded if kind == "video"]
+        if images:
+            parameters["input_image"] = images[0]
+            parameters["input_images"] = images
             parameters.update(
-                {f"input_image_{index}": reference for index, reference in enumerate(uploaded)}
+                {f"input_image_{index}": reference for index, reference in enumerate(images)}
             )
             for index in _numbered_input_image_indices(request.workflow):
                 parameters.setdefault(
                     f"input_image_{index}",
-                    uploaded[min(index, len(uploaded) - 1)],
+                    images[min(index, len(images) - 1)],
                 )
+        if videos:
+            parameters["input_video"] = videos[0]
+            parameters["input_videos"] = videos
+            parameters.update(
+                {f"input_video_{index}": reference for index, reference in enumerate(videos)}
+            )
         return parameters
 
     async def _runtime_lora_graph(
@@ -710,7 +839,9 @@ class ComfyUIAdapter:
             if cancel_event.is_set():
                 yield MediaEvent(type="cancelled")
                 return
-            assets = await self._collect_outputs(prompt_id, request.operation, cancel_event)
+            assets = await self._collect_outputs(
+                prompt_id, request.operation, cancel_event, run_id=request.run_id
+            )
             # Collected outputs were removed from the backend as they were read.
             # Nothing collected means a stop ended the wait for the run's record,
             # and the teardown still has to look for its files.
@@ -890,6 +1021,8 @@ class ComfyUIAdapter:
         prompt_id: str,
         operation: str,
         cancel_event: asyncio.Event | None = None,
+        *,
+        run_id: str | None = None,
     ) -> list[GeneratedAsset]:
         history = await self._finished_history(prompt_id, cancel_event)
         if history is None:
@@ -920,6 +1053,10 @@ class ComfyUIAdapter:
                     if not isinstance(raw_item, dict):
                         continue
                     item = dict(raw_item)
+                    if run_id is not None and _is_own_upload(item, run_id):
+                        # ComfyUI's LoadVideo shows the clip it loaded as a
+                        # preview. That is this run's own input, not a result.
+                        continue
                     if len(output_items) < _MAX_COMFY_OUTPUTS:
                         output_items.append((item, default_kind, collection, node_id))
                     else:

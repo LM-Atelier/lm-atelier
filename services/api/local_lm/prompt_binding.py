@@ -60,10 +60,11 @@ PROMPT_INPUT_NAMES = frozenset({"prompt", "text"})
 #: Names that can be in the parameter map without appearing among the settings
 #: this module reads, so a graph may bind one and still be binding something.
 #:
-#: `prompt`, `negative_prompt`, `input_image` and `input_images` are reserved
-#: against a workflow declaring them, so they can only ever come from
-#: `ComfyUIAdapter._request_parameters` - which writes the first two for every
-#: turn and the picture names when pictures ride. `mask` rides only for a
+#: `prompt`, `negative_prompt`, `input_image`, `input_images`, `input_video` and
+#: `input_videos` are reserved against a workflow declaring them, so they can
+#: only ever come from `ComfyUIAdapter._request_parameters` - which writes the
+#: first two for every turn, the picture names when pictures ride and the video
+#: names when videos do. `mask` rides only for a
 #: workflow that declares a mask input of its own, so it would be found among
 #: the settings anyway; it is named here because the adapter is what puts it in
 #: the map. `loras` is the odd one: the orchestrator writes it beside the
@@ -76,9 +77,18 @@ PROMPT_INPUT_NAMES = frozenset({"prompt", "text"})
 #: wrong refusal makes a working workflow unusable, while a missed one leaves
 #: the behaviour that already shipped.
 RUN_SUPPLIED_KEYS = frozenset(
-    {"prompt", "negative_prompt", "mask", "input_image", "input_images", "loras"}
+    {
+        "prompt",
+        "negative_prompt",
+        "mask",
+        "input_image",
+        "input_images",
+        "input_video",
+        "input_videos",
+        "loras",
+    }
 )
-_NUMBERED_INPUT_IMAGE = re.compile(r"input_image_[0-9]+")
+_NUMBERED_INPUT = re.compile(r"input_(?:image|video)_[0-9]+")
 
 
 def substitutable_keys(operation: str, input_schema: object) -> frozenset[str] | None:
@@ -126,7 +136,7 @@ def _substitutes(value: str, substitutable: Collection[str] | None) -> bool:
     if substitutable is None:
         return True
     name = value[2:-1]
-    return name in substitutable or _NUMBERED_INPUT_IMAGE.fullmatch(name) is not None
+    return name in substitutable or _NUMBERED_INPUT.fullmatch(name) is not None
 
 
 def _prompt_values(workflow: dict[str, Any]) -> list[str]:

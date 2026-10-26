@@ -163,7 +163,7 @@ async def test_conditioning_requires_an_input_and_rejects_non_images(tmp_path: P
 
         invalid = tmp_path / "not-an-image"
         invalid.write_bytes(b"plain text")
-        with pytest.raises(ValueError, match="supported raster images"):
+        with pytest.raises(ValueError, match="supported pictures or videos"):
             await adapter._request_parameters(media_request(invalid))
     finally:
         await adapter.close()

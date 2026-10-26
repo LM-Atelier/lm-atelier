@@ -64,6 +64,39 @@ def reference_capacity(workflow: dict[str, Any]) -> int:
     return min(prefix + 1, max(numbered) + 1)
 
 
+_ALL_VIDEOS = re.compile(r"\$\{input_videos\}\Z")
+_FIRST_VIDEO = re.compile(r"\$\{input_video\}\Z")
+_NUMBERED_VIDEO = re.compile(r"\$\{input_video_(?P<index>\d{1,2})\}\Z")
+
+
+def unread_videos(workflow: dict[str, Any], supplied: int) -> list[int]:
+    """The positions, among the attached videos, of each one the graph never reads.
+
+    Videos are offered as `${input_video}` for the first, `${input_videos}`
+    for the list and `${input_video_N}` per numbered slot. Unlike pictures, no
+    slot past the last video repeats one, so every video needs a slot of its
+    own.
+    """
+    if supplied <= 0:
+        return []
+    read: set[int] = set()
+    stack: list[Any] = [workflow]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+        elif isinstance(value, str):
+            if _ALL_VIDEOS.fullmatch(value):
+                return []
+            if _FIRST_VIDEO.fullmatch(value):
+                read.add(0)
+            elif match := _NUMBERED_VIDEO.fullmatch(value):
+                read.add(int(match.group("index")))
+    return [index for index in range(supplied) if index not in read]
+
+
 def exceeds_capacity(workflow: dict[str, Any], supplied: int) -> int | None:
     """The capacity that was overrun, or `None` when everything fits.
 
