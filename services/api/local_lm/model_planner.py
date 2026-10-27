@@ -41,6 +41,7 @@ _WORKFLOW_COMPONENT_KINDS = {
     "loras": "lora",
     "controlnet": "controlnet",
     "upscale_models": "upscaler",
+    "latent_upscale_models": "latent_upscaler",
     "embeddings": "embedding",
     "ipadapter": "ip_adapter",
 }
