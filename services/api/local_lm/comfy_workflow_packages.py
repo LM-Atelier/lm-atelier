@@ -27,6 +27,9 @@ SUPPORTED_MODEL_SUFFIXES = frozenset({".safetensors", ".gguf", ".json"})
 BLOCKED_MODEL_SUFFIXES = frozenset({".bin", ".ckpt", ".pickle", ".pkl", ".pt", ".pth"})
 KNOWN_MODEL_SUFFIXES = SUPPORTED_MODEL_SUFFIXES | BLOCKED_MODEL_SUFFIXES | frozenset({".onnx"})
 BACKGROUND_REMOVAL_LOADER_NODES = frozenset({"LoadBackgroundRemovalModel"})
+# ComfyUI reads these from `latent_upscale_models`, not `upscale_models`, so the
+# broad "upscale" match below would file their weights where nothing loads them.
+LATENT_UPSCALE_LOADER_NODES = frozenset({"LatentUpscaleModelLoader"})
 
 # These definitions live in the ComfyUI frontend rather than /object_info.
 #
@@ -789,6 +792,8 @@ def _asset_references(
 def _asset_kind(node_type: str, suffix: str) -> AssetKind:
     if node_type in BACKGROUND_REMOVAL_LOADER_NODES:
         return "background_removal"
+    if node_type in LATENT_UPSCALE_LOADER_NODES:
+        return "latent_upscaler"
     lowered = node_type.casefold()
     if "lora" in lowered:
         return "lora"
