@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from urllib.parse import unquote, urlparse
 
 from packaging.markers import Marker, default_environment
 from packaging.requirements import InvalidRequirement, Requirement
@@ -20,6 +20,7 @@ from .comfy_registry_dependencies import (
     ComfyRegistryDependencyPlan,
     plan_comfy_registry_dependencies,
 )
+from .comfy_registry_package_indexes import UNREAD_WHEEL_KEY, wheel_url_allowed
 from .comfy_registry_runtime import (
     ComfyRegistryRuntimeDistribution,
     ComfyRegistryRuntimeError,
@@ -37,6 +38,7 @@ MAX_WHEEL_URL_CHARACTERS = 2_000
 MAX_SUPPORTED_WHEEL_TAGS = 4_096
 MAX_WHEEL_MANIFEST_ARTIFACTS = 256
 _DIGEST_CHARACTERS = frozenset("0123456789abcdefABCDEF")
+_REFUSAL_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _MARKER_ENVIRONMENT_KEYS = frozenset(
     {
         "implementation_name",
@@ -89,9 +91,13 @@ class ComfyRegistryWheelArtifactManifest:
 
 @dataclass(frozen=True)
 class _Candidate:
-    artifact: ComfyRegistryWheelArtifact
+    # A listed wheel that could not be read carries why instead of an artifact.
+    outcome: ComfyRegistryWheelArtifact | ComfyRegistryWheelArtifactError
     rank: int
     build: tuple[int, int, str]
+    version: Version
+    filename: str
+    url: object
 
 
 def current_comfy_registry_wheel_target() -> tuple[dict[str, str], tuple[str, ...]]:
@@ -420,14 +426,15 @@ def _resolve_dependency(
         candidate = _candidate(dependency, record, environment, supported_tags, ranks)
         if candidate is None:
             continue
-        artifact = candidate.artifact
-        if artifact.filename in filenames or artifact.url in urls:
+        url = candidate.url if isinstance(candidate.url, str) else None
+        if candidate.filename in filenames or url in urls:
             raise ComfyRegistryWheelArtifactError(
                 "duplicate_wheel_artifact",
                 f"PyPI metadata repeats a wheel for {dependency.name}",
             )
-        filenames.add(artifact.filename)
-        urls.add(artifact.url)
+        filenames.add(candidate.filename)
+        if url is not None:
+            urls.add(url)
         candidates.append(candidate)
     if not candidates:
         raise ComfyRegistryWheelArtifactError(
@@ -437,7 +444,7 @@ def _resolve_dependency(
         )
     if prefer_latest_version:
         specifier = Requirement(dependency.requirement).specifier
-        versions = sorted({Version(candidate.artifact.version) for candidate in candidates})
+        versions = sorted({candidate.version for candidate in candidates})
         eligible = tuple(specifier.filter(versions, prereleases=None))
         if not eligible:
             raise ComfyRegistryWheelArtifactError(
@@ -446,11 +453,7 @@ def _resolve_dependency(
                 requirement=dependency.requirement,
             )
         best_version = max(eligible)
-        candidates = [
-            candidate
-            for candidate in candidates
-            if Version(candidate.artifact.version) == best_version
-        ]
+        candidates = [candidate for candidate in candidates if candidate.version == best_version]
     best_rank = min(candidate.rank for candidate in candidates)
     ranked = [candidate for candidate in candidates if candidate.rank == best_rank]
     best_build = max(candidate.build for candidate in ranked)
@@ -460,7 +463,10 @@ def _resolve_dependency(
             "ambiguous_wheel_artifact",
             f"Multiple equally preferred wheels exist for {dependency.requirement}",
         )
-    return selected[0].artifact
+    outcome = selected[0].outcome
+    if isinstance(outcome, ComfyRegistryWheelArtifactError):
+        raise outcome
+    return outcome
 
 
 def _project_document(name: str, value: object) -> list[object]:
@@ -550,20 +556,39 @@ def _candidate(
         return None
     rank = min(ranks[tag] for tag in matching)
     compatibility_tag = str(supported_tags[rank])
+    build_key = (0, 0, "") if not build else (1, build[0], build[1])
+    if UNREAD_WHEEL_KEY in value:
+        refusal = _unread_refusal(value[UNREAD_WHEEL_KEY], filename)
+        return _Candidate(refusal, rank, build_key, version, filename, value.get("url"))
     artifact = ComfyRegistryWheelArtifact(
         dependency.name,
         str(version),
         requirement,
         filename,
-        _wheel_url(value.get("url"), filename),
+        _wheel_url(dependency.name, value.get("url"), filename),
         _sha256(value.get("hashes"), f"wheel {filename}"),
         _wheel_size(value.get("size"), filename),
         _metadata_sha256(value.get("core-metadata"), filename),
         compatibility_tag,
         tuple(sorted(str(tag) for tag in wheel_tags)),
     )
-    build_key = (0, 0, "") if not build else (1, build[0], build[1])
-    return _Candidate(artifact, rank, build_key)
+    return _Candidate(artifact, rank, build_key, version, filename, artifact.url)
+
+
+def _unread_refusal(value: object, filename: str) -> ComfyRegistryWheelArtifactError:
+    code = value.get("code") if isinstance(value, dict) else None
+    message = value.get("message") if isinstance(value, dict) else None
+    if (
+        isinstance(code, str)
+        and _REFUSAL_CODE.fullmatch(code) is not None
+        and isinstance(message, str)
+        and 0 < len(message) <= 500
+        and not _has_control(message)
+    ):
+        return ComfyRegistryWheelArtifactError(code, message)
+    return ComfyRegistryWheelArtifactError(
+        "unreadable_wheel", f"Wheel {filename} could not be read from its package index"
+    )
 
 
 def _supports_python(value: object, python_version: str) -> bool:
@@ -581,29 +606,12 @@ def _supports_python(value: object, python_version: str) -> bool:
         ) from exc
 
 
-def _wheel_url(value: object, filename: str) -> str:
+def _wheel_url(name: str, value: object, filename: str) -> str:
     if not isinstance(value, str) or len(value) > MAX_WHEEL_URL_CHARACTERS or _has_control(value):
         raise ComfyRegistryWheelArtifactError(
             "invalid_wheel_url", f"PyPI wheel URL for {filename} is invalid"
         )
-    parsed = urlparse(value)
-    segments = parsed.path.split("/")
-    decoded = [unquote(segment) for segment in segments if segment]
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname != "files.pythonhosted.org"
-        or parsed.username
-        or parsed.password
-        or parsed.port
-        or parsed.query
-        or parsed.fragment
-        or not parsed.path.startswith("/packages/")
-        or not decoded
-        or decoded[-1] != filename
-        or any(
-            segment in {".", ".."} or "/" in segment or chr(92) in segment for segment in decoded
-        )
-    ):
+    if not wheel_url_allowed(name, value, filename):
         raise ComfyRegistryWheelArtifactError(
             "invalid_wheel_url", f"PyPI wheel URL for {filename} is not allowlisted"
         )
@@ -695,7 +703,7 @@ def _validated_artifact(value: object) -> ComfyRegistryWheelArtifact:
         raise ComfyRegistryWheelArtifactError(
             "invalid_artifact_manifest", "Wheel artifact selected tag is invalid"
         )
-    if _wheel_url(value.url, value.filename) != value.url:
+    if _wheel_url(name, value.url, value.filename) != value.url:
         raise ComfyRegistryWheelArtifactError(
             "invalid_artifact_manifest", "Wheel artifact URL is invalid"
         )
