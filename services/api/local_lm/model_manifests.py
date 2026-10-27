@@ -538,6 +538,7 @@ _COMFY_FOLDER_BY_KIND = {
     "lora": "loras",
     "controlnet": "controlnet",
     "upscaler": "upscale_models",
+    "latent_upscaler": "latent_upscale_models",
     "embedding": "embeddings",
     "ip_adapter": "ipadapter",
 }
@@ -570,6 +571,7 @@ def _kind_from_comfy_folder(folder: str) -> str | None:
         "vae": "vae",
         "clip_vision": "clip_vision",
         "loras": "lora",
+        "latent_upscale_models": "latent_upscaler",
     }.get(folder.casefold())
 
 

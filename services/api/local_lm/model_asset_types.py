@@ -11,6 +11,7 @@ InstalledAssetKind = Literal[
     "embedding",
     "gguf_model",
     "ip_adapter",
+    "latent_upscaler",
     "lora",
     "text_encoder",
     "upscaler",

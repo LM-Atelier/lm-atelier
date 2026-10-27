@@ -8,13 +8,16 @@ that does travel, and the fallback that keeps existing installs working.
 from __future__ import annotations
 
 import itertools
+from typing import get_args
 
 from sqlalchemy.orm import Session
 
 import local_lm.model_manifests as manifests_module
+import local_lm.model_planner as planner_module
 from local_lm.auxiliary_assets import AUXILIARY_ASSET_KINDS
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
+from local_lm.model_asset_types import InstalledAssetKind
 from local_lm.model_manifests import (
     COMFY_MODEL_ASSET_KINDS,
     COMFY_MODEL_FOLDERS,
@@ -47,6 +50,7 @@ def test_comfy_model_folder_contract_has_one_complete_source() -> None:
         "lora": "loras",
         "controlnet": "controlnet",
         "upscaler": "upscale_models",
+        "latent_upscaler": "latent_upscale_models",
         "embedding": "embeddings",
         "ip_adapter": "ipadapter",
     }
@@ -65,6 +69,17 @@ def test_standalone_auxiliary_kinds_do_not_enable_every_workflow_component() -> 
         == AUXILIARY_ASSET_KINDS
     )
     assert AUXILIARY_ASSET_KINDS < COMFY_MODEL_ASSET_KINDS
+
+
+def test_every_folder_kind_can_be_recorded_as_an_installed_asset() -> None:
+    assert frozenset(get_args(InstalledAssetKind)) == COMFY_MODEL_ASSET_KINDS | {"gguf_model"}
+
+
+def test_workflow_plans_read_each_folder_as_the_kind_the_folder_table_names() -> None:
+    for kind in COMFY_MODEL_ASSET_KINDS:
+        folder = comfy_folder_for_kind(kind)
+        assert folder is not None
+        assert planner_module._WORKFLOW_COMPONENT_KINDS[folder] == kind
 
 
 def test_repository_paths_recognize_every_canonical_comfy_folder() -> None:
