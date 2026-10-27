@@ -204,6 +204,10 @@ def _inspect_safetensors(path: PurePosixPath, content: bytes) -> InspectedCompon
     )
 
 
+# The metadata keys whose values say what kind of network a file holds.
+_NETWORK_TYPE_KEYS = ("ss_network_module", "modelspec.architecture", "network_type")
+
+
 def _lora_metadata(
     header: Mapping[str, Any],
     metadata: Mapping[str, Any],
@@ -211,7 +215,7 @@ def _lora_metadata(
     network_type = next(
         (
             str(metadata[key])[:200]
-            for key in ("ss_network_module", "modelspec.architecture", "network_type")
+            for key in _NETWORK_TYPE_KEYS
             if isinstance(metadata.get(key), str)
         ),
         "lora",
@@ -261,9 +265,26 @@ def _bounded_json_object_with_limit(content: bytes, limit: int) -> dict[str, Any
     return value
 
 
+def _declares_lora(metadata: Mapping[str, Any]) -> bool:
+    """Whether a file's metadata says it is a LoRA, read from its keys and declarations.
+
+    Free text is no declaration. A video model's embedded license grants rights
+    over "LoRA adapters", and matching "lora" anywhere in the metadata sorted
+    that model, its VAEs and its upscaler as LoRAs, so the finished download was
+    refused for not being what it was planned as.
+    """
+
+    for key, value in metadata.items():
+        name = str(key).casefold()
+        if "lora" in name:
+            return True
+        if name in _NETWORK_TYPE_KEYS and "lora" in str(value).casefold():
+            return True
+    return False
+
+
 def _safetensors_kind(tensor_names: list[str], metadata: Mapping[str, Any]) -> str:
     lowered = [name.casefold() for name in tensor_names]
-    metadata_text = " ".join(f"{key}={value}" for key, value in metadata.items()).casefold()
     # LyCORIS adapters are LoRAs in every way that matters here - ComfyUI loads
     # them through the same loader and providers list them as LoRAs - but none
     # of them spells "lora" in a tensor name. LoKr factorises into `lokr_w1`
@@ -276,7 +297,7 @@ def _safetensors_kind(tensor_names: list[str], metadata: Mapping[str, Any]) -> s
     # cannot promote something that is not an adapter.
     adapter_markers = ("lokr_", "hada_w", "dora_scale", "oft_blocks", "oft_diag")
     if (
-        "lora" in metadata_text
+        _declares_lora(metadata)
         or any(name.startswith(("lora_", "lycoris_")) or ".lora_" in name for name in lowered)
         or any(marker in name for name in lowered for marker in adapter_markers)
     ):
@@ -312,6 +333,16 @@ def _safetensors_kind(tensor_names: list[str], metadata: Mapping[str, Any]) -> s
     if any("text_model." in name or name.startswith("text_encoder.") for name in lowered):
         return "text_encoder"
     if any("vision_model." in name for name in lowered):
+        # A language model is a text encoder even when it carries a vision
+        # tower. Gemma 3 and 4 hold `vision_model.*` beside
+        # `model.embed_tokens`, and the tower alone sorted the whole encoder as
+        # a CLIP vision model. Only a language model's own prefixes count: a
+        # diffusion model can name a submodule `embed_tokens` too.
+        if any(
+            name.startswith(("model.embed_tokens.", "model.language_model.", "language_model."))
+            for name in lowered
+        ):
+            return "text_encoder"
         return "clip_vision"
     return "unknown_safetensors"
 
