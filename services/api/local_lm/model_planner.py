@@ -59,6 +59,7 @@ _WORKFLOW_REFERENCE_ARTIFACT_KINDS: dict[str, frozenset[str]] = {
         }
     ),
     "embedding": frozenset({"embedding"}),
+    "latent_upscaler": frozenset({"latent_upscaler"}),
     "lora": frozenset({"lora"}),
     "upscaler": frozenset({"upscaler"}),
     "vae": frozenset({"vae"}),
@@ -74,11 +75,16 @@ _WORKFLOW_ARTIFACT_TARGET_FOLDERS: dict[str, frozenset[str]] = {
         {"checkpoints", "clip_vision", "diffusion_models", "models", "text_encoders", "unet"}
     ),
     "ip_adapter": frozenset({"ipadapter"}),
+    "latent_upscaler": frozenset({"latent_upscale_models"}),
     "lora": frozenset({"loras"}),
     "text_encoder": frozenset({"text_encoders"}),
     "upscaler": frozenset({"upscale_models"}),
     "vae": frozenset({"vae"}),
 }
+# Utility weights a workflow names by filename alone. Their headers carry no
+# marker the inspector recognises, so the loader that names one is the only
+# evidence of what it is and which folder ComfyUI reads it from.
+_FILENAME_ONLY_REFERENCE_KINDS = frozenset({"background_removal", "latent_upscaler"})
 
 InstallCompatibility = Literal[
     "supported",
@@ -748,12 +754,14 @@ def _workflow_reference_component_contract(
 ) -> tuple[str, str] | None:
     """Refine one filename-only utility weight from its exact workflow use."""
 
+    folder = comfy_folder_for_kind(reference_kind)
     if (
-        reference_kind == "background_removal"
+        reference_kind in _FILENAME_ONLY_REFERENCE_KINDS
+        and folder
         and path.casefold().endswith(".safetensors")
         and inspected.kind in {"checkpoint", "unknown_safetensors"}
     ):
-        return "background_removal", "background_removal"
+        return reference_kind, folder
     return None
 
 

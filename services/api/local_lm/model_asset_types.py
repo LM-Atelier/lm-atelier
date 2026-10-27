@@ -22,6 +22,7 @@ BoundWorkflowAssetKind = Literal[
     "background_removal",
     "checkpoint",
     "embedding",
+    "latent_upscaler",
     "lora",
     "upscaler",
     "vae",
