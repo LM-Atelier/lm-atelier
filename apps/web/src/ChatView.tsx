@@ -306,9 +306,10 @@ export function ChatView({
                   requestId: Date.now(),
                 })}
                 onQuote={(text) => setQuoteTarget({ text, requestId: Date.now() })}
-                onDeleteExchange={busy ? undefined : onDeleteExchange}
-                onRemoveItem={busy ? undefined : onRemoveItem}
-                onForkThread={busy ? undefined : onForkThread}
+                onDeleteExchange={onDeleteExchange}
+                onRemoveItem={onRemoveItem}
+                onForkThread={onForkThread}
+                threadActionsDisabled={busy}
               />
               {branchCards(message.id)}
             </Fragment>
