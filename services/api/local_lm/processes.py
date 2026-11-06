@@ -2006,6 +2006,22 @@ class ProcessSupervisor:
             return []
 
     @staticmethod
+    def _holds_port(connection: Any) -> bool:
+        """Whether a socket-table row is a socket holding its local port open.
+
+        The reported state is trusted when it says LISTEN, and otherwise the row
+        decides: a connection always reports its remote peer, so a TCP socket
+        with a local port and none is the one holding that port. Recent Windows
+        11 builds report TCP states arbitrarily, for connections and listening
+        sockets alike, while each row's addresses and owner stay right. A
+        listening socket reads closed, a closing state, or a value with no name
+        at all, and waiting for LISTEN refused every worker that was in fact
+        serving, as "served by another process".
+        """
+
+        return connection.status == psutil.CONN_LISTEN or not connection.raddr
+
+    @staticmethod
     def _listening_match(process: psutil.Process, host: str, port: int) -> str | None:
         """How this process's listeners relate to host:port - exact, wildcard, or not.
 
@@ -2066,7 +2082,7 @@ class ProcessSupervisor:
             return None
         wildcard = False
         for connection in connections:
-            if connection.status != psutil.CONN_LISTEN:
+            if not ProcessSupervisor._holds_port(connection):
                 continue
             address = connection.laddr
             listening_host = getattr(address, "ip", None)
@@ -2347,7 +2363,10 @@ class ProcessSupervisor:
         try:
             wildcards = {"0.0.0.0", "::", ""}
             for connection in psutil.net_connections(kind="tcp"):
-                if connection.status != psutil.CONN_LISTEN or connection.pid is None:
+                # No process holds a port as pid 0. Windows files a closed
+                # connection's leftover row under it, and with the state
+                # misreported as LISTEN that row looks like the occupant.
+                if not self._holds_port(connection) or not connection.pid:
                     continue
                 address = connection.laddr
                 listening_host = getattr(address, "ip", None)
@@ -2393,7 +2412,7 @@ class ProcessSupervisor:
                 connection_port = getattr(address, "port", None)
                 if connection_port is None and len(address) > 1:
                     connection_port = address[1]
-                if connection.status == psutil.CONN_LISTEN and connection_port == port:
+                if connection_port == port and ProcessSupervisor._holds_port(connection):
                     return True
         return False
 
