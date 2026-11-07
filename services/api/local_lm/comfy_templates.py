@@ -46,7 +46,9 @@ _RUNTIME_PARAMETERS = {
 _SUPPRESSED_RUNTIME_NAMES = frozenset({"motion_strength"})
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "COMFY_DYNAMICCOMBO_V3", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 25
+# Output nodes that only show text in the editor. A turn keeps nothing of them.
+_TEXT_PREVIEW_NODES = frozenset({"PreviewAny"})
+COMFY_TEMPLATE_COMPILER_VERSION = 26
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -1808,6 +1810,17 @@ def _compile_ui_graph(
     text_nodes = [
         node_id for node_id, node in flat_nodes.items() if str(node.get("type")) == "CLIPTextEncode"
     ]
+    # Where an encoder's conditioning goes says what it is; a title only says
+    # what its author called it. LTX-2.5's negative encoder has no title at all,
+    # and read as a second positive it was handed the turn's own prompt.
+    fed_inputs: dict[str, set[str]] = {}
+    for origin, _, target, target_slot in links:
+        target_inputs = (flat_nodes.get(target) or {}).get("inputs") or []
+        if origin in text_nodes and target_slot < len(target_inputs):
+            fed_inputs.setdefault(origin, set()).add(
+                str(target_inputs[target_slot].get("name") or "")
+            )
+    negative_text_nodes = {node_id for node_id, fed in fed_inputs.items() if fed == {"negative"}}
     source_nodes = [
         node_id
         for node_id, node in flat_nodes.items()
@@ -1876,12 +1889,15 @@ def _compile_ui_graph(
         for input_name in list(inputs):
             if input_name in overridden_inputs or (has_cfg and input_name == "guidance"):
                 continue
+            runtime_name = _runtime_parameter(input_name, node)
+            if runtime_name == "prompt" and node_id in negative_text_nodes:
+                # Bound as a negative the way a titled one is, so the template's
+                # own negative text stays the default.
+                runtime_name = "negative_prompt"
             if (node_id, input_name) in linked_inputs:
-                runtime_name = _runtime_parameter(input_name, node)
                 if runtime_name and runtime_name not in schema_properties:
                     schema_properties[runtime_name] = {"readOnly": True}
                 continue
-            runtime_name = _runtime_parameter(input_name, node)
             if runtime_name:
                 if runtime_name == "denoise" and native_image_conditioning:
                     schema_properties.setdefault("denoise", {"readOnly": True})
@@ -1903,7 +1919,7 @@ def _compile_ui_graph(
             schema_properties[runtime_name] = {"type": "string"}
         if class_type == "CLIPTextEncode" and "text" in inputs:
             title = str(node.get("title") or "").lower()
-            negative = "negative" in title
+            negative = "negative" in title or node_id in negative_text_nodes
             if len(text_nodes) == 1 or not negative:
                 inputs["text"] = "${prompt}"
             else:
@@ -1922,6 +1938,7 @@ def _compile_ui_graph(
         for input_name, value in list(compiled["inputs"].items()):
             if isinstance(value, list) and len(value) == 2 and str(value[0]) not in api_graph:
                 del compiled["inputs"][input_name]
+    _drop_unread_text_previews(api_graph, object_info)
     if operation.endswith("_video"):
         _bind_video_frame_settings(
             api_graph, object_info, schema_properties, default_candidates, shared_widget_targets
@@ -1943,6 +1960,40 @@ def _compile_ui_graph(
             prop["maximum"] = min(prop["maximum"], field.maximum)
     _resolve_widget_defaults(fields, schema_properties, default_candidates)
     return api_graph, {"type": "object", "properties": schema_properties}
+
+
+def _drop_unread_text_previews(graph: dict[str, Any], object_info: dict[str, Any]) -> None:
+    """Leave out text previews nothing in the compiled graph reads.
+
+    A text preview shows nothing in a turn, and whatever only it reads ran for
+    nothing: LTX-2.5's prompt rewriter generated a new prompt every turn just
+    for its preview, while the encoder read the turn's own. Judged on the
+    compiled graph, after the encoders are bound, since binding an encoder to
+    the prompt is what leaves a rewriter's preview unread. A preview whose text
+    feeds another node passes it on, and one that is the only output stays.
+    """
+
+    while True:
+        read = {
+            str(value[0])
+            for node in graph.values()
+            for value in node["inputs"].values()
+            if isinstance(value, list) and len(value) == 2
+        }
+        unread = [
+            node_id
+            for node_id, node in graph.items()
+            if node["class_type"] in _TEXT_PREVIEW_NODES and node_id not in read
+        ]
+        kept_output = any(
+            node["class_type"] not in _TEXT_PREVIEW_NODES
+            and bool((object_info.get(node["class_type"]) or {}).get("output_node"))
+            for node in graph.values()
+        )
+        if not unread or not kept_output:
+            return
+        for node_id in unread:
+            del graph[node_id]
 
 
 def _bind_video_frame_settings(
@@ -2215,7 +2266,14 @@ def _widget_values(
 def _is_widget_spec(spec: Any) -> bool:
     if not isinstance(spec, list) or not spec:
         return False
-    return isinstance(spec[0], list) or spec[0] in _PRIMITIVE_WIDGET_TYPES
+    if isinstance(spec[0], list) or spec[0] in _PRIMITIVE_WIDGET_TYPES:
+        return True
+    # A socket that accepts several types, such as LTX's audio frame rate
+    # ("FLOAT,INT"), still draws a widget, of the type its options name. Missing
+    # it shifted every later saved value by one: the audio latent's batch size
+    # read the frame rate, and a template rendered 25 videos to a turn.
+    options = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
+    return options.get("widgetType") in _PRIMITIVE_WIDGET_TYPES
 
 
 def _node_widget_spec(node_info: Any, input_name: str) -> Any:
