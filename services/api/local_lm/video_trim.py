@@ -462,7 +462,7 @@ async def check_trim(
             raise TrimRefused("video-trim-output-mismatch")
         audio.append((facts_of.codec, stated_time(stream.get("start_time")), packet_count(stream)))
 
-    end = await _video_end(output, ffprobe, expected_container)
+    end = await _video_end(output, ffprobe)
     await _require_whole_start(output, ffprobe)
     shown = await _picture(output, 0, ffmpeg, keyframe=None)
     if shown.sha256 != source.sha256:
@@ -808,21 +808,17 @@ async def measure_output(output: Path, ffprobe: MediaTool) -> dict[str, Any]:
     return payload
 
 
-async def _video_end(output: Path, ffprobe: MediaTool, container: Container) -> float:
+async def _video_end(output: Path, ffprobe: MediaTool) -> float:
     """Where the new video's picture ends: the latest end among its picture packets.
 
-    An MP4 file is read from past any end it can have, so the read begins at
-    its last keyframe and runs to the end; when that lists no packet, as it now
-    and then does, every packet of the picture stream is read instead. A
-    Matroska file sought that far can list a few of its last packets and stop
-    there, without an error, so every packet of its picture is read, within the
-    same bounds.
+    Every packet of the picture stream is read, within the same bounds as the
+    other reads of the new file. Reading from past any end the file can have,
+    which starts at its last keyframe, is quicker but not reliable in either
+    container: sought that far, a file now and then lists no packet at all, or
+    a few of its last packets and then stops, without an error, and the end
+    it gives is then short.
     """
 
-    if container == "mp4":
-        listed = await _end_packets(output, ffprobe, f"{2 * MAX_DURATION_SECONDS}%")
-        if listed.strip():
-            return last_packet_end(listed)
     return last_packet_end(await _end_packets(output, ffprobe, None))
 
 
