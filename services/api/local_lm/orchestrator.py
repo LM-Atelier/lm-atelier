@@ -1145,6 +1145,19 @@ class ConversationOrchestrator:
         #: happens. Losing it is survivable in one direction only: chat is
         #: not restored, and the next text execution loads what it needs.
         self._displaced_chat_profile_id: str | None = None
+        #: The generation of the warm window now open, or None while the media
+        #: worker is not being kept for a following media turn. Each window gets
+        #: a new generation, so a task that wakes after a newer run has opened
+        #: its own window recognises it is stale and does nothing.
+        self._media_warm_window: int | None = None
+        self._media_warm_generation = 0
+        #: The pid of the worker launch the open window keeps.
+        self._media_warm_launch: int | None = None
+        #: Whether something outside this class's runs relies on the live media
+        #: worker, such as an open native editor session; set by the application.
+        self.media_worker_in_use: Callable[[], bool] = lambda: False
+        #: The window's expiry, or the settlement a chat load inside it left.
+        self._media_warm_task: asyncio.Task[None] | None = None
         self._admission_open = True
         #: Whether `close` has begun. Separate from `_admission_open`, which
         #: only stops new turns being created: a drain deliberately keeps
@@ -4579,6 +4592,11 @@ class ConversationOrchestrator:
             self._media_restart_task.cancel()
             await asyncio.gather(self._media_restart_task, return_exceptions=True)
             self._media_restart_task = None
+        self._media_warm_window = None
+        if self._media_warm_task:
+            self._media_warm_task.cancel()
+            await asyncio.gather(self._media_warm_task, return_exceptions=True)
+            self._media_warm_task = None
         self._media_restart_after_chat_activity = False
         self._step_prewarm_plan_id = None
         self._step_prewarm_task = None
@@ -4713,8 +4731,14 @@ class ConversationOrchestrator:
                         self._release_deferred_media_restart()
                         await self._settle_step_prewarm(job_id)
                         # `_ensure_chat_worker` loaded whatever this execution
-                        # needed, so nothing is owed back any more.
-                        if not claim_lost:
+                        # needed, so nothing is owed back any more - unless it
+                        # never got that far. A turn that failed or stopped
+                        # before its model loaded leaves chat down, and the
+                        # displaced model is then still owed by whichever
+                        # handoff comes next.
+                        if not claim_lost and (
+                            self._run_completed(run_id) or self._chat_worker_running()
+                        ):
                             self._displaced_chat_profile_id = None
                     elif operation != Operation.TEXT.value and not claim_lost:
                         pending = self._pending_chat_restore(resume_chat_profile)
@@ -4734,7 +4758,15 @@ class ConversationOrchestrator:
                             if media_failed and self._media_failure_retries(job_id, run_id, claim):
                                 await self._hold_media_handoff_for_retry(pending)
                             else:
-                                await self._complete_media_handoff(pending)
+                                # Only a run that finished with its result keeps
+                                # the worker for the next one. After a failure,
+                                # recycling is the clean start, and after a stop
+                                # ComfyUI may still be finishing the interrupted
+                                # prompt.
+                                await self._complete_media_handoff(
+                                    pending,
+                                    keep_warm=not media_failed and self._run_completed(run_id),
+                                )
                 if queued_verification_job_id and not claim_lost:
                     self.start(queued_verification_job_id, None)
         except asyncio.CancelledError:
@@ -6304,6 +6336,14 @@ class ConversationOrchestrator:
         job_id: str | None = None,
         run_id: str | None = None,
     ) -> str | None:
+        if operation != Operation.TEXT.value:
+            # This run takes over a worker kept warm for it, so nothing may
+            # recycle the worker under it, not even a chat model load. The run
+            # also starts the worker itself if it is down, which makes a restart
+            # still owed from an earlier recycle moot. Its own handoff decides
+            # what follows it.
+            self._close_media_warm_window()
+            self._media_restart_after_chat_activity = False
         if (
             operation == Operation.TEXT.value
             or not self.processes.settings.auto_unload_chat_for_media
@@ -6435,8 +6475,15 @@ class ConversationOrchestrator:
             queued_media_next = run is not None and run.operation != Operation.TEXT.value
         return fallback_profile_id, False, queued_media_next
 
-    async def _complete_media_handoff(self, chat_profile_id: str) -> None:
-        """Release retained Comfy state before restoring a managed chat model."""
+    async def _complete_media_handoff(
+        self, chat_profile_id: str, *, keep_warm: bool = True
+    ) -> None:
+        """Release retained Comfy state before restoring a managed chat model.
+
+        `keep_warm` is False after a failed run, and when a warm window's expiry
+        calls this, so the expiry hands the device back instead of opening
+        another window.
+        """
 
         # The obligation is recorded BEFORE anything that can fail, and this is
         # the only place it can be recorded at all: the caller holds this
@@ -6483,6 +6530,17 @@ class ConversationOrchestrator:
             # marks a handoff in flight, and this handoff is over. Availability
             # is then decided by the worker's real state, which is what
             # `_chat_planner_available` already checks.
+            self._chat_planner_ready.set()
+            return
+        if keep_warm and not queued_text_next and self._open_media_warm_window():
+            # Nothing is queued yet, but a media turn often follows one: the next
+            # clip of a sequence that is sent as each one finishes. Recycling now
+            # made that turn pay a chat model load, a ComfyUI start and a cold
+            # load of every model it uses, about as long as a short clip itself.
+            # The worker is kept for a while instead, and the window's expiry
+            # runs this method again to hand the device back. Until then chat
+            # stays displaced and owed, exactly as behind a queued image, and a
+            # chat model load from any path recycles the worker first.
             self._chat_planner_ready.set()
             return
         recycle_managed_media = False
@@ -6547,6 +6605,263 @@ class ConversationOrchestrator:
             self._media_restart_after_chat_activity = True
         else:
             self._schedule_media_restart()
+
+    def _open_media_warm_window(self) -> bool:
+        """Keep the managed ComfyUI worker for a following media turn, if it can be.
+
+        Returns whether a window was opened. Only a ready, managed, broad worker
+        is worth keeping: anything else holds nothing a media turn could reuse,
+        and the ordinary handoff answers it. A worker launched for one
+        activation's dependencies is not kept either. The next turn may need
+        models or nodes outside that scope, and the ordinary handoff leaves
+        such a worker down so the next run starts the worker it needs.
+        """
+
+        seconds = self.engines.settings.media_keep_warm_seconds
+        if seconds <= 0 or self.engines.settings.media_engine != "comfyui":
+            return False
+        try:
+            media_worker = next(item for item in self.processes.statuses() if item.name == "media")
+            launch_scope = getattr(self.processes, "launch_scope_sha256", None)
+            scoped = bool(launch_scope and launch_scope("media") is not None)
+        except Exception:
+            logger.exception("Could not inspect the media worker before keeping it warm")
+            return False
+        if scoped or not (
+            media_worker.managed and media_worker.running and media_worker.state == "ready"
+        ):
+            return False
+        self._close_media_warm_window()
+        self._media_warm_generation += 1
+        generation = self._media_warm_generation
+        self._media_warm_window = generation
+        # The window keeps this launch and no other. A worker stopped or
+        # started by someone else since then is theirs, and nothing here
+        # recycles it.
+        self._media_warm_launch = media_worker.pid
+        self._media_warm_task = asyncio.create_task(
+            self._expire_media_warm_window(generation, seconds),
+            name="media-warm-window",
+        )
+        return True
+
+    def _close_media_warm_window(self) -> int | None:
+        """End the open window and cancel whatever was waiting to settle one.
+
+        Returns the generation of the window that was open, if one was.
+        """
+
+        generation = self._media_warm_window
+        self._media_warm_window = None
+        task = self._media_warm_task
+        # Never the running task itself: cancelling it would abandon the
+        # handoff it is in the middle of at its next await.
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+        return generation
+
+    def _is_warm_launch(self, media_worker: WorkerStatus) -> bool:
+        """Whether this worker is still the ready launch the window kept.
+
+        A worker that is stopping, starting or a different launch has been
+        taken up by someone else since the run, and is theirs.
+        """
+
+        return (
+            media_worker.running
+            and media_worker.state == "ready"
+            and media_worker.pid == self._media_warm_launch
+        )
+
+    async def _media_runtime_busy(self) -> bool:
+        """Whether something other than LM Atelier's own runs is using ComfyUI.
+
+        That is a native editor session, whose return needs the launch it was
+        opened on, or a prompt ComfyUI holds that this class did not send: no
+        media run of this class is in flight while a window is open, and only
+        a run that finished keeps its worker, so any prompt ComfyUI reports
+        then belongs to someone using it from its own page. A worker that
+        cannot say is treated as idle, which is the handoff as it was.
+        """
+
+        try:
+            if self.media_worker_in_use():
+                return True
+        except Exception:
+            logger.exception("Could not tell whether a workflow editor is using the media worker")
+        probe = getattr(self.engines.media, "queue_remaining", None)
+        if probe is None:
+            return False
+        try:
+            remaining = await probe()
+        except Exception:
+            return False
+        return isinstance(remaining, int) and remaining > 0
+
+    async def _expire_media_warm_window(self, generation: int, seconds: float) -> None:
+        """Hand the device back to chat once a warm window passes unused."""
+
+        while True:
+            await asyncio.sleep(seconds)
+            # Under the device lease, so the give-back never runs beside a job.
+            # A media run that takes the worker over closes the window first,
+            # and so does a chat load inside it, so neither ever waits on this.
+            async with self.scheduler.lease("primary"):
+                if self._closing or self._media_warm_window != generation:
+                    return
+                if not await self._media_runtime_busy():
+                    await self._end_media_warm_window()
+                    return
+            # Someone is using ComfyUI directly or through the native editor,
+            # and recycling it would end their work. The window runs on until
+            # they have finished.
+
+    async def _end_media_warm_window(self) -> None:
+        """Close the open window and give back what it held, under the device lease."""
+
+        self._close_media_warm_window()
+        owed = self._displaced_chat_profile_id
+        try:
+            media_worker = next(item for item in self.processes.statuses() if item.name == "media")
+            if not self._is_warm_launch(media_worker):
+                # Stopped or replaced since the run, so whoever did that
+                # decides its fate. Only the chat model it displaced is owed.
+                await self._give_back_displaced_chat(owed)
+            elif owed is not None:
+                await self._complete_media_handoff(owed, keep_warm=False)
+            else:
+                # Nothing is owed, because a chat model was loaded beside a
+                # worker someone was using. The models are still resident, and
+                # with the window gone nothing would recycle them.
+                await self.processes.stop("media")
+                self._schedule_media_restart()
+        except Exception:
+            logger.exception("Could not hand the device back to chat after the warm window")
+
+    async def release_media_for_chat(self) -> None:
+        """Recycle a warm media worker before any chat model loads.
+
+        The supervisor awaits this before every chat load. A warm window keeps
+        ComfyUI's models resident, and loading a chat model beside them is the
+        paging the ordinary handoff recycles the worker to prevent, whichever
+        path the load comes from: a text turn, a vision step, an explicit load.
+        Outside a window this does nothing, so the handoff's own chat restore
+        passes straight through.
+        """
+
+        if self._media_warm_window is None:
+            return
+        try:
+            media_worker = next(item for item in self.processes.statuses() if item.name == "media")
+            ours = self._is_warm_launch(media_worker)
+            if ours and await self._media_runtime_busy():
+                # Someone is using it, and stopping it would end their work. A
+                # chat model beside it is slower, not lost; the window stays
+                # open, and its expiry recycles the worker once they are done.
+                return
+        except Exception:
+            logger.exception("Could not inspect the warm media worker before a chat model load")
+            ours = False
+        owed = self._displaced_chat_profile_id
+        generation = self._close_media_warm_window()
+        if generation is None:
+            return
+        # Created before the stop is awaited, so a load cancelled while ComfyUI
+        # stops still leaves its settlement. It waits for the device the
+        # caller holds, so creating it first changes no ordering.
+        self._media_warm_task = asyncio.create_task(
+            self._settle_chat_borrow(generation, owed),
+            name="media-warm-borrow",
+        )
+        if not ours:
+            # Stopped or replaced since the run, so whoever did that brings it
+            # back; the settlement gives back only the displaced chat model.
+            return
+        # Owed before the stop is awaited, for the same reason: the empty worker
+        # comes back once chat activity starts, or once the load's caller is
+        # done with the device.
+        self._media_restart_after_chat_activity = True
+        try:
+            await self.processes.stop("media")
+        except Exception:
+            # The load goes ahead regardless. Refusing it would fail the turn
+            # that asked for chat, which is worse than the contention.
+            logger.exception("Could not recycle the warm media worker before a chat model load")
+
+    async def _settle_chat_borrow(self, generation: int, owed_at_borrow: str | None) -> None:
+        """Finish the handoff that a chat load inside a warm window cut short.
+
+        Runs once whoever loaded chat lets go of the device. A text turn leaves
+        its own model loaded and has already brought the empty media worker
+        back, so nothing is left to do. A load that only borrowed the device,
+        such as proving a newly installed model, can leave chat down with the
+        displaced model still owed and the media worker stopped; this restores
+        both, as the window's expiry would have. The profile owed when the load
+        began is restored if the record has since been cleared with chat down.
+        """
+
+        async with self.scheduler.lease("primary"):
+            # A newer window means a media run has ended since, and its own
+            # handoff has already decided what follows it.
+            if self._closing or self._media_warm_generation != generation:
+                return
+            try:
+                await self._give_back_displaced_chat(
+                    self._displaced_chat_profile_id or owed_at_borrow
+                )
+            except Exception:
+                logger.exception("Could not settle the device after a chat model load")
+
+    async def _give_back_displaced_chat(self, owed: str | None) -> None:
+        """Load the displaced chat model if chat is down, and an owed empty worker.
+
+        Runs under the device lease. The media worker is left to whoever
+        stopped or replaced it: the empty restart runs only when this class
+        stopped one and still owes it.
+        """
+
+        chat_worker = next(item for item in self.processes.statuses() if item.name == "chat")
+        queued_text_next = False
+        if owed is not None and not chat_worker.running:
+            selected, queued_text_next, queued_media_next = self._handoff_chat_target(owed)
+            if queued_media_next:
+                # The next job wants the media worker and starts it itself.
+                return
+            await self._resume_chat_worker(selected)
+            self._discharge_displaced_chat_profile(selected)
+        if not queued_text_next:
+            self._release_deferred_media_restart()
+
+    def _chat_worker_running(self) -> bool:
+        """Whether a chat model is loaded now; True when the supervisor cannot say."""
+
+        try:
+            return next(item for item in self.processes.statuses() if item.name == "chat").running
+        except Exception:
+            return True
+
+    def _run_completed(self, run_id: str | None) -> bool:
+        """Whether this run finished with its result, rather than stopped or failed."""
+
+        if run_id is None:
+            return False
+        try:
+            with self.session_factory() as session:
+                run = session.get(Run, run_id)
+                return run is not None and run.status == RunStatus.COMPLETE.value
+        except Exception:
+            logger.exception("Could not read how media run %s ended", run_id)
+            return False
+
+    def forget_displaced_chat_profile(self) -> None:
+        """Owe nothing back once a chat model has been chosen explicitly.
+
+        A media run records the chat profile it displaced so a later handoff
+        restores it. After someone loads a chat model by hand, restoring the
+        displaced one at the next handoff would quietly undo their choice.
+        """
+
+        self._displaced_chat_profile_id = None
 
     def _media_failure_retries(
         self, job_id: str, run_id: str | None, claim: JobClaim | None
@@ -6655,6 +6970,14 @@ class ConversationOrchestrator:
         if not self._media_restart_after_chat_activity:
             return
         self._media_restart_after_chat_activity = False
+        try:
+            media_worker = next(item for item in self.processes.statuses() if item.name == "media")
+        except Exception:
+            media_worker = None
+        if media_worker is not None and media_worker.running:
+            # Started again since it was stopped, by someone else or by a run.
+            # A restart now would replace that worker rather than bring one back.
+            return
         self._schedule_media_restart()
 
     def _arm_step_prewarm(self, session: Session, run: Run) -> None:

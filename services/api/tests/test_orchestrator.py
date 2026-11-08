@@ -451,7 +451,9 @@ async def test_media_handoff_recycles_managed_comfy_before_chat_resume() -> None
         start_media=start_media,
     )
     orchestrator = ConversationOrchestrator(
-        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(
+            settings=SimpleNamespace(media_engine="comfyui", media_keep_warm_seconds=0)
+        ),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
@@ -494,16 +496,25 @@ async def test_media_handoff_preloads_the_next_queued_text_profile() -> None:
                 return next_run
             return None
 
+    live = [media]
+
+    async def stop(name: str) -> None:
+        # The recycle really stops it, as the supervisor does.
+        if name == "media":
+            live[0] = media.model_copy(update={"state": "stopped", "running": False, "pid": None})
+
     processes = _collaborator_double(
-        statuses=Mock(return_value=[media]),
-        stop=AsyncMock(),
+        statuses=Mock(side_effect=lambda: list(live)),
+        stop=AsyncMock(side_effect=stop),
         start_media=AsyncMock(),
     )
     scheduler = _collaborator_double(
         peek_next_eligible_job=Mock(return_value=("job-next", "run-next")),
     )
     orchestrator = ConversationOrchestrator(
-        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(
+            settings=SimpleNamespace(media_engine="comfyui", media_keep_warm_seconds=0)
+        ),
         artifacts=Mock(),
         events=Mock(),
         scheduler=scheduler,
@@ -778,7 +789,9 @@ async def test_scoped_media_handoff_does_not_restart_a_broad_worker() -> None:
         start_media=AsyncMock(),
     )
     orchestrator = ConversationOrchestrator(
-        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(
+            settings=SimpleNamespace(media_engine="comfyui", media_keep_warm_seconds=120)
+        ),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
@@ -880,7 +893,9 @@ def _plan_prewarm_orchestrator(  # type: ignore[no-untyped-def]
         start_media=start_media or AsyncMock(),
     )
     orchestrator = ConversationOrchestrator(
-        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(
+            settings=SimpleNamespace(media_engine="comfyui", media_keep_warm_seconds=0)
+        ),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
@@ -1116,7 +1131,9 @@ async def test_a_handoff_that_loads_another_profile_still_owes_the_displaced_one
         start_media=AsyncMock(),
     )
     orchestrator = ConversationOrchestrator(
-        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(
+            settings=SimpleNamespace(media_engine="comfyui", media_keep_warm_seconds=0)
+        ),
         artifacts=Mock(),
         events=Mock(),
         scheduler=_collaborator_double(
@@ -1169,7 +1186,9 @@ async def test_a_handoff_that_restores_the_displaced_profile_clears_the_debt() -
         start_media=AsyncMock(),
     )
     orchestrator = ConversationOrchestrator(
-        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(
+            settings=SimpleNamespace(media_engine="comfyui", media_keep_warm_seconds=0)
+        ),
         artifacts=Mock(),
         events=Mock(),
         scheduler=_collaborator_double(peek_next_eligible_job=Mock(return_value=None)),
@@ -1207,7 +1226,9 @@ async def test_external_media_handoff_only_resumes_chat() -> None:
         start_media=AsyncMock(),
     )
     orchestrator = ConversationOrchestrator(
-        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(
+            settings=SimpleNamespace(media_engine="comfyui", media_keep_warm_seconds=0)
+        ),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(),
@@ -1667,7 +1688,9 @@ def _queued_media_orchestrator(
         start_media=AsyncMock(),
     )
     orchestrator = ConversationOrchestrator(
-        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(
+            settings=SimpleNamespace(media_engine="comfyui", media_keep_warm_seconds=0)
+        ),
         artifacts=Mock(),
         events=Mock(),
         scheduler=_collaborator_double(peek_next_eligible_job=Mock(side_effect=list(peeks))),
@@ -2211,7 +2234,9 @@ async def test_later_media_preserves_the_chat_profile_owed_before_verification(
     )
     scheduler = _collaborator_double(peek_next_eligible_job=Mock(return_value=("job-verify", None)))
     orchestrator = ConversationOrchestrator(
-        engines=_collaborator_double(settings=SimpleNamespace(media_engine="comfyui")),
+        engines=_collaborator_double(
+            settings=SimpleNamespace(media_engine="comfyui", media_keep_warm_seconds=0)
+        ),
         artifacts=Mock(),
         events=Mock(),
         scheduler=scheduler,

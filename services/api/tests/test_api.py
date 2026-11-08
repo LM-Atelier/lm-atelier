@@ -11551,9 +11551,9 @@ async def test_a_queue_of_images_restores_the_chat_model_once_at_the_end(
 
     real_handoff = orchestrator._complete_media_handoff
 
-    async def watched_handoff(profile_id: str) -> None:
+    async def watched_handoff(profile_id: str, *, keep_warm: bool = True) -> None:
         handoffs.append(profile_id)
-        await real_handoff(profile_id)
+        await real_handoff(profile_id, keep_warm=keep_warm)
 
     monkeypatch.setattr(services.processes, "statuses", statuses)
     monkeypatch.setattr(services.processes, "stop", stop)
@@ -11670,9 +11670,9 @@ async def test_a_media_run_that_loses_its_claim_moves_no_worker_on_the_way_out(
 
     real_handoff = orchestrator._complete_media_handoff
 
-    async def watched_handoff(profile_id: str) -> None:
+    async def watched_handoff(profile_id: str, *, keep_warm: bool = True) -> None:
         handoffs.append(profile_id)
-        await real_handoff(profile_id)
+        await real_handoff(profile_id, keep_warm=keep_warm)
 
     monkeypatch.setattr(services.processes, "statuses", statuses)
     monkeypatch.setattr(services.processes, "stop", stop)

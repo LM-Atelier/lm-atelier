@@ -366,6 +366,13 @@ def build_services(settings: Settings) -> Services:
     scheduler = ResourceScheduler(events, power=power)
     processes = ProcessSupervisor(settings, runtimes, events)
     orchestrator = ConversationOrchestrator(engines, artifacts, events, scheduler, processes)
+    processes.before_chat_load = orchestrator.release_media_for_chat
+    editor_sessions = WorkflowEditorSessions()
+    # An open native editor session is bound to the media worker it was opened
+    # on, so a worker kept warm past a run is not recycled under it.
+    orchestrator.media_worker_in_use = lambda: (
+        editor_sessions.active_count > 0 or editor_sessions.validated_return_count > 0
+    )
     catalog = HuggingFaceCatalog(settings)
     civitai = CivitaiCatalog(settings, token=settings.civitai_token)
     services = Services(
@@ -392,7 +399,7 @@ def build_services(settings: Settings) -> Services:
         diagnostics=DiagnosticBundleBuilder(settings, artifacts, processes, power=power),
         custom_nodes=CustomNodeManager(settings),
         credentials=credentials,
-        workflow_editor_sessions=WorkflowEditorSessions(),
+        workflow_editor_sessions=editor_sessions,
         # Built locked; the lifespan settles it from the saved setting.
         workspace_lock=WorkspaceLock(),
         power=power,

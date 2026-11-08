@@ -343,6 +343,27 @@ class ComfyUIAdapter:
         return value
 
     @staticmethod
+    def _submission_owned_outputs(graph: dict[str, Any], folder: str) -> dict[str, Any]:
+        """Save this submission's files under a folder of its own.
+
+        ComfyUI keeps each node's result between prompts and answers a node
+        whose inputs have not changed from that cache, without running it. A
+        save node answered that way names the files an earlier submission
+        wrote, and this adapter removes managed files as soon as it has
+        collected them, so an identical request could not fetch its own
+        result. A per-submission folder changes only the save nodes' inputs:
+        they run again on the cached pictures and write files of their own,
+        nothing upstream is computed twice, and the file names stay as the
+        workflow chose them.
+        """
+        for node in graph.values():
+            inputs = node.get("inputs") if isinstance(node, dict) else None
+            prefix = inputs.get("filename_prefix") if isinstance(inputs, dict) else None
+            if isinstance(inputs, dict) and isinstance(prefix, str) and prefix:
+                inputs["filename_prefix"] = f"{folder}/{prefix}"
+        return graph
+
+    @staticmethod
     def _leaves_unfilled(value: Any, parameters: dict[str, Any]) -> bool:
         """Whether compiling this graph would keep a placeholder as written.
 
@@ -664,6 +685,8 @@ class ComfyUIAdapter:
                 )
             graph = self._compile(request.workflow, parameters)
             graph = await self._runtime_lora_graph(graph, cancel_event)
+            if self.managed_output_root is not None:
+                graph = self._submission_owned_outputs(graph, client_id)
             yield MediaEvent(
                 type="progress",
                 phase="Submitting media workflow",
@@ -1335,6 +1358,21 @@ class ComfyUIAdapter:
             self._cancelled.add(run_id)
         if run_id in self._jobs:
             await self._interrupt_prompt()
+
+    async def queue_remaining(self) -> int | None:
+        """How many prompts ComfyUI holds, running or waiting, or None if it cannot say."""
+
+        try:
+            response = await self._client.get("/prompt", timeout=5)
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        info = payload.get("exec_info") if isinstance(payload, dict) else None
+        remaining = info.get("queue_remaining") if isinstance(info, dict) else None
+        if isinstance(remaining, bool) or not isinstance(remaining, int) or remaining < 0:
+            return None
+        return remaining
 
     async def _interrupt_prompt(self) -> None:
         try:

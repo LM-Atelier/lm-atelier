@@ -536,6 +536,10 @@ class ProcessSupervisor:
         self._liveness_failure_threshold = liveness_failure_threshold
         self._workers: dict[str, WorkerRecord] = {}
         self._locks = {"chat": asyncio.Lock(), "media": asyncio.Lock()}
+        #: Awaited before any chat model loads. Whoever keeps a media worker's
+        #: models loaded past a run sets this, so the device is freed for chat
+        #: no matter which path asks for it.
+        self.before_chat_load: Callable[[], Awaitable[None]] | None = None
         self._identity_path = self.settings.state_dir / "worker-processes.json"
         self._identity_lock = threading.Lock()
         self._worker_identities = self._load_worker_identities()
@@ -680,6 +684,8 @@ class ProcessSupervisor:
         vision_max_images: int | None = None,
         before_replace: Callable[[], None] | None = None,
     ) -> WorkerStatus:
+        if self.before_chat_load is not None:
+            await self.before_chat_load()
         if profile.engine == "vllm":
             return await self._load_vllm_chat(
                 profile,

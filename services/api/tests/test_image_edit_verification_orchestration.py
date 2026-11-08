@@ -255,7 +255,7 @@ async def test_verifier_starts_after_media_handoff_and_inside_primary_lease(
         order.append("media completed")
         return "job-verifier"
 
-    async def complete_handoff(_profile_id: str) -> None:
+    async def complete_handoff(_profile_id: str, *, keep_warm: bool = True) -> None:
         order.append("chat restored")
 
     monkeypatch.setattr(orchestrator, "_execute_media", execute_media)

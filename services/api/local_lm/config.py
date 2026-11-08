@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     worker_startup_seconds: float = Field(default=60, ge=1, le=600)
     worker_shutdown_seconds: float = Field(default=10, ge=1, le=60)
     auto_unload_chat_for_media: bool = True
+    #: How long a managed ComfyUI worker keeps its loaded models after a media run
+    #: with nothing queued, before the chat model it displaced is loaded back.
+    #: A media turn inside this window starts sampling without reloading
+    #: anything; 0 hands the device back to chat as soon as each run ends.
+    media_keep_warm_seconds: float = Field(default=120, ge=0, le=3600)
     hf_token: str | None = None
     civitai_token: str | None = None
     crw_endpoint: str | None = Field(default=None, max_length=2000)

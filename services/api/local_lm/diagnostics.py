@@ -61,6 +61,7 @@ class DiagnosticBundleBuilder:
                 "chat_engine": self.settings.chat_engine,
                 "media_engine": self.settings.media_engine,
                 "auto_unload_chat_for_media": self.settings.auto_unload_chat_for_media,
+                "media_keep_warm_seconds": self.settings.media_keep_warm_seconds,
                 "comfy_inactivity_seconds": self.settings.comfy_inactivity_seconds,
                 "artifact_retention_days": retention.media_days,
                 "temporary_retention_hours": retention.temporary_hours,

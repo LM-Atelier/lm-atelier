@@ -2286,6 +2286,7 @@ async def _load_chat_profile(services: Services, session: Session, profile_id: s
         status = await services.processes.load_chat(profile, install)
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
         raise api_error(422, "chat-worker-start-failed", str(exc)) from exc
+    services.orchestrator.forget_displaced_chat_profile()
     setting = session.get(AppSetting, LAST_CHAT_PROFILE_KEY)
     if setting:
         setting.value_json = profile.id
