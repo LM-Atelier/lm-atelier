@@ -139,9 +139,14 @@ def source_pad_node(graph: object) -> str | None:
 
 def oriented_size(path: Path) -> tuple[int, int]:
     """A source picture's width and height as it is shown, not as it is stored."""
-    with Image.open(path) as image:
-        width, height = image.size
-        orientation = image.getexif().get(_ORIENTATION_TAG)
+    try:
+        with Image.open(path) as image:
+            width, height = image.size
+            orientation = image.getexif().get(_ORIENTATION_TAG)
+    except Exception as exc:
+        # A malformed file can make Pillow raise almost anything here, in words
+        # of its own that can carry the file's path.
+        raise RuntimeError("The picture to extend could not be read.") from exc
     return (height, width) if orientation in _QUARTER_TURNS else (width, height)
 
 

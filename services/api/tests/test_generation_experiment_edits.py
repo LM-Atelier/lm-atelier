@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from malformed_pictures import runtime_unreadable
 from sqlalchemy import select
 from test_chat_recovery_replay import _change
 from test_generation_experiment_preflight import PREFLIGHT, _arm, _request
@@ -249,6 +250,34 @@ async def test_a_picture_that_cannot_be_changed_here_refuses_the_comparison(
         await _trashed(client, source)
     body = _edit(
         source,
+        _arm("Light touch", profile, revision, denoise=0.3),
+        _arm("Heavier touch", profile, revision, denoise=0.55),
+    )
+
+    answer = (await client.post(PREFLIGHT, json=body)).json()
+
+    assert answer["outcome"] == "refused" and answer["preflight_sha256"] is None
+    assert {"code": "source-unavailable", "arm_ordinal": None} in [
+        {"code": refusal["code"], "arm_ordinal": refusal["arm_ordinal"]}
+        for refusal in answer["refusals"]
+    ]
+
+
+@pytest.mark.parametrize("name", sorted(runtime_unreadable()))
+async def test_a_picture_the_media_runtime_cannot_read_refuses_the_comparison(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """This app reads these TIFF layouts; the runtime the choices run in does not."""
+
+    revision, profile = await _choice(app, client, monkeypatch, _changes_the_picture())
+    uploaded = await client.post(
+        "/api/artifacts",
+        params={"kind": "image"},
+        files={"file": ("picture.tif", runtime_unreadable(512, 768)[name], "image/tiff")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    body = _edit(
+        uploaded.json()["id"],
         _arm("Light touch", profile, revision, denoise=0.3),
         _arm("Heavier touch", profile, revision, denoise=0.55),
     )

@@ -13,6 +13,7 @@ from typing import Any, cast
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from malformed_pictures import HEIGHT, PREMULTIPLIED_GREY_TIFF, UNREADABLE, WIDTH
 from PIL import Image, ImageCms, PngImagePlugin
 from run_waits import wait_for_terminal_status
 
@@ -255,6 +256,27 @@ async def test_a_copy_keeps_sixteen_bit_grey_and_transparency(
     assert copy.mode == "RGBA"
     assert copy.getpixel((0, 0)) == (255, 0, 0, 0)
     assert copy.getpixel((1, 0)) == (0, 255, 0, 255)
+
+
+async def test_a_copy_keeps_grey_with_premultiplied_alpha_as_grey_with_transparency(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    response = await _bundled(app, client, PREMULTIPLIED_GREY_TIFF)
+
+    assert response.status_code == 200, response.text
+    copy = _picture_in(response.content)
+    assert copy.mode == "LA"
+    assert copy.size == (WIDTH, HEIGHT)
+
+
+@pytest.mark.parametrize("name", sorted(UNREADABLE))
+async def test_a_malformed_picture_is_refused_with_a_code(
+    app: FastAPI, client: AsyncClient, name: str
+) -> None:
+    response = await _bundled(app, client, UNREADABLE[name])
+
+    assert response.status_code == 422, response.text
+    assert response.json()["code"] == "output-recipe-bundle-unreadable"
 
 
 async def test_a_picture_that_cannot_be_copied_whole_is_refused_with_a_code(

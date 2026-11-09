@@ -12,7 +12,7 @@ from __future__ import annotations
 from io import BytesIO
 from typing import Final
 
-from PIL import Image
+from PIL import Image, TiffImagePlugin
 from pydantic import Field
 
 from .artifacts import ArtifactStore
@@ -23,6 +23,25 @@ MAX_PICTURE_BYTES: Final = 64 * 1024 * 1024
 _ORIENTATION_TAG: Final = 0x0112
 #: The EXIF orientations that turn a picture a quarter, swapping its width and height.
 _QUARTER_TURNS: Final = frozenset({5, 6, 7, 8})
+#: The TIFF tag that says how many samples each pixel stores.
+_SAMPLES_PER_PIXEL: Final = 277
+
+
+def media_runtime_reads(image: Image.Image) -> bool:
+    """Whether the managed media runtime reads this picture's layout as this app does.
+
+    That runtime brings its own Pillow, 12.3, which refuses two TIFF layouts
+    this app's Pillow reads: grey whose alpha is premultiplied (La), and grey
+    with a second sample it does not name, which this app's Pillow drops. A
+    workflow is handed its source as it is stored, so such a picture would pass
+    a check here and fail in the runtime.
+    """
+    if image.mode == "La":
+        return False
+    if isinstance(image, TiffImagePlugin.TiffImageFile):
+        samples: object = image.tag_v2.get(_SAMPLES_PER_PIXEL, 1)
+        return samples == len(image.getbands())
+    return True
 
 
 class MatchSourceRequest(ApiModel):
@@ -35,9 +54,17 @@ def shown_size(store: ArtifactStore, artifact: Artifact) -> tuple[int, int]:
         raise ValueError("picture_shape_unsupported")
     try:
         content = store.verified_bytes(artifact, maximum_bytes=MAX_PICTURE_BYTES)
+    except (OSError, ValueError):
+        raise ValueError("picture_shape_unavailable") from None
+    try:
         with Image.open(BytesIO(content)) as image:
             width, height = image.size
             orientation = image.getexif().get(_ORIENTATION_TAG)
-    except (OSError, ValueError, Image.DecompressionBombError):
+            readable = media_runtime_reads(image)
+    except Exception:
+        # A malformed file can make Pillow raise almost anything here: a short
+        # chunk is a ValueError, broken orientation data a SyntaxError.
         raise ValueError("picture_shape_unavailable") from None
+    if not readable:
+        raise ValueError("picture_shape_unavailable")
     return (height, width) if orientation in _QUARTER_TURNS else (width, height)

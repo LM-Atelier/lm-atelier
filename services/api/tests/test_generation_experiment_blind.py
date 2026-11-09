@@ -12,6 +12,7 @@ from typing import Any, cast
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from malformed_pictures import HEIGHT, PREMULTIPLIED_GREY_TIFF, UNDECODABLE, WIDTH
 from PIL import Image, ImageCms, PngImagePlugin
 from sqlalchemy import select
 from test_generation_experiment_preflight import PREFLIGHT, _request, _two_choices
@@ -187,6 +188,64 @@ async def test_a_viewing_shows_each_picture_plainly_by_where_it_is_shown(
                 io.BytesIO((await client.get(f"/api/artifacts/{artifact.id}/content")).content)
             )
             assert shown.convert("RGBA").tobytes() == made.convert("RGBA").tobytes()
+
+
+def _engine_makes(app: FastAPI, monkeypatch: pytest.MonkeyPatch, content: bytes) -> None:
+    """Every run's picture is `content`, stored as it arrived, as an engine's output is."""
+
+    tiff = content.startswith(b"II*\x00")
+
+    async def generate(_request: MediaRequest) -> AsyncIterator[MediaEvent]:
+        yield MediaEvent(
+            type="complete",
+            assets=[
+                GeneratedAsset(
+                    content=content,
+                    kind="image",
+                    media_type="image/tiff" if tiff else "image/png",
+                    name="picture.tif" if tiff else "picture.png",
+                    origin={"node_id": "9", "output_type": "output", "collection": "images"},
+                )
+            ],
+        )
+
+    monkeypatch.setattr(app.state.services.engines.media, "generate", generate)
+
+
+async def _first_shown(client: AsyncClient) -> Any:
+    started = await _blind_started(client)
+    opened = await client.post(f"{CREATE}/{started['id']}/blind-views")
+    assert opened.status_code == 201, opened.text
+    view = opened.json()
+    return await client.get(f"{CREATE}/{started['id']}/blind-views/{view['id']}/pictures/1")
+
+
+async def test_grey_with_premultiplied_alpha_is_shown_plainly_with_its_transparency(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An engine can save grey whose alpha is premultiplied, which converts only to LA."""
+
+    _engine_makes(app, monkeypatch, PREMULTIPLIED_GREY_TIFF)
+
+    response = await _first_shown(client)
+
+    assert response.status_code == 200, response.text
+    shown = Image.open(io.BytesIO(response.content))
+    shown.load()
+    assert shown.mode == "RGBA"
+    assert shown.size == (WIDTH, HEIGHT)
+
+
+@pytest.mark.parametrize("name", sorted(UNDECODABLE))
+async def test_a_picture_that_cannot_be_read_is_refused_rather_than_failing(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    _engine_makes(app, monkeypatch, UNDECODABLE[name])
+
+    response = await _first_shown(client)
+
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "generation-experiment-blind-picture-unreadable"
 
 
 async def test_nothing_is_said_blind_before_a_picture_is_made(

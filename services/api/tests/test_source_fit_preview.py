@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from malformed_pictures import UNREADABLE
 from sqlalchemy import func, select
 from test_source_fit_acceptance import prepared_turn
 from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
@@ -183,6 +184,34 @@ async def test_preview_rechecks_source_bytes_after_a_successful_preview(
     before = counts()
     response = await client.post(url, json=body)
     assert response.status_code == 422, response.text
+    assert counts() == before
+
+
+@pytest.mark.parametrize(
+    "name", sorted(name for name, payload in UNREADABLE.items() if payload.startswith(b"\x89PNG"))
+)
+async def test_preview_refuses_a_malformed_source_without_creating_work(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """Pillow fails on a malformed file in ways of its own, decoding it or turning it."""
+
+    _, request = await prepared_turn(app, client, monkeypatch)
+    uploaded = await client.post(
+        "/api/artifacts", files={"file": ("malformed.png", UNREADABLE[name], "image/png")}
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    before = counts()
+
+    response = await client.post(
+        f"/api/workflow-revisions/{request['workflow_revision_id']}/source-fit/preview",
+        json={
+            "source_artifact_id": uploaded.json()["id"],
+            "source_fit": {"mode": "extend", "width": 8, "height": 6},
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["code"] == "source-fit-preview-unavailable"
     assert counts() == before
 
 

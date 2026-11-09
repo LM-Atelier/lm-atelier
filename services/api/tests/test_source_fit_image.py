@@ -8,6 +8,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
+from malformed_pictures import UNREADABLE
 from PIL import Image, PngImagePlugin
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -185,6 +186,21 @@ def test_unsupported_or_incomplete_source_is_not_silently_reinterpreted(
             image.save(output, format="JPEG")
         content = output.getvalue()
     artifact = ingest(artifact_session, content)
+    with pytest.raises(ValueError, match="source_fit_image_unsupported"):
+        prepare_source_fit_image(artifact_session[0], artifact)
+
+
+@pytest.mark.parametrize(
+    "name", sorted(name for name, payload in UNREADABLE.items() if payload.startswith(b"\x89PNG"))
+)
+def test_a_malformed_source_is_unsupported_rather_than_failing(
+    artifact_session: tuple[ArtifactStore, Session], name: str
+) -> None:
+    """Pillow fails on a malformed file in ways of its own, decoding it or turning it."""
+    from local_lm.source_fit_image import prepare_source_fit_image
+
+    artifact = ingest(artifact_session, UNREADABLE[name])
+
     with pytest.raises(ValueError, match="source_fit_image_unsupported"):
         prepare_source_fit_image(artifact_session[0], artifact)
 

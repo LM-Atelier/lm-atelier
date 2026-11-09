@@ -4,6 +4,7 @@ import io
 from collections.abc import Generator
 
 import pytest
+from malformed_pictures import UNDECODABLE
 from PIL import Image
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
@@ -291,6 +292,28 @@ def test_similarity_is_advice_and_cannot_block_the_attachment(session: Session) 
         raise OSError("disk gone")
 
     assert attach_asset(session, subject, artifact_id="art_third", read_bytes=explode).asset.id
+
+
+@pytest.mark.parametrize("name", sorted(UNDECODABLE))
+@pytest.mark.parametrize("malformed", ["incoming", "existing"])
+def test_a_malformed_image_is_never_similar_and_never_blocks_an_attachment(
+    session: Session, name: str, malformed: str
+) -> None:
+    """Pillow fails on a malformed file in ways of its own; each is an image not compared."""
+
+    subject = create_subject(session, name="Ada", kind="person")
+    _named_artifact(session, "existing")
+    _named_artifact(session, "incoming")
+    images = {"art_existing": _png(120), "art_incoming": _png(120)}
+    images[f"art_{malformed}"] = UNDECODABLE[name]
+
+    attach_asset(session, subject, artifact_id="art_existing", read_bytes=images.__getitem__)
+    result = attach_asset(
+        session, subject, artifact_id="art_incoming", read_bytes=images.__getitem__
+    )
+
+    assert result.asset.id
+    assert result.similar == ()
 
 
 @pytest.mark.parametrize("failure", [OSError, KeyError, ValueError])

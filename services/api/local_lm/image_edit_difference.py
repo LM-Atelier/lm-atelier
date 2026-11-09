@@ -29,7 +29,9 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from PIL import Image, ImageDraw, ImageMath, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageMath
+
+from .studio_region_edit import convertible
 
 # Small enough that re-encoding noise and one-pixel resampling differences
 # average away, large enough that a genuine local edit (a recoloured object,
@@ -160,7 +162,9 @@ def compare_images(source: bytes, result: bytes) -> ImageDifference:
     try:
         source_pixels = _normalized(source)
         result_pixels = _normalized(result)
-    except (OSError, UnidentifiedImageError, ValueError):
+    except Exception:
+        # A malformed file can make Pillow raise almost anything while it
+        # decodes or converts the picture, and each is a picture not read.
         return ImageDifference(
             mean_absolute_difference=0.0,
             changed=True,
@@ -196,7 +200,8 @@ def compare_edit(
 
     try:
         before, after, weights = _working_pictures(source, result, mask, invert=invert)
-    except (OSError, UnidentifiedImageError, ValueError, Image.DecompressionBombError):
+    except Exception:
+        # As in compare_images: whatever Pillow raises, the pictures were not read.
         return INCOMPARABLE
     grid = (min(LOCAL_GRID, weights.width), min(LOCAL_GRID, weights.height))
     coverage = list(weights.resize(grid, Image.Resampling.BOX).get_flattened_data())
@@ -388,9 +393,9 @@ def _working_pictures(
     """Bring source, result and selection weights onto one grid, each reduced exactly."""
 
     with Image.open(io.BytesIO(source)) as opened:
-        before = opened.convert("RGB")
+        before = convertible(opened).convert("RGB")
     with Image.open(io.BytesIO(result)) as opened:
-        after = opened.convert("RGB")
+        after = convertible(opened).convert("RGB")
     if after.size != before.size:
         after = after.resize(before.size, Image.Resampling.BOX)
     factor = max(1, math.ceil(max(before.size) / WORKING_LONG_SIDE))
@@ -405,7 +410,7 @@ def _selection_weights(mask: bytes, size: tuple[int, int], *, invert: bool) -> I
     """Weigh each source pixel by how much of it the selection covers, from 0 to 1."""
 
     with Image.open(io.BytesIO(mask)) as opened:
-        levels = opened.convert("L")
+        levels = convertible(opened).convert("L")
     # 255 where selected. Inverting selects everything the mask leaves out.
     selected = levels.point(lambda value: 0 if (value > SELECTED_LEVEL) == invert else 255)
     if selected.size != size:
@@ -427,5 +432,5 @@ def _normalized(payload: bytes) -> list[int]:
         # keeps almost the same brightness, so a luminance comparison called
         # a real edit "unchanged". A fixed size lets differing output
         # dimensions still compare.
-        converted = image.convert("RGB").resize(COMPARISON_SIZE)
+        converted = convertible(image).convert("RGB").resize(COMPARISON_SIZE)
         return list(converted.tobytes())

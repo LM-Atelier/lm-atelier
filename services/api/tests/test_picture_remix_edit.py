@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
 from httpx2 import AsyncClient as CurrentAsyncClient
+from malformed_pictures import DOUBLED_EXIF_BODY, SHORT_BODY, with_chunk
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 from sqlalchemy import func, select
@@ -403,6 +404,36 @@ async def test_a_moving_picture_is_no_starting_picture(
     body = (await _preview(client, artifact_id, revision_id, profile_id)).json()
 
     assert [item["code"] for item in body["refusals"]] == ["remix-picture-unusable"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "body", "after_pixels"),
+    [
+        (b"eXIf", DOUBLED_EXIF_BODY, False),
+        (b"gAMA", SHORT_BODY, False),
+        (b"gAMA", SHORT_BODY, True),
+        (b"iCCP", b"", True),
+    ],
+    ids=["doubled EXIF prefix", "short gamma", "short gamma after", "empty profile after"],
+)
+async def test_a_picture_that_cannot_be_read_is_no_starting_picture(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: bytes,
+    body: bytes,
+    after_pixels: bool,
+) -> None:
+    """Its settings read, but the picture does not: its header or orientation is malformed."""
+
+    revision_id, profile_id = await _edit_workflow(app, client, monkeypatch)
+    malformed = with_chunk(_picture(), kind, body, after_pixels=after_pixels)
+    artifact_id = await _uploaded(client, malformed)
+
+    response = await _preview(client, artifact_id, revision_id, profile_id)
+
+    assert response.status_code == 200, response.text
+    assert [item["code"] for item in response.json()["refusals"]] == ["remix-picture-unusable"]
 
 
 async def test_a_prompt_with_space_around_it_is_queued_as_the_words_a_turn_takes(

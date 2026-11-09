@@ -29,7 +29,7 @@ import warnings
 from dataclasses import dataclass
 from typing import Any
 
-from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat, UnidentifiedImageError
+from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
 
 from .studio_masks import (
     MaskContractError,
@@ -189,9 +189,10 @@ class SourcePicture:
 def load_source(payload: bytes) -> SourcePicture:
     decoded = decode_picture(payload, "source")
     icc_profile = decoded.info.get("icc_profile")
+    upright, orientation = upright_picture(decoded, "source")
     return SourcePicture(
-        image=_composable(_oriented(decoded)),
-        orientation=_orientation(decoded),
+        image=_composable(upright, "source"),
+        orientation=orientation,
         icc_profile=icc_profile if isinstance(icc_profile, bytes) else None,
     )
 
@@ -210,7 +211,9 @@ def fit_result(
     result_ratio = edited.width / edited.height
     if abs(result_ratio - source_ratio) > MAX_SHAPE_DRIFT * source_ratio:
         raise RegionEditError("region-result-reshaped", reshaped_message)
-    fitted = edited.convert("RGB").resize(source.image.size, Image.Resampling.LANCZOS)
+    fitted = converted(edited, "RGB", "edited picture").resize(
+        source.image.size, Image.Resampling.LANCZOS
+    )
     if source.image.mode == "RGBA":
         fitted.putalpha(source.image.getchannel("A"))
     return edited, fitted
@@ -232,6 +235,12 @@ class _Alpha:
 
 
 def decode_picture(payload: bytes, label: str) -> Image.Image:
+    """The picture in `payload`, decoded whole.
+
+    A malformed file can make Pillow raise almost anything, and not only while
+    it opens one: a chunk cut short after the pixels fails the load instead.
+    Each means the picture cannot be read, so both are refused the same way.
+    """
     try:
         with warnings.catch_warnings():
             # Between Pillow's pixel limit and twice it, a crafted header only
@@ -247,14 +256,51 @@ def decode_picture(payload: bytes, label: str) -> Image.Image:
                     f"The {label} is too large to edit through a selection.",
                 )
             image.load()
-    except (
-        Image.DecompressionBombError,
-        Image.DecompressionBombWarning,
-        UnidentifiedImageError,
-        OSError,
-    ) as exc:
+    except RegionEditError:
+        raise
+    except Exception as exc:
         raise RegionEditError("region-image-unreadable", f"The {label} could not be read.") from exc
     return image
+
+
+def upright_picture(image: Image.Image, label: str) -> tuple[Image.Image, int]:
+    """A decoded picture as the person saw it, and the orientation that turned it.
+
+    Both come from the picture's orientation data, which Pillow can fail on in
+    two places: broken data fails the first read of it, and a tag stored with
+    the wrong type reads as it is but cannot be written back once the turn is
+    taken out. Either is the picture being unreadable, refused as a broken
+    header is. Only a picture something turns is read for its orientation, so
+    a selection is never refused for orientation data nothing uses. A TIFF is
+    the exception Pillow makes itself: it turns one as it decodes it, and the
+    orientation here is then 1.
+    """
+    try:
+        orientation = _orientation(image)
+        return ImageOps.exif_transpose(image) or image, orientation
+    except Exception as exc:
+        raise RegionEditError("region-image-unreadable", f"The {label} could not be read.") from exc
+
+
+def convertible(image: Image.Image) -> Image.Image:
+    """The picture, with grey whose alpha is premultiplied made LA, which converts as LA does.
+
+    Pillow reads grey with premultiplied alpha from a TIFF as La, which it
+    converts to LA and to nothing else. Every other mode is returned as it is.
+    """
+    return image.convert("LA") if image.mode == "La" else image
+
+
+def converted(image: Image.Image, mode: str, label: str) -> Image.Image:
+    """A decoded picture in `mode`, refused as unreadable where Pillow cannot convert it.
+
+    A picture can decode cleanly and still fail its conversion: a palette whose
+    transparency runs past its colours does, as soon as it gains an alpha.
+    """
+    try:
+        return convertible(image).convert(mode)
+    except Exception as exc:
+        raise RegionEditError("region-image-unreadable", f"The {label} could not be read.") from exc
 
 
 def selection_alpha(mask: bytes, size: tuple[int, int], orientation: int) -> Image.Image:
@@ -269,26 +315,17 @@ def selection_alpha(mask: bytes, size: tuple[int, int], orientation: int) -> Ima
     ).image
 
 
-def exif_orientation(image: Image.Image) -> int:
-    """The orientation a camera recorded, 1 when it recorded none that is valid."""
-
-    return _orientation(image)
-
-
 def _orientation(image: Image.Image) -> int:
+    """The orientation a camera recorded, 1 when it recorded none that is valid."""
     value = image.getexif().get(_EXIF_ORIENTATION, 1)
     return value if isinstance(value, int) and 1 <= value <= 8 else 1
 
 
-def _oriented(image: Image.Image) -> Image.Image:
-    """The source as the person saw it, which is what the selection was drawn on."""
-    return ImageOps.exif_transpose(image) or image
-
-
-def _composable(image: Image.Image) -> Image.Image:
+def _composable(image: Image.Image, label: str) -> Image.Image:
+    image = convertible(image)
     if image.mode in {"RGBA", "LA", "PA"} or "transparency" in image.info:
-        return image.convert("RGBA")
-    return image.convert("RGB")
+        return converted(image, "RGBA", label)
+    return converted(image, "RGB", label)
 
 
 @dataclass(frozen=True)
@@ -381,7 +418,9 @@ def stitch_selection(crop: SelectionCrop, result: bytes) -> RegionBlend:
     left, top, right, bottom = crop.box
     original = source.image.crop(crop.box)
     selection = alpha.image.crop(crop.box)
-    fitted = edited.convert("RGB").resize((right - left, bottom - top), Image.Resampling.LANCZOS)
+    fitted = converted(edited, "RGB", "edited picture").resize(
+        (right - left, bottom - top), Image.Resampling.LANCZOS
+    )
     # What the workflow was given, brought back the same way, so resampling
     # alone reads as no change.
     given = (
@@ -496,11 +535,12 @@ def _drawn_selection(mask: Image.Image) -> Image.Image:
     opaque everywhere carries nothing there, so, like a mask without alpha, it
     is read by brightness: a black-and-white mask selects its white.
     """
+    mask = convertible(mask)
     if mask.mode in {"RGBA", "LA", "PA"} or "transparency" in mask.info:
-        alpha = mask.convert("RGBA").getchannel("A")
+        alpha = converted(mask, "RGBA", "selection").getchannel("A")
         if alpha.getextrema() != (255, 255):
             return alpha
-    return mask.convert("L")
+    return converted(mask, "L", "selection")
 
 
 def workflow_selection_mask(edit: RegionEdit) -> bytes | None:
@@ -521,7 +561,11 @@ def workflow_selection_mask(edit: RegionEdit) -> bytes | None:
     if upright is None or mask is None:
         return None
     (width, height), orientation = upright
-    selected = _drawn_selection(mask)
+    try:
+        selected = _drawn_selection(mask)
+    except RegionEditError:
+        # One that decodes but does not convert here is handed as drawn too.
+        return None
     try:
         mask_geometry(
             source_width=width,
@@ -552,7 +596,8 @@ def _upright_shape(payload: bytes) -> tuple[tuple[int, int], int] | None:
             image = Image.open(io.BytesIO(payload))
             orientation = _orientation(image)
             width, height = image.size
-    except (Image.DecompressionBombError, UnidentifiedImageError, OSError):
+    except Exception:
+        # Whatever Pillow raises on a malformed header, it does not read here.
         return None
     # Orientations 5 to 8 turn the picture on its side.
     return ((height, width) if orientation >= 5 else (width, height)), orientation
@@ -567,12 +612,8 @@ def _readable_selection(payload: bytes) -> Image.Image | None:
             if not 0 < image.width * image.height <= MAX_WORKFLOW_MASK_PIXELS:
                 return None
             image.load()
-    except (
-        Image.DecompressionBombError,
-        Image.DecompressionBombWarning,
-        UnidentifiedImageError,
-        OSError,
-    ):
+    except Exception:
+        # Whatever Pillow raises on a malformed file, it does not read here.
         return None
     return image
 
