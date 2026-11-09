@@ -464,6 +464,10 @@ logger = logging.getLogger(__name__)
 DURABLE_RETRY_BINDING_FIELDS = ("retry_run_id", "retry_work_plan_id", "retry_revision_id")
 IDEMPOTENCY_CLAIM_WAIT_SECONDS = 120.0
 MAX_PENDING_WORK_PER_CHAT = 32
+#: How soon a warm window that found ComfyUI in use checks again, however long
+#: the window itself is: one of several days must not leave a chat model beside
+#: ComfyUI's loaded models for days after the other use has ended.
+MEDIA_BUSY_RECHECK_SECONDS = 60.0
 MEDIA_SEED_SPACE = 2_147_483_648
 WORKFLOW_LORA_REPLAY_FAILURE = "The queued workflow LoRA configuration could not be verified."
 PENDING_OUTPUT_REFERENCE = re.compile(
@@ -1153,6 +1157,10 @@ class ConversationOrchestrator:
         self._media_warm_generation = 0
         #: The pid of the worker launch the open window keeps.
         self._media_warm_launch: int | None = None
+        #: Whether that launch was started for one activation's own custom nodes
+        #: and models. Such a worker is never replaced by the broad one when the
+        #: window ends: the next media run starts the worker it needs.
+        self._media_warm_scoped = False
         #: Whether something outside this class's runs relies on the live media
         #: worker, such as an open native editor session; set by the application.
         self.media_worker_in_use: Callable[[], bool] = lambda: False
@@ -6609,12 +6617,13 @@ class ConversationOrchestrator:
     def _open_media_warm_window(self) -> bool:
         """Keep the managed ComfyUI worker for a following media turn, if it can be.
 
-        Returns whether a window was opened. Only a ready, managed, broad worker
-        is worth keeping: anything else holds nothing a media turn could reuse,
+        Returns whether a window was opened. Only a ready, managed worker is
+        worth keeping: anything else holds nothing a media turn could reuse,
         and the ordinary handoff answers it. A worker launched for one
-        activation's dependencies is not kept either. The next turn may need
-        models or nodes outside that scope, and the ordinary handoff leaves
-        such a worker down so the next run starts the worker it needs.
+        activation's own custom nodes and models is kept as well. A following
+        run of that same activation reuses it, since the supervisor keeps an
+        identical scoped launch, and any other run replaces it with the worker
+        it needs before it starts, so keeping it costs a later run nothing.
         """
 
         seconds = self.engines.settings.media_keep_warm_seconds
@@ -6622,14 +6631,11 @@ class ConversationOrchestrator:
             return False
         try:
             media_worker = next(item for item in self.processes.statuses() if item.name == "media")
-            launch_scope = getattr(self.processes, "launch_scope_sha256", None)
-            scoped = bool(launch_scope and launch_scope("media") is not None)
+            scoped = self._media_worker_scope() is not None
         except Exception:
             logger.exception("Could not inspect the media worker before keeping it warm")
             return False
-        if scoped or not (
-            media_worker.managed and media_worker.running and media_worker.state == "ready"
-        ):
+        if not (media_worker.managed and media_worker.running and media_worker.state == "ready"):
             return False
         self._close_media_warm_window()
         self._media_warm_generation += 1
@@ -6639,11 +6645,18 @@ class ConversationOrchestrator:
         # started by someone else since then is theirs, and nothing here
         # recycles it.
         self._media_warm_launch = media_worker.pid
+        self._media_warm_scoped = scoped
         self._media_warm_task = asyncio.create_task(
             self._expire_media_warm_window(generation, seconds),
             name="media-warm-window",
         )
         return True
+
+    def _media_worker_scope(self) -> str | None:
+        """The activation scope the live media worker was launched for, if any."""
+
+        launch_scope = getattr(self.processes, "launch_scope_sha256", None)
+        return launch_scope("media") if launch_scope else None
 
     def _close_media_warm_window(self) -> int | None:
         """End the open window and cancel whatever was waiting to settle one.
@@ -6701,8 +6714,9 @@ class ConversationOrchestrator:
     async def _expire_media_warm_window(self, generation: int, seconds: float) -> None:
         """Hand the device back to chat once a warm window passes unused."""
 
+        delay = seconds
         while True:
-            await asyncio.sleep(seconds)
+            await asyncio.sleep(delay)
             # Under the device lease, so the give-back never runs beside a job.
             # A media run that takes the worker over closes the window first,
             # and so does a chat load inside it, so neither ever waits on this.
@@ -6714,7 +6728,9 @@ class ConversationOrchestrator:
                     return
             # Someone is using ComfyUI directly or through the native editor,
             # and recycling it would end their work. The window runs on until
-            # they have finished.
+            # they have finished, checked again soon rather than a whole window
+            # later.
+            delay = min(seconds, MEDIA_BUSY_RECHECK_SECONDS)
 
     async def _end_media_warm_window(self) -> None:
         """Close the open window and give back what it held, under the device lease."""
@@ -6732,9 +6748,11 @@ class ConversationOrchestrator:
             else:
                 # Nothing is owed, because a chat model was loaded beside a
                 # worker someone was using. The models are still resident, and
-                # with the window gone nothing would recycle them.
+                # with the window gone nothing would recycle them. A worker
+                # launched for one activation is not replaced by the broad one.
                 await self.processes.stop("media")
-                self._schedule_media_restart()
+                if not self._media_warm_scoped:
+                    self._schedule_media_restart()
         except Exception:
             logger.exception("Could not hand the device back to chat after the warm window")
 
@@ -6779,8 +6797,11 @@ class ConversationOrchestrator:
             return
         # Owed before the stop is awaited, for the same reason: the empty worker
         # comes back once chat activity starts, or once the load's caller is
-        # done with the device.
-        self._media_restart_after_chat_activity = True
+        # done with the device. A worker launched for one activation is not
+        # replaced by the broad one, as after the ordinary handoff: the next
+        # media run starts the worker it needs.
+        if not self._media_warm_scoped:
+            self._media_restart_after_chat_activity = True
         try:
             await self.processes.stop("media")
         except Exception:
@@ -7111,7 +7132,17 @@ class ConversationOrchestrator:
                 )
             await asyncio.shield(restart_task)
         status = next(item for item in self.processes.statuses() if item.name == "media")
-        if activation_scope is not None or not status.running or status.state != "ready":
+        # A worker launched for one activation sees only that activation's
+        # models and custom nodes, so a run without one never runs on it: it
+        # is replaced by the broad worker first. A run with a scope always asks
+        # for its own, and the supervisor keeps an identical launch running.
+        replace_scoped = activation_scope is None and self._media_worker_scope() is not None
+        if (
+            activation_scope is not None
+            or replace_scoped
+            or not status.running
+            or status.state != "ready"
+        ):
             if job_id and run_id:
                 # The start is a process effect: it is earned only by a
                 # phase write the row still accepts, and a phase the row
