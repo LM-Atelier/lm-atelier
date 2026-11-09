@@ -6566,6 +6566,33 @@ async def cancel_active_chat_run(
     return refreshed
 
 
+@router.post("/chats/{chat_id}/cancel-all", status_code=204)
+async def cancel_all_chat_work(
+    chat_id: str,
+    request: Request,
+    session: ConversationSessionDep,
+) -> Response:
+    """Cancel every queued, running and paused item the chat holds, all at once.
+
+    Stop ends one item, the chat's current one, so a chat someone filled with
+    work they no longer want would take a stop per item. Deleting a chat with
+    work in it starts here too, since a chat cannot be deleted while it holds
+    any. The chat's lock is held while its work is cancelled, so no turn starts
+    midway.
+    """
+    chat = session.get(Chat, chat_id)
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+        raise api_error(404, "chat-not-found", "chat not found")
+    _refuse_comparison_chat(session, chat_id)
+    # Nothing stays open on this session while the chat's lock is awaited.
+    session.rollback()
+    # Deletion begins with this same cancellation under the same lock; here
+    # nothing follows it, and the lock is released once the work has ended.
+    async with _services(request).orchestrator.prepare_chat_deletion(chat_id):
+        pass
+    return Response(status_code=204)
+
+
 @router.post(
     "/chats/{chat_id}/stop-and-send",
     response_model=TurnAccepted,
