@@ -10,6 +10,12 @@ model load from any path recycles the worker first, so a chat model is never
 loaded beside ComfyUI's resident models, and once the device is free whatever
 that load left owed is given back. The window keeps one launch and no other: a
 worker someone else stopped, restarted or is using directly is left to them.
+
+A worker launched for one workflow's own custom nodes and models is kept the
+same way, so consecutive turns of that workflow reuse it and ComfyUI stays
+reachable between them. It sees only that workflow's models and nodes, so a run
+without a scope replaces it with the broad worker before it starts, and when its
+window ends the broad worker is not started in its place.
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ from unittest.mock import Mock
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from pydantic import ValidationError
 from run_waits import PATIENCE_SECONDS, wait_until
 from test_chat_handoff_across_retries import ChatWorker, finished
 from test_generation_retry import choose_retries, failing_media, read_run, start_media
@@ -304,16 +311,124 @@ async def test_a_chat_load_cancelled_while_comfyui_stops_still_settles() -> None
     await orchestrator.close()
 
 
-async def test_a_scoped_worker_is_not_kept_warm() -> None:
-    orchestrator, record, _ = _warm_orchestrator(60, scope="a" * 64)
+SCOPE = "a" * 64
+
+
+async def test_a_scoped_worker_is_kept_warm_too() -> None:
+    orchestrator, record, _ = _warm_orchestrator(60, scope=SCOPE)
 
     await orchestrator._complete_media_handoff("profile-chat")
 
-    # The ordinary handoff: recycled, chat back, and no broad worker in its place.
-    assert record["order"] == ["stop media", "resume profile-chat"]
-    assert orchestrator._media_warm_window is None
-    assert orchestrator._media_restart_task is None
+    # Kept like the broad worker: nothing recycled, and chat stays owed.
+    assert record["order"] == []
+    assert orchestrator._media_warm_window is not None
+    assert orchestrator._displaced_chat_profile_id == "profile-chat"
     await orchestrator.close()
+
+
+async def test_an_unused_scoped_window_gives_chat_back_without_a_broad_worker() -> None:
+    orchestrator, record, _ = _warm_orchestrator(0.01, scope=SCOPE)
+
+    await orchestrator._complete_media_handoff("profile-chat")
+    # Kept first, and handed back only once the window ran out.
+    assert record["order"] == []
+    assert orchestrator._media_warm_window is not None
+    await _settled(orchestrator)
+
+    # Recycled and chat back, and no broad worker in its place: the next media
+    # run starts the worker it needs.
+    assert record["order"] == ["stop media", "resume profile-chat"]
+    assert orchestrator._media_restart_task is None
+    assert orchestrator._media_warm_window is None
+    await orchestrator.close()
+
+
+async def test_a_scoped_expiry_with_nothing_owed_starts_no_broad_worker() -> None:
+    orchestrator, record, _ = _warm_orchestrator(0.01, scope=SCOPE)
+    await orchestrator._complete_media_handoff("profile-chat")
+    orchestrator._displaced_chat_profile_id = None
+
+    await _settled(orchestrator)
+
+    assert record["order"] == ["stop media"]
+    assert not record["media_running"]
+    await orchestrator.close()
+
+
+@pytest.mark.parametrize("loaded_its_own", [True, False])
+async def test_a_chat_load_inside_a_scoped_window_owes_no_broad_worker(
+    loaded_its_own: bool,
+) -> None:
+    orchestrator, record, device = _warm_orchestrator(60, scope=SCOPE)
+    await orchestrator._complete_media_handoff("profile-chat")
+
+    async with device:
+        await orchestrator.release_media_for_chat()
+        assert record["order"] == ["stop media"]
+        assert orchestrator._media_restart_after_chat_activity is False
+        if loaded_its_own:
+            record["chat_running"] = True
+            orchestrator.forget_displaced_chat_profile()
+    await _settled(orchestrator)
+
+    # A load that only borrowed the device still gets the displaced chat model
+    # back, and neither starts the broad worker.
+    expected = ["stop media"] if loaded_its_own else ["stop media", "resume profile-chat"]
+    assert record["order"] == expected
+    assert not record["media_running"]
+    await orchestrator.close()
+
+
+async def test_a_run_without_a_scope_replaces_a_scoped_worker() -> None:
+    orchestrator, record, _ = _warm_orchestrator(60, scope=SCOPE)
+
+    await orchestrator._ensure_media_worker(claim=Mock())
+
+    # It sees only its own activation's models and nodes, so the run gets the
+    # broad worker instead.
+    assert record["order"] == ["start media"]
+    await orchestrator.close()
+
+
+async def test_a_run_without_a_scope_reuses_a_ready_broad_worker() -> None:
+    orchestrator, record, _ = _warm_orchestrator(60)
+
+    await orchestrator._ensure_media_worker(claim=Mock())
+
+    assert record["order"] == []
+    await orchestrator.close()
+
+
+async def test_a_busy_expiry_checks_again_soon_however_long_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator, record, _ = _warm_orchestrator(604_800)
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def recorded(delay: float) -> None:
+        delays.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", recorded)
+    # Something else is using ComfyUI when the window runs out.
+    record["comfy_queue"] = 1
+    await orchestrator._complete_media_handoff("profile-chat")
+    while len(delays) < 3:
+        await real_sleep(0)
+    record["comfy_queue"] = 0
+    await _settled(orchestrator)
+
+    assert delays[0] == 604_800
+    assert delays[1:] and all(delay <= 60 for delay in delays[1:])
+    assert record["order"] == ["stop media", "resume profile-chat", "start media"]
+    await orchestrator.close()
+
+
+def test_a_window_may_last_up_to_a_week() -> None:
+    assert Settings(media_keep_warm_seconds=604_800).media_keep_warm_seconds == 604_800
+    with pytest.raises(ValidationError):
+        Settings(media_keep_warm_seconds=604_801)
 
 
 async def test_a_worker_another_caller_stopped_is_left_to_that_caller() -> None:

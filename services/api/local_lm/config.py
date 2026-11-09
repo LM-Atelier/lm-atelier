@@ -38,8 +38,11 @@ class Settings(BaseSettings):
     #: How long a managed ComfyUI worker keeps its loaded models after a media run
     #: with nothing queued, before the chat model it displaced is loaded back.
     #: A media turn inside this window starts sampling without reloading
-    #: anything; 0 hands the device back to chat as soon as each run ends.
-    media_keep_warm_seconds: float = Field(default=120, ge=0, le=3600)
+    #: anything; 0 hands the device back to chat as soon as each run ends. On a
+    #: machine used mostly for media, up to a week keeps the last run's worker
+    #: and its models between media turns; a chat model still loads whenever
+    #: something needs one, stopping ComfyUI first.
+    media_keep_warm_seconds: float = Field(default=120, ge=0, le=604_800)
     hf_token: str | None = None
     civitai_token: str | None = None
     crw_endpoint: str | None = Field(default=None, max_length=2000)

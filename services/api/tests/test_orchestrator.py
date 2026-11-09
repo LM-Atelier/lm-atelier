@@ -799,7 +799,9 @@ async def test_scoped_media_handoff_does_not_restart_a_broad_worker() -> None:
     )
     orchestrator._resume_chat_worker = AsyncMock()  # type: ignore[method-assign]
 
-    await orchestrator._complete_media_handoff("profile-chat")
+    # A run that does not keep its worker warm, such as a failed one, hands the
+    # device back at once.
+    await orchestrator._complete_media_handoff("profile-chat", keep_warm=False)
 
     processes.stop.assert_awaited_once_with("media")
     orchestrator._resume_chat_worker.assert_awaited_once_with("profile-chat")
