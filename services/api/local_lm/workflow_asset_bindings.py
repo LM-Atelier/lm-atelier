@@ -37,6 +37,7 @@ _REFERENCE_ARTIFACT_KINDS: dict[str, frozenset[InstalledAssetKind]] = {
         }
     ),
     "embedding": frozenset({"embedding"}),
+    "latent_upscaler": frozenset({"latent_upscaler"}),
     "lora": frozenset({"lora"}),
     "upscaler": frozenset({"upscaler"}),
     "vae": frozenset({"vae"}),
@@ -53,6 +54,7 @@ _ARTIFACT_TARGET_FOLDERS: dict[InstalledAssetKind, frozenset[str]] = {
         {"checkpoints", "clip_vision", "diffusion_models", "models", "text_encoders", "unet"}
     ),
     "ip_adapter": frozenset({"ipadapter"}),
+    "latent_upscaler": frozenset({"latent_upscale_models"}),
     "lora": frozenset({"loras"}),
     "text_encoder": frozenset({"text_encoders"}),
     "upscaler": frozenset({"upscale_models"}),

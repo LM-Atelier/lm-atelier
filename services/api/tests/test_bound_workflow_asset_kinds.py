@@ -21,6 +21,7 @@ from local_lm.workflow_asset_bindings import (
         ("background_removal", "background_removal"),
         ("checkpoint", "checkpoints"),
         ("embedding", "embeddings"),
+        ("latent_upscaler", "latent_upscale_models"),
         ("lora", "loras"),
         ("upscaler", "upscale_models"),
         ("vae", "vae"),
