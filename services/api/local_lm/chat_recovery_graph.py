@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -36,14 +36,48 @@ from .models import (
 from .recovery_previews import RecoverySnapshot
 from .recovery_v1 import RecoveryConflict, RecoveryCountsV1
 
+# Distinct rows read, and the canonical bytes an inspection keeps in memory.
 MAX_GRAPH_ROWS = 100_000
 MAX_GRAPH_BYTES = 16 * 1024 * 1024
+# Canonical bytes hashed, each row once: how long one inspection holds the reserved writer.
+MAX_GRAPH_READ_BYTES = 24 * 1024 * 1024
 _TERMINAL = frozenset({"complete", "failed", "cancelled", "interrupted"})
+# The only owned columns read after inspection; every column is still hashed.
+_KEEP: Mapping[str, tuple[str, ...]] = {
+    "chats": ("id",),
+    "messages": ("id", "role", "status"),
+    "message_parts": ("message_id", "type", "artifact_id"),
+    "response_revisions": ("id", "message_id", "status"),
+    "response_revision_parts": ("response_revision_id", "type", "artifact_id"),
+    "runs": ("id", "status"),
+    "work_plans": ("id", "status"),
+    "work_steps": ("id", "status"),
+    "jobs": ("id", "status", "claim_owner", "run_id", "work_plan_id", "work_step_id"),
+}
+_PARENT_KEEP: Mapping[str, tuple[str, ...]] = {
+    "runs": ("id", "chat_id"),
+    "work_plans": ("id", "chat_id"),
+    "work_steps": ("id", "plan_id"),
+}
+_ARTIFACT_COLUMNS: Mapping[str, str] = {
+    "message_parts": "artifact_id",
+    "response_revision_parts": "artifact_id",
+    "chat_composer_draft_attachments": "artifact_id",
+    "run_context_artifacts": "artifact_id",
+    "setup_verifications": "input_artifact_id",
+}
 
 
 class ChatRecoveryGraphError(ValueError):
+    def __init__(self, code: str = "chat-recovery-graph-invalid") -> None:
+        super().__init__(code)
+
+
+class ChatRecoveryGraphTooLarge(ChatRecoveryGraphError):
+    """A valid conversation larger than one inspection may read under the writer."""
+
     def __init__(self) -> None:
-        super().__init__("chat-recovery-graph-invalid")
+        super().__init__("chat-recovery-graph-too-large")
 
 
 @dataclass(frozen=True)
@@ -51,7 +85,18 @@ class ChatRecoveryGraph:
     snapshot: RecoverySnapshot
     owned_job_ids: tuple[str, ...]
     artifact_ids: frozenset[str]
+    # Only the columns later code reads, never whole rows.
     rows: Mapping[str, tuple[Mapping[str, Any], ...]] = field(repr=False)
+
+
+def _encoded(name: str, values: Mapping[str, Any]) -> bytes:
+    normalized = {
+        key: value.isoformat() if isinstance(value, datetime) else value
+        for key, value in values.items()
+    }
+    return json.dumps(
+        [name, normalized], sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
 
 
 class _GraphReader:
@@ -60,6 +105,7 @@ class _GraphReader:
         self.digest = hashlib.sha256(b"chat-recovery-canonical-graph-v1\0")
         self.row_count = 0
         self.byte_count = 0
+        self.read_bytes = 0
 
     def read(
         self,
@@ -68,7 +114,14 @@ class _GraphReader:
         parameters: dict[str, object] | None = None,
         *,
         columns: tuple[str, ...] | None = None,
+        keep: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+        counted: Collection[object] = (),
     ) -> tuple[Mapping[str, Any], ...]:
+        """Hash every selected value, but keep and count as kept only what `keep` returns.
+
+        A row whose id is in `counted` was already counted by this inspection: it is hashed
+        again, in order, without being counted twice.
+        """
         table = Base.metadata.tables[name]
         statement = (
             (select(*(table.c[column] for column in columns)) if columns else select(table))
@@ -79,58 +132,64 @@ class _GraphReader:
         try:
             for row in self.session.execute(statement, parameters or {}).mappings():
                 values = dict(row)
-                normalized = {
-                    key: value.isoformat() if isinstance(value, datetime) else value
-                    for key, value in values.items()
-                }
-                encoded = json.dumps(
-                    [name, normalized], sort_keys=True, separators=(",", ":"), allow_nan=False
-                ).encode("utf-8")
-                self.row_count += 1
-                self.byte_count += len(encoded)
-                if self.row_count > MAX_GRAPH_ROWS or self.byte_count > MAX_GRAPH_BYTES:
-                    raise ChatRecoveryGraphError()
+                encoded = _encoded(name, values)
+                if not counted or values["id"] not in counted:
+                    self.row_count += 1
+                    self.read_bytes += len(encoded)
+                kept = values if keep is None else keep(values)
+                self.byte_count += len(encoded) if keep is None else len(_encoded(name, kept))
+                if (
+                    self.row_count > MAX_GRAPH_ROWS
+                    or self.byte_count > MAX_GRAPH_BYTES
+                    or self.read_bytes > MAX_GRAPH_READ_BYTES
+                ):
+                    raise ChatRecoveryGraphTooLarge()
                 self.digest.update(len(encoded).to_bytes(8, "big"))
                 self.digest.update(encoded)
-                result.append(values)
+                result.append(kept)
+        except ChatRecoveryGraphError:
+            raise
         except (TypeError, ValueError, RecursionError):
             raise ChatRecoveryGraphError() from None
         return tuple(result)
 
+    def leaves_room(self) -> bool:
+        """Whether every count stays within fifteen sixteenths of its bound."""
+        return all(
+            16 * used <= 15 * limit
+            for used, limit in (
+                (self.row_count, MAX_GRAPH_ROWS),
+                (self.byte_count, MAX_GRAPH_BYTES),
+                (self.read_bytes, MAX_GRAPH_READ_BYTES),
+            )
+        )
 
-def _artifact_roots(rows: Mapping[str, tuple[Mapping[str, Any], ...]]) -> set[str]:
-    found: set[str] = set()
-    for name, column in (
-        ("message_parts", "artifact_id"),
-        ("response_revision_parts", "artifact_id"),
-        ("chat_composer_draft_attachments", "artifact_id"),
-        ("run_context_artifacts", "artifact_id"),
-        ("setup_verifications", "input_artifact_id"),
-    ):
-        for row in rows[name]:
-            found.update(_optional_id(row[column]))
-    for row in rows["message_references"]:
+
+def _artifact_roots(name: str, row: Mapping[str, Any]) -> set[str]:
+    """Name the artifacts one owned row links, checked as the library's reference walk is."""
+    found = _optional_id(row[_ARTIFACT_COLUMNS[name]]) if name in _ARTIFACT_COLUMNS else set()
+    if name == "message_references":
         found.update(_ids(row["artifact_ids_json"]))
-    for row in rows["runs"]:
+    elif name == "runs":
         found.update(_run_ids(row["provenance_json"]))
         found.update(_settings_ids(row["settings_json"]))
-    for row in rows["work_steps"]:
+    elif name == "work_steps":
         found.update(_work_step_ids(row["input_bindings_json"]))
         found.update(_settings_ids(row["settings_json"]))
-    for row in rows["jobs"]:
+    elif name == "jobs":
         found.update(_job_ids(row["payload_json"]))
         found.update(_job_ids(row["result_json"]))
-    for row in rows["chats"]:
-        if row["scope"] == "studio":
-            found.update(_optional_id(_mapping(row["origin_json"]).get("source_artifact_id")))
+    elif name == "chats" and row["scope"] == "studio":
+        found.update(_optional_id(_mapping(row["origin_json"]).get("source_artifact_id")))
     return found
 
 
 def _owned_jobs(
-    reader: _GraphReader, chat_id: str, jobs: tuple[Mapping[str, Any], ...]
+    reader: _GraphReader, chat_id: str, rows: Mapping[str, tuple[Mapping[str, Any], ...]]
 ) -> tuple[str, ...]:
     """A historical source link does not transfer another conversation's job ownership."""
 
+    jobs = rows["jobs"]
     identifiers: dict[str, set[str]] = {"runs": set(), "work_plans": set(), "work_steps": set()}
     for job in jobs:
         for name, key in (
@@ -150,8 +209,16 @@ def _owned_jobs(
         parents: dict[str, Mapping[str, Any]] = {}
         table = Base.metadata.tables[name]
         values = sorted(identifiers[name])
+        columns = _PARENT_KEEP[name]
+        # An owned parent was counted when this graph read it; only a foreign one counts now.
+        owned = frozenset(row["id"] for row in rows[name])
         for start in range(0, len(values), 500):
-            for row in reader.read(name, table.c.id.in_(values[start : start + 500])):
+            for row in reader.read(
+                name,
+                table.c.id.in_(values[start : start + 500]),
+                keep=lambda row: {column: row[column] for column in columns},
+                counted=owned,
+            ):
                 parents[str(row["id"])] = row
         if len(parents) != len(values):
             raise ChatRecoveryGraphError()
@@ -190,32 +257,51 @@ def inspect_chat_recovery_graph(session: Session, chat_id: str) -> ChatRecoveryG
 
     reader = _GraphReader(session)
     rows: dict[str, tuple[Mapping[str, Any], ...]] = {}
+    found: set[str] = set()
+
+    def keeper(name: str) -> Callable[[Mapping[str, Any]], dict[str, Any]]:
+        columns = _KEEP.get(name, ())
+
+        def keep(row: Mapping[str, Any]) -> dict[str, Any]:
+            found.update(_artifact_roots(name, row))
+            kept = {column: row[column] for column in columns}
+            if name == "jobs":
+                payload = _mapping(row["payload_json"])
+                kept["payload_json"] = {
+                    key: payload[key] for key in ("chat_id", "source_run_id") if key in payload
+                }
+            return kept
+
+        return keep
+
     with session.no_autoflush:
-        for name, predicate in CHAT_OWNER_SQL.items():
-            if ROW_COLUMNS[name] != tuple(Base.metadata.tables[name].columns.keys()):
-                raise ChatRecoveryGraphError()
-            rows[name] = reader.read(
-                name, text(predicate.format(row=name, chat=":chat_id")), {"chat_id": chat_id}
-            )
-        if len(rows["chats"]) != 1:
-            raise ChatRecoveryGraphError()
-        reader.read(
-            "recovery_items",
-            (RecoveryItem.kind == "chat") & (RecoveryItem.subject_id == chat_id),
-        )
-        # A fork remains independently owned, but creating one changes the impact.
-        reader.read(
-            "chats",
-            text("json_extract(chats.origin_json, '$.source_chat_id') = :chat_id"),
-            {"chat_id": chat_id},
-        )
         try:
-            found = _artifact_roots(rows)
+            for name, predicate in CHAT_OWNER_SQL.items():
+                if ROW_COLUMNS[name] != tuple(Base.metadata.tables[name].columns.keys()):
+                    raise ChatRecoveryGraphError()
+                rows[name] = reader.read(
+                    name,
+                    text(predicate.format(row=name, chat=":chat_id")),
+                    {"chat_id": chat_id},
+                    keep=keeper(name),
+                )
+            if len(rows["chats"]) != 1:
+                raise ChatRecoveryGraphError()
+            trashed = reader.read(
+                "recovery_items",
+                (RecoveryItem.kind == "chat") & (RecoveryItem.subject_id == chat_id),
+            )
+            # A fork remains independently owned, but creating one changes the impact.
+            reader.read(
+                "chats",
+                text("json_extract(chats.origin_json, '$.source_chat_id') = :chat_id"),
+                {"chat_id": chat_id},
+            )
             visited: set[str] = set()
             retained_bytes = 0
             while frontier := sorted(found - visited):
                 if len(found) > MAX_GRAPH_ROWS:
-                    raise ChatRecoveryGraphError()
+                    raise ChatRecoveryGraphTooLarge()
                 for start in range(0, len(frontier), 500):
                     batch = frontier[start : start + 500]
                     artifacts = reader.read("artifacts", Artifact.id.in_(batch))
@@ -240,9 +326,13 @@ def inspect_chat_recovery_graph(session: Session, chat_id: str) -> ChatRecoveryG
                     )
                     reader.read("media_tag_assignments", MediaTagAssignment.entry_id.in_(entry_ids))
                     visited.update(batch)
-            owned_jobs = _owned_jobs(reader, chat_id, rows["jobs"])
+            owned_jobs = _owned_jobs(reader, chat_id, rows)
         except ArtifactReferenceDataError:
             raise ChatRecoveryGraphError() from None
+        # Admit a conversation only with room for its deletion record and later library or
+        # schema growth, so one already in Recently Deleted can still be listed and purged.
+        if not trashed and not reader.leaves_room():
+            raise ChatRecoveryGraphTooLarge()
         active_work = len(rows["turn_creation_claims"])
         for name in ("messages", "response_revisions", "runs", "work_plans", "work_steps", "jobs"):
             terminal = _TERMINAL | {"partial"} if name == "work_plans" else _TERMINAL

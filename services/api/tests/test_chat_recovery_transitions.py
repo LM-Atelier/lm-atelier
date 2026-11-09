@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import Row, delete, select
+from sqlalchemy import Row, delete, select, update
 from sqlalchemy.orm import Session
 from test_chat_recovery_graph import graph_session as graph_session
 
@@ -19,7 +19,15 @@ from local_lm.chat_recovery import (
     trash_chat,
 )
 from local_lm.db import Base
-from local_lm.models import Artifact, Chat, Job, Project, RecoveryItem, RecoveryOperation
+from local_lm.models import (
+    Artifact,
+    Chat,
+    ChatComposerDraft,
+    Job,
+    Project,
+    RecoveryItem,
+    RecoveryOperation,
+)
 from local_lm.recovery_previews import RecoveryPreviewConflict
 from local_lm.recovery_v1 import (
     PurgeRecoveryV1,
@@ -288,3 +296,55 @@ def test_expired_window_cannot_restore_but_can_be_previewed_for_purge(
         )
     session.rollback()
     assert session.get(RecoveryItem, item.deletion_id) is not None
+
+
+def test_purge_deletes_from_the_graph_its_preview_check_read(
+    graph_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_lm import chat_recovery
+    from local_lm.chat_recovery_graph import inspect_chat_recovery_graph
+
+    session = graph_session
+    item, _ = _trash(session)
+    preview = preview_chat_recovery(session, item.deletion_id, NOW)
+    session.commit()
+    inspected: list[str] = []
+
+    def counted(current: Session, chat_id: str) -> Any:
+        inspected.append(chat_id)
+        return inspect_chat_recovery_graph(current, chat_id)
+
+    monkeypatch.setattr(chat_recovery, "inspect_chat_recovery_graph", counted)
+    command = PurgeRecoveryV1.model_validate(
+        {**_fields(preview, "purge-once"), "acknowledgement": "permanently-delete"}
+    )
+    purge_chat(session, item.deletion_id, command, NOW)
+    session.commit()
+    assert inspected == ["chat-garden"]
+    assert session.get(Chat, "chat-garden") is None and session.get(Job, "job-garden") is None
+
+
+def test_a_conversation_past_the_kept_byte_bound_can_be_trashed_restored_and_purged(
+    graph_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_lm import chat_recovery_graph
+
+    session = graph_session
+    session.execute(update(ChatComposerDraft).values(text="Keep the garden path wide. " * 4_000))
+    session.commit()
+    monkeypatch.setattr(chat_recovery_graph, "MAX_GRAPH_BYTES", 64 * 1024)
+    item, _ = _trash(session)
+    preview = preview_chat_recovery(session, item.deletion_id, NOW)
+    session.commit()
+    restore = RestoreRecoveryV1.model_validate(_fields(preview, "restore-large"))
+    assert restore_chat(session, item.deletion_id, restore, NOW).action == RecoveryAction.RESTORE
+    session.commit()
+    item, _ = _trash(session, "trash-large-again")
+    preview = preview_chat_recovery(session, item.deletion_id, NOW)
+    session.commit()
+    command = PurgeRecoveryV1.model_validate(
+        {**_fields(preview, "purge-large"), "acknowledgement": "permanently-delete"}
+    )
+    assert purge_chat(session, item.deletion_id, command, NOW).action == RecoveryAction.PURGE
+    session.commit()
+    assert session.get(Chat, "chat-garden") is None

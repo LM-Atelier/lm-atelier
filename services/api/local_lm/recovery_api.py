@@ -18,7 +18,7 @@ from .chat_recovery import (
     restore_chat,
     trash_chat,
 )
-from .chat_recovery_graph import ChatRecoveryGraphError
+from .chat_recovery_graph import ChatRecoveryGraphError, ChatRecoveryGraphTooLarge
 from .db import get_session
 from .media_recovery import (
     preview_media_recovery,
@@ -143,6 +143,13 @@ def _commit[Result: (RecoveryImpactV1, RecoveryItemV1, RecoveryResultV1, Recover
     except RecoveryPreviewConflict as error:
         session.rollback()
         raise _error(error) from None
+    except ChatRecoveryGraphTooLarge:
+        session.rollback()
+        raise api_error(
+            409,
+            "chat-recovery-graph-too-large",
+            "This conversation is too long to check its deletion details.",
+        ) from None
     except ChatRecoveryGraphError:
         session.rollback()
         raise api_error(
