@@ -401,16 +401,18 @@ async def test_a_trim_begins_at_the_shown_keyframe_and_records_what_it_measured(
     assert _leftovers(app) == []
 
 
-async def test_a_new_video_whose_end_cannot_be_sought_is_measured_from_all_its_packets(
+async def test_an_mp4_video_is_measured_to_its_last_packet_when_a_seek_lists_part_of_it(
     client: AsyncClient, app: FastAPI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Sought far past its end, an MP4 file now and then lists no packet at all.
+    # Sought far past its end, an MP4 file now and then lists no packet at all,
+    # or a few of its last packets and then stops, without an error.
     source = _store(app, _walk(tmp_path))
     video_trim = _trim_module()
     run_tool = video_trim.run_tool
     reads: list[str] = []
 
-    async def nothing_past_the_end(executable: Path, arguments: list[str], **bounds: Any) -> Any:
+    async def part_past_the_end(executable: Path, arguments: list[str], **bounds: Any) -> Any:
+        answer = await run_tool(executable, arguments, **bounds)
         if "packet=pts_time,duration_time" in arguments:
             interval = (
                 arguments[arguments.index("-read_intervals") + 1]
@@ -419,21 +421,22 @@ async def test_a_new_video_whose_end_cannot_be_sought_is_measured_from_all_its_p
             )
             reads.append(interval)
             if interval:
-                answer = await run_tool(executable, arguments, **bounds)
-                return dataclasses.replace(answer, stdout=b"")
-        return await run_tool(executable, arguments, **bounds)
+                first = answer.stdout.splitlines(keepends=True)[:2]
+                return dataclasses.replace(answer, stdout=b"".join(first))
+        return answer
 
-    monkeypatch.setattr(video_trim, "run_tool", nothing_past_the_end)
+    monkeypatch.setattr(video_trim, "run_tool", part_past_the_end)
 
     job = await _trimmed(client, source, 1.43, 2.7, True)
 
     assert job["status"] == "complete", (job["result_json"], job["error"])
-    assert reads == [f"{2 * video_probe.MAX_DURATION_SECONDS}%", ""]
     made = _path(app, job["result_json"]["made_artifact_id"])
     [video, _sound] = _streams(made)
     assert job["result_json"]["actual_end_seconds"] == pytest.approx(
         1.0 + float(video["duration"]) - float(video["start_time"]), abs=0.001
     )
+    # Every picture packet is read, so a short seek answer is never consulted.
+    assert reads == [""]
 
 
 async def test_a_matroska_video_is_measured_to_its_last_packet_when_a_seek_lists_part_of_it(
@@ -1487,11 +1490,10 @@ async def test_a_trim_reads_one_private_copy_and_writes_one_file_the_store_made(
     copy, output = Path(files[0][0]), Path(files[-1][0])
     assert re.fullmatch(r"tool-input-[0-9a-f]{32}\.tmp", copy.name)
     assert re.fullmatch(r"tool-output-[0-9a-f]{32}\.tmp", output.name)
-    # Its end is read from past the end, and from the start only when that read
-    # lists nothing, which ffprobe does now and then for the same file.
+    # Its end is read once, from every picture packet: a read from past the end
+    # can list nothing, or only part of the last group of pictures.
     ends = [call for call in calls if "packet=pts_time,duration_time" in call]
-    assert 1 <= len(ends) <= 2 and "-read_intervals" in ends[0]
-    assert all("-read_intervals" not in call for call in ends[1:])
+    assert len(ends) == 1 and "-read_intervals" not in ends[0]
     # The probe, both keyframe lookups and the keyframe's decode read the copy;
     # the cut reads the copy and writes the output; then the output is read for
     # its streams, its end, its first packets, its first shown frame and its first
