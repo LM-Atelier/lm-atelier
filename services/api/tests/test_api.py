@@ -2706,9 +2706,18 @@ async def test_chat_pending_admission_limit_is_bounded(
 
 
 async def test_activation_can_be_requeued_for_an_installed_model(
-    client: AsyncClient,
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Stale evidence was a dead end: evidence is otherwise only written on download."""
+    # The activation waits for its runtime, as it does while one is fetched, so the
+    # second request finds the first still under way however quickly a refusal comes.
+    runtime_ready = asyncio.Event()
+
+    async def runtime_still_arriving(_engine: str, **_options: object) -> None:
+        await runtime_ready.wait()
+        raise RuntimeError("The chat runtime is not installed.")
+
+    monkeypatch.setattr(app.state.services.runtimes, "ensure", runtime_still_arriving)
     with SessionLocal() as session:
         session.add(
             ModelInstall(
@@ -2736,6 +2745,7 @@ async def test_activation_can_be_requeued_for_an_installed_model(
     again = await client.post("/api/models/model_reactivate/activate")
     assert again.status_code == 202
     assert again.json()["id"] == accepted.json()["id"]
+    runtime_ready.set()
 
 
 async def test_a_model_imported_by_hand_can_still_be_activated(

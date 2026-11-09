@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import shutil
 import sqlite3
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
@@ -14,10 +16,12 @@ from verification_phase_timings import register_verification_phase_timings
 
 import local_lm
 from local_lm import db
+from local_lm import main as application
 from local_lm.config import Settings
 from local_lm.database_migrations import upgrade_database
 from local_lm.db import configure_database
 from local_lm.main import create_app
+from local_lm.runtime_provisioning import RuntimeProvisioner
 
 #: Which tree these tests are about to measure.
 #:
@@ -95,6 +99,42 @@ def settings(tmp_path: Path, migrated_database_template: Path) -> Settings:
     # Tests that create their own app re-bind again through `create_app`.
     configure_database(test_settings)
     return test_settings
+
+
+def _refuse_download(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError("A test never downloads a runtime.", request=request)
+
+
+class _OfflineRuntimes(RuntimeProvisioner):
+    """The application's runtime installer, refusing every download it is asked for.
+
+    Activating a llama.cpp model asks for its runtime. An installer with a real
+    connection fetches one from the internet in the background and then writes
+    where it went into this process's environment, where every later test's
+    settings read it as a runtime already configured.
+    """
+
+    def __init__(self, settings: Settings, **options: Any) -> None:
+        refusing = options.get("client") is None
+        if refusing:
+            options["client"] = httpx.AsyncClient(transport=httpx.MockTransport(_refuse_download))
+        super().__init__(settings, **options)
+        # Closed with the installer, as a connection of its own making would be.
+        self._owns_client = self._owns_client or refusing
+
+
+@pytest.fixture(scope="session", autouse=True)
+def runtimes_never_download() -> Iterator[None]:
+    """Every application a test builds installs runtimes without a connection.
+
+    Patched once for the session, not through each test's `monkeypatch`: a
+    fixture that asks for that one sets it up before the test's own fixtures,
+    so the test's patches would stay in place until after its application had
+    shut down.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(application, "RuntimeProvisioner", _OfflineRuntimes)
+        yield
 
 
 @pytest.fixture
