@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from malformed_pictures import UNREADABLE_SHAPE
 from PIL import Image
 from sqlalchemy import select
 from test_turn_workflow_choices import _image_workflow, _resource_batch
@@ -194,6 +195,45 @@ async def test_the_dragged_margins_pad_the_picture_in_the_dispatched_graph(
     with SessionLocal() as session:
         stored = session.get(WorkflowRevision, revision_id)
         assert stored is not None and stored.api_graph_json == graph
+
+
+@pytest.mark.parametrize("name", sorted(UNREADABLE_SHAPE))
+async def test_a_source_that_cannot_be_read_fails_the_extension_in_words_of_its_own(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """Pillow's own words for a malformed file say nothing a person can act on."""
+
+    orchestrator = app.state.services.orchestrator
+    revision_id, source_id, chat_id = await _outpainter(
+        client, _outpaint_graph(), UNREADABLE_SHAPE[name]
+    )
+    monkeypatch.setattr(orchestrator, "_ensure_media_worker", AsyncMock())
+    async with app.state.services.scheduler.lease("primary"):
+        with SessionLocal() as session:
+            accepted = await orchestrator.create_turn(
+                session,
+                chat_id,
+                TurnRequest(
+                    text="Extend the scene to the right.",
+                    mode="image",
+                    input_artifact_ids=[source_id],
+                    workflow_revision_id=revision_id,
+                    settings={OUTPAINT_SETTING_KEY: {"right": 0.5}},
+                ),
+                freeze_context=True,
+                activate_branch=False,
+            )
+            job = session.scalar(select(Job).where(Job.run_id == accepted.run.id))
+            assert job is not None
+            claim = JobClaim(token="outpaint-attempt", attempt=1)
+            job.status = "running"
+            job.claim_owner = claim.token
+            job.attempt = claim.attempt
+            job_id, run_id = job.id, accepted.run.id
+            session.commit()
+
+        with pytest.raises(RuntimeError, match=r"^The picture to extend could not be read\.$"):
+            await orchestrator._execute_media(job_id, run_id, claim)
 
 
 async def test_a_workflow_with_no_single_source_pad_refuses_the_margins(

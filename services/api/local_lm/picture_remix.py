@@ -65,6 +65,7 @@ from .models import (
 )
 from .orchestrator import ConversationOrchestrator, _chosen_setting_layers, _resolve_output_loras
 from .outpaint_workflows import OUTPAINT_SETTING_KEY, extends_by_nothing
+from .picture_shape import media_runtime_reads
 from .routing import ModalityRouter
 from .schemas import SettingField, TurnRequest
 from .settings_registry import WORKFLOW_LORA_OVERRIDES_SETTING_KEY, validate_settings
@@ -273,7 +274,12 @@ def read_remix_source(artifacts: ArtifactStore, artifact_id: str) -> RemixSource
             if getattr(image, "is_animated", False) or getattr(image, "n_frames", 1) != 1:
                 return None
             orientation = image.getexif().get(_ORIENTATION_TAG)
-    except (OSError, ValueError, Image.DecompressionBombError):
+            readable = media_runtime_reads(image)
+    except Exception:
+        # A malformed file can make Pillow raise almost anything here: a short
+        # chunk is a ValueError, broken orientation data a SyntaxError.
+        return None
+    if not readable:
         return None
     return RemixSource(width, height, orientation in _QUARTER_TURNS)
 

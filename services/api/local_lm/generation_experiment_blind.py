@@ -36,7 +36,13 @@ from .models import (
     GenerationExperimentTrial,
     Run,
 )
-from .studio_region_edit import MAX_BLEND_READ_BYTES, RegionEditError, decode_picture
+from .studio_region_edit import (
+    MAX_BLEND_READ_BYTES,
+    RegionEditError,
+    converted,
+    convertible,
+    decode_picture,
+)
 
 
 class BlindViewRefused(Exception):
@@ -123,12 +129,16 @@ def view_picture(
     if artifact is None:
         raise BlindViewRefused("generation-experiment-blind-picture-not-ready")
     try:
-        picture = decode_picture(
-            artifacts.verified_bytes(artifact, maximum_bytes=MAX_BLEND_READ_BYTES), "picture"
+        picture = convertible(
+            decode_picture(
+                artifacts.verified_bytes(artifact, maximum_bytes=MAX_BLEND_READ_BYTES), "picture"
+            )
+        )
+        plain = converted(
+            picture, "RGBA" if picture.mode in {"RGBA", "LA", "PA"} else "RGB", "picture"
         )
     except (RegionEditError, ValueError, OSError):
         raise BlindViewRefused("generation-experiment-blind-picture-unreadable") from None
-    plain = picture.convert("RGBA" if picture.mode in {"RGBA", "LA", "PA"} else "RGB")
     # Saved without the source's text chunks, profile or other metadata: a
     # workflow can write its own name and settings into the file it makes.
     plain.info = {}

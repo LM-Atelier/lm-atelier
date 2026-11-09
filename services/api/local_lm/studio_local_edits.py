@@ -25,7 +25,7 @@ from dataclasses import asdict, dataclass
 from pathlib import PurePath
 from typing import Any
 
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image, ImageFilter
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -39,10 +39,12 @@ from .studio_region_edit import (
     MAX_BLEND_PIXELS,
     MAX_BLEND_READ_BYTES,
     RegionEditError,
+    converted,
+    convertible,
     decode_picture,
     encode_png,
-    exif_orientation,
     selection_alpha,
+    upright_picture,
 )
 
 #: What each edit is called in the session, which is what the filmstrip shows.
@@ -242,6 +244,11 @@ def render_local_edit(
 
     try:
         decoded = decode_picture(payload, "picture")
+        # Upright as the person saw it, since that is the picture they turned or cut.
+        upright, orientation = upright_picture(decoded, "picture")
+        upright = convertible(upright)
+        has_alpha = upright.mode in {"RGBA", "LA", "PA"} or "transparency" in upright.info
+        picture = converted(upright, "RGBA" if has_alpha else "RGB", "picture")
     except RegionEditError as exc:
         # The decoder words its refusals for a selection, which this is not.
         if exc.code == "region-image-too-large":
@@ -249,14 +256,9 @@ def render_local_edit(
                 "studio-edit-too-large", "This picture is too large to edit here."
             ) from exc
         raise LocalEditError("studio-edit-unreadable", "This picture could not be read.") from exc
-    # Upright as the person saw it, since that is the picture they turned or cut.
-    orientation = exif_orientation(decoded)
-    upright = ImageOps.exif_transpose(decoded) or decoded
     # A profile describes the colours it came with. Kept only where the pixels
     # stay in that space, since a grey or print profile would misdescribe RGB.
     profile = upright.info.get("icc_profile") if upright.mode in {"RGB", "RGBA"} else None
-    has_alpha = upright.mode in {"RGBA", "LA", "PA"} or "transparency" in upright.info
-    picture = upright.convert("RGBA" if has_alpha else "RGB")
     if operation == "crop":
         if crop is None:
             raise LocalEditError("studio-crop-missing", "Choose the part of the picture to keep.")
@@ -479,7 +481,7 @@ def _captioned(picture: Image.Image, caption: CaptionOverlay | None) -> Image.Im
     if caption is None:
         raise LocalEditError("studio-caption-missing", "Write the words to add.")
     try:
-        drawn = decode_picture(caption.overlay, "drawn words")
+        drawn = converted(decode_picture(caption.overlay, "drawn words"), "RGBA", "drawn words")
     except RegionEditError as exc:
         raise LocalEditError(
             "studio-caption-unreadable", "The drawn words could not be read."
@@ -491,7 +493,7 @@ def _captioned(picture: Image.Image, caption: CaptionOverlay | None) -> Image.Im
             "studio-caption-size-mismatch",
             "The words were drawn for a picture of another size. Write them again.",
         )
-    words = Image.alpha_composite(picture.convert("RGBA"), drawn.convert("RGBA"))
+    words = Image.alpha_composite(picture.convert("RGBA"), drawn)
     return words if picture.mode == "RGBA" else words.convert("RGB")
 
 
@@ -499,7 +501,9 @@ def _with_subject(picture: Image.Image, placed: CaptionOverlay | None) -> Image.
     if placed is None:
         raise LocalEditError("studio-subject-missing", "Choose the new subject again.")
     try:
-        drawn = decode_picture(placed.overlay, "placed subject")
+        drawn = converted(
+            decode_picture(placed.overlay, "placed subject"), "RGBA", "placed subject"
+        )
     except RegionEditError as exc:
         raise LocalEditError(
             "studio-subject-unreadable", "The placed subject could not be read."
@@ -511,7 +515,7 @@ def _with_subject(picture: Image.Image, placed: CaptionOverlay | None) -> Image.
             "studio-subject-size-mismatch",
             "The new subject was placed for a picture of another size. Replace it again.",
         )
-    with_subject = Image.alpha_composite(picture.convert("RGBA"), drawn.convert("RGBA"))
+    with_subject = Image.alpha_composite(picture.convert("RGBA"), drawn)
     return with_subject if picture.mode == "RGBA" else with_subject.convert("RGB")
 
 

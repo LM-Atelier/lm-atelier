@@ -16,11 +16,17 @@ import io
 from pathlib import PurePath
 from typing import Any, Final, Literal
 
-from PIL import Image, ImageOps
+from PIL import Image
 
 from .artifacts import ArtifactStore
 from .models import Artifact
-from .studio_region_edit import MAX_BLEND_READ_BYTES, RegionEditError, decode_picture
+from .studio_region_edit import (
+    MAX_BLEND_READ_BYTES,
+    RegionEditError,
+    convertible,
+    decode_picture,
+    upright_picture,
+)
 
 ExportFormat = Literal["png", "jpeg", "webp"]
 #: How each format is named to Pillow, its media type, and its file extension.
@@ -69,7 +75,7 @@ def export_picture(
 
 def _export(payload: bytes, file_format: ExportFormat, quality: int) -> bytes:
     decoded = decode_picture(payload, "picture")
-    upright = ImageOps.exif_transpose(decoded) or decoded
+    upright = convertible(upright_picture(decoded, "picture")[0])
     if upright.mode in _SIXTEEN_BIT_GREY:
         if file_format == "png":
             grey = upright.convert("I;16")

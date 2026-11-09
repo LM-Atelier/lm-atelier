@@ -358,12 +358,11 @@ class VisionContextService:
                     if width * height > self.settings.vision_max_pixels:
                         raise VisionInputError("image exceeds the configured pixel limit")
                     image.load()
-        except (
-            Image.DecompressionBombError,
-            Image.DecompressionBombWarning,
-            UnidentifiedImageError,
-            OSError,
-        ) as exc:
+        except VisionInputError:
+            raise
+        except Exception as exc:
+            # A malformed file can make Pillow raise almost anything while it
+            # decodes, in words of its own; each is the same refusal.
             raise VisionInputError("image decoding failed") from exc
         return VisualFrame(
             artifact_id=artifact.id,

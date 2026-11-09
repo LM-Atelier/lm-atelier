@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from io import BytesIO
 
+import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from malformed_pictures import UNREADABLE_SHAPE, runtime_unreadable
 from PIL import Image
 from test_workflow_output_geometry_api import (
     _dimension,
@@ -148,6 +150,36 @@ async def test_a_missing_or_unreadable_source_is_refused(app: FastAPI, client: A
     assert unreadable.status_code == 422, unreadable.text
     assert unreadable.json()["code"] == "source-shape-unavailable"
     assert unknown.status_code == 404, unknown.text
+
+
+@pytest.mark.parametrize("name", sorted(UNREADABLE_SHAPE))
+async def test_a_source_whose_header_or_orientation_cannot_be_read_is_refused(
+    client: AsyncClient, name: str
+) -> None:
+    """Reading the shape reads only the header and the orientation, and either can fail."""
+
+    _, revision_id = await _trusted_revision(client, "Malformed source geometry")
+    source = await uploaded(client, UNREADABLE_SHAPE[name])
+
+    response = await client.post(matched(revision_id), json={"source_artifact_id": source})
+
+    assert response.status_code == 422, response.text
+    assert response.json()["code"] == "source-shape-unavailable"
+
+
+@pytest.mark.parametrize("name", sorted(runtime_unreadable()))
+async def test_a_source_the_media_runtime_cannot_read_is_refused(
+    client: AsyncClient, name: str
+) -> None:
+    """This app reads these TIFF layouts; the runtime a workflow runs in does not."""
+
+    _, revision_id = await _trusted_revision(client, "Runtime source geometry")
+    source = await uploaded(client, runtime_unreadable(300, 200)[name], "image/tiff")
+
+    response = await client.post(matched(revision_id), json={"source_artifact_id": source})
+
+    assert response.status_code == 422, response.text
+    assert response.json()["code"] == "source-shape-unavailable"
 
 
 def test_a_video_start_frame_is_matched_on_the_root_s_own_grid() -> None:

@@ -28,17 +28,28 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 
 from .outpaint_colour import match_extension_colour
 from .source_fit_restore import RestoredPicture
-from .studio_region_edit import RegionEditError, decode_picture, encode_png, load_source
+from .studio_region_edit import (
+    RegionEditError,
+    converted,
+    convertible,
+    decode_picture,
+    encode_png,
+    load_source,
+)
 from .workflow_source_geometry import SelectionRoute
 
 #: ComfyUI's largest padding on one side.
 MAX_PAD_PX = 16384
 #: Modes ComfyUI and this module read the same way.
 _EIGHT_BIT = frozenset({"1", "L", "LA", "P", "PA", "RGB", "RGBA"})
+#: Modes a PNG holds as they are.
+_PNG_MODES = frozenset({"1", "L", "LA", "P", "RGB", "RGBA", "I;16", "I;16B"})
+#: Grey deeper than a PNG holds, or in a byte order it does not write.
+_DEEP_GREY = frozenset({"I", "I;16L", "I;16N"})
 #: EXIF orientations that mirror the picture, which ComfyUI does not.
 _MIRRORED = frozenset({2, 4, 5, 7})
 _ORIENTATION_TAG = 0x0112
@@ -102,14 +113,9 @@ def prepare_source(source: bytes, grown: Mapping[str, int]) -> tuple[bytes, tupl
                 ):
                     return None
         loaded = load_source(source)
-    except (
-        RegionEditError,
-        OSError,
-        ValueError,
-        UnidentifiedImageError,
-        Image.DecompressionBombError,
-        Image.DecompressionBombWarning,
-    ):
+    except Exception:
+        # A malformed file can make Pillow raise almost anything while it reads
+        # the picture, and one that does not read here is sent as it is stored.
         return None
     picture = loaded.image
     width, height = picture.size
@@ -127,6 +133,20 @@ def prepare_source(source: bytes, grown: Mapping[str, int]) -> tuple[bytes, tupl
             (0, height),
         )
     return encode_png(grown_picture, loaded.icc_profile), (width, height)
+
+
+def _storable(picture: Image.Image) -> Image.Image:
+    """The picture in a mode a PNG holds, as close to its own as a PNG comes."""
+    picture = convertible(picture)
+    if picture.mode in _PNG_MODES:
+        return picture
+    if picture.mode in _DEEP_GREY:
+        # Through I: Pillow converts other byte orders of 16-bit grey to I;16
+        # by way of eight bits.
+        return converted(picture, "I", "extended picture").convert("I;16")
+    return converted(
+        picture, "RGBA" if picture.has_transparency_data else "RGB", "extended picture"
+    )
 
 
 def finish_extension(
@@ -153,20 +173,24 @@ def finish_extension(
     height = finish.size[1] + requested["top"] + requested["bottom"]
     picture = made.crop((left, top, left + width, top + height))
     colour: dict[str, Any]
-    if not blended:
-        colour = {"applied": False, "reason": "not_blended"}
-    elif finish.feathering is None:
-        colour = {"applied": False, "reason": "feather_unknown"}
-    else:
-        handed = decode_picture(finish.prepared, "prepared source").convert("RGB")
-        picture, colour = match_extension_colour(
-            picture.convert("RGB"),
-            handed.crop((0, 0, *finish.size)),
-            requested,
-            feathered_px(finish.feathering, handed.size),
-        )
+    try:
+        if not blended:
+            colour = {"applied": False, "reason": "not_blended"}
+        elif finish.feathering is None:
+            colour = {"applied": False, "reason": "feather_unknown"}
+        else:
+            handed = decode_picture(finish.prepared, "prepared source").convert("RGB")
+            picture, colour = match_extension_colour(
+                converted(picture, "RGB", "extended picture"),
+                handed.crop((0, 0, *finish.size)),
+                requested,
+                feathered_px(finish.feathering, handed.size),
+            )
+        stored = _storable(picture)
+    except RegionEditError:
+        return None
     return RestoredPicture(
-        content=encode_png(picture, None),
+        content=encode_png(stored, None),
         record={
             "version": 1,
             "source_artifact_id": finish.source_artifact_id,

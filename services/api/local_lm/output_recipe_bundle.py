@@ -42,7 +42,7 @@ import zlib
 from dataclasses import dataclass
 from typing import Any, Final
 
-from PIL import Image, ImageCms, ImageOps
+from PIL import Image, ImageCms
 from sqlalchemy.orm import Session
 
 from .artifacts import ArtifactStore
@@ -59,7 +59,9 @@ from .studio_region_edit import (
     MAX_BLEND_PIXELS,
     MAX_BLEND_READ_BYTES,
     RegionEditError,
+    convertible,
     decode_picture,
+    upright_picture,
 )
 
 BUNDLE_SCHEMA_ID: Final = "lm-atelier-output-recipe-bundle-v1"
@@ -313,7 +315,7 @@ def pixels_only_png(payload: bytes) -> bytes:
         decoded = decode_picture(payload, "picture")
         if getattr(decoded, "n_frames", 1) != 1:
             raise _unreadable()
-        upright = ImageOps.exif_transpose(decoded) or decoded
+        upright = convertible(upright_picture(decoded, "picture")[0])
         picture = _in_srgb(upright, upright.info.get("icc_profile"))
         # Conversion carries the source's metadata along; none of it is wanted.
         picture.info = {}

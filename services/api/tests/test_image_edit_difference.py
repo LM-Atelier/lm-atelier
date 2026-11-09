@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 
 import pytest
+from malformed_pictures import HEIGHT, PREMULTIPLIED_GREY_TIFF, UNDECODABLE, WIDTH
 from PIL import Image
 
 from local_lm.image_edit_difference import (
@@ -95,6 +96,36 @@ def test_an_unreadable_image_never_claims_nothing_changed() -> None:
 
     assert not difference.comparable
     assert difference.changed
+
+
+@pytest.mark.parametrize("name", sorted(UNDECODABLE))
+def test_a_malformed_image_is_incomparable_rather_than_failing(name: str) -> None:
+    """Pillow fails on a malformed file in ways of its own; each is an image not compared."""
+
+    source = _encode(_solid((40, 90, 180), (WIDTH, HEIGHT)))
+
+    for difference in (
+        compare_images(UNDECODABLE[name], source),
+        compare_edit(UNDECODABLE[name], source),
+        compare_edit(source, source, mask=UNDECODABLE[name]),
+    ):
+        assert not difference.comparable
+
+
+def test_grey_with_premultiplied_alpha_is_compared_like_any_other_picture() -> None:
+    """Pillow reads it as La, which converts to LA and to nothing else."""
+
+    whole = compare_images(PREMULTIPLIED_GREY_TIFF, PREMULTIPLIED_GREY_TIFF)
+    edit = compare_edit(PREMULTIPLIED_GREY_TIFF, PREMULTIPLIED_GREY_TIFF)
+    masked = compare_edit(
+        _encode(_solid((40, 90, 180), (WIDTH, HEIGHT))),
+        _encode(_solid((40, 90, 180), (WIDTH, HEIGHT))),
+        mask=PREMULTIPLIED_GREY_TIFF,
+    )
+
+    assert whole.comparable and not whole.changed
+    assert edit.comparable and not edit.changed
+    assert masked.comparable and not masked.changed
 
 
 def test_the_provenance_records_the_threshold_it_judged_against() -> None:

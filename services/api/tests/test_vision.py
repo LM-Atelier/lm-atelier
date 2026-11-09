@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
+from malformed_pictures import UNDECODABLE
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -89,6 +90,34 @@ async def test_vision_service_rejects_unsafe_explicit_image_but_skips_contextual
         await service.prepare([artifact], strict_artifact_ids={artifact.id})
 
     contextual = await service.prepare([artifact], strict_artifact_ids=set())
+    assert contextual.frames == ()
+    assert contextual.skipped_artifact_ids == (artifact.id,)
+
+
+@pytest.mark.parametrize(
+    "name", sorted(name for name, payload in UNDECODABLE.items() if payload.startswith(b"\x89PNG"))
+)
+async def test_vision_service_refuses_a_malformed_explicit_image_and_skips_a_contextual_one(
+    vision_store: tuple[Settings, ArtifactStore, Session], name: str
+) -> None:
+    """Pillow fails on a malformed file in ways of its own, in words a person cannot act on."""
+
+    settings, store, session = vision_store
+    artifact = store.ingest_bytes(
+        session,
+        UNDECODABLE[name],
+        kind=ArtifactKind.IMAGE,
+        media_type="image/png",
+        original_name="malformed.png",
+    )
+    session.commit()
+    service = VisionContextService(settings, store)
+
+    with pytest.raises(VisionInputError) as refused:
+        await service.prepare([artifact], strict_artifact_ids={artifact.id})
+    contextual = await service.prepare([artifact], strict_artifact_ids=set())
+
+    assert str(refused.value) == "Visual input malformed.png is unavailable: image decoding failed"
     assert contextual.frames == ()
     assert contextual.skipped_artifact_ids == (artifact.id,)
 

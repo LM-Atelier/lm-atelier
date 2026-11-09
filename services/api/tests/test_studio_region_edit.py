@@ -7,6 +7,14 @@ import io
 import random
 
 import pytest
+from malformed_pictures import (
+    CIELAB_TIFF,
+    UNCONVERTIBLE,
+    UNDECODABLE,
+    UNREADABLE,
+    UNREADABLE_SHAPE,
+    premultiplied_grey_tiff,
+)
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 from local_lm import studio_region_edit
@@ -400,6 +408,84 @@ def test_a_picture_too_large_to_place_an_edit_back_into_is_not_cropped(
 ) -> None:
     monkeypatch.setattr(studio_region_edit, "MAX_BLEND_PIXELS", 512 * 384 - 1)
     assert crop_selection(_edit(_png(_smooth_source()), _small_mask()), ROUTE) is None
+
+
+@pytest.mark.parametrize("name", sorted(UNREADABLE))
+def test_a_source_that_cannot_be_read_refuses_and_is_never_cropped(name: str) -> None:
+    """Pillow fails on a malformed source in ways of its own, decoding it or turning it."""
+
+    with pytest.raises(RegionEditError) as raised:
+        prepare_selection(_edit(UNREADABLE[name]))
+
+    assert raised.value.code == "region-image-unreadable"
+    assert crop_selection(_edit(UNREADABLE[name]), ROUTE) is None
+
+
+@pytest.mark.parametrize("name", sorted(UNDECODABLE))
+def test_a_result_that_cannot_be_read_refuses(name: str) -> None:
+    crop = crop_selection(_edit(_png(_smooth_source()), _small_mask()), ROUTE)
+    assert crop is not None
+
+    with pytest.raises(RegionEditError) as blended:
+        blend_through_selection(_edit(), UNDECODABLE[name])
+    with pytest.raises(RegionEditError) as stitched:
+        stitch_selection(crop, UNDECODABLE[name])
+    assert blended.value.code == stitched.value.code == "region-image-unreadable"
+
+
+#: A selection is never turned, and is converted to gain an alpha.
+_UNUSABLE_SELECTIONS = {**UNDECODABLE, **UNCONVERTIBLE}
+
+
+@pytest.mark.parametrize("name", sorted(_UNUSABLE_SELECTIONS))
+def test_a_selection_that_cannot_be_read_refuses(name: str) -> None:
+    with pytest.raises(RegionEditError) as raised:
+        prepare_selection(_edit(mask=_UNUSABLE_SELECTIONS[name]))
+
+    assert raised.value.code == "region-image-unreadable"
+
+
+@pytest.mark.parametrize("name", sorted(UNREADABLE_SHAPE))
+def test_a_workflow_selection_over_a_source_whose_shape_does_not_read_is_handed_as_drawn(
+    name: str,
+) -> None:
+    assert workflow_selection_mask(_edit(UNREADABLE_SHAPE[name], _opaque_mask())) is None
+
+
+@pytest.mark.parametrize("name", sorted(_UNUSABLE_SELECTIONS))
+def test_a_workflow_selection_that_does_not_read_is_handed_as_drawn(name: str) -> None:
+    assert workflow_selection_mask(_edit(mask=_UNUSABLE_SELECTIONS[name])) is None
+
+
+def test_grey_with_premultiplied_alpha_is_placed_back_and_selects() -> None:
+    """Pillow reads it as La, which converts to LA and to nothing else."""
+
+    crop = crop_selection(_edit(_png(_smooth_source()), _small_mask()), ROUTE)
+    assert crop is not None
+
+    blended = blend_through_selection(_edit(), premultiplied_grey_tiff(64, 48))
+    stitched = stitch_selection(crop, premultiplied_grey_tiff(68, 60))
+    selected = prepare_selection(_edit(mask=premultiplied_grey_tiff(64, 48)))
+    as_source = blend_through_selection(
+        _edit(premultiplied_grey_tiff(64, 48)), _png(Image.new("RGB", (64, 48), (1, 2, 3)))
+    )
+
+    assert _pixels(blended.content).size == (64, 48)
+    assert _pixels(stitched.content).size == (512, 384)
+    assert 0 < selected.coverage <= 1
+    # As a source, its alpha is kept through the blend.
+    assert _pixels(as_source.content).mode == "RGBA"
+
+
+def test_a_selection_that_reads_but_not_as_grey_refuses_or_is_handed_as_drawn() -> None:
+    """A CIELab picture converts to RGB, and not to the grey a selection is read as."""
+
+    with pytest.raises(RegionEditError) as raised:
+        prepare_selection(_edit(mask=CIELAB_TIFF))
+
+    assert raised.value.code == "region-image-unreadable"
+    assert crop_selection(_edit(_png(_smooth_source()), CIELAB_TIFF), ROUTE) is None
+    assert workflow_selection_mask(_edit(mask=CIELAB_TIFF)) is None
 
 
 def _round_drawing(crop: studio_region_edit.SelectionCrop) -> bytes:

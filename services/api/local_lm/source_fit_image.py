@@ -108,7 +108,9 @@ def _canonical_png(content: bytes) -> tuple[bytes, int, int]:
                 if len(result) > MAX_SOURCE_BYTES:
                     raise ValueError
                 return result, canonical.width, canonical.height
-    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+    except Exception:
+        # A malformed file can make Pillow raise almost anything while it
+        # decodes or turns the picture, and each is a picture not supported.
         raise ValueError("source_fit_image_unsupported") from None
 
 

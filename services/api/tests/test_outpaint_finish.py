@@ -7,6 +7,12 @@ from collections.abc import Callable
 from dataclasses import replace
 
 import pytest
+from malformed_pictures import (
+    UNDECODABLE,
+    UNREADABLE,
+    premultiplied_grey_tiff,
+    thirty_two_bit_grey_tiff,
+)
 from PIL import Image
 from test_outpaint_colour import (
     cast_by,
@@ -188,6 +194,66 @@ def test_an_extension_is_cut_back_to_the_canvas_asked_for(requested: dict[str, i
     assert finished.record["grown"] == dict(finish.grown)
     assert (finished.record["width"], finished.record["height"]) == (width, height)
     assert (finished.record["result_width"], finished.record["result_height"]) == finish.canvas
+
+
+@pytest.mark.parametrize("name", sorted(UNREADABLE))
+def test_a_source_that_does_not_read_here_is_sent_as_it_is_stored(name: str) -> None:
+    """Pillow fails on a malformed source in ways of its own, before or after it decodes."""
+
+    assert prepare_source(UNREADABLE[name], {"right": 0, "bottom": 1}) is None
+
+
+@pytest.mark.parametrize(
+    ("made", "stored_mode"),
+    [(premultiplied_grey_tiff, "LA"), (thirty_two_bit_grey_tiff, "I;16")],
+    ids=["premultiplied grey", "thirty-two-bit grey"],
+)
+def test_an_extension_in_a_mode_a_png_does_not_hold_is_still_cut_back(
+    made: Callable[[int, int], bytes], stored_mode: str
+) -> None:
+    requested = {"top": 0, "right": 129, "bottom": 0, "left": 0}
+    finish = _finish(requested)
+
+    finished = finish_extension(finish, made(*finish.canvas))
+
+    assert finished is not None
+    out = Image.open(io.BytesIO(finished.content))
+    assert out.mode == stored_mode
+    assert out.size == (SIZE[0] + 129, SIZE[1])
+
+
+@pytest.mark.parametrize("name", sorted(UNDECODABLE))
+def test_an_extension_that_does_not_read_is_kept_as_made(name: str) -> None:
+    finish = _finish({"top": 0, "right": 129, "bottom": 0, "left": 0})
+
+    assert finish_extension(finish, UNDECODABLE[name]) is None
+
+
+def test_a_blended_extension_in_premultiplied_grey_is_matched_and_cut_back() -> None:
+    """Pillow reads it as La, which converts to LA and to nothing else."""
+
+    finish = replace(_finish({"top": 0, "right": 129, "bottom": 0, "left": 0}), feathering=64)
+
+    finished = finish_extension(finish, premultiplied_grey_tiff(*finish.canvas), blended=True)
+
+    assert finished is not None
+    assert finished.record["colour"]["applied"] is True
+    assert Image.open(io.BytesIO(finished.content)).size == (SIZE[0] + 129, SIZE[1])
+
+
+def test_sixteen_bit_grey_in_another_byte_order_keeps_its_depth() -> None:
+    """Pillow converts little-endian 16-bit grey to I;16 by way of eight bits."""
+
+    finish = _finish({"top": 0, "right": 129, "bottom": 0, "left": 0})
+    made = io.BytesIO()
+    Image.new("I;16L", finish.canvas, 4660).save(made, format="IM")
+
+    finished = finish_extension(finish, made.getvalue())
+
+    assert finished is not None
+    out = Image.open(io.BytesIO(finished.content))
+    assert out.mode == "I;16"
+    assert out.getpixel((0, 0)) == 4660
 
 
 @pytest.mark.parametrize("returned", ["asked-for size", "unreadable"])
