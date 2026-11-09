@@ -70,6 +70,8 @@ it("binds deletion previews and trash to the same chat and media choice", async 
   expect(request).toHaveBeenLastCalledWith("/api/chats/chat%2Fgarden/deletion-impact?delete_generated_media=true", { signal });
   await api.trashChat("chat/garden", command);
   expect(request).toHaveBeenLastCalledWith("/api/chats/chat%2Fgarden/trash", { method: "POST", body: JSON.stringify(command) });
+  await api.cancelAllChatWork("chat/garden");
+  expect(request).toHaveBeenLastCalledWith("/api/chats/chat%2Fgarden/cancel-all", { method: "POST" });
 });
 
 it("keeps recovery identifiers in one path segment and retains complete replay commands", async () => {

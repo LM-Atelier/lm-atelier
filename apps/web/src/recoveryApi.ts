@@ -28,6 +28,8 @@ export function recoveryApi(request: Request) {
       request<RecoveryImpact>(`/api/chats/${encodeURIComponent(chatId)}/deletion-impact?delete_generated_media=${deleteGeneratedMedia}`, { signal }),
     trashChat: (chatId: string, command: RecoveryCommand & { delete_generated_media: boolean }) =>
       post<RecoveryItem>(`/api/chats/${encodeURIComponent(chatId)}/trash`, command),
+    cancelAllChatWork: (chatId: string) =>
+      request<void>(`/api/chats/${encodeURIComponent(chatId)}/cancel-all`, { method: "POST" }),
     projectDeletionImpact: (projectId: string, signal?: AbortSignal) =>
       request<RecoveryImpact>(`/api/projects/${encodeURIComponent(projectId)}/deletion-impact`, { signal }),
     trashProject: (projectId: string, command: RecoveryCommand) =>
