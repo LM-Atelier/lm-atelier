@@ -141,8 +141,9 @@ async def test_a_finished_generation_keeps_its_claim_during_a_slow_handoff(
     async def prepare_handoff(*_args: object, **_kwargs: object) -> str:
         return "garden-chat-profile"
 
-    async def complete_handoff(profile_id: str) -> None:
+    async def complete_handoff(profile_id: str, *, keep_warm: bool = True) -> None:
         assert profile_id == "garden-chat-profile"
+        assert keep_warm
         entered.set()
         await finish.wait()
 
