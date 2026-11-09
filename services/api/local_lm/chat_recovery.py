@@ -12,7 +12,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from .chat_media_purge import generated_media_ids, release_generated_membership
-from .chat_recovery_graph import inspect_chat_recovery_graph
+from .chat_recovery_graph import ChatRecoveryGraph, inspect_chat_recovery_graph
 from .models import Chat, Job, Project, RecoveryItem, RecoveryOperation, RecoveryPreviewRecord
 from .profile_service import reset_unavailable_chat_profiles
 from .prompt_helpers import STANDARD_CHAT_SCOPE
@@ -94,7 +94,9 @@ def _item(session: Session, deletion_id: str) -> RecoveryItem:
     return item
 
 
-def _snapshot(session: Session, chat_id: str, now: datetime) -> RecoverySnapshot:
+def _inspected(
+    session: Session, chat_id: str, now: datetime
+) -> tuple[RecoverySnapshot, ChatRecoveryGraph]:
     _require_standard_chat(session, chat_id)
     graph = inspect_chat_recovery_graph(session, chat_id)
     item = _membership(session, chat_id)
@@ -120,9 +122,14 @@ def _snapshot(session: Session, chat_id: str, now: datetime) -> RecoverySnapshot
                 if _utc(now) < _utc(item.purge_after)
                 else (RecoveryAction.PURGE,)
             )
-    return replace(
+    snapshot = replace(
         graph.snapshot, fingerprint=fingerprint, conflicts=conflicts, available_actions=actions
     )
+    return snapshot, graph
+
+
+def _snapshot(session: Session, chat_id: str, now: datetime) -> RecoverySnapshot:
+    return _inspected(session, chat_id, now)[0]
 
 
 def preview_chat_trash(
@@ -256,13 +263,20 @@ def _transition(
     if other_operation is not None:
         raise RecoveryPreviewConflict("recovery-operation-conflict")
     chat_id = item.subject_id
+    graphs: list[ChatRecoveryGraph] = []
+
+    def inspect(current: Session) -> RecoverySnapshot:
+        snapshot, graph = _inspected(current, chat_id, now)
+        graphs.append(graph)
+        return snapshot
+
     snapshot = require_current_recovery_preview(
         session,
         kind=RecoveryKind.CHAT,
         subject_id=chat_id,
         deletion_id=deletion_id,
         command=command,
-        inspect=lambda current: _snapshot(current, chat_id, now),
+        inspect=inspect,
         now=now,
         delete_generated_media=item.delete_generated_media,
     )
@@ -281,7 +295,8 @@ def _transition(
         if chat is not None:
             reset_unavailable_chat_profiles(session, chat)
     else:
-        graph = inspect_chat_recovery_graph(session, chat_id)
+        # Nothing has written under this reserved writer since the check read the graph.
+        (graph,) = graphs
         media_ids = generated_media_ids(graph) if item.delete_generated_media else frozenset()
         item.state = RecoveryState.PURGING.value
         session.flush()

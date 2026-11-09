@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import hashlib
+import json
+from collections.abc import Iterator, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from local_lm.chat_recovery_graph import ChatRecoveryGraph
@@ -21,6 +25,7 @@ from local_lm.models import (
     Message,
     MessagePart,
     MessageReference,
+    RecoveryItem,
     ResponseRevision,
     ResponseRevisionPart,
     Run,
@@ -312,7 +317,7 @@ def test_independent_content_and_location_changes_change_the_private_revision(
     assert before.snapshot.fingerprint != after.snapshot.fingerprint
 
 
-@pytest.mark.parametrize("bound", ["MAX_GRAPH_ROWS", "MAX_GRAPH_BYTES"])
+@pytest.mark.parametrize("bound", ["MAX_GRAPH_ROWS", "MAX_GRAPH_BYTES", "MAX_GRAPH_READ_BYTES"])
 def test_a_graph_that_exceeds_the_bound_refuses_instead_of_reporting_partial_counts(
     graph_session: Session, monkeypatch: pytest.MonkeyPatch, bound: str
 ) -> None:
@@ -320,6 +325,139 @@ def test_a_graph_that_exceeds_the_bound_refuses_instead_of_reporting_partial_cou
 
     monkeypatch.setattr(chat_recovery_graph, bound, 1)
     with pytest.raises(
-        chat_recovery_graph.ChatRecoveryGraphError, match="^chat-recovery-graph-invalid$"
+        chat_recovery_graph.ChatRecoveryGraphError, match="^chat-recovery-graph-too-large$"
     ):
         _graph(graph_session)
+
+
+def _readers(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    from local_lm import chat_recovery_graph
+
+    readers: list[Any] = []
+
+    class Recording(chat_recovery_graph._GraphReader):
+        def __init__(self, session: Session) -> None:
+            super().__init__(session)
+            readers.append(self)
+
+    monkeypatch.setattr(chat_recovery_graph, "_GraphReader", Recording)
+    return readers
+
+
+def _framed(name: str, row: Mapping[Any, Any]) -> bytes:
+    values = {
+        key: value.isoformat() if isinstance(value, datetime) else value
+        for key, value in row.items()
+    }
+    encoded = json.dumps(
+        [name, values], sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return len(encoded).to_bytes(8, "big") + encoded
+
+
+def test_the_private_revision_hashes_whole_rows_in_one_canonical_order(
+    graph_session: Session,
+) -> None:
+    expected = hashlib.sha256(b"chat-recovery-canonical-graph-v1\0")
+    for name, keys in (
+        ("chats", ("chat-garden",)),
+        ("chat_composer_drafts", ("chat-garden",)),
+        ("messages", ("assistant-garden", "user-garden")),
+        ("message_parts", ("part-garden",)),
+        ("runs", ("run-garden",)),
+        ("run_context_snapshots", ("run-garden",)),
+        ("run_context_artifacts", ("run-garden",)),
+        ("response_revisions", ("revision-garden",)),
+        ("response_revision_parts", ("revision-part-garden",)),
+        ("work_plans", ("plan-garden",)),
+        ("work_steps", ("step-garden",)),
+        ("jobs", ("job-garden",)),
+        ("artifacts", (_artifact_id(1), _artifact_id(4), _artifact_id(5))),
+        ("artifact_library_entries", ("libentry:sha256:" + f"{1:064x}",)),
+        ("artifacts", (_artifact_id(2), _artifact_id(3))),
+        # Job ownership reads the job's step, run and plan again, as whole rows.
+        ("work_steps", ("step-garden",)),
+        ("runs", ("run-garden",)),
+        ("work_plans", ("plan-garden",)),
+    ):
+        table = Base.metadata.tables[name]
+        key = next(iter(table.primary_key.columns))
+        statement = select(table).where(key.in_(keys)).order_by(*table.primary_key.columns)
+        for row in graph_session.execute(statement).mappings():
+            expected.update(_framed(name, row))
+    assert _graph(graph_session).snapshot.fingerprint == expected.hexdigest()
+
+
+def test_a_parent_read_again_to_settle_job_ownership_is_counted_once(
+    graph_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    readers = _readers(monkeypatch)
+    _graph(graph_session)
+    # Thirteen owned rows, five artifacts and one library entry.
+    assert readers[-1].row_count == 19
+    graph_session.commit()
+    graph_session.add(
+        Job(
+            id="job-other",
+            run_id="run-other",
+            status="complete",
+            payload_json={"chat_id": "chat-other", "source_run_id": "run-garden"},
+        )
+    )
+    graph_session.commit()
+    _graph(graph_session)
+    # The linked job, and the other conversation's run it names, count once each.
+    assert readers[-1].row_count == 21
+
+
+def test_text_that_is_only_hashed_does_not_count_against_the_kept_bytes(
+    graph_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_lm import chat_recovery_graph
+
+    graph_session.execute(
+        update(ChatComposerDraft).values(text="Keep the garden path wide. " * 4_000)
+    )
+    graph_session.commit()
+    monkeypatch.setattr(chat_recovery_graph, "MAX_GRAPH_BYTES", 64 * 1024)
+    before = _graph(graph_session)
+    graph_session.commit()
+    graph_session.execute(
+        update(ChatComposerDraft).values(text="Keep the garden path narrow. " * 4_000)
+    )
+    graph_session.commit()
+    after = _graph(graph_session)
+    assert before.snapshot.counts == after.snapshot.counts
+    assert before.snapshot.fingerprint != after.snapshot.fingerprint
+    assert set(after.rows["message_parts"][0]) == {"message_id", "type", "artifact_id"}
+    assert all("provenance_json" not in row for row in after.rows["runs"])
+
+
+def test_only_a_graph_with_room_to_grow_enters_recently_deleted(
+    graph_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_lm import chat_recovery_graph
+
+    readers = _readers(monkeypatch)
+    _graph(graph_session)
+    graph_session.commit()
+    # Exactly the size of the graph once its own deletion record is added.
+    monkeypatch.setattr(chat_recovery_graph, "MAX_GRAPH_ROWS", readers[-1].row_count + 1)
+    with pytest.raises(
+        chat_recovery_graph.ChatRecoveryGraphError, match="^chat-recovery-graph-too-large$"
+    ):
+        _graph(graph_session)
+    graph_session.rollback()
+    moment = datetime(2026, 10, 2, tzinfo=UTC)
+    graph_session.add(
+        RecoveryItem(
+            kind="chat",
+            subject_id="chat-garden",
+            display_label="Garden notes",
+            deleted_at=moment,
+            purge_after=moment,
+            subject_revision="0" * 64,
+        )
+    )
+    graph_session.commit()
+    assert _graph(graph_session).snapshot.counts.messages == 2

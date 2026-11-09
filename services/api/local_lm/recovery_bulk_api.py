@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.orm import Session
 
 from .api_errors import ApiError, api_error
-from .chat_recovery_graph import ChatRecoveryGraphError
+from .chat_recovery_graph import ChatRecoveryGraphError, ChatRecoveryGraphTooLarge
 from .db import get_session
 from .recovery_bulk import apply_batch, batch_chat_ids, batch_record, materialize_batch
 from .recovery_bulk_v1 import (
@@ -59,6 +59,13 @@ async def preview_batch(
         except RecoveryPreviewConflict as error:
             session.rollback()
             raise _refusal(error) from None
+        except ChatRecoveryGraphTooLarge:
+            session.rollback()
+            raise api_error(
+                409,
+                "chat-recovery-graph-too-large",
+                "A selected conversation is too long to check its deletion details.",
+            ) from None
         except ChatRecoveryGraphError:
             session.rollback()
             raise api_error(
@@ -96,6 +103,13 @@ async def apply_recovery_batch(
         except RecoveryPreviewConflict as error:
             session.rollback()
             raise _refusal(error) from None
+        except ChatRecoveryGraphTooLarge:
+            session.rollback()
+            raise api_error(
+                409,
+                "chat-recovery-graph-too-large",
+                "A selected conversation is too long to check its deletion details.",
+            ) from None
         except ChatRecoveryGraphError:
             session.rollback()
             raise api_error(
