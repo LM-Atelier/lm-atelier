@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import Result, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement, TextClause
 
@@ -116,11 +116,14 @@ class _GraphReader:
         columns: tuple[str, ...] | None = None,
         keep: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
         counted: Collection[object] = (),
+        facts: Callable[[Mapping[str, Any]], Mapping[str, int]] | None = None,
     ) -> tuple[Mapping[str, Any], ...]:
         """Hash every selected value, but keep and count as kept only what `keep` returns.
 
         A row whose id is in `counted` was already counted by this inspection: it is hashed
-        again, in order, without being counted twice.
+        again, in order, without being counted twice. Values that `facts` computes from a row
+        join it before it is encoded, so they are counted and hashed with it; a fact named
+        like one of its columns refuses the read rather than replace that column.
         """
         table = Base.metadata.tables[name]
         statement = (
@@ -129,9 +132,16 @@ class _GraphReader:
             .order_by(*table.primary_key.columns)
         )
         result: list[Mapping[str, Any]] = []
+        rows: Result[Any] | None = None
         try:
-            for row in self.session.execute(statement, parameters or {}).mappings():
+            rows = self.session.execute(statement, parameters or {})
+            for row in rows.mappings():
                 values = dict(row)
+                if facts is not None:
+                    computed = facts(values)
+                    if not values.keys().isdisjoint(computed):
+                        raise ChatRecoveryGraphError()
+                    values.update(computed)
                 encoded = _encoded(name, values)
                 if not counted or values["id"] not in counted:
                     self.row_count += 1
@@ -151,6 +161,10 @@ class _GraphReader:
             raise
         except (TypeError, ValueError, RecursionError):
             raise ChatRecoveryGraphError() from None
+        finally:
+            # A refusal partway through leaves no statement open on the reserved connection.
+            if rows is not None:
+                rows.close()
         return tuple(result)
 
     def leaves_room(self) -> bool:
@@ -182,6 +196,18 @@ def _artifact_roots(name: str, row: Mapping[str, Any]) -> set[str]:
     elif name == "chats" and row["scope"] == "studio":
         found.update(_optional_id(_mapping(row["origin_json"]).get("source_artifact_id")))
     return found
+
+
+def _organized(session: Session, batch: Collection[str]) -> frozenset[str]:
+    """The entries an album or tag holds: all that release reads of organization.
+
+    Their rows have no limit, so the graph binds one digit per entry instead.
+    """
+    entries = select(ArtifactLibraryEntry.id).where(ArtifactLibraryEntry.artifact_id.in_(batch))
+    held: set[str] = set()
+    for column in (MediaCollectionMembership.entry_id, MediaTagAssignment.entry_id):
+        held.update(session.scalars(select(column).where(column.in_(entries)).distinct()))
+    return frozenset(held)
 
 
 def _owned_jobs(
@@ -298,6 +324,7 @@ def inspect_chat_recovery_graph(session: Session, chat_id: str) -> ChatRecoveryG
                 {"chat_id": chat_id},
             )
             visited: set[str] = set()
+            organized: set[str] = set()
             retained_bytes = 0
             while frontier := sorted(found - visited):
                 if len(found) > MAX_GRAPH_ROWS:
@@ -316,15 +343,12 @@ def inspect_chat_recovery_graph(session: Session, chat_id: str) -> ChatRecoveryG
                         for key in ARTIFACT_METADATA_REFERENCE_KEYS:
                             if key in metadata:
                                 found.update(_optional_id(metadata[key]))
-                    entries = reader.read(
-                        "artifact_library_entries", ArtifactLibraryEntry.artifact_id.in_(batch)
-                    )
-                    entry_ids = [entry["id"] for entry in entries]
+                    organized.update(_organized(session, batch))
                     reader.read(
-                        "media_collection_memberships",
-                        MediaCollectionMembership.entry_id.in_(entry_ids),
+                        "artifact_library_entries",
+                        ArtifactLibraryEntry.artifact_id.in_(batch),
+                        facts=lambda row: {"organized": int(row["id"] in organized)},
                     )
-                    reader.read("media_tag_assignments", MediaTagAssignment.entry_id.in_(entry_ids))
                     visited.update(batch)
             owned_jobs = _owned_jobs(reader, chat_id, rows)
         except ArtifactReferenceDataError:

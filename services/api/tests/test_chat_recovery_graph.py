@@ -383,8 +383,10 @@ def test_the_private_revision_hashes_whole_rows_in_one_canonical_order(
         table = Base.metadata.tables[name]
         key = next(iter(table.primary_key.columns))
         statement = select(table).where(key.in_(keys)).order_by(*table.primary_key.columns)
+        # A library entry is hashed with whether an album or tag holds it, not with those rows.
+        facts = {"organized": 0} if name == "artifact_library_entries" else {}
         for row in graph_session.execute(statement).mappings():
-            expected.update(_framed(name, row))
+            expected.update(_framed(name, {**row, **facts}))
     assert _graph(graph_session).snapshot.fingerprint == expected.hexdigest()
 
 
