@@ -12,6 +12,7 @@ from collections.abc import Set as AbstractSet
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from itertools import batched
 from typing import Any, Final, NoReturn, cast
 
 from sqlalchemy import and_, func, or_, select, update
@@ -750,6 +751,10 @@ def fenced_reference_snapshot(
         session.info.pop(_FENCED_REFERENCE_SNAPSHOT, None)
 
 
+#: How many ids one statement of the flush guard's existence check names.
+_EXISTENCE_CHECK_CHUNK: Final = 500
+
+
 def guard_artifact_reference_flush(
     session: Session,
     _flush_context: object,
@@ -784,9 +789,10 @@ def guard_artifact_reference_flush(
     available = {
         value.id for value in session.new if isinstance(value, Artifact) and value.id not in deleted
     }
-    available.update(
-        session.scalars(select(Artifact.id).where(Artifact.id.in_(sorted(referenced)))).all()
-    )
+    # A chunk at a time: one flush may name up to MAX_REFERENCE_VALUES ids,
+    # more parameters than a default SQLite build lets one statement carry.
+    for chunk in batched(sorted(referenced), _EXISTENCE_CHECK_CHUNK):
+        available.update(session.scalars(select(Artifact.id).where(Artifact.id.in_(chunk))))
     available.difference_update(deleted)
     if referenced - available:
         raise ArtifactReferenceDataError(REFERENCE_CORRUPT)

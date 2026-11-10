@@ -13,11 +13,12 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from itertools import batched
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, Final
 
@@ -87,6 +88,9 @@ _RESTORE_PARTIAL = re.compile(r"(?:[0-9a-f]{64}|\.[0-9a-f]{64}\.[^.]+)\.restore-
 #: any plausible backlog while still bounding a single listing.
 _ROOT_LISTING_LIMIT: Final = 65536
 _STAGED_DELETION = re.compile(r"^(?P<digest>[0-9a-f]{64})\.[0-9a-f]{32}$")
+#: How many staged digests one lookup names, so each statement stays small
+#: however many files are staged.
+_STAGED_LOOKUP_CHUNK: Final = 500
 _MAX_VIDEO_POSTER_BYTES = 16 * 1024 * 1024
 _TOOL_INPUT_PREFIX: Final = "tool-input-"
 #: Exactly the names the copy below makes, and so the only ones the sweep may remove.
@@ -135,6 +139,31 @@ def _aged_file_size(entry: AnchoredEntry, cutoff: datetime) -> int | None:
     if size is None or modified is None or modified > cutoff:
         return None
     return size
+
+
+def _staged_artifacts(session: Session, entries: Iterable[AnchoredEntry]) -> dict[str, Artifact]:
+    """The rows that staged files belong to, by digest, read for those digests only.
+
+    Recovery removes a staged file whose digest has no row, since that is a
+    deletion that committed, so every file recovery acts on is looked up here:
+    a row missed would cost a live artifact its bytes.
+    """
+
+    digests = sorted(
+        {
+            match.group("digest")
+            for entry in entries
+            if entry.kind is AnchoredEntryKind.FILE
+            and (match := _STAGED_DELETION.fullmatch(entry.name)) is not None
+        }
+    )
+    found: dict[str, Artifact] = {}
+    for chunk in batched(digests, _STAGED_LOOKUP_CHUNK):
+        found.update(
+            (artifact.sha256, artifact)
+            for artifact in session.scalars(select(Artifact).where(Artifact.sha256.in_(chunk)))
+        )
+    return found
 
 
 def _removed(anchor: AnchoredDirectory, name: str, *, counted: int, cutoff: datetime) -> bool:
@@ -1716,11 +1745,13 @@ class ArtifactStore:
 
         The same stop that bounds the orphan walk bounds this listing. A stop
         after one native record must not fetch the next one.
+
+        Rows are read only for the digests the listing names, once it has
+        named them, so a store with nothing staged reads no artifact row.
+        Reading every row first built an object for each one, with its metadata
+        parsed, on every sweep batch while the writer was held.
         """
 
-        artifacts_by_sha = {
-            artifact.sha256: artifact for artifact in session.scalars(select(Artifact)).all()
-        }
         try:
             with AnchoredDirectory(self.root) as root:
                 trash = next(
@@ -1736,9 +1767,9 @@ class ArtifactStore:
                 if trash is None or trash.kind is not AnchoredEntryKind.DIRECTORY:
                     return
                 with open_child_directory(root, ".delete-pending") as held:
-                    for entry in list_entries(
-                        held, include_metadata=False, should_stop=should_stop
-                    ):
+                    staged = list_entries(held, include_metadata=False, should_stop=should_stop)
+                    artifacts_by_sha = _staged_artifacts(session, staged)
+                    for entry in staged:
                         self._recover_one_staged_entry(held, entry, artifacts_by_sha)
                 with suppress(AnchoredDirectoryError):
                     remove_directory_entry(root, ".delete-pending")
@@ -1810,7 +1841,9 @@ class ArtifactStore:
         the store clears that place, and the next walk starts at the top.
         """
 
-        indexed = {artifact.relative_path for artifact in session.scalars(select(Artifact)).all()}
+        # The paths are all the walk compares, so only they are read, not every
+        # row with its metadata.
+        indexed = set(session.scalars(select(Artifact.relative_path)))
         cutoff = current - timedelta(hours=temporary_hours)
         allowance = budget or _DeletionBudget(None, None)
         resume_after = self._walk_resume_after if walk is not None else None
