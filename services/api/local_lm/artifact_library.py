@@ -21,6 +21,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
 from .artifact_deletion_authority import (
+    ArtifactReferenceDataError as ArtifactReferenceDataError,
+)
+from .artifact_deletion_authority import (
     active_artifact_deletion_proof,
     artifact_deletion_proof_references,
     complete_reference_snapshot,
@@ -62,10 +65,6 @@ LIBRARY_DATA_INVALID = "Stored Media Library data is invalid."
 _CURSOR_CONTEXT = b"artifact-library-page-v1"
 _ENTRY_ID = re.compile(r"^libentry:sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-
-
-class ArtifactReferenceDataError(RuntimeError):
-    pass
 
 
 class ArtifactLibraryConflict(ValueError):

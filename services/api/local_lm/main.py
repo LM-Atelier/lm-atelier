@@ -32,6 +32,7 @@ from .api import (
     shutdown_registry_preparations,
 )
 from .api_errors import register_api_error_handler
+from .artifact_reference_errors import register_artifact_reference_error_handler
 from .artifacts import (
     RETENTION_BATCH_DELETIONS,
     RETENTION_BATCH_SECONDS,
@@ -932,6 +933,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(SecurityHeadersMiddleware)
     register_api_error_handler(app)
     register_workflow_selection_error_handler(app)
+    register_artifact_reference_error_handler(app)
     app.include_router(router)
     app.include_router(media_organization_batch_router, prefix="/api")
 
