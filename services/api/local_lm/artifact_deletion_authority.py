@@ -30,6 +30,25 @@ class ArtifactDeletionProofError(ValueError):
     pass
 
 
+class ArtifactReferenceDataError(RuntimeError):
+    """Stored artifact references could not be read completely.
+
+    Nothing that needs the whole reference graph may go ahead: a deletion keeps
+    its bytes, a preview is refused, and an HTTP caller gets a conflict.
+    """
+
+
+class ArtifactReferenceRefusal(ArtifactReferenceDataError, ArtifactDeletionProofError):
+    """A stored document the database check refuses, raised while forming a snapshot.
+
+    It is both kinds of refusal on purpose. Callers that keep bytes when stored
+    references cannot be read catch the first, and callers of the deletion
+    proof catch the second; a document only the SQL check refuses has to reach
+    both, or startup recovery and recovery previews fail outright where they
+    should decline.
+    """
+
+
 class _ArtifactReferenceSnapshot(frozenset[str]):
     _session: Session
     _transaction: object
@@ -124,7 +143,7 @@ def complete_reference_snapshot(
     if not isinstance(driver, sqlite3.Connection) or not driver.in_transaction:
         return frozenset(values)
     if connection.exec_driver_sql(STORED_JSON_INVALID_SQL).scalar_one():
-        raise ArtifactDeletionProofError("artifact JSON reference is invalid")
+        raise ArtifactReferenceRefusal("artifact JSON reference is invalid")
     return _ArtifactReferenceSnapshot(
         values, session=session, connection=connection, driver=driver, referrers=referrers
     )

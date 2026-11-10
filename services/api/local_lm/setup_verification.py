@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING, Literal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .artifact_library import ArtifactReferenceDataError
+from .artifact_deletion_authority import artifact_metadata_retains
+from .artifact_library import ArtifactReferenceDataError, begin_artifact_write_fence
 from .domain import ArtifactKind, JobStatus, utcnow
 from .models import (
     Artifact,
@@ -292,15 +293,39 @@ def delete_setup_artifacts(
     artifacts: ArtifactStore,
     artifact_ids: set[str],
 ) -> None:
-    """Delete only unpublished setup bytes after every setup reference is gone."""
+    """Delete only unpublished setup bytes after every setup reference is gone.
+
+    Recovery, failure and completion paths call this, so bytes that something
+    still holds, that are not a picture or a video, or whose references cannot
+    be read are kept rather than raised: a refusal there would stop the app
+    starting, replace the error being reported, or leave a finished
+    verification running.
+    """
 
     for artifact_id in sorted(artifact_ids):
         artifact = session.get(Artifact, artifact_id)
-        if artifact is not None:
-            if artifact.metadata_json.get("temporary_preview") is True:
-                artifacts.delete_temporary_preview(session, artifact_id)
-            else:
-                artifacts.delete_library_artifact(session, artifact)
+        if artifact is None:
+            continue
+        if artifact.metadata_json.get("temporary_preview") is True:
+            artifacts.delete_temporary_preview(session, artifact_id)
+        elif _deletable(session, artifacts, artifact):
+            artifacts.delete_library_artifact(session, artifact)
+
+
+def _deletable(session: Session, artifacts: ArtifactStore, artifact: Artifact) -> bool:
+    """Ask the deletion's own authority, under the writer, before deleting anything."""
+
+    if artifact.kind not in {ArtifactKind.IMAGE.value, ArtifactKind.VIDEO.value}:
+        return False
+    begin_artifact_write_fence(session)
+    try:
+        retained = artifacts.referenced_artifact_ids(session, for_deletion=True)
+    except ArtifactReferenceDataError:
+        # Unreadable references keep these bytes, as they keep a preview's.
+        return False
+    return artifact.id not in retained and not artifact_metadata_retains(
+        session, retained, artifact.id
+    )
 
 
 def synthetic_setup_image(verification_id: str) -> bytes:

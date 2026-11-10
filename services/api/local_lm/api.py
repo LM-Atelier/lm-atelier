@@ -51,6 +51,7 @@ from .artifact_library import (
     ArtifactLibraryConflict,
     ArtifactLibraryCursorError,
     ArtifactLibraryDataError,
+    ArtifactReferenceDataError,
     list_library_entries,
     set_library_favorite,
 )
@@ -7337,6 +7338,10 @@ async def delete_artifact(
         references, removed, reclaimed = _services(request).artifacts.delete_library_artifact(
             session, artifact
         )
+    except ArtifactReferenceDataError:
+        # Unreadable stored references are not this artifact being in use; the
+        # app-wide handler answers them with their own conflict.
+        raise
     except ValueError as exc:
         raise api_error(409, "artifact-in-use", str(exc)) from exc
     session.commit()
