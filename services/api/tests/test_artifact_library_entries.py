@@ -16,7 +16,6 @@ from sqlalchemy import create_engine, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from local_lm import artifact_library
 from local_lm.artifact_library import (
     REFERENCE_CORRUPT,
     ArtifactLibraryConflict,
@@ -267,21 +266,54 @@ def test_corrupt_reference_json_aborts_retention_with_fixed_text(
         session.flush()
 
 
-def test_reference_row_cap_fails_before_parsing(
-    library_session: tuple[ArtifactStore, Session], monkeypatch: pytest.MonkeyPatch
+def test_a_library_past_a_hundred_thousand_pictures_keeps_them_and_still_deletes(
+    library_session: tuple[ArtifactStore, Session],
 ) -> None:
-    _store, session = library_session
-    session.add(Job(payload_json={}, result_json={}))
-    session.flush()
-    monkeypatch.setattr(artifact_library, "MAX_REFERENCE_ROWS", 0)
-    monkeypatch.setattr(
-        artifact_library,
-        "_job_ids",
-        lambda _value: pytest.fail("parser reached after cap failure"),
-    )
+    """A large store is not corrupt: its size never refuses the reference graph.
 
-    with pytest.raises(ArtifactReferenceDataError, match=f"^{REFERENCE_CORRUPT}$"):
-        referenced_artifact_ids(session)
+    A long-used library passes a hundred thousand pictures. Every one of them
+    stays retained, and a deletion that asks for the complete graph still gets
+    it, rather than every deletion and the retention sweep refusing at once.
+    """
+
+    store, session = library_session
+    pictures = 100_001
+    stamp = datetime(2026, 1, 2, tzinfo=UTC).isoformat()
+    connection = session.connection()
+    connection.exec_driver_sql(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) "
+        "INSERT INTO artifacts (id, sha256, kind, media_type, size_bytes, relative_path, "
+        "original_name, metadata_json, favorite, created_at, updated_at) "
+        "SELECT printf('picture_%06d', i), printf('%064x', i), 'image', 'image/png', 1, "
+        "printf('pictures/%06d.png', i), NULL, '{}', 0, ?, ? FROM n",
+        (pictures, stamp, stamp),
+    )
+    connection.exec_driver_sql(
+        "INSERT INTO artifact_library_entries (id, artifact_id, display_name, favorite, "
+        "state, deleted_at, recovery_id, version, created_at, updated_at) "
+        "SELECT 'libentry:sha256:' || sha256, id, id, 0, 'visible', NULL, NULL, 1, "
+        "created_at, updated_at FROM artifacts WHERE id LIKE 'picture_%'",
+    )
+    preview = store.ingest_bytes(
+        session,
+        b"a finished preview",
+        kind=ArtifactKind.IMAGE,
+        media_type="image/png",
+        metadata={"temporary_preview": True},
+    )
+    session.commit()
+    preview_path = store.verified_path(preview)
+
+    retained = referenced_artifact_ids(session)
+
+    assert len(retained) == pictures
+    assert {"picture_000001", f"picture_{pictures:06d}"} <= retained
+    assert preview.id not in retained
+    assert store.delete_temporary_preview(session, preview.id) is True
+    session.commit()
+    assert session.get(Artifact, preview.id) is None
+    assert not preview_path.exists()
+    assert session.get(Artifact, f"picture_{pictures:06d}") is not None
 
 
 def test_job_reference_parser_is_bounded_and_keeps_exact_fields(

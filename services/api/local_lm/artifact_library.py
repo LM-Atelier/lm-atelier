@@ -52,7 +52,6 @@ from .models import (
     WorkStep,
 )
 
-MAX_REFERENCE_ROWS = 100_000
 MAX_REFERENCE_LIST = 4_096
 MAX_REFERENCE_VALUES = 100_000
 MAX_REFERENCE_DEPTH = 16
@@ -842,37 +841,17 @@ def referenced_artifact_ids(
     Only for_deletion validates all stored JSON and binds deletion authority
     to the current writer reservation. Ordinary publication needs reachability.
     Library exclusions preview released membership without authorizing byte deletion.
+
+    Only the shape of a stored value fails the walk, never how many there are.
+    The graph is as large as the store, and a long-used store passes any fixed
+    count of rows or ids with nothing wrong in it: refusing there would stop the
+    retention sweep and every deletion that needs this graph.
     """
 
     if for_deletion and (exclude_message_payload_for is not None or exclude_library_membership_for):
         raise ValueError("a selective reference preview cannot authorize deletion")
     found: set[str] = set()
-    counted_tables = (
-        MessagePart,
-        ResponseRevisionPart,
-        ReferenceSubject,
-        ReferenceAsset,
-        SetupVerification,
-        ArtifactLibraryEntry,
-        MessageReference,
-        ComfyRegistrySourceArtifactReview,
-        Run,
-        RunContextArtifact,
-        WorkStep,
-        Chat,
-        ChatComposerDraftAttachment,
-        Job,
-    )
-    row_count = 0
-    for table in counted_tables:
-        row_count += session.scalar(select(func.count()).select_from(table)) or 0
-        if row_count > MAX_REFERENCE_ROWS:
-            _fail()
-
-    def retain(values: set[str]) -> None:
-        found.update(values)
-        if len(found) > MAX_REFERENCE_VALUES:
-            _fail()
+    retain = found.update
 
     # A subject cover is a replaceable selector, not a retention edge. Its
     # foreign key is deliberately SET NULL when those bytes are removed.
@@ -943,8 +922,6 @@ def referenced_artifact_ids(
             artifact_id for artifact_id in dict.fromkeys(frontier) if artifact_id not in visited
         ]
         visited.update(level)
-        if len(visited) > MAX_REFERENCE_VALUES:
-            _fail()
         metadata_by_id = _artifact_metadata(session, level)
         frontier = []
         for artifact_id in level:
@@ -989,12 +966,8 @@ def metadata_referrers(artifacts: Iterable[Artifact]) -> dict[str, set[str]]:
     same pass rather than the next one.
 
     Deliberately takes loaded artifacts instead of a session. The sweep already
-    holds every row, so this costs no query, and - the reason that matters - a
-    set built here is bounded by the caller's own working set instead of by the
-    store. Scanning the whole table instead would be bounded by
-    MAX_REFERENCE_VALUES, which is a CORRUPTION bound: a large but entirely
-    valid store exceeds it and fails the startup sweep with "reference data is
-    invalid" - the failure this module exists to prevent.
+    holds every row, so this costs no query, and a set built here is bounded by
+    the caller's own working set instead of by the store.
     """
 
     referrers: dict[str, set[str]] = {}

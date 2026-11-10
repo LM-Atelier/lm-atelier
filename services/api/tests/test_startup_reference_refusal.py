@@ -7,7 +7,7 @@ from httpx2 import ASGITransport, AsyncClient
 from test_setup_verification import seed_ready_role
 from test_startup_recovery_preview import _pin_a_preview
 
-from local_lm import artifact_library, db
+from local_lm import db
 from local_lm.artifact_library import ArtifactReferenceDataError
 from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
@@ -20,11 +20,31 @@ from local_lm.setup_verification import (
 )
 
 
-async def test_a_reference_row_limit_keeps_previews_and_allows_restart(
-    settings: Settings, monkeypatch: pytest.MonkeyPatch
+def _store_an_unreadable_reference() -> None:
+    """Store one finished job whose artifact reference no walk can read.
+
+    It goes in past the insert guard, as a row written before that guard would
+    have, so every complete reference walk refuses until it is repaired.
+    """
+
+    with db.SessionLocal() as session:
+        connection = session.connection()
+        connection.exec_driver_sql("DROP TRIGGER jobs_artifact_reference_insert_guard")
+        connection.exec_driver_sql(
+            "INSERT INTO jobs (id, kind, status, progress, phase, payload_json, result_json, "
+            "progress_json, queue_priority, attempt, cancellable, created_at, updated_at) "
+            "VALUES ('unreadable_reference_job', 'chat', 'complete', 1, 'complete', "
+            "'{\"artifact_ids\": \"not-a-list\"}', '{}', '{}', 0, 0, 0, "
+            "'2026-01-02 00:00:00.000000', '2026-01-02 00:00:00.000000')"
+        )
+        session.commit()
+
+
+async def test_an_unreadable_reference_keeps_previews_and_allows_restart(
+    settings: Settings,
 ) -> None:
     preview_id, job_id = _pin_a_preview(settings.data_dir)
-    monkeypatch.setattr(artifact_library, "MAX_REFERENCE_ROWS", 0)
+    _store_an_unreadable_reference()
 
     app = create_app(settings)
     async with app.router.lifespan_context(app):
@@ -48,7 +68,7 @@ async def test_a_reference_row_limit_keeps_previews_and_allows_restart(
 
 
 def test_refused_reference_authority_declines_preview_cleanup_without_deleting(
-    settings: Settings, monkeypatch: pytest.MonkeyPatch
+    settings: Settings,
 ) -> None:
     preview_id, _job_id = _pin_a_preview(settings.data_dir)
     store = ArtifactStore(settings)
@@ -61,7 +81,7 @@ def test_refused_reference_authority_declines_preview_cleanup_without_deleting(
         assert assistant is not None
         assistant.parts.clear()
         session.commit()
-        monkeypatch.setattr(artifact_library, "MAX_REFERENCE_ROWS", 0)
+        _store_an_unreadable_reference()
 
         assert store.delete_temporary_preview(session, preview_id) is False
         session.commit()
@@ -93,7 +113,7 @@ def test_valid_unreferenced_previews_are_still_removed(settings: Settings) -> No
 
 @pytest.mark.parametrize("with_job", [False, True])
 async def test_restart_keeps_setup_and_preview_bytes_without_reference_authority(
-    settings: Settings, monkeypatch: pytest.MonkeyPatch, with_job: bool
+    settings: Settings, with_job: bool
 ) -> None:
     preview_id, job_id = _pin_a_preview(settings.data_dir)
     install, profile, _workflow = seed_ready_role(settings, "image", operation="text_to_image")
@@ -135,7 +155,7 @@ async def test_restart_keeps_setup_and_preview_bytes_without_reference_authority
         artifact_id, verification_id = artifact.id, verification.id
         expected_bytes = store.verified_path(artifact).read_bytes()
         session.commit()
-    monkeypatch.setattr(artifact_library, "MAX_REFERENCE_ROWS", 0)
+    _store_an_unreadable_reference()
     app = create_app(settings)
     async with app.router.lifespan_context(app):
         await asyncio.wait_for(app.state.retention_sweep, timeout=30)
