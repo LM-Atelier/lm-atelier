@@ -5,6 +5,7 @@ import ctypes
 import dataclasses
 import enum
 import errno
+import functools
 import os
 import stat
 import sys
@@ -2269,12 +2270,20 @@ def _walk_windows(path: Path, *, create: bool = False, read_security: bool = Fal
     return chain
 
 
+@functools.cache
 def _windows_api() -> Any:
-    """Bind ntdll and the NT structures.
+    """Bind ntdll and the NT structures, once per process.
 
     Widened to Any deliberately: this module is type-checked for POSIX too,
     where ctypes has no WinDLL at all, and a platform-conditional ignore is
     itself an error on the platform that does have it.
+
+    Built once because every build defines a new UnicodeString class, and the
+    pointer type ObjectAttributes makes for it stays in ctypes' cache, class
+    and all, for the life of the process. Rebuilding on every call held about
+    6 KB each time, and removing one file takes at least two calls, so a sweep
+    held memory for every file it touched. Nothing here changes after it is
+    built, so every call shares it.
     """
 
     import ctypes
