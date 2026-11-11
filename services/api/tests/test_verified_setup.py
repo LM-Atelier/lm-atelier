@@ -19,6 +19,8 @@ from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.hardware import hardware_envelope
 from local_lm.models import ModelComponentManifest, ModelInstall
+from local_lm.schemas import SettingField, VerifiedSetup
+from local_lm.setup_verification import SETUP_VERIFICATION_VERSION, setup_verification_settings
 from local_lm.verified_setup import (
     VERIFIED_SETUP_VERSION,
     build_verified_setup,
@@ -279,4 +281,73 @@ def test_incompatible_hardware_withdraws_even_the_elsewhere_claim(
         assert resolved["hardware_compatible"] is False
         assert resolved["verified_elsewhere"] is False
         assert resolved["ready_to_verify"] is False
+        session.rollback()
+
+
+@pytest.mark.parametrize(
+    ("role", "targets"),
+    [
+        ("chat", {"max_tokens": 8}),
+        (
+            "image",
+            {"steps": 8, "width": 512, "height": 512, "frames": 16, "duration": 2, "batch_size": 1},
+        ),
+        (
+            "video",
+            {"steps": 8, "width": 512, "height": 512, "frames": 16, "duration": 2, "batch_size": 1},
+        ),
+    ],
+)
+def test_generation_provenance_describes_a_bounded_preview(
+    settings: Settings, role: str, targets: dict[str, int]
+) -> None:
+    with SessionLocal() as session:
+        install = _install(session, f"case{next(_COUNTER)}")
+        parts = _parts(install.id)
+        parts["verification"].role = role
+        requested = (
+            {"max_tokens": 64} if role == "chat" else {"steps": 30, "width": 1024, "frames": 120}
+        )
+        parts["profile"].request_settings_json = requested
+        payload = VerifiedSetup.model_validate(
+            build_verified_setup(session, install=install, **parts)
+        ).model_dump()
+        assert payload["attestation"]["generation_probe"] == {
+            "scope": "bounded-preview",
+            "version": SETUP_VERIFICATION_VERSION,
+            "nominal_request_targets": targets,
+            "target_constraints": "supported-field-constraints",
+            "full_request_settings_verified": False,
+        }
+        assert payload["settings"]["request"] == requested
+        assert local_identifiers_in(payload) == []
+        session.rollback()
+
+
+@pytest.mark.parametrize("role", ["image", "video"])
+def test_nominal_preview_targets_are_not_claimed_as_observed_settings(
+    settings: Settings, role: str
+) -> None:
+    fields = [
+        SettingField(
+            key="width",
+            label="Width",
+            type="integer",
+            scope="request",
+            default=2048,
+            minimum=1024,
+            maximum=2048,
+        )
+    ]
+    actual = setup_verification_settings(fields, "image" if role == "image" else "video")
+    assert actual == {"width": 1024}
+    with SessionLocal() as session:
+        install = _install(session, f"case{next(_COUNTER)}")
+        parts = _parts(install.id)
+        parts["verification"].role = role
+        payload = build_verified_setup(session, install=install, **parts)
+        scope = payload["attestation"]["generation_probe"]
+        assert scope["nominal_request_targets"]["width"] == 512
+        assert scope["target_constraints"] == "supported-field-constraints"
+        assert scope["full_request_settings_verified"] is False
         session.rollback()
