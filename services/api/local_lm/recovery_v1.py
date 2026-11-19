@@ -54,6 +54,9 @@ class RecoveryConflict(StrEnum):
     ACTIVE_WORK = "active_work"
     ACTIVE_SELECTION = "active_selection"
     RECORD_CHANGED = "record_changed"
+    # Listed only: a deleted conversation too large to check whole can be permanently deleted
+    # but not restored.
+    TOO_LARGE = "too_large"
 
 
 class RecoveryContract(BaseModel):

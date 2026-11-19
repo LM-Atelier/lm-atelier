@@ -176,3 +176,27 @@ it("closes the restore window at its deadline without needing a page refresh", a
   fireEvent.click(restore);
   expect(api.recoveryImpact).not.toHaveBeenCalled();
 });
+
+it("explains a deleted chat too large to check and offers only permanent deletion", async () => {
+  const long: RecoveryItem = { ...item, deletion_id: "deleted-long", subject_id: "chat-long",
+    display_label: "Long garden notes", restore_conflicts: ["too_large"] };
+  vi.mocked(api.recoveryItems).mockResolvedValue({ items: [long, item], next_cursor: null });
+  vi.mocked(api.recoveryImpact).mockResolvedValue({ ...preview, subject_id: long.subject_id, available_actions: ["purge"] });
+  show();
+  const row = (await screen.findByText("Long garden notes")).closest("article")!;
+  const other = screen.getByText("Garden notes").closest("article")!;
+  expect(within(row).getByText("This chat is too large to check, so it cannot be restored. You can still delete it permanently.")).toBeTruthy();
+  expect(within(other).queryByText(/too large to check/)).toBeNull();
+  const restore = within(row).getByRole("button", { name: "Restore Long garden notes" });
+  expect(restore).toHaveAttribute("aria-disabled", "true");
+  fireEvent.click(restore);
+  expect(api.recoveryImpact).not.toHaveBeenCalled();
+  expect(within(other).getByRole("button", { name: "Restore Garden notes" })).toHaveAttribute("aria-disabled", "false");
+  fireEvent.click(within(row).getByRole("button", { name: "Permanently delete Long garden notes" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Delete permanently" })).toHaveAttribute("aria-disabled", "false"));
+  fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
+  await waitFor(() => expect(api.purgeRecovery).toHaveBeenCalledWith(long.deletion_id, {
+    expected_revision: preview.revision, impact_sha256: preview.impact_sha256,
+    operation_key: expect.any(String), acknowledgement: "permanently-delete",
+  }));
+});

@@ -12,11 +12,16 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from .chat_media_purge import generated_media_ids, release_generated_membership
-from .chat_recovery_graph import ChatRecoveryGraph, inspect_chat_recovery_graph
+from .chat_recovery_graph import (
+    ChatRecoveryGraph,
+    ChatRecoveryGraphTooLarge,
+    inspect_chat_purge_graph,
+    inspect_chat_recovery_graph,
+)
 from .models import Chat, Job, Project, RecoveryItem, RecoveryOperation, RecoveryPreviewRecord
 from .profile_service import reset_unavailable_chat_profiles
 from .prompt_helpers import STANDARD_CHAT_SCOPE
-from .recovery_operations import _remember, _replay, forget_recovery_labels
+from .recovery_operations import _remember, _replay, forget_recovery_labels, recorded_counts
 from .recovery_previews import (
     RecoveryPreviewConflict,
     RecoverySnapshot,
@@ -132,6 +137,37 @@ def _snapshot(session: Session, chat_id: str, now: datetime) -> RecoverySnapshot
     return _inspected(session, chat_id, now)[0]
 
 
+def _deletion_inspected(
+    session: Session, item: RecoveryItem
+) -> tuple[RecoverySnapshot, ChatRecoveryGraph]:
+    """Describe a deleted conversation too large to check whole from what purge reads.
+
+    Only permanent deletion is offered; media totals are those saved at deletion.
+    """
+    graph = inspect_chat_purge_graph(session, item.subject_id)
+    saved = recorded_counts(session, item)
+    counts = graph.snapshot.counts.model_copy(
+        update={"artifacts": saved.artifacts, "retained_bytes": saved.retained_bytes}
+    )
+    purgeable = item.state == RecoveryState.RECOVERABLE.value and not counts.active_work
+    snapshot = replace(
+        graph.snapshot,
+        counts=counts,
+        available_actions=(RecoveryAction.PURGE,) if purgeable else (),
+    )
+    return snapshot, graph
+
+
+def _recovery_inspected(
+    session: Session, item: RecoveryItem, now: datetime
+) -> tuple[RecoverySnapshot, ChatRecoveryGraph]:
+    """Check a deleted conversation whole, or from what purge reads when it is too large."""
+    try:
+        return _inspected(session, item.subject_id, now)
+    except ChatRecoveryGraphTooLarge:
+        return _deletion_inspected(session, item)
+
+
 def preview_chat_trash(
     session: Session, chat_id: str, now: datetime, *, delete_generated_media: bool = False
 ) -> RecoveryImpactV1:
@@ -160,7 +196,7 @@ def preview_chat_recovery(session: Session, deletion_id: str, now: datetime) -> 
         kind=RecoveryKind.CHAT,
         subject_id=item.subject_id,
         deletion_id=deletion_id,
-        inspect=lambda current: _snapshot(current, item.subject_id, now),
+        inspect=lambda current: _recovery_inspected(current, item, now)[0],
         now=now,
         delete_generated_media=item.delete_generated_media,
     )
@@ -266,7 +302,11 @@ def _transition(
     graphs: list[ChatRecoveryGraph] = []
 
     def inspect(current: Session) -> RecoverySnapshot:
-        snapshot, graph = _inspected(current, chat_id, now)
+        if action == RecoveryAction.RESTORE:
+            # Restoring needs the whole check, so a conversation too large to check stays deleted.
+            snapshot, graph = _inspected(current, chat_id, now)
+        else:
+            snapshot, graph = _recovery_inspected(current, item, now)
         graphs.append(graph)
         return snapshot
 

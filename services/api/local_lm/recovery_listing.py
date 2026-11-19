@@ -10,12 +10,16 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from .chat_recovery import _snapshot as inspect_chat
+from .chat_recovery_graph import ChatRecoveryGraphTooLarge
 from .media_recovery import _snapshot as inspect_media
 from .models import ArtifactLibraryEntry, Chat, Project, RecoveryItem, WorkflowFamily
 from .project_recovery import inspect_project_recovery
 from .prompt_helpers import STANDARD_CHAT_SCOPE
+from .recovery_operations import recorded_counts
 from .recovery_previews import RecoveryPreviewConflict, _utc, reserve_recovery_write
 from .recovery_v1 import (
+    RecoveryConflict,
+    RecoveryCountsV1,
     RecoveryItemV1,
     RecoveryKind,
     RecoveryLocationV1,
@@ -68,6 +72,26 @@ def _read_page_cursor(
         return _utc(date), identity
     except (ValueError, TypeError, UnicodeError):
         raise RecoveryPreviewConflict("recovery-cursor-invalid") from None
+
+
+def _measured(
+    session: Session, item: RecoveryItem, now: datetime
+) -> tuple[RecoveryCountsV1, tuple[RecoveryConflict, ...]]:
+    """Inspect one listed item; a conversation too large to check whole shows its saved counts."""
+    if item.kind == RecoveryKind.CHAT.value:
+        try:
+            snapshot = inspect_chat(session, item.subject_id, now)
+        except ChatRecoveryGraphTooLarge:
+            # Its own rows cannot change once it is deleted, so the counts saved then still hold.
+            return recorded_counts(session, item), (RecoveryConflict.TOO_LARGE,)
+    else:
+        inspect = {
+            RecoveryKind.PROJECT.value: inspect_project_recovery,
+            RecoveryKind.MEDIA_LIBRARY_ENTRY.value: inspect_media,
+            RecoveryKind.WORKFLOW_FAMILY.value: inspect_workflow_recovery,
+        }[item.kind]
+        snapshot = inspect(session, item.subject_id, now)
+    return snapshot.counts, snapshot.conflicts
 
 
 def recovery_page(
@@ -143,13 +167,7 @@ def recovery_page(
     )
     items: list[RecoveryItemV1] = []
     for item in rows[:limit]:
-        inspect = {
-            RecoveryKind.CHAT.value: inspect_chat,
-            RecoveryKind.PROJECT.value: inspect_project_recovery,
-            RecoveryKind.MEDIA_LIBRARY_ENTRY.value: inspect_media,
-            RecoveryKind.WORKFLOW_FAMILY.value: inspect_workflow_recovery,
-        }[item.kind]
-        snapshot = inspect(session, item.subject_id, now)
+        counts, conflicts = _measured(session, item, now)
         items.append(
             RecoveryItemV1(
                 deletion_id=item.deletion_id,
@@ -163,8 +181,8 @@ def recovery_page(
                 purge_after=item.purge_after,
                 state=RecoveryState(item.state),
                 revision=item.subject_revision,
-                counts=snapshot.counts,
-                restore_conflicts=snapshot.conflicts,
+                counts=counts,
+                restore_conflicts=conflicts,
                 delete_generated_media=item.delete_generated_media,
             )
         )
