@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -341,16 +342,62 @@ def test_every_required_check_is_a_job_this_workflow_runs() -> None:
 def test_the_merge_gate_is_one_of_the_required_checks() -> None:
     """Dropping the gate from the required list weakens what green means.
 
-    Windows compatibility is deliberately not a required check of its own: it
-    is conditional, and the merge-gate job is what reads its result together
-    with the plan's decision about whether it was needed. So the gate is the
-    only check that can refuse a head whose Windows leg failed. Remove it from
-    the ruleset and Ubuntu alone decides, which is green for a change that
-    broke Windows.
+    Neither Windows compatibility nor the Ubuntu browser suites is a required
+    check of its own. Windows is conditional, and the merge-gate job reads its
+    result together with the plan's decision about whether it was needed; the
+    browser suites run in a job of their own beside Ubuntu compatibility, and
+    the gate reads that result too. So the gate is the only check that can
+    refuse a head whose Windows leg or browser suites failed. Remove it from the
+    ruleset and Ubuntu compatibility alone decides, which is green for a change
+    that broke either.
     """
 
     jobs = _workflow_job_names()
     assert jobs["merge-gate"] in _required_contexts(), (
-        "the merge gate is the only check that inspects the Windows result, so "
-        "a ruleset that does not require it lets a Windows failure merge"
+        "the merge gate is the only check that reads the Windows result and the "
+        "browser suites' result, so a ruleset that does not require it lets "
+        "either kind of failure merge"
+    )
+
+
+def test_every_verification_job_is_read_by_a_required_check() -> None:
+    """A job that no required check reads can fail without stopping a merge.
+
+    The ruleset waits only for the checks it names. Any other job is evidence
+    only if the merge gate reads its result: the gate needs the job, its
+    decision step receives the job's result, and the decision script reads that
+    value, refusing a head unless it succeeded. Needing the job alone is not
+    reading it. A job that is neither can fail while the head merges anyway. The
+    scheduled audit is the one exception: it runs on a timer and never for a
+    pull request or a merge group.
+    """
+
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
+    required = _required_contexts()
+    gate = jobs["merge-gate"]
+    needs = gate["needs"]
+    # A list, so membership below is by job, never by substring of one name.
+    assert isinstance(needs, list), needs
+    decision = next(
+        step for step in gate["steps"] if step.get("run") == "python scripts/ci-merge-gate.py"
+    )
+    script = (ROOT / "scripts/ci-merge-gate.py").read_text(encoding="utf-8")
+    read = set()
+    for name, value in decision.get("env", {}).items():
+        bound = re.fullmatch(r"\$\{\{ needs\.([A-Za-z0-9_-]+)\.result \}\}", str(value))
+        if bound and bound.group(1) in needs and f'environment.get("{name}"' in script:
+            read.add(bound.group(1))
+    unread = [
+        key
+        for key, job in jobs.items()
+        if job.get("if") != "github.event_name == 'schedule'"
+        and job.get("name", key) not in required
+        and key not in read
+    ]
+
+    assert unread == [], (
+        f"{unread} can fail without any required check refusing the head; require "
+        "each one in the ruleset, or have the merge gate need it, pass its result to "
+        "the decision step and refuse in scripts/ci-merge-gate.py unless it succeeded"
     )

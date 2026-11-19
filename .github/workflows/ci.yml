@@ -99,11 +99,11 @@ jobs:
         )
       )
     runs-on: ubuntu-24.04
-    # The Ubuntu verification normally finishes near 35 minutes, but a busy
-    # runner pool has stretched passing runs past 55 minutes with every gate
-    # green and only the browser stage left. The same queue window as Windows
-    # applies.
-    timeout-minutes: 80
+    # Verification alone has taken up to 64 minutes on slower runners, and
+    # installing ffmpeg from the package mirror has added ten more. The browser
+    # suites run beside this job rather than after it. Like Windows, reserve
+    # five minutes for the plan within the queue's 90-minute check window.
+    timeout-minutes: 85
     env:
       LOCAL_LM_DATA_DIR: ${{ github.workspace }}/temp/local-lm-tests
       UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
@@ -111,6 +111,28 @@ jobs:
       - name: Require a valid verification plan
         if: needs.verification-plan.result != 'success'
         run: exit 1
+      # Installing ffmpeg has taken as long as ten minutes when the package
+      # mirror is slow, so it runs in the background while the checkout, the
+      # secret scan and the dependency installs run. The step before
+      # verification waits for it and fails the job unless the install
+      # finished and both tools answer.
+      - name: Start installing ffmpeg for media pipeline tests
+        if: needs.verification-plan.outputs.mode == 'full'
+        run: |
+          exec 9> "$RUNNER_TEMP/ffmpeg-install.lock"
+          flock 9
+          (
+            set +e
+            {
+              date -u '+%H:%M:%S refreshing the package index'
+              sudo apt-get update &&
+                date -u '+%H:%M:%S installing ffmpeg' &&
+                sudo apt-get install --yes --no-install-recommends ffmpeg
+            } 9>&-
+            status=$?
+            date -u '+%H:%M:%S finished'
+            echo "$status" > "$RUNNER_TEMP/ffmpeg-install.status"
+          ) < /dev/null > "$RUNNER_TEMP/ffmpeg-install.log" 2>&1 &
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -163,26 +185,17 @@ jobs:
         run: |
           npm audit --audit-level=high
           .venv/bin/python scripts/audit-dependencies.py
-      - name: Install ffmpeg for media pipeline tests
+      - name: Finish installing ffmpeg for media pipeline tests
         if: needs.verification-plan.outputs.mode == 'full'
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends ffmpeg
+          flock "$RUNNER_TEMP/ffmpeg-install.lock" true
+          cat "$RUNNER_TEMP/ffmpeg-install.log"
+          test "$(cat "$RUNNER_TEMP/ffmpeg-install.status" 2> /dev/null)" = 0
+          ffmpeg -version
+          ffprobe -version
       - name: Run repository verification
         if: needs.verification-plan.outputs.mode == 'full'
         run: ./scripts/verify.sh
-      - name: Install golden-path browser
-        if: needs.verification-plan.outputs.mode == 'full'
-        run: npx playwright install --with-deps chromium
-      - name: Run browser golden path
-        if: needs.verification-plan.outputs.mode == 'full'
-        run: npm run e2e:run
-      - name: Certify synthetic workflow editor browser protocol
-        if: needs.verification-plan.outputs.mode == 'full'
-        run: npm run e2e:workflow-editor:run
-      - name: Certify surfaces that need a managed media engine
-        if: needs.verification-plan.outputs.mode == 'full'
-        run: npm run e2e:managed-media:run
       - name: Validate documentation-only change
         if: needs.verification-plan.outputs.mode == 'documentation'
         env:
@@ -195,6 +208,85 @@ jobs:
         if: needs.verification-plan.outputs.mode == 'promotion'
         run: echo Protected develop is ready for exact-tree promotion to main.
 
+  # The browser suites run beside Ubuntu compatibility instead of after it, so
+  # a run takes as long as the longer of the two. This is not a required check
+  # of its own: a ruleset counts a skipped check as satisfied, so the merge gate
+  # reads this job's result and refuses a head whose browser suites did not pass.
+  browser-suites:
+    name: Ubuntu browser suites
+    needs: verification-plan
+    if: >-
+      always() &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'merge_group' &&
+          github.event.action == 'checks_requested' &&
+          github.event.repository.private == false &&
+          github.event.merge_group.base_ref == 'refs/heads/develop'
+        ) ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.repository.private == false &&
+          github.event.pull_request.draft == false
+        )
+      )
+    runs-on: ubuntu-24.04
+    # The suites take about fifteen minutes, and installing the browser has
+    # taken four more when the package mirror was slow.
+    timeout-minutes: 40
+    env:
+      LOCAL_LM_DATA_DIR: ${{ github.workspace }}/temp/local-lm-tests
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
+    steps:
+      - name: Require a valid verification plan
+        if: needs.verification-plan.result != 'success'
+        run: exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: needs.verification-plan.outputs.mode == 'full'
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: needs.verification-plan.outputs.mode == 'full'
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        if: needs.verification-plan.outputs.mode == 'full'
+        with:
+          version: "0.11.18"
+          enable-cache: true
+          cache-dependency-glob: services/api/uv.lock
+      # The suites drive the production build against mock and synthetic
+      # engines and never ask one for video, so this job installs no ffmpeg.
+      # It builds the web client itself, because the build in the repository
+      # verification runs in the other job.
+      - name: Install browser suite dependencies
+        if: needs.verification-plan.outputs.mode == 'full'
+        run: |
+          uv sync --project services/api --locked --python 3.12 --extra dev --extra package
+          npm ci
+      - name: Build the production web client
+        if: needs.verification-plan.outputs.mode == 'full'
+        run: npm run build
+      - name: Install golden-path browser
+        if: needs.verification-plan.outputs.mode == 'full'
+        run: npx playwright install --with-deps chromium
+      - name: Run browser golden path
+        if: needs.verification-plan.outputs.mode == 'full'
+        run: npm run e2e:run
+      - name: Certify synthetic workflow editor browser protocol
+        if: needs.verification-plan.outputs.mode == 'full'
+        run: npm run e2e:workflow-editor:run
+      - name: Certify surfaces that need a managed media engine
+        if: needs.verification-plan.outputs.mode == 'full'
+        run: npm run e2e:managed-media:run
+
   # The required context that cannot be satisfied by absence.
   #
   # A GitHub ruleset treats a *skipped* required check as satisfied, so every
@@ -202,13 +294,15 @@ jobs:
   # pull request looking exactly like a fully verified one. This job runs with
   # `if: always()`, so it always produces a real conclusion, and it fails unless
   # the jobs the plan actually required for this head succeeded.
+  # That includes the browser suites, which run in a job of their own and are
+  # not a required check.
   #
   # It must be listed as a required check in the branch ruleset. Nothing here
   # changes the ruleset - that is a separate, deliberate step.
   merge-gate:
     name: Merge gate
     if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
-    needs: [verification-plan, compatibility, windows-compatibility]
+    needs: [verification-plan, compatibility, windows-compatibility, browser-suites]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -238,6 +332,7 @@ jobs:
           HEAD_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
           PLAN: ${{ needs.verification-plan.result }}
           UBUNTU: ${{ needs.compatibility.result }}
+          BROWSER_SUITES: ${{ needs.browser-suites.result }}
           WINDOWS: ${{ needs.windows-compatibility.result }}
           WINDOWS_REQUIRED: ${{ needs.verification-plan.outputs.windows }}
           BASE_CHANGED: ${{ github.event.changes.base.ref.from != '' || github.event.changes.base.sha.from != '' }}

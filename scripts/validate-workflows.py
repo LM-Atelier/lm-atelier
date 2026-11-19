@@ -228,6 +228,7 @@ GREEN_MERGE_GATE = {
     "HEAD_SHA": "0" * 40,
     "PLAN": "success",
     "UBUNTU": "success",
+    "BROWSER_SUITES": "success",
     "WINDOWS": "success",
     "WINDOWS_REQUIRED": "true",
 }
@@ -245,6 +246,7 @@ GREEN_MERGE_GROUP: dict[str, str | None] = {
     "BASE_CHANGED": None,
     "PLAN": "success",
     "UBUNTU": "success",
+    "BROWSER_SUITES": "success",
     "WINDOWS": "success",
     "WINDOWS_REQUIRED": "true",
 }
@@ -280,6 +282,10 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             ("UBUNTU", "skipped"),
             ("UBUNTU", "failure"),
             ("UBUNTU", "cancelled"),
+            ("BROWSER_SUITES", "skipped"),
+            ("BROWSER_SUITES", "failure"),
+            ("BROWSER_SUITES", "cancelled"),
+            ("BROWSER_SUITES", None),
             ("WINDOWS", "skipped"),
             ("WINDOWS", "failure"),
             ("WINDOWS", "cancelled"),
@@ -288,8 +294,9 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     ),
     (
         # Production's shape, not a synthetic green one: the plan is skipped,
-        # Ubuntu runs on always() and refuses, and WINDOWS_REQUIRED is absent
-        # because the job that sets it never ran.
+        # Ubuntu runs on always() and refuses, and the browser suites refuse the
+        # same way. WINDOWS_REQUIRED is absent because the job that sets it
+        # never ran.
         "a title or body edit must not authorize",
         {
             "ACTION": "edited",
@@ -297,6 +304,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "false",
             "PLAN": "skipped",
             "UBUNTU": "failure",
+            "BROWSER_SUITES": "failure",
             "WINDOWS": "skipped",
             "WINDOWS_REQUIRED": None,
         },
@@ -310,6 +318,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "success",
+            "BROWSER_SUITES": "success",
             "WINDOWS": "success",
             "WINDOWS_REQUIRED": "true",
         },
@@ -323,6 +332,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "success",
+            "BROWSER_SUITES": "success",
             "WINDOWS": "success",
             "WINDOWS_REQUIRED": "true",
         },
@@ -339,6 +349,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "success",
+            "BROWSER_SUITES": "success",
             "WINDOWS": "success",
             "WINDOWS_REQUIRED": "true",
         },
@@ -352,6 +363,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "success",
+            "BROWSER_SUITES": "success",
             "WINDOWS": "success",
             "WINDOWS_REQUIRED": "true",
         },
@@ -364,6 +376,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "true",
             "PLAN": "success",
             "UBUNTU": "success",
+            "BROWSER_SUITES": "success",
             "WINDOWS": "success",
             "WINDOWS_REQUIRED": "false",
         },
@@ -375,6 +388,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "true",
             "PLAN": "skipped",
             "UBUNTU": "skipped",
+            "BROWSER_SUITES": "skipped",
             "WINDOWS": "skipped",
             "WINDOWS_REQUIRED": "false",
         },
@@ -386,6 +400,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "false",
             "PLAN": "skipped",
             "UBUNTU": "success",
+            "BROWSER_SUITES": "success",
             "WINDOWS": "skipped",
             "WINDOWS_REQUIRED": "false",
         },
@@ -397,6 +412,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "skipped",
+            "BROWSER_SUITES": "success",
             "WINDOWS": "skipped",
             "WINDOWS_REQUIRED": "false",
         },
@@ -408,6 +424,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "cancelled",
+            "BROWSER_SUITES": "success",
             "WINDOWS": "skipped",
             "WINDOWS_REQUIRED": "false",
         },
@@ -419,6 +436,43 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "failure",
+            "BROWSER_SUITES": "success",
+            "WINDOWS": "skipped",
+            "WINDOWS_REQUIRED": "false",
+        },
+        1,
+    ),
+    (
+        "skipped browser suites are not passing ones",
+        {
+            "DRAFT": "false",
+            "PLAN": "success",
+            "UBUNTU": "success",
+            "BROWSER_SUITES": "skipped",
+            "WINDOWS": "skipped",
+            "WINDOWS_REQUIRED": "false",
+        },
+        1,
+    ),
+    (
+        "cancelled browser suites are not passing ones",
+        {
+            "DRAFT": "false",
+            "PLAN": "success",
+            "UBUNTU": "success",
+            "BROWSER_SUITES": "cancelled",
+            "WINDOWS": "skipped",
+            "WINDOWS_REQUIRED": "false",
+        },
+        1,
+    ),
+    (
+        "failed browser suites fail the gate",
+        {
+            "DRAFT": "false",
+            "PLAN": "success",
+            "UBUNTU": "success",
+            "BROWSER_SUITES": "failure",
             "WINDOWS": "skipped",
             "WINDOWS_REQUIRED": "false",
         },
@@ -430,6 +484,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "success",
+            "BROWSER_SUITES": "success",
             "WINDOWS": "skipped",
             "WINDOWS_REQUIRED": "false",
         },
@@ -441,6 +496,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "success",
+            "BROWSER_SUITES": "success",
             "WINDOWS": "skipped",
             "WINDOWS_REQUIRED": "true",
         },
@@ -452,6 +508,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "success",
+            "BROWSER_SUITES": "success",
             "WINDOWS": "failure",
             "WINDOWS_REQUIRED": "true",
         },
@@ -463,6 +520,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "success",
+            "BROWSER_SUITES": "success",
             "WINDOWS": "success",
             "WINDOWS_REQUIRED": "true",
         },
@@ -493,6 +551,15 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             ("an uppercase head is refused", {"HEAD_SHA": "A" * 40}),
             ("an unknown plan conclusion is refused", {"PLAN": "neutral"}),
             ("an uppercase Ubuntu conclusion is refused", {"UBUNTU": "SUCCESS"}),
+            ("a missing browser-suites conclusion is refused", {"BROWSER_SUITES": None}),
+            (
+                "an uppercase browser-suites conclusion is refused",
+                {"BROWSER_SUITES": "SUCCESS"},
+            ),
+            (
+                "an unknown browser-suites conclusion is refused",
+                {"BROWSER_SUITES": "timed_out"},
+            ),
             ("an unknown Windows conclusion is refused", {"WINDOWS": "timed_out"}),
             # The one case where a result's domain is what refuses rather than
             # the success comparison: an unrequired Windows leg is never
@@ -515,6 +582,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "true",
             "PLAN": "success",
             "UBUNTU": "success",
+            "BROWSER_SUITES": "success",
             "WINDOWS": "success",
             "WINDOWS_REQUIRED": "true",
         },
@@ -531,6 +599,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "success",
+            "BROWSER_SUITES": "success",
             "WINDOWS": "success",
             "WINDOWS_REQUIRED": "true",
         },
@@ -544,6 +613,21 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "skipped",
+            "BROWSER_SUITES": "success",
+            "WINDOWS": "success",
+            "WINDOWS_REQUIRED": "true",
+        },
+        1,
+    ),
+    (
+        "an edited base does not excuse missing browser suites",
+        {
+            "ACTION": "edited",
+            "BASE_CHANGED": "true",
+            "DRAFT": "false",
+            "PLAN": "success",
+            "UBUNTU": "success",
+            "BROWSER_SUITES": "skipped",
             "WINDOWS": "success",
             "WINDOWS_REQUIRED": "true",
         },
@@ -590,7 +674,7 @@ VERIFICATION_REF = event_expression(
 MERGE_GATE_JOB = {
     "name": "Merge gate",
     "if": MERGE_GATE_CONDITION,
-    "needs": ["verification-plan", "compatibility", "windows-compatibility"],
+    "needs": ["verification-plan", "compatibility", "windows-compatibility", "browser-suites"],
     "runs-on": "ubuntu-24.04",
     "timeout-minutes": 5,
 }
@@ -609,6 +693,7 @@ MERGE_GATE_ENV = {
     "HEAD_SHA": EVENT_HEAD_SHA,
     "PLAN": "${{ needs.verification-plan.result }}",
     "UBUNTU": "${{ needs.compatibility.result }}",
+    "BROWSER_SUITES": "${{ needs.browser-suites.result }}",
     "WINDOWS": "${{ needs.windows-compatibility.result }}",
     "WINDOWS_REQUIRED": "${{ needs.verification-plan.outputs.windows }}",
     # Which KIND of edited event this is. Without it the decision cannot
@@ -1132,6 +1217,56 @@ PLAN_COMMAND = (
     '  --head-sha "$HEAD_SHA" \\\n'
     '  --github-output "$GITHUB_OUTPUT"'
 )
+FULL_PLAN = "needs.verification-plan.outputs.mode == 'full'"
+# The first step of both Ubuntu jobs, so neither can succeed after a plan that
+# failed or never ran.
+REQUIRED_PLAN_STEP = {
+    "name": "Require a valid verification plan",
+    "if": "needs.verification-plan.result != 'success'",
+    "run": "exit 1",
+}
+# A condition that still contains the full-plan test can be made false without
+# removing it, as `... == 'full' && false` is, so the steps that do the verifying
+# are pinned whole: name, condition and command, with nothing beside them.
+UBUNTU_VERIFICATION_STEP = {
+    "name": "Run repository verification",
+    "if": FULL_PLAN,
+    "run": "./scripts/verify.sh",
+}
+# Every command the browser-suites job runs after its plan check, in order.
+BROWSER_SUITE_STEPS = (
+    {
+        "name": "Install browser suite dependencies",
+        "if": FULL_PLAN,
+        "run": (
+            "uv sync --project services/api --locked --python 3.12 --extra dev --extra package\n"
+            "npm ci"
+        ),
+    },
+    {"name": "Build the production web client", "if": FULL_PLAN, "run": "npm run build"},
+    {
+        "name": "Install golden-path browser",
+        "if": FULL_PLAN,
+        "run": "npx playwright install --with-deps chromium",
+    },
+    {"name": "Run browser golden path", "if": FULL_PLAN, "run": "npm run e2e:run"},
+    {
+        "name": "Certify synthetic workflow editor browser protocol",
+        "if": FULL_PLAN,
+        "run": "npm run e2e:workflow-editor:run",
+    },
+    {
+        "name": "Certify surfaces that need a managed media engine",
+        "if": FULL_PLAN,
+        "run": "npm run e2e:managed-media:run",
+    },
+)
+# The keys either Ubuntu job may declare. `defaults`, `container`, `services`
+# and `strategy` each change what a step runs without touching the step, so a
+# job is refused for declaring any key beyond these.
+VERIFICATION_JOB_KEYS = frozenset(
+    {"name", "needs", "if", "runs-on", "timeout-minutes", "env", "steps"}
+)
 
 
 def validate_verification_bindings(path: Path, workflow: dict[str, Any]) -> list[str]:
@@ -1152,6 +1287,7 @@ def validate_verification_bindings(path: Path, workflow: dict[str, Any]) -> list
     for name, condition, needs in (
         ("verification-plan", VERIFICATION_PLAN_CONDITION, None),
         ("compatibility", COMPATIBILITY_CONDITION, "verification-plan"),
+        ("browser-suites", COMPATIBILITY_CONDITION, "verification-plan"),
         (
             "windows-compatibility",
             "needs.verification-plan.outputs.windows == 'true'",
@@ -1190,14 +1326,38 @@ def validate_verification_bindings(path: Path, workflow: dict[str, Any]) -> list
                 problems.append(f"{path}: verification-plan must run the bound planner exactly")
             if not exactly_equal(expected_outputs, job.get("outputs")):
                 problems.append(f"{path}: verification-plan must publish all planner outputs")
-        elif name == "compatibility":
-            required_plan = {
-                "name": "Require a valid verification plan",
-                "if": "needs.verification-plan.result != 'success'",
-                "run": "exit 1",
-            }
-            if not steps or not exactly_equal(required_plan, steps[0]):
-                problems.append(f"{path}: compatibility must refuse an unsuccessful plan")
+        elif name in ("compatibility", "browser-suites"):
+            if not steps or not exactly_equal(REQUIRED_PLAN_STEP, steps[0]):
+                problems.append(f"{path}: {name} must refuse an unsuccessful plan")
+            if set(job) != VERIFICATION_JOB_KEYS:
+                missing = sorted(VERIFICATION_JOB_KEYS - set(job))
+                unexpected = sorted(str(key) for key in set(job) - VERIFICATION_JOB_KEYS)
+                problems.append(
+                    f"{path}: {name} must declare exactly {sorted(VERIFICATION_JOB_KEYS)}; "
+                    f"missing={missing} unexpected={unexpected}"
+                )
+            if not exactly_equal("ubuntu-24.04", job.get("runs-on")):
+                problems.append(
+                    f"{path}: {name} must run on 'ubuntu-24.04', found {job.get('runs-on')!r}"
+                )
+            commands = [
+                {**step, "run": str(step["run"]).strip()} for step in steps[1:] if "run" in step
+            ]
+            if name == "browser-suites":
+                if not exactly_equal(list(BROWSER_SUITE_STEPS), commands):
+                    problems.append(
+                        f"{path}: browser-suites must build the web client and run every "
+                        "browser suite exactly as pinned"
+                    )
+                continue
+            verifying = [
+                command for command in commands if exactly_equal(UBUNTU_VERIFICATION_STEP, command)
+            ]
+            if len(verifying) != 1:
+                problems.append(
+                    f"{path}: compatibility must run the repository verification exactly once, "
+                    "as pinned"
+                )
             docs = [
                 step for step in steps if step.get("name") == "Validate documentation-only change"
             ]
