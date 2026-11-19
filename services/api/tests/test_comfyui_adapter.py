@@ -5,7 +5,7 @@ import json
 import os
 import subprocess
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,7 @@ import pytest
 from run_waits import PATIENCE_SECONDS
 from websockets.exceptions import WebSocketException
 
+from local_lm.adapters import comfyui as comfyui_adapter
 from local_lm.adapters.base import GeneratedAsset, MediaEvent, MediaRequest
 from local_lm.adapters.comfyui import ComfyUIAdapter, _preview_payload
 from local_lm.adapters.contracts import close_iterator
@@ -414,45 +415,11 @@ async def test_workflow_probe_requires_a_generated_asset(
         await adapter.close()
 
 
-async def test_workflow_probe_interrupts_a_backend_that_exceeds_its_deadline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    interrupted = False
-
-    async def comfy(request: httpx.Request) -> httpx.Response:
-        nonlocal interrupted
-        assert request.url.path == "/interrupt"
-        interrupted = True
-        return httpx.Response(200, json={})
-
-    async def stalled_probe(_request: MediaRequest) -> AsyncIterator[MediaEvent]:
-        yield MediaEvent(type="queued")
-        await asyncio.Event().wait()
-
-    adapter = ComfyUIAdapter("http://comfy.test")
-    await adapter._client.aclose()
-    adapter._client = httpx.AsyncClient(
-        base_url="http://comfy.test",
-        transport=httpx.MockTransport(comfy),
-    )
-    monkeypatch.setattr(adapter, "generate", stalled_probe)
-    try:
-        with pytest.raises(RuntimeError, match="bounded model activation probe"):
-            await adapter.probe_workflow(
-                media_request(operation="text_to_image"),
-                timeout_seconds=0.01,
-            )
-    finally:
-        await adapter.close()
-
-    assert interrupted
-
-
 async def test_silent_websocket_is_interrupted_after_configured_inactivity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prompt_id = "prompt-silent"
-    interrupted = False
+    stopped: list[str] = []
 
     class Socket:
         async def __aenter__(self) -> Socket:
@@ -472,12 +439,11 @@ async def test_silent_websocket_is_interrupted_after_configured_inactivity(
         return Socket()
 
     async def comfy(request: httpx.Request) -> httpx.Response:
-        nonlocal interrupted
         if request.url.path == "/prompt":
             return httpx.Response(200, json={"prompt_id": prompt_id, "node_errors": {}})
-        if request.url.path == "/interrupt":
-            interrupted = True
-            return httpx.Response(200, json={})
+        if request.url.path == f"/api/jobs/{prompt_id}/cancel":
+            stopped.append(prompt_id)
+            return httpx.Response(200, json={"cancelled": True})
         raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
 
     monkeypatch.setattr("local_lm.adapters.comfyui.websockets.connect", connect)
@@ -494,7 +460,7 @@ async def test_silent_websocket_is_interrupted_after_configured_inactivity(
     finally:
         await adapter.close()
 
-    assert interrupted
+    assert stopped == [prompt_id]
     assert request.run_id not in adapter._jobs
 
 
@@ -503,7 +469,7 @@ async def test_cancel_wakes_a_blocked_comfyui_websocket(
 ) -> None:
     prompt_id = "prompt-cancelled"
     receiving = asyncio.Event()
-    interrupted = False
+    stopped = False
 
     class Socket:
         async def __aenter__(self) -> Socket:
@@ -524,13 +490,13 @@ async def test_cancel_wakes_a_blocked_comfyui_websocket(
         return Socket()
 
     async def comfy(request: httpx.Request) -> httpx.Response:
-        nonlocal interrupted
+        nonlocal stopped
         if request.url.path == "/prompt":
             return httpx.Response(200, json={"prompt_id": prompt_id, "node_errors": {}})
-        if request.url.path == "/interrupt":
-            interrupted = True
+        if request.url.path == f"/api/jobs/{prompt_id}/cancel":
+            stopped = True
             # Local cancellation must remain authoritative when the worker is
-            # already stopping and its best-effort interrupt request fails.
+            # already stopping and its best-effort stop request fails.
             return httpx.Response(500)
         if request.url.path == f"/history/{prompt_id}":
             return httpx.Response(200, json={})
@@ -560,7 +526,7 @@ async def test_cancel_wakes_a_blocked_comfyui_websocket(
         ("queued", "Queued in media runtime"),
         ("cancelled", ""),
     ]
-    assert interrupted
+    assert stopped
     assert request.run_id not in adapter._jobs
     assert request.run_id not in adapter._cancel_events
 
@@ -786,9 +752,6 @@ async def test_a_pending_prompt_cannot_start_between_the_two_abandonment_request
 
     The transport applies the backend's own rules and starts the next pending
     prompt when the interrupt returns, which is the moment that matters.
-
-    Adopted from the reviewer's control; ported here so it lives beside the
-    other abandonment cases rather than in a separate module.
     """
 
     mine = "prompt-abandoned"
@@ -883,15 +846,14 @@ async def test_a_cancelled_run_is_interrupted_once_and_not_again_on_the_way_out(
 ) -> None:
     """The half that must not change.
 
-    `cancel` issues the interrupt itself, and every post-submission exit that
-    yields `cancelled` runs with the cancel event set. That event is what tells
-    the teardown there is nothing left to repeat. This passes before the
-    abandonment interrupt exists and must keep passing after it.
+    `cancel` stops the prompt itself, and a run stopped through `cancel` ends
+    with its cancel event set. That event is what tells the teardown there is
+    nothing left to repeat.
     """
 
     prompt_id = "prompt-cancelled-once"
     receiving = asyncio.Event()
-    interrupts = 0
+    stops = 0
 
     class Socket:
         async def __aenter__(self) -> Socket:
@@ -912,12 +874,12 @@ async def test_a_cancelled_run_is_interrupted_once_and_not_again_on_the_way_out(
         return Socket()
 
     async def comfy(request: httpx.Request) -> httpx.Response:
-        nonlocal interrupts
+        nonlocal stops
         if request.url.path == "/prompt":
             return httpx.Response(200, json={"prompt_id": prompt_id, "node_errors": {}})
-        if request.url.path == "/interrupt":
-            interrupts += 1
-            return httpx.Response(200, json={})
+        if request.url.path == f"/api/jobs/{prompt_id}/cancel":
+            stops += 1
+            return httpx.Response(200, json={"cancelled": True})
         if request.url.path == f"/history/{prompt_id}":
             return httpx.Response(200, json={})
         raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
@@ -941,7 +903,7 @@ async def test_a_cancelled_run_is_interrupted_once_and_not_again_on_the_way_out(
         await adapter.close()
 
     assert events[-1].type == "cancelled"
-    assert interrupts == 1
+    assert stops == 1
 
 
 async def _collect_media_events(
@@ -949,6 +911,346 @@ async def _collect_media_events(
     request: MediaRequest,
 ) -> list[MediaEvent]:
     return [event async for event in adapter.generate(request)]
+
+
+OURS = "prompt-this-run"
+THEIRS = "prompt-another-client"
+
+
+def _busy_backend(
+    *,
+    atomic: bool,
+    while_submitting: Callable[[], Awaitable[None]] | None = None,
+    cancel_delay: float = 0.0,
+) -> tuple[Callable[[httpx.Request], Coroutine[Any, Any, httpx.Response]], dict[str, Any]]:
+    """A backend rendering another client's prompt, with this run's prompt queued behind it.
+
+    The stop routes follow the backend's own rules:
+
+      post_interrupt  stops the RUNNING prompt when the body names it or names
+                      nothing, so an interrupt that names no prompt ends
+                      whatever is running, whoever queued it.
+      post_queue      a delete reaches PENDING entries only.
+      job cancel      drops the named prompt, pending or running. A backend
+                      without the route answers 404 (`atomic=False`).
+
+    `while_submitting` runs once the prompt is queued and before the reply that
+    names it is sent. `cancel_delay` is how long the job cancel route takes to
+    answer, as when the backend is briefly busy.
+    """
+
+    state: dict[str, Any] = {"running": THEIRS, "pending": [], "submitted": False, "stops": []}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        body = json.loads(request.content) if request.content else {}
+        if path == "/prompt":
+            state["submitted"] = True
+            state["pending"].append(OURS)
+            if while_submitting is not None:
+                await while_submitting()
+            return httpx.Response(200, json={"prompt_id": OURS, "node_errors": {}})
+        if path.startswith("/api/jobs/") and path.endswith("/cancel"):
+            target = path.removeprefix("/api/jobs/").removesuffix("/cancel")
+            state["stops"].append(("cancel", target))
+            await asyncio.sleep(cancel_delay)
+            if not atomic:
+                return httpx.Response(404)
+            cancelled = target == state["running"] or target in state["pending"]
+            if target == state["running"]:
+                state["running"] = None
+            if target in state["pending"]:
+                state["pending"].remove(target)
+            return httpx.Response(200, json={"cancelled": cancelled})
+        if path == "/queue" and request.method == "POST":
+            state["stops"].append(("delete", body.get("delete")))
+            for prompt_id in body.get("delete", []):
+                if prompt_id in state["pending"]:
+                    state["pending"].remove(prompt_id)
+            return httpx.Response(200, json={})
+        if path == "/interrupt":
+            named = body.get("prompt_id")
+            state["stops"].append(("interrupt", named))
+            if named is None or named == state["running"]:
+                state["running"] = None
+            return httpx.Response(200, json={})
+        if path.startswith("/history/"):
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    return handler, state
+
+
+async def _adapter_behind_another_client(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Callable[[httpx.Request], Coroutine[Any, Any, httpx.Response]],
+    *,
+    inactivity_seconds: float = 60,
+) -> tuple[ComfyUIAdapter, asyncio.Event]:
+    """An adapter whose progress socket stays silent while ComfyUI renders for someone else.
+
+    The event is set once the run reads that socket, which it does only after
+    its prompt was accepted.
+    """
+
+    reading = asyncio.Event()
+
+    class Socket(_BlockingSocket):
+        async def __anext__(self) -> str:
+            reading.set()
+            return await super().__anext__()
+
+    monkeypatch.setattr(
+        "local_lm.adapters.comfyui.websockets.connect",
+        lambda *_args, **_kwargs: Socket(),
+    )
+    adapter = ComfyUIAdapter("http://comfy.test", inactivity_seconds=inactivity_seconds)
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(handler),
+    )
+    return adapter, reading
+
+
+#: A stop that names this run's prompt: the job cancel, or on a backend without
+#: it, the queue delete and an interrupt naming the prompt.
+_NAMED_STOP = pytest.mark.parametrize(
+    ("atomic", "named_stop"),
+    [
+        pytest.param(True, [("cancel", OURS)], id="job-cancel"),
+        pytest.param(
+            False,
+            [("cancel", OURS), ("delete", [OURS]), ("interrupt", OURS)],
+            id="without-job-cancel",
+        ),
+    ],
+)
+
+
+@_NAMED_STOP
+async def test_stopping_a_queued_generation_leaves_another_clients_running_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    atomic: bool,
+    named_stop: list[tuple[str, Any]],
+) -> None:
+    """Stop ends this run's prompt and only that one.
+
+    While the prompt waits its turn, ComfyUI may be rendering for another
+    application or for an open workflow editor. An interrupt that names no
+    prompt would end that render and leave this run's prompt queued to run
+    later for nobody.
+    """
+
+    handler, state = _busy_backend(atomic=atomic)
+    adapter, reading = await _adapter_behind_another_client(monkeypatch, handler)
+    request = media_request(operation="text_to_image")
+    collecting = asyncio.create_task(_collect_media_events(adapter, request))
+    try:
+        await asyncio.wait_for(reading.wait(), timeout=PATIENCE_SECONDS)
+        await adapter.cancel(request.run_id)
+        events = await asyncio.wait_for(collecting, timeout=PATIENCE_SECONDS)
+    finally:
+        collecting.cancel()
+        await asyncio.gather(collecting, return_exceptions=True)
+        await adapter.close()
+
+    assert events[-1].type == "cancelled"
+    assert state["running"] == THEIRS, f"another client's render was stopped: {state['stops']}"
+    assert OURS not in state["pending"], f"this run's prompt was left queued: {state['stops']}"
+    assert state["stops"] == named_stop
+
+
+@pytest.mark.parametrize(
+    "stop", ["cancel", "cancel-during-submission", "inactivity", "probe-deadline"]
+)
+async def test_a_stop_still_reaches_the_older_routes_when_the_backend_answers_slowly(
+    monkeypatch: pytest.MonkeyPatch,
+    stop: str,
+) -> None:
+    """Every stop the run asks for has its own budget, not the short teardown deadline.
+
+    A backend without the job cancel route answers that request with 404, and
+    only then do the delete and the named interrupt follow. When that answer
+    comes late, a deadline sized for an attempt already unwinding would end
+    the stop before either was sent, and the prompt would render on. That
+    holds for a cancel, a cancel that arrives while the prompt is being
+    submitted, a run that stops hearing from ComfyUI, and an activation probe
+    past its deadline.
+    """
+
+    monkeypatch.setattr(comfyui_adapter, "ABANDONED_INTERRUPT_SECONDS", 0.05)
+    request = media_request(operation="text_to_image")
+    holder: dict[str, Any] = {}
+
+    async def stop_the_run() -> None:
+        await holder["adapter"].cancel(request.run_id)
+
+    handler, state = _busy_backend(
+        atomic=False,
+        cancel_delay=0.2,
+        while_submitting=stop_the_run if stop == "cancel-during-submission" else None,
+    )
+    adapter, reading = await _adapter_behind_another_client(
+        monkeypatch, handler, inactivity_seconds=0.01 if stop == "inactivity" else 60
+    )
+    holder["adapter"] = adapter
+    try:
+        if stop == "cancel":
+            collecting = asyncio.create_task(_collect_media_events(adapter, request))
+            try:
+                await asyncio.wait_for(reading.wait(), timeout=PATIENCE_SECONDS)
+                await adapter.cancel(request.run_id)
+                events = await asyncio.wait_for(collecting, timeout=PATIENCE_SECONDS)
+            finally:
+                collecting.cancel()
+                await asyncio.gather(collecting, return_exceptions=True)
+            assert events[-1].type == "cancelled"
+        elif stop == "cancel-during-submission":
+            events = await asyncio.wait_for(
+                _collect_media_events(adapter, request), timeout=PATIENCE_SECONDS
+            )
+            assert events[-1].type == "cancelled"
+        elif stop == "inactivity":
+            with pytest.raises(RuntimeError, match="stopped reporting generation activity"):
+                await _collect_media_events(adapter, request)
+        else:
+            with pytest.raises(RuntimeError, match="bounded model activation probe"):
+                await adapter.probe_workflow(request, timeout_seconds=0.5)
+            assert reading.is_set(), "the deadline passed before the probe's prompt was submitted"
+    finally:
+        await adapter.close()
+
+    assert state["running"] == THEIRS, f"another client's render was stopped: {state['stops']}"
+    assert OURS not in state["pending"], f"this run's prompt was left queued: {state['stops']}"
+    # The full older protocol reached the backend, whatever ran before it.
+    assert state["stops"][-3:] == [("cancel", OURS), ("delete", [OURS]), ("interrupt", OURS)]
+    assert all(target in (OURS, [OURS]) for _route, target in state["stops"])
+
+
+@_NAMED_STOP
+async def test_a_stop_during_submission_stops_only_the_prompt_it_submitted(
+    monkeypatch: pytest.MonkeyPatch,
+    atomic: bool,
+    named_stop: list[tuple[str, Any]],
+) -> None:
+    """A stop that arrives before ComfyUI names the prompt still ends only that prompt.
+
+    Until the reply arrives there is nothing to name, so `cancel` sends nothing
+    and the run stops its prompt once the reply names it.
+    """
+
+    holder: dict[str, Any] = {}
+    request = media_request(operation="text_to_image")
+
+    async def stop_the_run() -> None:
+        await holder["adapter"].cancel(request.run_id)
+
+    handler, state = _busy_backend(atomic=atomic, while_submitting=stop_the_run)
+    adapter, _reading = await _adapter_behind_another_client(monkeypatch, handler)
+    holder["adapter"] = adapter
+    try:
+        events = await asyncio.wait_for(
+            _collect_media_events(adapter, request), timeout=PATIENCE_SECONDS
+        )
+    finally:
+        await adapter.close()
+
+    assert events[-1].type == "cancelled"
+    assert state["running"] == THEIRS, f"another client's render was stopped: {state['stops']}"
+    assert OURS not in state["pending"], f"this run's prompt was left queued: {state['stops']}"
+    assert state["stops"] == named_stop
+
+
+@_NAMED_STOP
+async def test_an_inactivity_timeout_stops_only_its_own_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    atomic: bool,
+    named_stop: list[tuple[str, Any]],
+) -> None:
+    """A run that hears nothing while another client's render runs gives up its own prompt."""
+
+    handler, state = _busy_backend(atomic=atomic)
+    adapter, _reading = await _adapter_behind_another_client(
+        monkeypatch, handler, inactivity_seconds=0.01
+    )
+    try:
+        with pytest.raises(RuntimeError, match="stopped reporting generation activity"):
+            await _collect_media_events(adapter, media_request(operation="text_to_image"))
+    finally:
+        await adapter.close()
+
+    assert state["running"] == THEIRS, f"another client's render was stopped: {state['stops']}"
+    assert OURS not in state["pending"], f"this run's prompt was left queued: {state['stops']}"
+    assert state["stops"] == named_stop
+
+
+@_NAMED_STOP
+async def test_a_probe_past_its_deadline_stops_only_its_own_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    atomic: bool,
+    named_stop: list[tuple[str, Any]],
+) -> None:
+    """An activation probe that runs out of time ends its own prompt and nothing else."""
+
+    handler, state = _busy_backend(atomic=atomic)
+    adapter, reading = await _adapter_behind_another_client(monkeypatch, handler)
+    try:
+        with pytest.raises(RuntimeError, match="bounded model activation probe"):
+            await adapter.probe_workflow(
+                media_request(operation="text_to_image"),
+                # Counted from the probe's start, so it has to outlast the
+                # preparation before the prompt is submitted.
+                timeout_seconds=0.5,
+            )
+    finally:
+        await adapter.close()
+
+    assert reading.is_set(), "the deadline passed before the probe's prompt was submitted"
+    assert state["running"] == THEIRS, f"another client's render was stopped: {state['stops']}"
+    assert OURS not in state["pending"], f"the probe's prompt was left queued: {state['stops']}"
+    # The teardown's short stop, then the probe's own: both name the prompt.
+    assert state["stops"] == named_stop * 2
+
+
+async def test_a_probe_past_its_deadline_before_submitting_sends_no_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With nothing submitted, the only render a stop could reach is someone else's."""
+
+    handler, state = _busy_backend(atomic=True)
+
+    class Unopened:
+        """A progress socket that never opens, so the prompt is never submitted."""
+
+        async def __aenter__(self) -> Unopened:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "local_lm.adapters.comfyui.websockets.connect",
+        lambda *_args, **_kwargs: Unopened(),
+    )
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="bounded model activation probe"):
+            await adapter.probe_workflow(
+                media_request(operation="text_to_image"), timeout_seconds=0.05
+            )
+    finally:
+        await adapter.close()
+
+    assert state["running"] == THEIRS, f"another client's render was stopped: {state['stops']}"
+    assert not state["submitted"]
+    assert state["stops"] == []
 
 
 @pytest.mark.parametrize(
@@ -1475,8 +1777,8 @@ async def test_a_stop_while_the_run_record_is_awaited_ends_the_run_cancelled(
             if history_reads == 1:
                 await adapter.cancel(request.run_id)
             return httpx.Response(200, json={})
-        if http_request.url.path == "/interrupt":
-            return httpx.Response(200)
+        if http_request.url.path == f"/api/jobs/{prompt_id}/cancel":
+            return httpx.Response(200, json={"cancelled": False})
         raise AssertionError(
             f"unexpected ComfyUI request: {http_request.method} {http_request.url}"
         )
@@ -1534,8 +1836,8 @@ async def test_a_stop_while_the_output_is_downloaded_ends_the_run_cancelled(
             return httpx.Response(
                 200, content=b"\x89PNG\r\n\x1a\n", headers={"content-type": "image/png"}
             )
-        if http_request.url.path == "/interrupt":
-            return httpx.Response(200)
+        if http_request.url.path == f"/api/jobs/{prompt_id}/cancel":
+            return httpx.Response(200, json={"cancelled": False})
         raise AssertionError(
             f"unexpected ComfyUI request: {http_request.method} {http_request.url}"
         )
@@ -1935,9 +2237,9 @@ async def test_a_cancel_during_the_lookup_still_stops_a_running_submission(
 ) -> None:
     """Cancelling before the identity is bound must not lose the prompt.
 
-    `cancel` interrupts on `run_id in self._jobs`, and during the reconciliation
-    request there is no entry there yet - so it sets the event and issues
-    nothing. The teardown used to read a set event as "already interrupted",
+    `cancel` stops the prompt `self._jobs` names for the run, and during the
+    reconciliation request there is no entry there yet - so it sets the event
+    and stops nothing. The teardown used to read a set event as "already interrupted",
     which is false on this path: the prompt would be bound a moment later and
     then deliberately left alone, running, with the caller told it failed.
     """

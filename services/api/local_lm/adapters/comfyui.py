@@ -181,6 +181,10 @@ def _preview_payload(frame: bytes) -> bytes | None:
 #: seconds and the output cleanup runs after this, so the ask must not be able
 #: to spend the entire allowance on its own.
 ABANDONED_INTERRUPT_SECONDS = 2.0
+#: How long a stop the run itself asks for may take in all: long enough that a
+#: backend that answers slowly still gets every step of the older
+#: delete-then-interrupt protocol.
+STOP_SECONDS = 10.0
 RECONCILE_SECONDS = 5.0
 
 
@@ -753,7 +757,7 @@ class ComfyUIAdapter:
                 if prompt_id is None:
                     raise RuntimeError("ComfyUI returned an invalid prompt identifier")
                 if cancel_event.is_set():
-                    await self._interrupt_prompt()
+                    await self._abandon_prompt(prompt_id, seconds=STOP_SECONDS)
                     yield MediaEvent(type="cancelled")
                     return
                 yield MediaEvent(
@@ -774,7 +778,7 @@ class ComfyUIAdapter:
                     except StopAsyncIteration:
                         break
                     except TimeoutError as exc:
-                        await self._interrupt_prompt()
+                        await self._abandon_prompt(prompt_id, seconds=STOP_SECONDS)
                         raise RuntimeError(
                             "ComfyUI stopped reporting generation activity for "
                             f"{self.inactivity_seconds:g} seconds; the run was interrupted"
@@ -918,24 +922,24 @@ class ComfyUIAdapter:
                     # nobody will read, holding the device against the run that
                     # replaced this one.
                     #
-                    # A set cancel event means `cancel` already issued the
-                    # interrupt - but ONLY where `cancel` could see the prompt.
-                    # It interrupts on `run_id in self._jobs`, and on the
-                    # recovery path below there is no entry there until the
-                    # reconciliation returns. A cancel arriving during that
-                    # await therefore sets the event and issues nothing, so
-                    # reading the set event as "already interrupted" would
-                    # leave the recovered prompt running with the caller told
-                    # it failed - the exact state this path exists to prevent.
-                    # `bound_after_timeout` is checked ahead of the event for
-                    # that reason. Repeating a stop is harmless; skipping one
-                    # is not.
+                    # A set cancel event means `cancel` already stopped the
+                    # prompt - but ONLY where `cancel` could see it. It stops
+                    # the prompt `self._jobs` names for the run, and on the
+                    # lost-reply recovery path there is no entry there until
+                    # the reconciliation returns. A cancel arriving during that
+                    # await therefore sets the event and stops nothing, so
+                    # reading the set event as "already stopped" would leave
+                    # the recovered prompt running with the caller told it
+                    # failed - the exact state this path exists to prevent.
+                    # `bound_after_submission_failure` is checked ahead of the
+                    # event for that reason. Repeating a stop is harmless;
+                    # skipping one is not.
                     #
                     # Still deliberately not extended to the generic error
                     # exits below. A malformed or oversized event is a different
                     # case with its own settled handling, and widening this to
-                    # cover it would change six existing controls on a question
-                    # that row did not ask.
+                    # cover it would change behaviour six existing tests rely
+                    # on.
                     #
                     # `refused_after_acceptance` is not that widening. It marks
                     # the one exit where THIS code refuses a response the backend
@@ -943,7 +947,7 @@ class ComfyUIAdapter:
                     # situation as an abandoned stream and not an error arriving
                     # from a prompt already being consumed.
                     #
-                    # `bound_after_timeout` is the same situation reached the
+                    # `bound_after_submission_failure` is the same situation reached the
                     # other way: the backend took the prompt and this code never
                     # heard so. It is only ever set when the backend's own queue
                     # named the prompt under this submission's client id, so it
@@ -985,13 +989,23 @@ class ComfyUIAdapter:
         """Run a bounded generation before an adaptive model is activated."""
 
         completed = False
+        prompt_id: str | None = None
         try:
             async with asyncio.timeout(timeout_seconds):
                 async for event in self.generate(request):
+                    named = event.data.get("prompt_id")
+                    if isinstance(named, str):
+                        prompt_id = named
                     if event.type == "complete" and event.assets:
                         completed = True
         except TimeoutError as exc:
-            await self._interrupt_prompt()
+            # The deadline cancelled `generate`, and its teardown made a short
+            # attempt to stop the probe's prompt. The probe asks again with the
+            # time a requested stop gets, so a backend that answers slowly still
+            # gets every step. A prompt it never saw queued has no name to give,
+            # and a stop that names none would end whatever ComfyUI is running.
+            if prompt_id is not None:
+                await self._abandon_prompt(prompt_id, seconds=STOP_SECONDS)
             raise RuntimeError(
                 "ComfyUI did not complete the bounded model activation probe."
             ) from exc
@@ -1356,8 +1370,8 @@ class ComfyUIAdapter:
             event.set()
         else:
             self._cancelled.add(run_id)
-        if run_id in self._jobs:
-            await self._interrupt_prompt()
+        if prompt_id := self._jobs.get(run_id):
+            await self._abandon_prompt(prompt_id, seconds=STOP_SECONDS)
 
     async def queue_remaining(self) -> int | None:
         """How many prompts ComfyUI holds, running or waiting, or None if it cannot say."""
@@ -1373,15 +1387,6 @@ class ComfyUIAdapter:
         if isinstance(remaining, bool) or not isinstance(remaining, int) or remaining < 0:
             return None
         return remaining
-
-    async def _interrupt_prompt(self) -> None:
-        try:
-            response = await self._client.post("/interrupt", timeout=10)
-            response.raise_for_status()
-        except httpx.HTTPError:
-            # Local cancellation remains authoritative even when the worker has
-            # already exited or its interrupt endpoint is unavailable.
-            return
 
     async def _prompt_id_for_client(self, client_id: str) -> str | None:
         """The queued prompt this submission's client id names, if there is one.
@@ -1431,18 +1436,25 @@ class ComfyUIAdapter:
                             return candidate
         return None
 
-    async def _abandon_prompt(self, prompt_id: str) -> None:
+    async def _abandon_prompt(self, prompt_id: str, *, seconds: float | None = None) -> None:
         """Cancel the submitted prompt through the atomic job endpoint when available.
 
         A completed or unknown job is a successful no-op. Only an unavailable
         endpoint permits the older delete-then-interrupt protocol, which remains
         best effort because its running check and interrupt are separate steps.
-        One total deadline bounds all requests so output cleanup can still run.
-        Failures remain local to this already-unwinding attempt.
+        One total deadline bounds all of the requests: by default the short
+        one for an attempt already unwinding, so output cleanup can still run,
+        and `seconds` (STOP_SECONDS) for a stop the run asks for. Failures
+        remain local.
+
+        Every stop this adapter sends comes through here, naming the prompt it
+        submitted. An interrupt that names no prompt stops whatever ComfyUI is
+        running: while this run waits its turn, that can be another
+        application's work or a graph queued from an open workflow editor.
         """
 
         with suppress(Exception):
-            async with asyncio.timeout(ABANDONED_INTERRUPT_SECONDS):
+            async with asyncio.timeout(ABANDONED_INTERRUPT_SECONDS if seconds is None else seconds):
                 identifier = quote(prompt_id, safe="")
                 if identifier in {".", ".."}:
                     identifier = identifier.replace(".", "%2E")
