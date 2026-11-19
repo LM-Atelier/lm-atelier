@@ -1314,6 +1314,7 @@ def test_merge_gate_accepts_verified_merge_group_without_pull_request_fields(
         "RUN_SHA": "b" * 40,
         "PLAN": "success",
         "UBUNTU": "success",
+        "BROWSER_SUITES": "success",
         "WINDOWS": "skipped",
         "WINDOWS_REQUIRED": "false",
         **pr_fields,
@@ -1321,9 +1322,10 @@ def test_merge_gate_accepts_verified_merge_group_without_pull_request_fields(
     log: list[str] = []
     assert namespace["decide"](environment, log) == 0, log
     for result in ("skipped", "cancelled", "failure"):
-        for job in ("PLAN", "UBUNTU", "WINDOWS"):
-            refused = {**environment, job: result, "WINDOWS_REQUIRED": "true"}
-            assert namespace["decide"](refused, []) == 1, (job, result)
+        for job in ("PLAN", "UBUNTU", "BROWSER_SUITES"):
+            assert namespace["decide"]({**environment, job: result}, []) == 1, (job, result)
+        windows = {**environment, "WINDOWS": result, "WINDOWS_REQUIRED": "true"}
+        assert namespace["decide"](windows, []) == 1, ("WINDOWS", result)
 
 
 def test_the_ffmpeg_fetch_waits_long_enough_for_a_real_outage() -> None:
@@ -1351,18 +1353,64 @@ def test_the_ffmpeg_fetch_waits_long_enough_for_a_real_outage() -> None:
     assert waits == sorted(waits), "back off progressively rather than hammering the feed"
 
 
-def test_verification_has_room_to_finish_inside_the_merge_queue_window() -> None:
-    """Each platform job's limit sits between what the suite needs and what the queue allows.
+def test_ffmpeg_installs_in_the_background_and_is_awaited_before_verification() -> None:
+    """Ubuntu installs ffmpeg beside its setup and waits for it before verifying.
 
-    Passing Windows runs take up to 54 minutes as the suite grows, and passing
-    runs on both platforms were cancelled at 55 on busy runners, so a limit
-    below 70 cancels real verification. The queue waits at most its check
-    response timeout for every required check, and the plan job runs first, so a
-    limit that does not fit inside it dequeues the change instead.
+    The package mirror has taken as long as ten minutes to deliver ffmpeg, so the
+    install starts before the checkout and runs while the setup steps do. The
+    media pipeline tests need it, so the step right before verification waits
+    for the install to release its lock, and it refuses unless the install
+    recorded success and both tools answer.
+    """
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["compatibility"]["steps"]
+    names = [step.get("name") for step in steps]
+    start = names.index("Start installing ffmpeg for media pipeline tests")
+    finish = names.index("Finish installing ffmpeg for media pipeline tests")
+    checkout = next(
+        index
+        for index, step in enumerate(steps)
+        if str(step.get("uses", "")).startswith("actions/checkout@")
+    )
+
+    assert start < checkout < finish == names.index("Run repository verification") - 1
+    for index in (start, finish):
+        assert steps[index]["if"] == "needs.verification-plan.outputs.mode == 'full'"
+    started = steps[start]["run"]
+    # The background half holds the lock until it has written its status, and apt
+    # runs with the lock closed, so nothing apt starts can keep holding it.
+    assert 'exec 9> "$RUNNER_TEMP/ffmpeg-install.lock"' in started
+    assert "\nflock 9\n" in started
+    assert "} 9>&-" in started
+    # Every stream is redirected, so the step does not wait on an inherited pipe.
+    assert started.rstrip().endswith(') < /dev/null > "$RUNNER_TEMP/ffmpeg-install.log" 2>&1 &'), (
+        "the install must not hold up the steps after it"
+    )
+    for step in steps[start + 1 : finish]:
+        assert not re.search(r"\b(apt|apt-get|dpkg)\b", str(step.get("run", ""))), step
+    finished = steps[finish]["run"]
+    assert 'flock "$RUNNER_TEMP/ffmpeg-install.lock" true' in finished
+    assert 'test "$(cat "$RUNNER_TEMP/ffmpeg-install.status" 2> /dev/null)" = 0' in finished
+    assert "\nffmpeg -version\n" in finished
+    assert "ffprobe -version" in finished
+
+
+def test_verification_has_room_to_finish_inside_the_merge_queue_window() -> None:
+    """Each verification job's limit sits between what it needs and what the queue allows.
+
+    Ubuntu verification alone has taken up to 64 minutes on slower runners, and
+    installing ffmpeg from the package mirror has added ten more, and the full
+    Windows gate can exceed 80 minutes on its own, so both keep a limit of 85,
+    all the queue window leaves beside the plan. The browser suites run in a job
+    of their own beside Ubuntu, with a limit of their own. The queue waits at
+    most its check response timeout for every required check, and the plan job
+    runs first, so a limit that does not fit inside it dequeues the change
+    instead.
     """
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     plan = workflow.split("  verification-plan:", 1)[1].split("  compatibility:", 1)[0]
-    ubuntu = workflow.split("  compatibility:", 1)[1].split("  merge-gate:", 1)[0]
+    ubuntu = workflow.split("  compatibility:", 1)[1].split("  browser-suites:", 1)[0]
+    browser = workflow.split("  browser-suites:", 1)[1].split("  merge-gate:", 1)[0]
     windows = workflow.split("  windows-compatibility:", 1)[1].split("  scheduled-audit:", 1)[0]
     ruleset = json.loads((ROOT / ".github/rulesets/public-develop-queue.json").read_text())
     queue = next(rule for rule in ruleset["rules"] if rule["type"] == "merge_queue")
@@ -1372,15 +1420,18 @@ def test_verification_has_room_to_finish_inside_the_merge_queue_window() -> None
         assert found, "the job no longer declares its own timeout"
         return int(found.group(1))
 
-    for job in (ubuntu, windows):
-        assert limit(job) >= 70
+    assert limit(ubuntu) >= 85
+    assert limit(windows) >= 85
+    assert limit(browser) >= 30
+    for job in (ubuntu, browser, windows):
         assert limit(plan) + limit(job) <= queue["parameters"]["check_response_timeout_minutes"]
 
 
 def test_ci_workflow_retains_required_check_for_every_pr_scope() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     plan = workflow.split("  verification-plan:", 1)[1].split("  compatibility:", 1)[0]
-    compatibility = workflow.split("  compatibility:", 1)[1].split("  windows-compatibility:", 1)[0]
+    compatibility = workflow.split("  compatibility:", 1)[1].split("  browser-suites:", 1)[0]
+    browser = workflow.split("  browser-suites:", 1)[1].split("  merge-gate:", 1)[0]
     windows = workflow.split("  windows-compatibility:", 1)[1].split("  scheduled-audit:", 1)[0]
 
     assert "name: Ubuntu compatibility" in compatibility
@@ -1389,11 +1440,31 @@ def test_ci_workflow_retains_required_check_for_every_pr_scope() -> None:
         assert f'"${variable}"' in plan
     for output in ("mode", "dependency_audit", "windows"):
         assert f"{output}: ${{{{ steps.plan.outputs.{output} }}}}" in plan
-    assert compatibility.count("needs.verification-plan.outputs.mode") >= 10
+    assert compatibility.count("needs.verification-plan.outputs.mode") == 10
     assert "needs.verification-plan.result != 'success'" in compatibility
     assert "documentation" in compatibility
     assert "promotion" in compatibility
     assert "needs.verification-plan.outputs.dependency_audit" in compatibility
+    # The browser suites run in a job of their own beside Ubuntu compatibility
+    # rather than inside it, so their commands appear there and only there.
+    for command in (
+        "npx playwright install",
+        "npm run e2e:run",
+        "e2e:workflow-editor:run",
+        "e2e:managed-media:run",
+    ):
+        assert command not in compatibility, command
+    assert "name: Ubuntu browser suites" in browser
+    assert "needs.verification-plan.result != 'success'" in browser
+    assert browser.count("needs.verification-plan.outputs.mode == 'full'") == 9
+    for command in (
+        "npm run build",
+        "npx playwright install --with-deps chromium",
+        "npm run e2e:run",
+        "npm run e2e:workflow-editor:run",
+        "npm run e2e:managed-media:run",
+    ):
+        assert command in browser, command
     assert "name: Windows compatibility" in windows
     assert "runs-on: windows-2025" in windows
     assert "needs.verification-plan.outputs.windows == 'true'" in windows
@@ -1439,6 +1510,9 @@ def test_merge_gate_refuses_every_unverified_pull_request_shape() -> None:
     # fails here.
     assert "a title or body edit must not authorize" in labels
     assert "an edited event that changed the base reverifies and may authorize" in labels
+    # The browser suites are not a required check of their own, so the gate is
+    # the only thing that refuses a head whose browser leg never ran.
+    assert "skipped browser suites are not passing ones" in labels
     assert any(expected == 0 for _l, _e, expected in matrix), (
         "a matrix that only ever expects failure would pass against a gate that rejects everything"
     )
@@ -1459,6 +1533,7 @@ PRODUCTION_GATE_SHAPES = (
             "BASE_CHANGED": "false",
             "PLAN": "skipped",
             "UBUNTU": "skipped",
+            "BROWSER_SUITES": "skipped",
             "WINDOWS": "skipped",
         },
         "Draft pull request",
@@ -1471,6 +1546,7 @@ PRODUCTION_GATE_SHAPES = (
             "BASE_CHANGED": "false",
             "PLAN": "skipped",
             "UBUNTU": "failure",
+            "BROWSER_SUITES": "failure",
             "WINDOWS": "skipped",
         },
         "Edited event that did not change the base branch",
@@ -2249,6 +2325,7 @@ def _job_mutations() -> list[tuple[str, WorkflowMutation]]:
         job("dropped authority input", lambda j: steps(j)[2]["env"].pop("ACTION")),
         job("dropped draft input", lambda j: steps(j)[2]["env"].pop("DRAFT")),
         job("dropped windows policy", lambda j: steps(j)[2]["env"].pop("WINDOWS_REQUIRED")),
+        job("dropped browser suites input", lambda j: steps(j)[2]["env"].pop("BROWSER_SUITES")),
         job("extra authority input", lambda j: steps(j)[2]["env"].update({"EXTRA": "x"})),
         job(
             "rebound draft input",
@@ -2263,6 +2340,12 @@ def _job_mutations() -> list[tuple[str, WorkflowMutation]]:
         job(
             "rebound plan input",
             lambda j: steps(j)[2]["env"].update({"PLAN": "${{ needs.compatibility.result }}"}),
+        ),
+        job(
+            "rebound browser suites input",
+            lambda j: steps(j)[2]["env"].update(
+                {"BROWSER_SUITES": "${{ needs.compatibility.result }}"}
+            ),
         ),
         job("missing decision env", lambda j: steps(j)[2].pop("env")),
     ]
@@ -2414,6 +2497,23 @@ def _queue_binding_mutations() -> list[tuple[str, WorkflowMutation]]:
 
         return apply
 
+    def named(candidate: dict[str, Any], name: str) -> dict[str, Any]:
+        found = next(step for step in candidate["steps"] if step.get("name") == name)
+        assert isinstance(found, dict)
+        return found
+
+    def without(name: str) -> Callable[[dict[str, Any]], None]:
+        def apply(candidate: dict[str, Any]) -> None:
+            candidate["steps"].remove(named(candidate, name))
+
+        return apply
+
+    def replace_shell(candidate: dict[str, Any]) -> None:
+        candidate["defaults"] = {"run": {"shell": "true {0}"}}
+
+    # A condition that keeps the full-plan test can still be made false.
+    disabled = "needs.verification-plan.outputs.mode == 'full' && false"
+
     mutations: list[tuple[str, WorkflowMutation]] = [
         (
             "missing merge group trigger",
@@ -2463,8 +2563,50 @@ def _queue_binding_mutations() -> list[tuple[str, WorkflowMutation]]:
                 if step.get("name") == "Validate documentation-only change"
             )["env"].update({"HEAD_SHA": "${{ github.event.pull_request.head.sha }}"}),
         ),
+        job(
+            "Ubuntu disables its verification",
+            "compatibility",
+            lambda j: named(j, "Run repository verification").update({"if": disabled}),
+        ),
+        job(
+            "Ubuntu replaces its verification",
+            "compatibility",
+            lambda j: named(j, "Run repository verification").update({"run": "true"}),
+        ),
+        job("Ubuntu replaces the shell", "compatibility", replace_shell),
+        job(
+            "browser suites accept a skipped planner",
+            "browser-suites",
+            lambda j: j["steps"][0].update({"run": "exit 0"}),
+        ),
+        job(
+            "browser suites disable the golden path",
+            "browser-suites",
+            lambda j: named(j, "Run browser golden path").update({"if": disabled}),
+        ),
+        job(
+            "browser suites replace the golden path",
+            "browser-suites",
+            lambda j: named(j, "Run browser golden path").update({"run": "true"}),
+        ),
+        job(
+            "browser suites drop a suite",
+            "browser-suites",
+            without("Certify surfaces that need a managed media engine"),
+        ),
+        job(
+            "browser suites skip the build",
+            "browser-suites",
+            without("Build the production web client"),
+        ),
+        job("browser suites replace the shell", "browser-suites", replace_shell),
+        job(
+            "browser suites leave the hosted image",
+            "browser-suites",
+            lambda j: j.update({"runs-on": "self-hosted"}),
+        ),
     ]
-    for key in ("verification-plan", "compatibility", "windows-compatibility"):
+    for key in ("verification-plan", "compatibility", "browser-suites", "windows-compatibility"):
         mutations.extend(
             [
                 job(
@@ -2487,7 +2629,9 @@ def _queue_binding_mutations() -> list[tuple[str, WorkflowMutation]]:
     return mutations
 
 
-@pytest.mark.parametrize("job_key", ["verification-plan", "compatibility", "windows-compatibility"])
+@pytest.mark.parametrize(
+    "job_key", ["verification-plan", "compatibility", "browser-suites", "windows-compatibility"]
+)
 def test_workflow_policy_rejects_pull_request_merge_ref(job_key: str) -> None:
     namespace = _workflow_namespace()
     path, content, workflow = _shipped_ci()
@@ -2543,7 +2687,7 @@ def test_workflow_policy_refuses_every_recorded_production_drift() -> None:
     # Pinned exactly, so a case cannot be dropped while the suite stays green.
     # The gate requires at least 77 production-entry mutations; the extra
     # cases are neighbours of accepted drifts that cost nothing to keep.
-    assert len(tree_cases) + len(text_cases) == 101
+    assert len(tree_cases) + len(text_cases) == 103
     assert len(tree_cases) + len(text_cases) >= 77
 
     accepted: list[str] = []
@@ -2604,7 +2748,7 @@ def test_exact_comparator_refuses_every_equal_but_differently_typed_value() -> N
     assert exactly_equal([1, "a", True], [1, "a", True])
 
 
-@pytest.mark.parametrize("surface", ["verification", "merge-gate"])
+@pytest.mark.parametrize("surface", ["verification", "browser", "merge-gate"])
 def test_invalid_workflow_does_not_execute_the_merge_decision(
     monkeypatch: pytest.MonkeyPatch, surface: str
 ) -> None:
@@ -2612,6 +2756,8 @@ def test_invalid_workflow_does_not_execute_the_merge_decision(
     path, content, workflow = _shipped_ci()
     if surface == "verification":
         workflow["jobs"]["windows-compatibility"]["continue-on-error"] = True
+    elif surface == "browser":
+        workflow["jobs"]["browser-suites"]["continue-on-error"] = True
     else:
         workflow["jobs"]["merge-gate"]["continue-on-error"] = True
 

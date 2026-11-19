@@ -56,6 +56,7 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
     head = environment.get("HEAD_SHA", "")
     plan = environment.get("PLAN", "")
     ubuntu = environment.get("UBUNTU", "")
+    browser_suites = environment.get("BROWSER_SUITES", "")
     windows = environment.get("WINDOWS", "")
     windows_required = environment.get("WINDOWS_REQUIRED", "")
     base_changed = environment.get("BASE_CHANGED", "")
@@ -63,7 +64,7 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
 
     log.append(f"action={action} draft={draft} head={head}")
     log.append(
-        f"plan={plan} ubuntu={ubuntu} windows={windows} "
+        f"plan={plan} ubuntu={ubuntu} browser_suites={browser_suites} windows={windows} "
         f"windows_required={windows_required} base_changed={base_changed}"
     )
 
@@ -140,6 +141,7 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
             ("WINDOWS_REQUIRED", windows_required, BOOLEANS),
             ("PLAN", plan, RESULTS),
             ("UBUNTU", ubuntu, RESULTS),
+            ("BROWSER_SUITES", browser_suites, RESULTS),
             ("WINDOWS", windows, RESULTS),
         )
         if value not in domain
@@ -157,6 +159,17 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
 
     if ubuntu != SUCCESS:
         log.append(f"Ubuntu compatibility did not succeed for {head} (result: {ubuntu}).")
+        log.append("A skipped or cancelled job is not a passing one.")
+        return 1
+
+    # The browser suites run in a job of their own beside Ubuntu compatibility.
+    # That job runs for every event this gate can authorize and the plan only
+    # decides which of its steps run, so there is no unrequired case: a skipped
+    # browser leg is a missing one.
+    if browser_suites != SUCCESS:
+        log.append(
+            f"The Ubuntu browser suites did not succeed for {head} (result: {browser_suites})."
+        )
         log.append("A skipped or cancelled job is not a passing one.")
         return 1
 
