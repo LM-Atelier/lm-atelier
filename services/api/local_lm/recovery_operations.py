@@ -15,6 +15,7 @@ from .recovery_previews import RecoveryPreviewConflict
 from .recovery_v1 import (
     RecoveryAction,
     RecoveryCommandV1,
+    RecoveryCountsV1,
     RecoveryItemV1,
     RecoveryKind,
     RecoveryResultV1,
@@ -91,6 +92,33 @@ def forget_recovery_labels(session: Session, item: RecoveryItem) -> None:
         record.preview_json = draft.model_copy(update={"impact_sha256": digest}).model_dump(
             mode="json"
         )
+
+
+def recorded_counts(session: Session, item: RecoveryItem) -> RecoveryCountsV1:
+    """Return the counts saved when the item was deleted, or zeros when that result is unusable."""
+    saved = session.scalars(
+        select(RecoveryOperation.response_json)
+        .where(
+            RecoveryOperation.deletion_id == item.deletion_id,
+            RecoveryOperation.kind == item.kind,
+            RecoveryOperation.subject_id == item.subject_id,
+            RecoveryOperation.action == RecoveryAction.TRASH.value,
+        )
+        .limit(2)
+    ).all()
+    if len(saved) != 1:
+        return RecoveryCountsV1()
+    try:
+        result = RecoveryItemV1.model_validate(saved[0])
+    except ValidationError:
+        return RecoveryCountsV1()
+    if (result.deletion_id, result.kind.value, result.subject_id) != (
+        item.deletion_id,
+        item.kind,
+        item.subject_id,
+    ):
+        return RecoveryCountsV1()
+    return result.counts
 
 
 def _request_digest(command: RecoveryCommandV1) -> str:

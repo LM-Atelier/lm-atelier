@@ -1,7 +1,7 @@
 export type RecoveryKind = "chat" | "project" | "media_library_entry" | "workflow_family";
 export type RecoveryState = "recoverable" | "restoring" | "purging" | "blocked" | "purged";
 export type RecoveryAction = "trash" | "restore" | "purge";
-export type RecoveryConflict = "original_project_missing" | "subject_missing" | "active_work" | "active_selection" | "record_changed";
+export type RecoveryConflict = "original_project_missing" | "subject_missing" | "active_work" | "active_selection" | "record_changed" | "too_large";
 
 export interface RecoveryCounts {
   chats: number;

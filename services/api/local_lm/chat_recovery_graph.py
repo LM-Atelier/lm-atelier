@@ -278,41 +278,86 @@ def _owned_jobs(
     return tuple(found)
 
 
+def _keeper(name: str, found: set[str]) -> Callable[[Mapping[str, Any]], dict[str, Any]]:
+    """Keep the owned columns later code reads, and collect the artifacts each row links."""
+    columns = _KEEP.get(name, ())
+
+    def keep(row: Mapping[str, Any]) -> dict[str, Any]:
+        found.update(_artifact_roots(name, row))
+        kept = {column: row[column] for column in columns}
+        if name == "jobs":
+            payload = _mapping(row["payload_json"])
+            kept["payload_json"] = {
+                key: payload[key] for key in ("chat_id", "source_run_id") if key in payload
+            }
+        return kept
+
+    return keep
+
+
+def _read_owned(
+    reader: _GraphReader, chat_id: str, found: set[str]
+) -> dict[str, tuple[Mapping[str, Any], ...]]:
+    """Read every row the conversation owns, refusing a table whose columns have changed."""
+    rows: dict[str, tuple[Mapping[str, Any], ...]] = {}
+    for name, predicate in CHAT_OWNER_SQL.items():
+        if ROW_COLUMNS[name] != tuple(Base.metadata.tables[name].columns.keys()):
+            raise ChatRecoveryGraphError()
+        rows[name] = reader.read(
+            name,
+            text(predicate.format(row=name, chat=":chat_id")),
+            {"chat_id": chat_id},
+            keep=_keeper(name, found),
+        )
+    if len(rows["chats"]) != 1:
+        raise ChatRecoveryGraphError()
+    return rows
+
+
+def _owned_snapshot(
+    rows: Mapping[str, tuple[Mapping[str, Any], ...]],
+    fingerprint: str,
+    *,
+    artifacts: int,
+    retained_bytes: int,
+) -> RecoverySnapshot:
+    """Count the owned rows and their unfinished work beside the given media totals."""
+    active_work = len(rows["turn_creation_claims"])
+    for name in ("messages", "response_revisions", "runs", "work_plans", "work_steps", "jobs"):
+        terminal = _TERMINAL | {"partial"} if name == "work_plans" else _TERMINAL
+        active_work += sum(
+            row["status"] not in terminal or (name == "jobs" and row["claim_owner"] is not None)
+            for row in rows[name]
+        )
+    counts = RecoveryCountsV1(
+        messages=len(rows["messages"]),
+        message_parts=len(rows["message_parts"]),
+        response_revisions=len(rows["response_revisions"]),
+        runs=len(rows["runs"]),
+        jobs=len(rows["jobs"]),
+        work_plans=len(rows["work_plans"]),
+        references=len(rows["message_references"]),
+        artifacts=artifacts,
+        active_work=active_work,
+        retained_bytes=retained_bytes,
+        # Every counted byte is still referenced by this canonical graph.
+        reclaimable_bytes=0,
+    )
+    return RecoverySnapshot(
+        fingerprint=fingerprint,
+        counts=counts,
+        conflicts=(RecoveryConflict.ACTIVE_WORK,) if active_work else (),
+    )
+
+
 def inspect_chat_recovery_graph(session: Session, chat_id: str) -> ChatRecoveryGraph:
     """Read a bounded graph; its caller reserves the writer before using the result."""
 
     reader = _GraphReader(session)
-    rows: dict[str, tuple[Mapping[str, Any], ...]] = {}
     found: set[str] = set()
-
-    def keeper(name: str) -> Callable[[Mapping[str, Any]], dict[str, Any]]:
-        columns = _KEEP.get(name, ())
-
-        def keep(row: Mapping[str, Any]) -> dict[str, Any]:
-            found.update(_artifact_roots(name, row))
-            kept = {column: row[column] for column in columns}
-            if name == "jobs":
-                payload = _mapping(row["payload_json"])
-                kept["payload_json"] = {
-                    key: payload[key] for key in ("chat_id", "source_run_id") if key in payload
-                }
-            return kept
-
-        return keep
-
     with session.no_autoflush:
         try:
-            for name, predicate in CHAT_OWNER_SQL.items():
-                if ROW_COLUMNS[name] != tuple(Base.metadata.tables[name].columns.keys()):
-                    raise ChatRecoveryGraphError()
-                rows[name] = reader.read(
-                    name,
-                    text(predicate.format(row=name, chat=":chat_id")),
-                    {"chat_id": chat_id},
-                    keep=keeper(name),
-                )
-            if len(rows["chats"]) != 1:
-                raise ChatRecoveryGraphError()
+            rows = _read_owned(reader, chat_id, found)
             trashed = reader.read(
                 "recovery_items",
                 (RecoveryItem.kind == "chat") & (RecoveryItem.subject_id == chat_id),
@@ -357,34 +402,45 @@ def inspect_chat_recovery_graph(session: Session, chat_id: str) -> ChatRecoveryG
         # schema growth, so one already in Recently Deleted can still be listed and purged.
         if not trashed and not reader.leaves_room():
             raise ChatRecoveryGraphTooLarge()
-        active_work = len(rows["turn_creation_claims"])
-        for name in ("messages", "response_revisions", "runs", "work_plans", "work_steps", "jobs"):
-            terminal = _TERMINAL | {"partial"} if name == "work_plans" else _TERMINAL
-            active_work += sum(
-                row["status"] not in terminal or (name == "jobs" and row["claim_owner"] is not None)
-                for row in rows[name]
-            )
-        counts = RecoveryCountsV1(
-            messages=len(rows["messages"]),
-            message_parts=len(rows["message_parts"]),
-            response_revisions=len(rows["response_revisions"]),
-            runs=len(rows["runs"]),
-            jobs=len(rows["jobs"]),
-            work_plans=len(rows["work_plans"]),
-            references=len(rows["message_references"]),
-            artifacts=len(visited),
-            active_work=active_work,
-            retained_bytes=retained_bytes,
-            # Every counted byte is still referenced by this canonical graph.
-            reclaimable_bytes=0,
-        )
         return ChatRecoveryGraph(
-            snapshot=RecoverySnapshot(
-                fingerprint=reader.digest.hexdigest(),
-                counts=counts,
-                conflicts=(RecoveryConflict.ACTIVE_WORK,) if active_work else (),
+            snapshot=_owned_snapshot(
+                rows,
+                reader.digest.hexdigest(),
+                artifacts=len(visited),
+                retained_bytes=retained_bytes,
             ),
             owned_job_ids=owned_jobs,
             artifact_ids=frozenset(visited),
             rows=rows,
         )
+
+
+def inspect_chat_purge_graph(session: Session, chat_id: str) -> ChatRecoveryGraph:
+    """Read only what purging a deleted conversation uses; deletion fixes how many rows that is.
+
+    Its own rows, its deletion record and its jobs' parents are read with the same checks as the
+    whole graph, so purge deletes the same jobs and chooses the same media from either.
+    """
+
+    reader = _GraphReader(session)
+    with session.no_autoflush:
+        try:
+            rows = _read_owned(reader, chat_id, set())
+            trashed = reader.read(
+                "recovery_items",
+                (RecoveryItem.kind == "chat") & (RecoveryItem.subject_id == chat_id),
+            )
+            if len(trashed) != 1:
+                raise ChatRecoveryGraphError()
+            owned_jobs = _owned_jobs(reader, chat_id, rows)
+        except ArtifactReferenceDataError:
+            raise ChatRecoveryGraphError() from None
+    # Its own domain: a preview taken from one read never verifies against the other.
+    fingerprint = hashlib.sha256(b"chat-recovery-purge-v1\0" + reader.digest.digest()).hexdigest()
+    return ChatRecoveryGraph(
+        snapshot=_owned_snapshot(rows, fingerprint, artifacts=0, retained_bytes=0),
+        owned_job_ids=owned_jobs,
+        # No artifact is read: release finds generated media through the kept part columns.
+        artifact_ids=frozenset(),
+        rows=rows,
+    )

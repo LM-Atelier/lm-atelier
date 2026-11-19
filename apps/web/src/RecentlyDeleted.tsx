@@ -139,6 +139,7 @@ export function RecentlyDeleted() {
     <div className="backup-list">
       {items.map((item) => {
         const recoverable = item.state === "recoverable";
+        const tooLarge = item.restore_conflicts.includes("too_large");
         const expired = new Date(item.purge_after).getTime() <= now;
         const checked = batch.selected.some(value => value.deletion_id === item.deletion_id);
         const cannotSelect = locked || !recoverable || (!checked && batch.selected.length >= 20);
@@ -151,11 +152,12 @@ export function RecentlyDeleted() {
             <small>Deleted <time dateTime={item.deleted_at}>{dateText(item.deleted_at)}</time></small>
             <small>{expired ? "Recovery ended" : "Recover until"} <time dateTime={item.purge_after}>{dateText(item.purge_after)}</time></small>
             <ImpactDetails counts={item.counts} kind={item.kind} />
+            {tooLarge && <p className="muted">This chat is too large to check, so it cannot be restored. You can still delete it permanently.</p>}
           </div>
           <div className="row-actions">
-            <button className="secondary compact-button" aria-disabled={locked || !recoverable || expired}
+            <button className="secondary compact-button" aria-disabled={locked || !recoverable || expired || tooLarge}
               aria-label={`Restore ${item.display_label}`}
-              onClick={() => { if (!locked && recoverable && !expired) choose(item, "restore"); }}>Restore</button>
+              onClick={() => { if (!locked && recoverable && !expired && !tooLarge) choose(item, "restore"); }}>Restore</button>
             <button className="secondary compact-button danger" aria-disabled={locked || !recoverable}
               aria-label={`Permanently delete ${item.display_label}`}
               onClick={() => { if (!locked && recoverable) choose(item, "purge"); }}>Permanently delete</button>
