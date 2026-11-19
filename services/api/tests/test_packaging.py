@@ -2455,6 +2455,286 @@ def _policy_mutations() -> list[tuple[str, WorkflowMutation]]:
     ]
 
 
+def _run_environment_mutations() -> list[tuple[str, WorkflowMutation, str]]:
+    """Drifts that change how verification runs, each with the refusal that reports it.
+
+    Most leave the verifying steps as they are and act on them from outside: a
+    workflow or job setting, a job environment, another job, or an earlier
+    step that changes what later ones run. Naming the expected message keeps a
+    case from passing on a neighbouring rule's refusal.
+    """
+
+    def job(workflow: dict[str | bool, Any], key: str) -> dict[str, Any]:
+        found = workflow["jobs"][key]
+        assert isinstance(found, dict)
+        return found
+
+    def step(workflow: dict[str | bool, Any], key: str, name: str) -> dict[str, Any]:
+        found = next(item for item in job(workflow, key)["steps"] if item.get("name") == name)
+        assert isinstance(found, dict)
+        return found
+
+    def append_to_run(key: str, name: str, line: str) -> WorkflowMutation:
+        def apply(content: str, workflow: dict[str | bool, Any]) -> None:
+            target = step(workflow, key, name)
+            target["run"] = target["run"] + line + "\n"
+
+        return apply
+
+    def turn_on_workflow_commands(content: str, workflow: dict[str | bool, Any]) -> None:
+        target = step(workflow, "compatibility", install)
+        target["env"] = {"ACTIONS_ALLOW_UNSECURE_COMMANDS": "true"}
+        target["run"] = target["run"] + 'echo "::set-env name=BASH_ENV::$RUNNER_TEMP/skip.sh"\n'
+
+    def verify_windows_twice(content: str, workflow: dict[str | bool, Any]) -> None:
+        verification = step(workflow, "windows-compatibility", "Run repository verification")
+        job(workflow, "windows-compatibility")["steps"].append(dict(verification))
+
+    shell = {"run": {"shell": "true {0}"}}
+    keys = "must declare exactly the top-level keys"
+    install = "Install verification dependencies"
+    finish_ffmpeg = "Finish installing ffmpeg for media pipeline tests"
+    windows_verification = "windows-compatibility must run the repository verification exactly once"
+    impersonator = {
+        "name": "Merge gate",
+        "if": "always()",
+        "needs": "merge-gate",
+        "runs-on": "ubuntu-24.04",
+        "timeout-minutes": 5,
+        "steps": [{"run": "exit 0"}],
+    }
+    return [
+        (
+            "workflow-level default shell",
+            lambda content, workflow: workflow.update({"defaults": shell}),
+            "must not set workflow-level defaults",
+        ),
+        (
+            "workflow-level env",
+            lambda content, workflow: workflow.update({"env": {"BASH_ENV": "scripts/env.sh"}}),
+            "must not set a workflow-level env",
+        ),
+        (
+            "extra top-level key",
+            lambda content, workflow: workflow.update({"run-name": "CI"}),
+            keys,
+        ),
+        ("missing top-level name", lambda content, workflow: workflow.pop("name"), keys),
+        (
+            "Ubuntu sources a file before each step",
+            lambda content, workflow: job(workflow, "compatibility")["env"].update(
+                {"BASH_ENV": "scripts/env.sh"}
+            ),
+            "compatibility job env must be exactly",
+        ),
+        (
+            "Ubuntu repoints its environment",
+            lambda content, workflow: job(workflow, "compatibility")["env"].update(
+                {"UV_PROJECT_ENVIRONMENT": "${{ github.workspace }}/tools/venv"}
+            ),
+            "compatibility job env must be exactly",
+        ),
+        (
+            "browser suites replace the npm script shell",
+            lambda content, workflow: job(workflow, "browser-suites")["env"].update(
+                {"npm_config_script_shell": "true"}
+            ),
+            "browser-suites job env must be exactly",
+        ),
+        (
+            "Windows loads a profile from the checkout",
+            lambda content, workflow: job(workflow, "windows-compatibility")["env"].update(
+                {"USERPROFILE": "${{ github.workspace }}/tools"}
+            ),
+            "windows-compatibility job env must be exactly",
+        ),
+        (
+            "planner sources a file before its step",
+            lambda content, workflow: job(workflow, "verification-plan").update(
+                {"env": {"BASH_ENV": "scripts/env.sh"}}
+            ),
+            "verification-plan must declare exactly",
+        ),
+        (
+            "planner replaces the shell",
+            lambda content, workflow: job(workflow, "verification-plan").update(
+                {"defaults": shell}
+            ),
+            "verification-plan must declare exactly",
+        ),
+        (
+            "Windows replaces the shell",
+            lambda content, workflow: job(workflow, "windows-compatibility").update(
+                {"defaults": shell}
+            ),
+            "windows-compatibility must declare exactly",
+        ),
+        (
+            "planner leaves the hosted image",
+            lambda content, workflow: job(workflow, "verification-plan").update(
+                {"runs-on": "self-hosted"}
+            ),
+            "verification-plan must run on 'ubuntu-24.04'",
+        ),
+        (
+            "Windows leaves the hosted image",
+            lambda content, workflow: job(workflow, "windows-compatibility").update(
+                {"runs-on": "self-hosted"}
+            ),
+            "windows-compatibility must run on 'windows-2025'",
+        ),
+        (
+            "Windows replaces its verification",
+            lambda content, workflow: step(
+                workflow, "windows-compatibility", "Run repository verification"
+            ).update({"run": "exit 0"}),
+            windows_verification,
+        ),
+        (
+            "Windows verification made conditional",
+            lambda content, workflow: step(
+                workflow, "windows-compatibility", "Run repository verification"
+            ).update({"if": "false"}),
+            windows_verification,
+        ),
+        ("Windows verification runs twice", verify_windows_twice, windows_verification),
+        (
+            "Ubuntu verification chooses its own shell",
+            lambda content, workflow: step(
+                workflow, "compatibility", "Run repository verification"
+            ).update({"shell": "true {0}"}),
+            "compatibility must run the repository verification exactly once",
+        ),
+        (
+            "browser golden path sets its own env",
+            lambda content, workflow: step(
+                workflow, "browser-suites", "Run browser golden path"
+            ).update({"env": {"CI": "false"}}),
+            "browser-suites must build the web client and run every browser suite",
+        ),
+        (
+            "Ubuntu leaves the hosted image",
+            lambda content, workflow: job(workflow, "compatibility").update(
+                {"runs-on": "self-hosted"}
+            ),
+            "compatibility must run on 'ubuntu-24.04'",
+        ),
+        (
+            "planner runs on an ARM image",
+            lambda content, workflow: job(workflow, "verification-plan").update(
+                {"runs-on": "ubuntu-24.04-arm"}
+            ),
+            "verification-plan must run on 'ubuntu-24.04'",
+        ),
+        (
+            "planner runs on a list of labels",
+            lambda content, workflow: job(workflow, "verification-plan").update(
+                {"runs-on": ["ubuntu-24.04"]}
+            ),
+            "verification-plan must run on 'ubuntu-24.04'",
+        ),
+        (
+            "Ubuntu adds a variable no list of dangerous names holds",
+            lambda content, workflow: job(workflow, "compatibility")["env"].update(
+                {"LOCAL_LM_FAST_TESTS": "1"}
+            ),
+            "compatibility job env must be exactly",
+        ),
+        (
+            "Windows declares a container",
+            lambda content, workflow: job(workflow, "windows-compatibility").update(
+                {"container": "mcr.microsoft.com/windows/servercore:ltsc2025"}
+            ),
+            "windows-compatibility must declare exactly",
+        ),
+        (
+            "Windows drops its time limit",
+            lambda content, workflow: job(workflow, "windows-compatibility").pop("timeout-minutes"),
+            "missing=['timeout-minutes']",
+        ),
+        (
+            "Ubuntu runs a local action",
+            lambda content, workflow: job(workflow, "compatibility")["steps"].insert(
+                2, {"uses": "./.github/actions/prepare"}
+            ),
+            "compatibility step 3 ('./.github/actions/prepare') is not the step pinned there",
+        ),
+        (
+            "browser suites run a local action",
+            lambda content, workflow: job(workflow, "browser-suites")["steps"].insert(
+                2, {"uses": "./.github/actions/prepare"}
+            ),
+            "browser-suites step 3 ('./.github/actions/prepare') is not the step pinned there",
+        ),
+        (
+            "Windows runs a local action spelled with a backslash",
+            lambda content, workflow: job(workflow, "windows-compatibility")["steps"].insert(
+                4, {"name": "Prepare the toolchain", "uses": ".\\.github\\actions\\prepare"}
+            ),
+            "windows-compatibility step 5 ('Prepare the toolchain') is not the step pinned there",
+        ),
+        (
+            "Ubuntu step sets the environment of later steps",
+            append_to_run(
+                "compatibility", install, 'echo "BASH_ENV=$RUNNER_TEMP/skip.sh" >> "$GITHUB_ENV"'
+            ),
+            "compatibility step 8 ('Install verification dependencies') is not the step pinned",
+        ),
+        (
+            "Ubuntu step writes the environment file through the github context",
+            append_to_run(
+                "compatibility",
+                install,
+                'echo "BASH_ENV=$RUNNER_TEMP/skip.sh" >> "${{ github.env }}"',
+            ),
+            "compatibility step 8 ('Install verification dependencies') is not the step pinned",
+        ),
+        (
+            "Ubuntu step turns on the workflow commands that set the environment",
+            turn_on_workflow_commands,
+            "compatibility step 8 ('Install verification dependencies') is not the step pinned",
+        ),
+        (
+            "Ubuntu step edits the verification script",
+            append_to_run(
+                "compatibility", finish_ffmpeg, "sed -i 's/exit 1/exit 0/' scripts/verify.sh"
+            ),
+            f"compatibility step 10 ('{finish_ffmpeg}') is not the step pinned there",
+        ),
+        (
+            "Windows step prepends a folder to later steps' PATH",
+            append_to_run("windows-compatibility", install, '"$PWD\\tools" >> $env:GITHUB_PATH'),
+            "windows-compatibility step 5 ('Install verification dependencies') is not the step",
+        ),
+        (
+            "browser suites write the npm configuration through setup-node",
+            lambda content, workflow: job(workflow, "browser-suites")["steps"][2]["with"].update(
+                {"registry-url": "https://registry.npmjs.org/\nscript-shell=/bin/true"}
+            ),
+            "browser-suites step 3 ('actions/setup-node@",
+        ),
+        (
+            "quoted on beside the parsed one",
+            lambda content, workflow: workflow.update({"on": _triggers(workflow)}),
+            keys,
+        ),
+        (
+            "another job reports the merge gate's name",
+            lambda content, workflow: workflow["jobs"].update(
+                {"merge-confirmation": dict(impersonator)}
+            ),
+            "ci.yml must run exactly the jobs",
+        ),
+        (
+            "the scheduled audit reports a required check's name",
+            lambda content, workflow: job(workflow, "scheduled-audit").update(
+                {"name": "Ubuntu compatibility"}
+            ),
+            "ci.yml must run exactly the jobs",
+        ),
+    ]
+
+
 def _content_mutations() -> list[tuple[str, str, str]]:
     """Text-level drifts, since two validators read the file rather than the tree."""
     return [
@@ -2662,7 +2942,12 @@ def test_workflow_policy_rejects_merge_group_binding_drift() -> None:
 
 
 def _all_workflow_mutations() -> list[tuple[str, WorkflowMutation]]:
-    return _job_mutations() + _trigger_mutations() + _policy_mutations()
+    return (
+        _job_mutations()
+        + _trigger_mutations()
+        + _policy_mutations()
+        + [(label, mutate) for label, mutate, _ in _run_environment_mutations()]
+    )
 
 
 def test_workflow_policy_refuses_every_recorded_production_drift() -> None:
@@ -2687,7 +2972,7 @@ def test_workflow_policy_refuses_every_recorded_production_drift() -> None:
     # Pinned exactly, so a case cannot be dropped while the suite stays green.
     # The gate requires at least 77 production-entry mutations; the extra
     # cases are neighbours of accepted drifts that cost nothing to keep.
-    assert len(tree_cases) + len(text_cases) == 103
+    assert len(tree_cases) + len(text_cases) == 139
     assert len(tree_cases) + len(text_cases) >= 77
 
     accepted: list[str] = []
@@ -2703,6 +2988,25 @@ def test_workflow_policy_refuses_every_recorded_production_drift() -> None:
         if not validate_document(named, mutated, workflow):
             accepted.append(label)
     assert not accepted, f"workflow policy accepted: {accepted}"
+
+
+def test_workflow_policy_names_each_change_to_how_verification_runs() -> None:
+    """Each drift is refused by its own rule, not only by some neighbour."""
+
+    namespace = _workflow_namespace()
+    validate_document = namespace["validate_workflow_document"]
+    assert callable(validate_document)
+    named, content, shipped = _shipped_ci()
+    assert validate_document(named, content, shipped) == []
+
+    misreported = []
+    for label, mutate, expected in _run_environment_mutations():
+        workflow = yaml.safe_load(content)
+        mutate(content, workflow)
+        errors = validate_document(named, content, workflow)
+        if not any(expected in error for error in errors):
+            misreported.append((label, errors))
+    assert not misreported, misreported
 
 
 def test_exact_comparator_refuses_every_equal_but_differently_typed_value() -> None:
@@ -2834,6 +3138,7 @@ def test_workflow_validator_wiring_is_intact() -> None:
             "validate_environment_contexts",
             "validate_untrusted_triggers",
             "validate_pull_request_triggers",
+            "validate_workflow_keys",
             "validate_merge_gate",
             "validate_verification_bindings",
         )
@@ -2849,6 +3154,7 @@ def test_workflow_validator_wiring_is_intact() -> None:
         "validate_environment_contexts",
         "validate_untrusted_triggers",
         "validate_pull_request_triggers",
+        "validate_workflow_keys",
         "validate_merge_gate",
         "validate_verification_bindings",
     ):

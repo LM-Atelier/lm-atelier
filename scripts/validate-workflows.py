@@ -1261,12 +1261,255 @@ BROWSER_SUITE_STEPS = (
         "run": "npm run e2e:managed-media:run",
     },
 )
-# The keys either Ubuntu job may declare. `defaults`, `container`, `services`
-# and `strategy` each change what a step runs without touching the step, so a
-# job is refused for declaring any key beyond these.
+# The Windows job runs its whole verification in one step. That step is pinned
+# like the Ubuntu one, so it cannot be replaced or made conditional.
+WINDOWS_VERIFICATION_STEP = {
+    "name": "Run repository verification",
+    "run": ".\\scripts\\verify.ps1",
+}
+# The keys the Ubuntu and Windows verification jobs declare, no more and no
+# fewer. `defaults`, `container`, `services` and `strategy` each change what a
+# step runs without touching the step, so a job is refused for declaring any
+# key beyond these, and for leaving one out. The planner declares outputs
+# instead of env and needs: its outputs decide how much the other jobs verify.
 VERIFICATION_JOB_KEYS = frozenset(
     {"name", "needs", "if", "runs-on", "timeout-minutes", "env", "steps"}
 )
+PLAN_JOB_KEYS = frozenset({"name", "if", "runs-on", "timeout-minutes", "outputs", "steps"})
+VERIFICATION_RUNNERS = {
+    "verification-plan": "ubuntu-24.04",
+    "compatibility": "ubuntu-24.04",
+    "browser-suites": "ubuntu-24.04",
+    "windows-compatibility": "windows-2025",
+}
+# A job's env reaches every step in it, the pinned ones included, and many
+# variables change what a step runs: BASH_ENV runs a file before each bash
+# step, PYTEST_ADDOPTS can make the suite only collect, and an npm script shell
+# can make every `npm run` succeed. A list of dangerous names would always be
+# missing one, so the whole mapping is pinned.
+VERIFICATION_ENV = {
+    "LOCAL_LM_DATA_DIR": "${{ github.workspace }}/temp/local-lm-tests",
+    "UV_PROJECT_ENVIRONMENT": "${{ github.workspace }}/.venv",
+}
+VERIFICATION_CHECKOUT = {
+    "uses": f"{MERGE_GATE_SETUP[0]['action']}@{MERGE_GATE_SETUP[0]['ref']}",
+    "with": {
+        "ref": VERIFICATION_REF,
+        "fetch-depth": 0,
+        "persist-credentials": False,
+    },
+}
+# The toolchain steps every job that verifies runs. Their inputs are pinned with
+# them: setup-node writes a registry setting into the npm configuration later
+# steps read, and setup-uv can put a folder at the front of their PATH.
+TOOLCHAIN_STEPS = (
+    {
+        "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+        "with": {"node-version": 22, "cache": "npm"},
+    },
+    {
+        "uses": f"{MERGE_GATE_SETUP[1]['action']}@{MERGE_GATE_SETUP[1]['ref']}",
+        "with": {"python-version": "3.12"},
+    },
+    {
+        "uses": "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d",
+        "with": {
+            "version": "0.11.18",
+            "enable-cache": True,
+            "cache-dependency-glob": "services/api/uv.lock",
+        },
+    },
+)
+FFMPEG_START_SCRIPT = (
+    'exec 9> "$RUNNER_TEMP/ffmpeg-install.lock"\n'
+    "flock 9\n"
+    "(\n"
+    "  set +e\n"
+    "  {\n"
+    "    date -u '+%H:%M:%S refreshing the package index'\n"
+    "    sudo apt-get update &&\n"
+    "      date -u '+%H:%M:%S installing ffmpeg' &&\n"
+    "      sudo apt-get install --yes --no-install-recommends ffmpeg\n"
+    "  } 9>&-\n"
+    "  status=$?\n"
+    "  date -u '+%H:%M:%S finished'\n"
+    '  echo "$status" > "$RUNNER_TEMP/ffmpeg-install.status"\n'
+    ') < /dev/null > "$RUNNER_TEMP/ffmpeg-install.log" 2>&1 &'
+)
+SECRET_SCAN_SCRIPT = (
+    "set -euo pipefail\n"
+    'version="8.30.1"\n'
+    'archive_name="gitleaks_${version}_linux_x64.tar.gz"\n'
+    'archive="$RUNNER_TEMP/$archive_name"\n'
+    "expected_hash=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb\n"
+    "curl --fail --location --proto '=https' --tlsv1.2 \\\n"
+    '  --output "$archive" \\\n'
+    '  "https://github.com/gitleaks/gitleaks/releases/download/v$version/$archive_name"\n'
+    'echo "$expected_hash  $archive" | sha256sum --check --strict\n'
+    'tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks\n'
+    "# -v prints RuleID, File and Line for each finding. Without it the\n"
+    '# step fails with only "leaks found: 1" and names nothing, so a\n'
+    "# refusal on a false positive costs a person a manual bisect. Secret\n"
+    "# and Match stay redacted, so nothing candidate-secret reaches a\n"
+    "# public log.\n"
+    '"$RUNNER_TEMP/gitleaks" git . --redact -v'
+)
+FFMPEG_FINISH_SCRIPT = (
+    'flock "$RUNNER_TEMP/ffmpeg-install.lock" true\n'
+    'cat "$RUNNER_TEMP/ffmpeg-install.log"\n'
+    'test "$(cat "$RUNNER_TEMP/ffmpeg-install.status" 2> /dev/null)" = 0\n'
+    "ffmpeg -version\n"
+    "ffprobe -version"
+)
+WINDOWS_FFMPEG_SCRIPT = (
+    "# The community feed returns 503 and 504 often enough to fail runs\n"
+    "# on its own. The pinned version is what matters; how many attempts\n"
+    "# it took to fetch it does not.\n"
+    "#\n"
+    "# The budget is deliberate rather than arbitrary. Four attempts with\n"
+    "# linear backoff covered ninety seconds, and on 2026-09-10 an outage\n"
+    "# outlasted it: every attempt failed inside 105 seconds, the step\n"
+    "# never reached the verification script, and a merge-group run was\n"
+    "# dequeued without a single test having run. These waits cover about\n"
+    "# seven minutes, which is an order of magnitude more outage for a\n"
+    "# cost paid only when the feed is actually down.\n"
+    "#\n"
+    "# Waiting is the right answer here rather than making the install\n"
+    "# optional: three tests in test_integrated_hardening.py drive the\n"
+    "# real video path and FAIL, not skip, without a working ffmpeg.\n"
+    "$waits = @(15, 30, 60, 120, 180)\n"
+    "$attempt = 0\n"
+    "while ($true) {\n"
+    "  $attempt++\n"
+    "  choco install ffmpeg --version 8.1.2 --yes --no-progress\n"
+    "  if ($LASTEXITCODE -eq 0) { break }\n"
+    "  if ($attempt -gt $waits.Length) {"
+    ' throw "choco install ffmpeg failed after $attempt attempts." }\n'
+    "  $wait = $waits[$attempt - 1]\n"
+    '  Write-Host "Attempt $attempt failed; retrying in ${wait}s."\n'
+    "  Start-Sleep -Seconds $wait\n"
+    "}"
+)
+# Every step of the three jobs that verify a head, in order and whole. Any step
+# can change the steps after it, without touching them: it can append to the
+# files GitHub reads environment variables and PATH entries from, turn on the
+# workflow commands that do the same, put another tool first on PATH, edit a
+# script the verification runs, or check out a different tree. A rule about one
+# of those spellings would miss the next, so no step of these jobs is left
+# free, and changing one means changing this file. The planner's two steps and
+# the merge gate's three are pinned the same way.
+VERIFICATION_STEPS: dict[str, tuple[dict[str, Any], ...]] = {
+    "compatibility": (
+        REQUIRED_PLAN_STEP,
+        {
+            "name": "Start installing ffmpeg for media pipeline tests",
+            "if": FULL_PLAN,
+            "run": FFMPEG_START_SCRIPT,
+        },
+        VERIFICATION_CHECKOUT,
+        {
+            "name": "Scan reachable source history for secrets",
+            "if": FULL_PLAN,
+            "shell": "bash",
+            "run": SECRET_SCAN_SCRIPT,
+        },
+        *({**step, "if": FULL_PLAN} for step in TOOLCHAIN_STEPS),
+        {
+            "name": "Install verification dependencies",
+            "if": FULL_PLAN,
+            "run": (
+                "uv sync --project services/api --locked --python 3.12 \\\n"
+                "  --extra dev \\\n"
+                "  --extra package\n"
+                "npm ci"
+            ),
+        },
+        {
+            "name": "Audit locked dependencies",
+            "if": "needs.verification-plan.outputs.dependency_audit == 'true'",
+            "run": "npm audit --audit-level=high\n.venv/bin/python scripts/audit-dependencies.py",
+        },
+        {
+            "name": "Finish installing ffmpeg for media pipeline tests",
+            "if": FULL_PLAN,
+            "run": FFMPEG_FINISH_SCRIPT,
+        },
+        UBUNTU_VERIFICATION_STEP,
+        {
+            "name": "Validate documentation-only change",
+            "if": "needs.verification-plan.outputs.mode == 'documentation'",
+            "env": {"BASE_SHA": EVENT_BASE_SHA, "HEAD_SHA": EVENT_HEAD_SHA},
+            "run": (
+                "python3 scripts/check-repository-hygiene.py\n"
+                "git diff --check $BASE_SHA...$HEAD_SHA --"
+            ),
+        },
+        {
+            "name": "Confirm exact develop promotion",
+            "if": "needs.verification-plan.outputs.mode == 'promotion'",
+            "run": "echo Protected develop is ready for exact-tree promotion to main.",
+        },
+    ),
+    "browser-suites": (
+        REQUIRED_PLAN_STEP,
+        VERIFICATION_CHECKOUT,
+        *({**step, "if": FULL_PLAN} for step in TOOLCHAIN_STEPS),
+        *BROWSER_SUITE_STEPS,
+    ),
+    "windows-compatibility": (
+        VERIFICATION_CHECKOUT,
+        *TOOLCHAIN_STEPS,
+        {
+            "name": "Install verification dependencies",
+            "run": (
+                "uv sync --project services/api --locked --python 3.12"
+                " --extra dev --extra package\n"
+                "npm.cmd ci"
+            ),
+        },
+        {
+            "name": "Install ffmpeg for media pipeline tests",
+            "shell": "pwsh",
+            "run": WINDOWS_FFMPEG_SCRIPT,
+        },
+        WINDOWS_VERIFICATION_STEP,
+    ),
+}
+
+
+def step_list_problems(
+    path: Path, name: str, expected: tuple[dict[str, Any], ...], steps: list[dict[str, Any]]
+) -> list[str]:
+    """Refuse a step list that differs from the pinned one, naming the first difference."""
+
+    declared = [
+        {**step, "run": str(step["run"]).strip()} if "run" in step else step for step in steps
+    ]
+    if exactly_equal(list(expected), declared):
+        return []
+    # Not strict: when one list is a prefix of the other, the count below says so.
+    for index, (pinned, step) in enumerate(zip(expected, declared, strict=False), start=1):
+        if not exactly_equal(pinned, step):
+            label = step.get("name") or step.get("uses") or "unnamed"
+            return [f"{path}: {name} step {index} ({label!r}) is not the step pinned there"]
+    return [
+        f"{path}: {name} must run exactly its {len(expected)} pinned steps, found {len(declared)}"
+    ]
+
+
+def job_key_problems(
+    path: Path, name: str, job: dict[str, Any], expected: frozenset[str]
+) -> list[str]:
+    """Refuse a job that declares a key beyond the ones it needs, or leaves one out."""
+
+    if set(job) == expected:
+        return []
+    missing = sorted(expected - set(job))
+    unexpected = sorted(str(key) for key in set(job) - expected)
+    return [
+        f"{path}: {name} must declare exactly {sorted(expected)}; "
+        f"missing={missing} unexpected={unexpected}"
+    ]
 
 
 def validate_verification_bindings(path: Path, workflow: dict[str, Any]) -> list[str]:
@@ -1276,14 +1519,6 @@ def validate_verification_bindings(path: Path, workflow: dict[str, Any]) -> list
         return []
     problems: list[str] = []
     jobs = workflow.get("jobs") or {}
-    expected_checkout = {
-        "uses": f"{MERGE_GATE_SETUP[0]['action']}@{MERGE_GATE_SETUP[0]['ref']}",
-        "with": {
-            "ref": VERIFICATION_REF,
-            "fetch-depth": 0,
-            "persist-credentials": False,
-        },
-    }
     for name, condition, needs in (
         ("verification-plan", VERIFICATION_PLAN_CONDITION, None),
         ("compatibility", COMPATIBILITY_CONDITION, "verification-plan"),
@@ -1302,6 +1537,22 @@ def validate_verification_bindings(path: Path, workflow: dict[str, Any]) -> list
             problems.append(f"{path}: {name} must keep its event condition")
         if not exactly_equal(needs, job.get("needs")):
             problems.append(f"{path}: {name} must depend on its verification plan")
+        problems.extend(
+            job_key_problems(
+                path,
+                name,
+                job,
+                PLAN_JOB_KEYS if name == "verification-plan" else VERIFICATION_JOB_KEYS,
+            )
+        )
+        runner = VERIFICATION_RUNNERS[name]
+        if not exactly_equal(runner, job.get("runs-on")):
+            problems.append(f"{path}: {name} must run on {runner!r}, found {job.get('runs-on')!r}")
+        if name != "verification-plan" and not exactly_equal(VERIFICATION_ENV, job.get("env")):
+            problems.append(
+                f"{path}: {name} job env must be exactly {VERIFICATION_ENV}, "
+                f"found {job.get('env')!r}"
+            )
         steps = job.get("steps")
         if not isinstance(steps, list) or not all(isinstance(step, dict) for step in steps):
             problems.append(f"{path}: {name} steps must be a list of mappings")
@@ -1309,10 +1560,12 @@ def validate_verification_bindings(path: Path, workflow: dict[str, Any]) -> list
         checkouts = [
             step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@")
         ]
-        if not exactly_equal([expected_checkout], checkouts):
+        if not exactly_equal([VERIFICATION_CHECKOUT], checkouts):
             problems.append(f"{path}: {name} must check out the integration SHA exactly once")
         if "continue-on-error" in job or any("continue-on-error" in step for step in steps):
             problems.append(f"{path}: {name} must report verification failures")
+        if name in VERIFICATION_STEPS:
+            problems.extend(step_list_problems(path, name, VERIFICATION_STEPS[name], steps))
         if name == "verification-plan":
             expected_outputs = {
                 output: "${{ steps.plan.outputs." + output + " }}"
@@ -1322,24 +1575,25 @@ def validate_verification_bindings(path: Path, workflow: dict[str, Any]) -> list
             normalized = [
                 {**step, "run": step["run"].strip()} if "run" in step else step for step in steps
             ]
-            if not exactly_equal([expected_checkout, expected_plan], normalized):
+            if not exactly_equal([VERIFICATION_CHECKOUT, expected_plan], normalized):
                 problems.append(f"{path}: verification-plan must run the bound planner exactly")
             if not exactly_equal(expected_outputs, job.get("outputs")):
                 problems.append(f"{path}: verification-plan must publish all planner outputs")
+        elif name == "windows-compatibility":
+            commands = [
+                {**step, "run": str(step["run"]).strip()} for step in steps if "run" in step
+            ]
+            verifying = [
+                command for command in commands if exactly_equal(WINDOWS_VERIFICATION_STEP, command)
+            ]
+            if len(verifying) != 1:
+                problems.append(
+                    f"{path}: windows-compatibility must run the repository verification "
+                    "exactly once, as pinned"
+                )
         elif name in ("compatibility", "browser-suites"):
             if not steps or not exactly_equal(REQUIRED_PLAN_STEP, steps[0]):
                 problems.append(f"{path}: {name} must refuse an unsuccessful plan")
-            if set(job) != VERIFICATION_JOB_KEYS:
-                missing = sorted(VERIFICATION_JOB_KEYS - set(job))
-                unexpected = sorted(str(key) for key in set(job) - VERIFICATION_JOB_KEYS)
-                problems.append(
-                    f"{path}: {name} must declare exactly {sorted(VERIFICATION_JOB_KEYS)}; "
-                    f"missing={missing} unexpected={unexpected}"
-                )
-            if not exactly_equal("ubuntu-24.04", job.get("runs-on")):
-                problems.append(
-                    f"{path}: {name} must run on 'ubuntu-24.04', found {job.get('runs-on')!r}"
-                )
             commands = [
                 {**step, "run": str(step["run"]).strip()} for step in steps[1:] if "run" in step
             ]
@@ -1369,6 +1623,60 @@ def validate_verification_bindings(path: Path, workflow: dict[str, Any]) -> list
     return problems
 
 
+# The top-level keys ci.yml may declare. A workflow-level `defaults` sets the
+# shell and working directory of every run step that does not choose its own,
+# and a workflow-level `env` reaches every job, so either could make each
+# verification step exit 0 without changing one.
+CI_WORKFLOW_KEYS = frozenset({"name", "on", "permissions", "concurrency", "jobs"})
+# Every job ci.yml runs, by id and the name it reports. A required check is
+# matched by that name, so an added or renamed job could report one, and a
+# skipped job that reports it counts as satisfied.
+CI_JOBS = {
+    "verification-plan": "Select verification plan",
+    "compatibility": "Ubuntu compatibility",
+    "browser-suites": "Ubuntu browser suites",
+    "merge-gate": "Merge gate",
+    "windows-compatibility": "Windows compatibility",
+    "scheduled-audit": "Scheduled dependency audit",
+}
+
+
+def validate_workflow_keys(path: Path, workflow: dict[str, Any]) -> list[str]:
+    """Refuse ci.yml keys and jobs that change or impersonate verification."""
+
+    if path.name != "ci.yml":
+        return []
+    problems: list[str] = []
+    if "defaults" in workflow:
+        problems.append(
+            f"{path}: ci.yml must not set workflow-level defaults, which change the shell "
+            "and working directory of every run step that does not choose its own"
+        )
+    if "env" in workflow:
+        problems.append(
+            f"{path}: ci.yml must not set a workflow-level env, which reaches every job"
+        )
+    # `on` parses as True (see validate_pull_request_triggers), so the keys are
+    # read through a mapping that admits a key that is not a string. A list
+    # rather than a set, so a quoted "on" beside the parsed one is refused too.
+    keyed = cast("Mapping[object, Any]", workflow)
+    declared = sorted("on" if key is True else str(key) for key in keyed)
+    if declared != sorted(CI_WORKFLOW_KEYS):
+        problems.append(
+            f"{path}: ci.yml must declare exactly the top-level keys "
+            f"{sorted(CI_WORKFLOW_KEYS)}, found {declared}"
+        )
+    jobs = workflow.get("jobs")
+    reported = (
+        {str(key): job.get("name") if isinstance(job, dict) else None for key, job in jobs.items()}
+        if isinstance(jobs, dict)
+        else None
+    )
+    if not exactly_equal(CI_JOBS, reported):
+        problems.append(f"{path}: ci.yml must run exactly the jobs {CI_JOBS}, found {reported}")
+    return problems
+
+
 def validate_workflow_document(path: Path, content: str, workflow: dict[str, Any]) -> list[str]:
     """Every policy this repository applies to one workflow file.
 
@@ -1385,6 +1693,7 @@ def validate_workflow_document(path: Path, content: str, workflow: dict[str, Any
     errors.extend(validate_environment_contexts(path, workflow))
     errors.extend(validate_untrusted_triggers(path, content))
     errors.extend(validate_pull_request_triggers(path, workflow))
+    errors.extend(validate_workflow_keys(path, workflow))
     errors.extend(validate_verification_bindings(path, workflow))
     if errors:
         return errors
