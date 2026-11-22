@@ -290,6 +290,14 @@ class CatalogCacheStore:
         link before any byte is read. A link at the cache name is not an
         entry. A root that cannot be held is the same outcome as a missing
         file.
+
+        A window admits a file only while the file is younger than it, and the
+        freshness and stale windows share that rule. A file exactly as old as
+        its window has outlived it, so a window of zero or less admits nothing:
+        a zero freshness window always asks the source, and a zero stale window
+        serves no stale page. Admitting an age equal to the window served a
+        zero window's file whenever the read fell in the same clock tick as the
+        write, so whether the source was asked depended on timing.
         """
 
         self._require_cache_path(path)
@@ -306,8 +314,10 @@ class CatalogCacheStore:
                     return None
                 try:
                     if max_age_seconds is not None:
+                        # A file time ahead of the clock is no age rather than a
+                        # negative one, which even a zero window would admit.
                         age = max(0.0, self._now() - os.fstat(descriptor).st_mtime)
-                        if age > max_age_seconds:
+                        if age >= max_age_seconds:
                             return None
                     return _read_all(descriptor)
                 finally:
