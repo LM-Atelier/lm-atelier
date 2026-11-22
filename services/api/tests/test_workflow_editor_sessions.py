@@ -820,11 +820,185 @@ def test_concurrent_consume_and_cancel_allow_one_terminal_winner() -> None:
     assert manager.validated_return_count == (1 if "consumed" in results else 0)
 
 
+def test_an_open_editor_counts_only_while_its_window_reports_in() -> None:
+    manager, clock = _sessions(ttl=timedelta(minutes=30))
+    session = _start(manager)
+
+    # A session opened on the live launch counts at once.
+    assert manager.in_use("runtime_one") is True
+    clock.value += timedelta(seconds=181)
+    # Still within its lifetime, but nobody has reported the window open.
+    assert manager.active_count == 1
+    assert manager.in_use("runtime_one") is False
+
+    manager.heartbeat(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+    )
+    assert manager.in_use("runtime_one") is True
+    clock.value += timedelta(seconds=179)
+    assert manager.in_use("runtime_one") is True
+    clock.value += timedelta(seconds=1)
+    assert manager.in_use("runtime_one") is False
+
+    manager.heartbeat(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+    )
+    assert manager.in_use("runtime_one") is True
+    # A session needs only the launch it was opened on, and without a live
+    # launch there is nothing for it to hold.
+    assert manager.in_use("runtime_two") is False
+    assert manager.in_use(None) is False
+
+
+def test_a_report_never_extends_the_session() -> None:
+    manager, clock = _sessions(ttl=timedelta(minutes=10))
+    session = _start(manager)
+    expires_at = session.expires_at
+
+    clock.value += timedelta(minutes=9)
+    manager.heartbeat(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+    )
+    assert manager.in_use("runtime_one") is True
+
+    clock.value = expires_at
+    assert manager.in_use("runtime_one") is False
+    assert manager.active_count == 0
+    with pytest.raises(WorkflowEditorSessionError) as expired:
+        manager.heartbeat(
+            session_id=session.id,
+            nonce=session.nonce,
+            workflow_id=session.workflow_id,
+        )
+    assert expired.value.code == "workflow-editor-session-not-found"
+
+
+def test_a_report_is_authenticated_as_a_cancel_is() -> None:
+    manager, clock = _sessions()
+    session = _start(manager)
+    clock.value += timedelta(seconds=181)
+
+    refusals = {
+        "workflow-editor-session-authentication-failed": {
+            "session_id": session.id,
+            "nonce": "wrong",
+            "workflow_id": "workflow_two",
+        },
+        "workflow-editor-session-mismatch": {
+            "session_id": session.id,
+            "nonce": session.nonce,
+            "workflow_id": "workflow_two",
+        },
+        "workflow-editor-session-not-found": {
+            "session_id": "wfedit_unknown",
+            "nonce": session.nonce,
+            "workflow_id": session.workflow_id,
+        },
+        "invalid-workflow-editor-session": {
+            "session_id": session.id,
+            "nonce": "has whitespace",
+            "workflow_id": session.workflow_id,
+        },
+    }
+    for code, arguments in refusals.items():
+        with pytest.raises(WorkflowEditorSessionError) as refused:
+            manager.heartbeat(**arguments)
+        assert refused.value.code == code
+        # A refused report is not a report.
+        assert manager.in_use("runtime_one") is False
+
+    manager.cancel(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+    )
+    with pytest.raises(WorkflowEditorSessionError) as cancelled:
+        manager.heartbeat(
+            session_id=session.id,
+            nonce=session.nonce,
+            workflow_id=session.workflow_id,
+        )
+    assert cancelled.value.code == "workflow-editor-session-not-found"
+
+
+def test_only_a_changed_return_waiting_for_its_draft_holds_the_worker() -> None:
+    manager, clock = _sessions()
+    changed = _start(manager)
+    returned = manager.consume(
+        session_id=changed.id,
+        nonce=changed.nonce,
+        workflow_id=changed.workflow_id,
+        base_revision_id=changed.base_revision_id,
+        current_revision_id=changed.base_revision_id,
+        returned_ui_graph=_graph(node_type="VAEDecode"),
+        returned_api_graph=_prompt(node_type="VAEDecode"),
+        runtime_identity=changed.runtime_identity,
+    )
+    assert returned.changed
+    assert manager.active_count == 0
+    assert manager.in_use("runtime_one") is True
+    # The edit waits for its draft whether or not any window still reports in,
+    # and only on the launch it was validated on.
+    clock.value += timedelta(seconds=181)
+    assert manager.in_use("runtime_one") is True
+    assert manager.in_use("runtime_two") is False
+
+    manager.bind_validated_return_to_draft(
+        validated_return_id=returned.validated_return_id,
+        workflow_id=changed.workflow_id,
+        runtime_identity=changed.runtime_identity,
+        draft_revision_id="revision_draft_one",
+    )
+    assert manager.in_use("runtime_one") is False
+
+    unchanged = _start(manager)
+    assert not manager.consume(
+        session_id=unchanged.id,
+        nonce=unchanged.nonce,
+        workflow_id=unchanged.workflow_id,
+        base_revision_id=unchanged.base_revision_id,
+        current_revision_id=unchanged.base_revision_id,
+        returned_ui_graph=_graph(),
+        returned_api_graph=_prompt(),
+        runtime_identity=unchanged.runtime_identity,
+    ).changed
+    assert manager.validated_return_count == 2
+    assert manager.in_use("runtime_one") is False
+
+
+def test_a_changed_return_stops_holding_the_worker_when_it_expires() -> None:
+    manager, clock = _sessions(ttl=timedelta(minutes=30), validated_return_ttl=timedelta(minutes=5))
+    session = _start(manager)
+    manager.consume(
+        session_id=session.id,
+        nonce=session.nonce,
+        workflow_id=session.workflow_id,
+        base_revision_id=session.base_revision_id,
+        current_revision_id=session.base_revision_id,
+        returned_ui_graph=_graph(node_type="VAEDecode"),
+        returned_api_graph=_prompt(node_type="VAEDecode"),
+        runtime_identity=session.runtime_identity,
+    )
+    clock.value += timedelta(minutes=4, seconds=59)
+    assert manager.in_use("runtime_one") is True
+
+    clock.value += timedelta(seconds=1)
+    assert manager.in_use("runtime_one") is False
+    assert manager.validated_return_count == 0
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
         {"ttl": timedelta(0)},
         {"validated_return_ttl": timedelta(0)},
+        {"activity_window": timedelta(0)},
         {"max_active": 0},
         {"clock": lambda: datetime(2026, 8, 3, 12)},
     ],

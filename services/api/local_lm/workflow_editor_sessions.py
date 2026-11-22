@@ -27,6 +27,13 @@ WORKFLOW_EDITOR_PROTOCOL_VERSION = WORKFLOW_EDITOR_BRIDGE_PROTOCOL_VERSION
 DEFAULT_EDITOR_SESSION_TTL = timedelta(hours=2)
 DEFAULT_VALIDATED_RETURN_TTL = timedelta(minutes=5)
 DEFAULT_MAX_EDITOR_SESSIONS = 128
+# A session lives for hours, so its lifetime cannot say whether anyone is still
+# editing. The page that opened the editor reports in every 30 seconds while its
+# editor window is open and while it holds a returned edit a retry could still
+# validate, and a session not heard from for this long stops counting as use of
+# the media worker. Three minutes outlast a hidden tab throttled to about one
+# timer a minute, even with a report missed.
+DEFAULT_EDITOR_ACTIVITY_WINDOW = timedelta(minutes=3)
 _OPAQUE_TOKEN_CHARACTERS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
 )
@@ -72,6 +79,8 @@ class WorkflowEditorSession:
     nonce: str
     created_at: datetime
     expires_at: datetime
+    #: When the page holding the editor last reported in. It never moves `expires_at`.
+    last_seen_at: datetime
     protocol_version: int = WORKFLOW_EDITOR_PROTOCOL_VERSION
 
     @property
@@ -135,6 +144,7 @@ class WorkflowEditorSessions:
         *,
         ttl: timedelta = DEFAULT_EDITOR_SESSION_TTL,
         validated_return_ttl: timedelta = DEFAULT_VALIDATED_RETURN_TTL,
+        activity_window: timedelta = DEFAULT_EDITOR_ACTIVITY_WINDOW,
         max_active: int = DEFAULT_MAX_EDITOR_SESSIONS,
         clock: Clock | None = None,
         token_factory: TokenFactory | None = None,
@@ -143,10 +153,13 @@ class WorkflowEditorSessions:
             raise ValueError("workflow editor session TTL must be positive")
         if validated_return_ttl <= timedelta(0):
             raise ValueError("validated workflow editor return TTL must be positive")
+        if activity_window <= timedelta(0):
+            raise ValueError("workflow editor activity window must be positive")
         if max_active < 1:
             raise ValueError("workflow editor session capacity must be positive")
         self._ttl = ttl
         self._validated_return_ttl = validated_return_ttl
+        self._activity_window = activity_window
         self._max_active = max_active
         self._clock = clock or (lambda: datetime.now(UTC))
         self._token_factory = token_factory or secrets.token_urlsafe
@@ -188,6 +201,7 @@ class WorkflowEditorSessions:
                 nonce=_nonce(self._token_factory(32)),
                 created_at=now,
                 expires_at=now + self._ttl,
+                last_seen_at=now,
             )
             self._sessions[session.id] = session
             return session
@@ -320,23 +334,58 @@ class WorkflowEditorSessions:
         now = _aware_utc(self._clock())
         with self._lock:
             self._purge_expired(now)
-            session = self._sessions.get(session_id)
-            if session is None:
-                raise WorkflowEditorSessionError(
-                    "workflow-editor-session-not-found",
-                    "The workflow editor session is unavailable or expired",
-                )
-            if not hmac.compare_digest(session.nonce, nonce):
-                raise WorkflowEditorSessionError(
-                    "workflow-editor-session-authentication-failed",
-                    "The workflow editor session could not be authenticated",
-                )
-            if session.workflow_id != workflow_id:
-                raise WorkflowEditorSessionError(
-                    "workflow-editor-session-mismatch",
-                    "The workflow editor session does not match this workflow",
-                )
+            self._open_session_locked(session_id=session_id, nonce=nonce, workflow_id=workflow_id)
             del self._sessions[session_id]
+
+    def heartbeat(self, *, session_id: str, nonce: str, workflow_id: str) -> None:
+        """Record that the page holding this editor session has reported in.
+
+        The page reports while its editor window is open and while it holds a
+        returned edit a retry could still validate. A report is authenticated
+        exactly as a cancel is. It never moves the session's expiry: a report
+        says the editor is in use, not that it may live longer.
+        """
+
+        session_id = _identifier(session_id, "workflow editor session")
+        nonce = _nonce(nonce)
+        workflow_id = _identifier(workflow_id, "workflow")
+        now = _aware_utc(self._clock())
+        with self._lock:
+            self._purge_expired(now)
+            session = self._open_session_locked(
+                session_id=session_id,
+                nonce=nonce,
+                workflow_id=workflow_id,
+            )
+            self._sessions[session_id] = replace(session, last_seen_at=now)
+
+    def in_use(self, runtime_identity: str | None) -> bool:
+        """Whether an editor still needs the media launch with this identity.
+
+        An open session counts while the page holding it has reported in within
+        the activity window. A changed return counts until it is saved as a
+        draft or expires, because that save is refused on any other launch.
+        Nothing bound to another launch counts: that launch is already gone, and
+        the live one refuses its sessions and returns.
+        """
+
+        if runtime_identity is None:
+            return False
+        now = _aware_utc(self._clock())
+        with self._lock:
+            self._purge_expired(now)
+            if any(
+                session.runtime_identity == runtime_identity
+                and session.last_seen_at + self._activity_window > now
+                for session in self._sessions.values()
+            ):
+                return True
+            return any(
+                validated.runtime_identity == runtime_identity
+                and validated.result.changed
+                and validated.draft_revision_id is None
+                for validated in self._validated_returns.values()
+            )
 
     def validated_return(
         self,
@@ -433,6 +482,37 @@ class WorkflowEditorSessions:
             "workflow-editor-return-id-collision",
             "A unique validated workflow editor return could not be created",
         )
+
+    def _open_session_locked(
+        self,
+        *,
+        session_id: str,
+        nonce: str,
+        workflow_id: str,
+    ) -> WorkflowEditorSession:
+        """Return the open session a page holds, checking its nonce before its workflow.
+
+        A page that cannot authenticate is never told whether the session belongs
+        to another workflow.
+        """
+
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise WorkflowEditorSessionError(
+                "workflow-editor-session-not-found",
+                "The workflow editor session is unavailable or expired",
+            )
+        if not hmac.compare_digest(session.nonce, nonce):
+            raise WorkflowEditorSessionError(
+                "workflow-editor-session-authentication-failed",
+                "The workflow editor session could not be authenticated",
+            )
+        if session.workflow_id != workflow_id:
+            raise WorkflowEditorSessionError(
+                "workflow-editor-session-mismatch",
+                "The workflow editor session does not match this workflow",
+            )
+        return session
 
     def _authorize_return_locked(
         self,

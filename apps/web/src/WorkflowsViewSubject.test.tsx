@@ -27,6 +27,7 @@ vi.mock("./api", () => ({
 }));
 
 vi.mock("./workflowEditorBridge", () => ({
+  EDITOR_HEARTBEAT_MS: 30_000,
   openWorkflowEditorPopup: vi.fn(),
   runWorkflowEditor: vi.fn(),
 }));

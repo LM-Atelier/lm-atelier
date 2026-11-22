@@ -105,6 +105,7 @@ function fakeApi(overrides: Partial<WorkflowEditorApi> = {}): WorkflowEditorApi 
     consumeWorkflowEditor: vi.fn().mockResolvedValue(returned()),
     createWorkflowEditorDraft: vi.fn().mockResolvedValue(draft()),
     cancelWorkflowEditor: vi.fn().mockResolvedValue(undefined),
+    heartbeatWorkflowEditor: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -384,6 +385,57 @@ describe("native workflow editor orchestration", () => {
     expect(warnings).toHaveLength(1);
     controller.abort();
     await expect(run).rejects.toThrow("cancelled");
+  });
+
+  it("reports an open editor until the run ends", async () => {
+    const api = fakeApi();
+    const browser = harness();
+    const phases: string[] = [];
+    const run = runWorkflowEditor(api, "workflow-1", browser.popup, {
+      environment: browser.environment as never,
+      onPhase: (phase) => phases.push(phase),
+    });
+    await vi.waitFor(() => expect(phases).toContain("editing"));
+
+    browser.firePoll();
+    expect(api.heartbeatWorkflowEditor).toHaveBeenCalledOnce();
+    expect(api.heartbeatWorkflowEditor).toHaveBeenCalledWith("workflow-1", "session-1", "nonce-1");
+
+    // A closed window sends nothing, and its closing ends the run.
+    browser.popup.closed = true;
+    browser.firePoll();
+    await expect(run).rejects.toThrow("workflow editor was closed");
+    expect(api.heartbeatWorkflowEditor).toHaveBeenCalledOnce();
+
+    // A report left scheduled would go out again once the window reads as open.
+    browser.popup.closed = false;
+    browser.firePoll();
+    expect(api.heartbeatWorkflowEditor).toHaveBeenCalledOnce();
+  });
+
+  it("keeps editing when a report is refused and stops reporting when the canvas is kept", async () => {
+    const api = fakeApi({
+      heartbeatWorkflowEditor: vi.fn().mockRejectedValue(new Error("session is gone")),
+    });
+    const browser = harness();
+    const phases: string[] = [];
+    const run = runWorkflowEditor(api, "workflow-1", browser.popup, {
+      environment: browser.environment as never,
+      onPhase: (phase) => phases.push(phase),
+    });
+    await vi.waitFor(() => expect(phases).toContain("editing"));
+
+    browser.firePoll();
+    browser.firePoll();
+    await vi.waitFor(() => expect(api.heartbeatWorkflowEditor).toHaveBeenCalledTimes(2));
+
+    // The refused reports left the run editing: it ends only when the session
+    // expires, with the ComfyUI window still open.
+    browser.fireTimeout();
+    await expect(run).rejects.toThrow("secure editor session expired");
+    expect(browser.popup.close).not.toHaveBeenCalled();
+    browser.firePoll();
+    expect(api.heartbeatWorkflowEditor).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the live ComfyUI canvas open when editor authority expires", async () => {

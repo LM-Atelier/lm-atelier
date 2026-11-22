@@ -696,7 +696,10 @@ async def test_ready_media_worker_still_receives_an_exact_activation_scope() -> 
 
     await orchestrator._ensure_media_worker(claim=_TEST_CLAIM, activation_scope=scope)
 
-    start_media.assert_awaited_once_with(activation_scope=scope)
+    # The running worker is replaced only past the check that nobody else is using it.
+    start_media.assert_awaited_once_with(
+        activation_scope=scope, replacement_guard=orchestrator._refuse_busy_replacement
+    )
 
 
 def test_media_execution_revalidates_the_exact_queued_activation(

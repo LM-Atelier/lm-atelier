@@ -29,6 +29,7 @@ import { WorkflowDiscover } from "./WorkflowDiscover";
 import { WorkflowRecipeManagerAction } from "./WorkflowRecipeManager";
 import { WorkflowDestinations } from "./WorkflowDestinations";
 import { useWorkflowDestination } from "./useWorkflowDestination";
+import { useWorkflowEditorReports } from "./useWorkflowEditorReports";
 import { downloadJson } from "./format";
 import {
   openWorkflowEditorPopup,
@@ -282,6 +283,7 @@ export function WorkflowsView() {
       retryDraft.mutate(pending);
     },
   });
+  useWorkflowEditorReports(pendingSubmission, retrySubmission.error ?? nativeEditor.error);
   const openNativeEditor = () => {
     if (
       !selected

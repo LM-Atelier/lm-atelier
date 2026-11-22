@@ -369,11 +369,6 @@ def build_services(settings: Settings) -> Services:
     orchestrator = ConversationOrchestrator(engines, artifacts, events, scheduler, processes)
     processes.before_chat_load = orchestrator.release_media_for_chat
     editor_sessions = WorkflowEditorSessions()
-    # An open native editor session is bound to the media worker it was opened
-    # on, so a worker kept warm past a run is not recycled under it.
-    orchestrator.media_worker_in_use = lambda: (
-        editor_sessions.active_count > 0 or editor_sessions.validated_return_count > 0
-    )
     catalog = HuggingFaceCatalog(settings)
     civitai = CivitaiCatalog(settings, token=settings.civitai_token)
     services = Services(
@@ -405,6 +400,13 @@ def build_services(settings: Settings) -> Services:
         workspace_lock=WorkspaceLock(),
         power=power,
         video_utilities=VideoUtilityManager(artifacts, scheduler),
+    )
+    # A native editor open on the live media launch, or an edit from it not yet
+    # saved as a draft, needs that launch, so the worker is not stopped under it.
+    # The store is read through the services, so a store replaced after they are
+    # built is the one consulted.
+    orchestrator.media_worker_in_use = lambda: services.workflow_editor_sessions.in_use(
+        services.processes.workflow_editor_runtime_identity()
     )
     return services
 

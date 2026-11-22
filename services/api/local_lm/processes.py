@@ -488,6 +488,12 @@ class WorkerRecord:
     shutdown_incomplete: bool = False
 
 
+def _is_live(record: WorkerRecord | None) -> bool:
+    """Whether the record's process is still running and nothing is stopping it."""
+
+    return record is not None and record.process.returncode is None and not record.stopping
+
+
 def _media_containment_status(name: str) -> CustomNodeContainmentStatus | None:
     """Report the installed capability for the media worker, and nothing for chat.
 
@@ -871,6 +877,7 @@ class ProcessSupervisor:
         phase_callback: Callable[[str], Awaitable[None]] | None = None,
         activation_scope: WorkflowMediaLaunchScope | None = None,
         before_replace: Callable[[], None] | None = None,
+        replacement_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> WorkerStatus:
         from .workflow_activations import WorkflowSourceLaunchScope
 
@@ -923,10 +930,12 @@ class ProcessSupervisor:
         await report_phase("Validating media dependencies")
         custom_node_types: tuple[str, ...] = ()
         if activation_scope is None:
-            if before_replace is None:
-                await self._clear_cancelled_workflow_activations()
-            else:
-                await self._clear_cancelled_workflow_activations(before_stop=before_replace)
+            stop_checks: dict[str, Any] = {}
+            if before_replace is not None:
+                stop_checks["before_stop"] = before_replace
+            if replacement_guard is not None:
+                stop_checks["replacement_guard"] = replacement_guard
+            await self._clear_cancelled_workflow_activations(**stop_checks)
             check_start()
             trusted_custom_nodes = await self._trusted_comfy_node_folders()
         else:
@@ -1033,6 +1042,8 @@ class ProcessSupervisor:
         source_checks: dict[str, Any] = {}
         if before_replace is not None:
             source_checks["before_replace"] = before_replace
+        if replacement_guard is not None:
+            source_checks["replacement_guard"] = replacement_guard
         if reviewed_inputs is not None or isinstance(activation_scope, WorkflowSourceLaunchScope):
             source_checks["prestart_check"] = revalidate
         if activation_scope is not None:
@@ -1073,8 +1084,18 @@ class ProcessSupervisor:
         return self.statuses()[1]
 
     async def _clear_cancelled_workflow_activations(
-        self, *, before_stop: Callable[[], None] | None = None
+        self,
+        *,
+        before_stop: Callable[[], None] | None = None,
+        replacement_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
+        """Disable extensions whose install was cancelled, stopping the media worker first.
+
+        Nothing is stopped when no install was cancelled. `replacement_guard` is
+        awaited under the media lock before a running worker is stopped, and a
+        raise leaves the worker running and the extensions as they were.
+        """
+
         from .db import SessionLocal
         from .workflow_completion_jobs import (
             cancelled_workflow_activation_packages,
@@ -1100,6 +1121,8 @@ class ProcessSupervisor:
                 return
             if before_stop is not None:
                 before_stop()
+            if replacement_guard is not None and _is_live(self._workers.get("media")):
+                await replacement_guard()
             await self._stop_unlocked("media")
             remaining = await asyncio.to_thread(self._matching_worker_processes, "media")
             if not media_worker_stopped(self) or remaining:
@@ -1668,7 +1691,17 @@ class ProcessSupervisor:
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
         prestart_check: Callable[[], Awaitable[None]] | None = None,
         before_replace: Callable[[], None] | None = None,
+        replacement_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
+        """Start the named worker with this launch, stopping any that is running first.
+
+        A ready worker started with exactly this scoped launch is kept as it is.
+        `replacement_guard` is awaited under the worker's lock only when a running
+        worker is about to be stopped, so no other start or stop comes between its
+        answer and this stop, and the guard must not wait for that lock itself. A
+        raise leaves that worker running and reaches the caller.
+        """
+
         if launch_scope_sha256 is not None and not re.fullmatch(
             r"[0-9a-f]{64}", launch_scope_sha256
         ):
@@ -1692,6 +1725,8 @@ class ProcessSupervisor:
                 == bool(editor_bridge_support and editor_bridge_support.supported)
             ):
                 return
+            if replacement_guard is not None and _is_live(current):
+                await replacement_guard()
             await self._stop_unlocked(name)
             await self._reclaim_port_from_our_own_children(name, health_url)
             await self._ensure_port_available(name, health_url)

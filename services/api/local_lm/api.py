@@ -13173,6 +13173,41 @@ async def cancel_workflow_editor_session(
     return Response(status_code=204)
 
 
+@router.post(
+    "/workflows/{workflow_id}/editor-sessions/{session_id}/heartbeat",
+    status_code=204,
+)
+async def heartbeat_workflow_editor_session(
+    workflow_id: str,
+    session_id: str,
+    payload: WorkflowEditorCancelIn,
+    request: Request,
+) -> Response:
+    # An editor counts as use of the media worker only while the page that
+    # opened it reports in, so a page closed without cancelling stops holding
+    # the worker. A report never lengthens the session.
+    try:
+        _services(request).workflow_editor_sessions.heartbeat(
+            session_id=session_id,
+            nonce=payload.nonce,
+            workflow_id=workflow_id,
+        )
+    except WorkflowEditorSessionError as exc:
+        if exc.code == "workflow-editor-session-not-found":
+            raise api_error(404, exc.code, str(exc)) from exc
+        if exc.code == "workflow-editor-session-authentication-failed":
+            raise api_error(403, exc.code, str(exc)) from exc
+        if exc.code == "workflow-editor-session-mismatch":
+            raise api_error(409, exc.code, str(exc)) from exc
+        raise api_error(
+            422,
+            "workflow-editor-session-invalid",
+            "The workflow editor session could not report in.",
+            reason_code=exc.code,
+        ) from exc
+    return Response(status_code=204)
+
+
 def _local_asset_filenames(session: Session) -> set[str]:
     """Filenames this machine holds, as a workflow might reference them."""
 

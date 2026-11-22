@@ -383,6 +383,26 @@ it("keeps native workflow editor authority in authenticated request bodies", asy
     expect(String(call[0])).not.toContain("secret-nonce");
   }
 });
+it("reports an open workflow editor with its nonce in the request body", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }))
+    .mockResolvedValueOnce(new Response(null, { status: 204 }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await expect(api.heartbeatWorkflowEditor("workflow/one", "editor/session", "secret-nonce"))
+    .resolves.toBeUndefined();
+
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  const [path, init] = fetchMock.mock.calls[1];
+  expect(path).toBe("/api/workflows/workflow%2Fone/editor-sessions/editor%2Fsession/heartbeat");
+  expect(init?.method).toBe("POST");
+  expect(JSON.parse(String(init?.body))).toEqual({ nonce: "secret-nonce" });
+  expect(new Headers(init?.headers).get("x-local-lm-csrf")).toBe("csrf");
+});
 it("returns the complete uploaded artifact for composer previews", async () => {
   const artifact = {
     id: "artifact-uploaded",
