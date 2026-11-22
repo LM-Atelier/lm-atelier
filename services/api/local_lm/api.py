@@ -6605,17 +6605,35 @@ async def stop_and_send_turn(
     request: Request,
     session: ConversationSessionDep,
 ) -> TurnAccepted:
+    """Stop the chat's current work, then send this turn in its place.
+
+    Only a new submission stops anything. One whose key this chat already
+    accepted is a retry, after a lost answer or a rerun, and is answered with
+    the turn that submission created, just as a sent turn with a reused key
+    is; stopping first could stop that very turn. The chat's lock is held from
+    the lookup until the turn exists, so the earlier turn cannot be created in
+    between: a retry that arrives while it is still being created waits, then
+    finds it.
+    """
     if not session.get(Chat, chat_id):
         raise api_error(404, "chat-not-found", "chat not found")
     _refuse_comparison_chat(session, chat_id)
-    await _cancel_current_chat_work(request, session, chat_id)
-    return await _accept_turn(
-        _services(request).orchestrator,
-        session,
-        chat_id,
-        payload,
-        source_action="stop_and_send",
-    )
+    orchestrator = _services(request).orchestrator
+    # Nothing stays open on this session while the chat's lock is awaited, so
+    # the lookup sees a turn another request committed while holding it.
+    session.rollback()
+    async with orchestrator.chat_guard(chat_id):
+        key = payload.idempotency_key
+        if key is None or orchestrator._idempotent_run(session, chat_id, key) is None:
+            await _cancel_current_chat_work(request, session, chat_id)
+        return await _accept_turn(
+            orchestrator,
+            session,
+            chat_id,
+            payload,
+            source_action="stop_and_send",
+            chat_guard_held=True,
+        )
 
 
 async def _cancel_current_chat_work(
