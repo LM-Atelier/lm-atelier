@@ -477,6 +477,11 @@ MAX_PENDING_WORK_PER_CHAT = 32
 #: ComfyUI's loaded models for days after the other use has ended.
 MEDIA_BUSY_RECHECK_SECONDS = 60.0
 MEDIA_SEED_SPACE = 2_147_483_648
+#: Why a media run fails when its engine reports it stopped although nothing in
+#: this process asked the engine to stop it.
+MEDIA_STOPPED_BY_ENGINE = (
+    "The media engine stopped this generation before it finished. Retry to run it again."
+)
 WORKFLOW_LORA_REPLAY_FAILURE = "The queued workflow LoRA configuration could not be verified."
 PENDING_OUTPUT_REFERENCE = re.compile(
     r"\b(?:"
@@ -1045,6 +1050,28 @@ class ClaimLost(RuntimeError):
     """The presented claim no longer owns the row at a claim-bound effect."""
 
 
+class MediaStoppedByEngine(RuntimeError):
+    """The media engine stopped a run that nothing in this process asked it to stop.
+
+    Someone stopped it in the engine itself, as from ComfyUI's own page. Raising
+    this lets the run fail where every other media failure does, once its device
+    handoff is over. Until then the run reads running, so a retry is refused: one
+    accepted while the ending execution still hands the device back would never
+    run.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(MEDIA_STOPPED_BY_ENGINE)
+
+
+#: The media failures that are not retried automatically. A run stopped rather
+#: than restart ComfyUI under someone else's work would meet the same work again,
+#: and a run stopped in the engine itself was stopped by someone's choice. The
+#: device handoff and the failure write both read this, so they agree on whether
+#: a retry follows.
+MEDIA_FAILURES_NOT_RETRIED = (MediaWorkerBusy, MediaStoppedByEngine)
+
+
 class ResponseRevisionConflict(ValueError):
     """A stable response cannot accept the requested revision transition."""
 
@@ -1227,6 +1254,15 @@ class ConversationOrchestrator:
         #: nothing in the engine to stop, and an engine that remembers a stop
         #: for a run it is not generating applies it to that run's next attempt.
         self._media_generating: set[str] = set()
+        #: The generating media runs this process has told the media engine to
+        #: stop. Each one stays here until its generation ends. A producer that
+        #: reports one of these cancelled was stopped from here; one that
+        #: reports any other run cancelled was stopped from the engine itself.
+        self._media_stopping: set[str] = set()
+        #: The media runs whose generation ended in a stop nothing in this
+        #: process asked for. The execution fails each one with its reason once
+        #: the device handoff is over, where every other media failure is written.
+        self._media_stopped_in_engine: set[str] = set()
         #: The window's expiry, or the settlement a chat load inside it left.
         self._media_warm_task: asyncio.Task[None] | None = None
         self._admission_open = True
@@ -4560,6 +4596,7 @@ class ConversationOrchestrator:
                 elif run_id in self._media_generating:
                     # A run that has not begun generating is ended by cancelling
                     # its task below, which stops one that begins meanwhile too.
+                    self._media_stopping.add(run_id)
                     await self.engines.media.cancel(run_id)
             except Exception:
                 logger.exception(
@@ -4655,6 +4692,7 @@ class ConversationOrchestrator:
                     # cancelled above, has not yet run on to change it. A run
                     # still queued or preparing has nothing in the engine to stop.
                     assert run_id is not None
+                    self._media_stopping.add(run_id)
                     await self.engines.media.cancel(run_id)
             except Exception:
                 logger.warning(
@@ -4825,6 +4863,9 @@ class ConversationOrchestrator:
                         queued_verification_job_id = await self._execute_media(
                             job_id, run_id, claim
                         )
+                        if run_id in self._media_stopped_in_engine:
+                            self._media_stopped_in_engine.discard(run_id)
+                            raise MediaStoppedByEngine()
                 except Exception as exc:
                     # `_fail` writes this failure once the lease is released,
                     # after the handoff below; noting it here is what lets the
@@ -4862,10 +4903,11 @@ class ConversationOrchestrator:
                         # loads whatever the next text execution needs.
                         if pending and (claim is None or self._attempt_current(job_id, claim)):
                             # A run stopped rather than restart ComfyUI under
-                            # someone else's work is not retried: the retry
-                            # would meet the same work.
+                            # someone else's work is not retried, and neither
+                            # is one stopped in the engine itself; see
+                            # `MEDIA_FAILURES_NOT_RETRIED`.
                             retryable = media_failure is not None and not isinstance(
-                                media_failure, MediaWorkerBusy
+                                media_failure, MEDIA_FAILURES_NOT_RETRIED
                             )
                             if retryable and self._media_failure_retries(job_id, run_id, claim):
                                 await self._hold_media_handoff_for_retry(pending)
@@ -4970,7 +5012,7 @@ class ConversationOrchestrator:
                 run_id,
                 detail,
                 claim=claim,
-                retryable=not isinstance(exc, MediaWorkerBusy),
+                retryable=not isinstance(exc, MEDIA_FAILURES_NOT_RETRIED),
             )
         if run_id is not None and not claim_lost:
             await self._finalize_setup_verification_run(job_id, run_id, claim)
@@ -8593,6 +8635,8 @@ class ConversationOrchestrator:
                 revalidate_workflow_review_runtime(
                     session, self.processes, current_revision, verified_review
                 )
+        # Only this generation's own report may fail it as stopped in the engine.
+        self._media_stopped_in_engine.discard(run_id)
         producer = self.engines.media.generate(request)
         try:
             async for event in producer:
@@ -8719,6 +8763,13 @@ class ConversationOrchestrator:
                         },
                     )
                 elif event.type == "cancelled":
+                    if run_id not in self._media_stopping:
+                        # Nothing here asked for this stop, as when the prompt
+                        # is stopped from ComfyUI's own page. A stop asked for
+                        # here also marks its run cancelled; nothing marks this
+                        # one, so the execution fails it with its reason once
+                        # the device handoff is over.
+                        self._media_stopped_in_engine.add(run_id)
                     return None
                 elif event.type == "complete":
                     completed_assets.extend(event.assets)
@@ -8750,6 +8801,7 @@ class ConversationOrchestrator:
             # Closing the producer stops whatever it began in the engine, so a
             # stop from here on has nothing more to tell the engine.
             self._media_generating.discard(run_id)
+            self._media_stopping.discard(run_id)
             # The producer is typed as an iterator by the adapter contract, and a
             # close that raises or hangs must not replace the refusal that
             # ended this execution; the shared bounded close does both.
@@ -10724,7 +10776,8 @@ class ConversationOrchestrator:
         """Fail the run, or queue it again when its retry allowance covers the failure.
 
         `retryable` is False for a failure another attempt would only meet
-        again, which spends none of the allowance.
+        again, or one that should not be repeated unless someone asks, either
+        of which spends none of the allowance.
         """
 
         with self.session_factory() as session:

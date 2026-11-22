@@ -932,56 +932,66 @@ class ComfyUIAdapter:
         except OSError:
             raise RuntimeError("ComfyUI could not access local generation files") from None
         finally:
-            if self._cancel_events.get(request.run_id) is cancel_event:
-                self._jobs.pop(request.run_id, None)
-                self._cancel_events.pop(request.run_id, None)
-                self._cancelled.discard(request.run_id)
             if submitted:
                 self._in_flight -= 1
                 if not outputs_collected:
                     self._unsettled += 1
-            if prompt_id and not outputs_collected:
-                if bound_after_submission_failure or (
-                    (abandoned or refused_after_acceptance) and not cancel_event.is_set()
-                ):
-                    # A prompt was submitted and the consumer walked away.
-                    # Popping the entries above ends this adapter's interest in
-                    # it and nothing else: the backend goes on with a result
-                    # nobody will read, holding the device against the run that
-                    # replaced this one.
-                    #
-                    # A set cancel event means `cancel` already stopped the
-                    # prompt - but ONLY where `cancel` could see it. It stops
-                    # the prompt `self._jobs` names for the run, and on the
-                    # lost-reply recovery path there is no entry there until
-                    # the reconciliation returns. A cancel arriving during that
-                    # await therefore sets the event and stops nothing, so
-                    # reading the set event as "already stopped" would leave
-                    # the recovered prompt running with the caller told it
-                    # failed - the exact state this path exists to prevent.
-                    # `bound_after_submission_failure` is checked ahead of the
-                    # event for that reason. Repeating a stop is harmless;
-                    # skipping one is not.
-                    #
-                    # Still deliberately not extended to the generic error
-                    # exits below. A malformed or oversized event is a different
-                    # case with its own settled handling, and widening this to
-                    # cover it would change behaviour six existing tests rely
-                    # on.
-                    #
-                    # `refused_after_acceptance` is not that widening. It marks
-                    # the one exit where THIS code refuses a response the backend
-                    # has already accepted and queued, which is the same
-                    # situation as an abandoned stream and not an error arriving
-                    # from a prompt already being consumed.
-                    #
-                    # `bound_after_submission_failure` is the same situation reached the
-                    # other way: the backend took the prompt and this code never
-                    # heard so. It is only ever set when the backend's own queue
-                    # named the prompt under this submission's client id, so it
-                    # cannot mark a generation that was never accepted.
-                    await self._abandon_prompt(prompt_id)
-                await self._cleanup_prompt_outputs(prompt_id)
+            try:
+                if prompt_id and not outputs_collected:
+                    if bound_after_submission_failure or (
+                        (abandoned or refused_after_acceptance) and not cancel_event.is_set()
+                    ):
+                        # A prompt was submitted and the consumer walked away.
+                        # Removing the run's entries below ends this adapter's
+                        # interest in it and nothing else: the backend goes on
+                        # with a result nobody will read, holding the device
+                        # against the run that replaced this one.
+                        #
+                        # A set cancel event means `cancel` already stopped the
+                        # prompt - but ONLY where `cancel` could see it. It stops
+                        # the prompt `self._jobs` names for the run, and on the
+                        # lost-reply recovery path there is no entry there until
+                        # the reconciliation returns. A cancel arriving during that
+                        # await therefore sets the event and stops nothing, so
+                        # reading the set event as "already stopped" would leave
+                        # the recovered prompt running with the caller told it
+                        # failed - the exact state this path exists to prevent.
+                        # `bound_after_submission_failure` is checked ahead of the
+                        # event for that reason. Repeating a stop is harmless;
+                        # skipping one is not.
+                        #
+                        # Still deliberately not extended to the generic error
+                        # exits below. A malformed or oversized event is a different
+                        # case with its own settled handling, and widening this to
+                        # cover it would change behaviour six existing tests rely
+                        # on.
+                        #
+                        # `refused_after_acceptance` is not that widening. It marks
+                        # the one exit where THIS code refuses a response the backend
+                        # has already accepted and queued, which is the same
+                        # situation as an abandoned stream and not an error arriving
+                        # from a prompt already being consumed.
+                        #
+                        # `bound_after_submission_failure` is the same situation reached the
+                        # other way: the backend took the prompt and this code never
+                        # heard so. It is only ever set when the backend's own queue
+                        # named the prompt under this submission's client id, so it
+                        # cannot mark a generation that was never accepted.
+                        await self._abandon_prompt(prompt_id)
+                    await self._cleanup_prompt_outputs(prompt_id)
+            finally:
+                # Last, and even when an await above is cancelled. While this
+                # teardown waits on the backend, its caller can still count the
+                # run as generating, so a stop can still arrive, and it has to
+                # find this event to set. Without one, `cancel` keeps the stop
+                # for the run's next generation, and a retry of this run would
+                # end at once without sending its prompt. A newer generation of
+                # the same run owns the entries once it has registered, so only
+                # this generation's own are removed.
+                if self._cancel_events.get(request.run_id) is cancel_event:
+                    self._jobs.pop(request.run_id, None)
+                    self._cancel_events.pop(request.run_id, None)
+                    self._cancelled.discard(request.run_id)
 
     async def _next_message(
         self,
