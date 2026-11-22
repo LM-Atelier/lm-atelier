@@ -5591,6 +5591,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
         created_at: stamp,
         updated_at: stamp,
       },
+      replayed: false,
     };
     let finishTurn: ((turn: TurnAccepted) => void) | undefined;
     vi.mocked(api.sendTurn).mockImplementation(

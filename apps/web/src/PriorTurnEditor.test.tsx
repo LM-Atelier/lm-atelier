@@ -240,7 +240,7 @@ it("reuses the confirmed wire request after a lost response and reopening, accep
   const accepted: Awaited<ReturnType<typeof api.queueEditedMessage>> = {
     source_run_id: source.source_run_id, source_message_id: source.source_user_message_id,
     branch_activated: false, work_plan_id: "edit-plan", branch_head_message_id: "edit-assistant",
-    accepted_context_sha256: "b".repeat(64),
+    accepted_context_sha256: "b".repeat(64), replayed: false,
     run: { id: "edit-run", idempotency_key: confirmed.idempotency_key, chat_id: chat.id,
       user_message_id: "edit-user", assistant_message_id: "edit-assistant", operation: "text_to_video",
       status: "queued", standalone_prompt: source.text, profile_id: null, workflow_revision_id: null,
