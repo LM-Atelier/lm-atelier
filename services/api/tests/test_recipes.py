@@ -7,6 +7,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from huggingface_hub import HfApi
 
 from local_lm import api as api_module
 from local_lm.catalog import HuggingFaceCatalog
@@ -64,13 +65,28 @@ def test_every_recipe_pins_a_checksum_for_every_file() -> None:
         assert all(file.sha256 for file in recipe.files), recipe.id
 
 
+def _hub_unreachable(*_args: object, **_kwargs: object) -> object:
+    """List a repository's files as the listing goes when the model hub cannot be reached.
+
+    An accepted install starts its transfer in the background, after the answer
+    these tests check, by asking the hub for the files it is about to fetch.
+    Unanswered, it stops there, before fetching anything.
+    """
+
+    raise httpx.ConnectError("The model hub could not be reached.")
+
+
 def _chat_recipe_catalog(
     recipe: ReferenceRecipe,
     monkeypatch: pytest.MonkeyPatch,
     *,
     files: list[dict[str, object]] | None = None,
 ) -> None:
-    """Answer catalog lookups with exactly what the recipe pins, unless overridden."""
+    """Answer catalog lookups with exactly what the recipe pins, unless overridden.
+
+    The model hub an accepted install then asks in the background is left
+    unanswered.
+    """
 
     async def inspect(
         _catalog: HuggingFaceCatalog,
@@ -96,9 +112,12 @@ def _chat_recipe_catalog(
 
     monkeypatch.setattr(HuggingFaceCatalog, "inspect", inspect)
     # Bounded header reads are an optimisation preflight treats as optional, and
-    # the staged bytes are inspected for real before activation. Removing it keeps
-    # the test off the network entirely.
+    # the staged bytes are inspected for real before activation, so removing them
+    # keeps the install check off the network. The hub listing an accepted install
+    # then asks for in the background is answered as unreachable, so its transfer
+    # stops before fetching anything.
     monkeypatch.delattr(HuggingFaceCatalog, "inspect_file_prefix", raising=False)
+    monkeypatch.setattr(HfApi, "model_info", _hub_unreachable)
 
 
 async def test_recipe_install_produces_a_plan_matching_its_pins(
@@ -194,6 +213,7 @@ async def test_recipe_install_plans_its_pinned_revision_after_the_repository_mov
         )
 
     monkeypatch.delattr(HuggingFaceCatalog, "inspect_file_prefix", raising=False)
+    monkeypatch.setattr(HfApi, "model_info", _hub_unreachable)
     async with httpx.AsyncClient(
         base_url="https://huggingface.co", transport=httpx.MockTransport(handler)
     ) as hub:

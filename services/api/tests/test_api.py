@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
@@ -6995,6 +6996,18 @@ async def test_catalog_preflight_blocks_gated_unsafe_weights(
     assert {"weights", "access"}.issubset(blocked)
 
 
+async def _catalog_file_read_unreachable(*_args: object, **_kwargs: object) -> bytes:
+    """Read the start of a catalog file as it reads when the catalog cannot be reached.
+
+    An install check reads the start of each selected file only to learn more
+    than the listing says, and plans from the listing alone when it cannot,
+    which is all the checks that use this are about. Answered for real, the
+    read would ask the internet about a repository that does not exist.
+    """
+
+    raise httpx.ConnectError("The catalog could not be reached.")
+
+
 async def test_catalog_preflight_autoselects_smallest_gguf(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -7020,6 +7033,7 @@ async def test_catalog_preflight_autoselects_smallest_gguf(
         }
 
     monkeypatch.setattr(HuggingFaceCatalog, "inspect", inspect)
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect_file_prefix", _catalog_file_read_unreachable)
     response = await client.post(
         "/api/catalog/owner/model/preflight",
         json={
@@ -7079,6 +7093,7 @@ async def test_catalog_preflight_prefers_balanced_gguf_quantization(
         }
 
     monkeypatch.setattr(HuggingFaceCatalog, "inspect", inspect)
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect_file_prefix", _catalog_file_read_unreachable)
     response = await client.post(
         "/api/catalog/owner/model/preflight",
         json={
@@ -7126,6 +7141,7 @@ async def test_catalog_preflight_selects_a_complete_split_gguf_set(
         }
 
     monkeypatch.setattr(HuggingFaceCatalog, "inspect", inspect)
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect_file_prefix", _catalog_file_read_unreachable)
     response = await client.post(
         "/api/catalog/owner/model/preflight",
         json={
@@ -7370,6 +7386,7 @@ async def test_comfy_catalog_preflight_offers_a_provisional_adaptive_checkpoint(
         }
 
     monkeypatch.setattr(HuggingFaceCatalog, "inspect", inspect)
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect_file_prefix", _catalog_file_read_unreachable)
     response = await client.post(
         "/api/catalog/owner/new-checkpoint/preflight",
         json={
@@ -7553,6 +7570,7 @@ async def test_workflow_catalog_preserves_exact_variants_and_preflights_the_chos
         }
 
     monkeypatch.setattr(HuggingFaceCatalog, "inspect", inspect)
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect_file_prefix", _catalog_file_read_unreachable)
 
     # The catalog shows both variants, each naming its template and operation.
     cards = (await client.get("/api/catalog/workflow-models?role=image")).json()
@@ -7870,6 +7888,7 @@ async def test_comfy_catalog_preflight_blocks_an_unreviewed_managed_runtime(
         }
 
     monkeypatch.setattr(HuggingFaceCatalog, "inspect", inspect)
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect_file_prefix", _catalog_file_read_unreachable)
     blocked_status = RuntimeStatus(
         engine="comfyui",
         release="v0.28.0",
