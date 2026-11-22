@@ -1572,6 +1572,11 @@ class TurnAccepted(ApiModel):
     user_message: MessageOut
     assistant_message: MessageOut
     assistant_messages: list[MessageOut] = Field(default_factory=list)
+    # True when the idempotency key matched an earlier submission in this chat
+    # and this describes the run that submission created; false when this
+    # request created the run. A sent turn is matched by its key alone, so a
+    # changed turn sent with a reused key is answered with the earlier run.
+    replayed: bool = False
 
 
 class PriorTurnEditAccepted(TurnAccepted):

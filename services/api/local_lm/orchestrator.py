@@ -1424,8 +1424,12 @@ class ConversationOrchestrator:
         queue_idempotency_key: str,
         expected_plan_version: int,
         expected_plan_sha256: str,
-    ) -> tuple[TurnAccepted, bool]:
-        """Queue every selected draft as one exact, atomic media work plan."""
+    ) -> TurnAccepted:
+        """Queue every selected draft as one exact, atomic media work plan.
+
+        A batch already queued under the same key answers with the plan it
+        queued then, marked as replayed.
+        """
 
         if not self._admission_open:
             raise RuntimeError(
@@ -1454,7 +1458,7 @@ class ConversationOrchestrator:
                 )
                 if run is None:
                     raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
-                return self._accepted_for_run(session, run), True
+                return self._accepted_for_run(session, run, replayed=True)
             existing = self._idempotent_run(session, chat_id, queue_idempotency_key)
             if existing is not None:
                 raise PromptExpansionUseConflict(
@@ -1474,14 +1478,13 @@ class ConversationOrchestrator:
                 output_count=len(selection.items),
                 idempotency_key=queue_idempotency_key,
             )
-            accepted = await self._create_new_turn(
+            return await self._create_new_turn(
                 session,
                 chat_id,
                 request,
                 source_action="prompt_library",
                 prompt_batch_selection=selection,
             )
-            return accepted, False
 
     async def _create_turn(
         self,
@@ -1512,7 +1515,7 @@ class ConversationOrchestrator:
         if key is not None:
             existing = self._idempotent_run(session, chat_id, key)
             if existing is not None:
-                return self._accepted_for_run(session, existing)
+                return self._accepted_for_run(session, existing, replayed=True)
         pending_count = session.scalar(
             select(func.count(Job.id))
             .join(Run, Job.run_id == Run.id)
@@ -1570,7 +1573,7 @@ class ConversationOrchestrator:
             self._admission_chat(session, chat_id)
             existing = self._idempotent_run(session, chat_id, key)
             if existing:
-                return self._accepted_for_run(session, existing)
+                return self._accepted_for_run(session, existing, replayed=True)
             return await self._create_new_turn(
                 session,
                 chat_id,
@@ -1604,7 +1607,7 @@ class ConversationOrchestrator:
             self._admission_chat(session, chat_id)
             existing = self._idempotent_run(session, chat_id, idempotency_key)
             if existing:
-                return None, self._accepted_for_run(session, existing)
+                return None, self._accepted_for_run(session, existing, replayed=True)
 
             owner_token = secrets.token_hex(24)
             claim = TurnCreationClaim(
@@ -2839,7 +2842,7 @@ class ConversationOrchestrator:
             refreeze=lambda _run: request.source_fit is not None or request.upscale,
         )
         session.commit()
-        accepted = self._accepted_for_run(session, runs[0])
+        accepted = self._accepted_for_run(session, runs[0], replayed=False)
         await self.events.publish(
             "work_plan.created",
             work_plan.id,
@@ -4088,7 +4091,7 @@ class ConversationOrchestrator:
             refreeze=lambda run: run.provenance_json.get("upscale") is True,
         )
         session.commit()
-        accepted = self._accepted_for_run(session, runs[0])
+        accepted = self._accepted_for_run(session, runs[0], replayed=False)
         await self.events.publish(
             "work_plan.created",
             work_plan.id,
@@ -9474,7 +9477,9 @@ class ConversationOrchestrator:
         retry_run = session.get(Run, retry_run_id)
         if retry_run is None:
             return None
-        return self._accepted_for_run(session, retry_run)
+        # Found through the source's verification record rather than a
+        # submitted idempotency key, so it is not a replay of a submission.
+        return self._accepted_for_run(session, retry_run, replayed=False)
 
     def _bound_retry_announcement(
         self, session: Session, accepted: TurnAccepted
@@ -14566,7 +14571,13 @@ class ConversationOrchestrator:
         )
 
     @staticmethod
-    def _accepted_for_run(session: Session, run: Run) -> TurnAccepted:
+    def _accepted_for_run(session: Session, run: Run, *, replayed: bool) -> TurnAccepted:
+        """Describe an accepted run as its turn's answer.
+
+        `replayed` says whether an earlier submission created the run under the
+        same idempotency key. A replay answers with that earlier run, which need
+        not be what the new request asked for, so the answer says which it is.
+        """
         refreshed = session.scalar(select(Run).where(Run.id == run.id))
         if not refreshed:
             raise LookupError("run not found")
@@ -14623,4 +14634,5 @@ class ConversationOrchestrator:
             user_message=MessageOut.model_validate(user_message),
             assistant_message=MessageOut.model_validate(assistant_message),
             assistant_messages=[MessageOut.model_validate(message) for message in outputs],
+            replayed=replayed,
         )

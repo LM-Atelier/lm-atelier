@@ -4521,7 +4521,7 @@ async def queue_prompt_batch(
     if chat is None or chat.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, batch.chat_id):
         raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
     try:
-        _, replayed = await _services(request).orchestrator.create_prompt_batch_turn(
+        accepted = await _services(request).orchestrator.create_prompt_batch_turn(
             session,
             chat.id,
             batch.id,
@@ -4548,7 +4548,7 @@ async def queue_prompt_batch(
     except ValueError as exc:
         session.rollback()
         raise api_error(422, "generation-settings-invalid", str(exc)) from exc
-    return _prompt_expansion_out(stored).model_copy(update={"replayed": replayed})
+    return _prompt_expansion_out(stored).model_copy(update={"replayed": accepted.replayed})
 
 
 @router.post("/prompt-helpers", response_model=PromptHelperDetail, status_code=201)
@@ -5527,7 +5527,7 @@ async def _regenerate_message_locked(
         if existing is not None:
             require_request_binding(existing.provenance_json)
             _require_run_replay_sources(session, existing)
-            return orchestrator._accepted_for_run(session, existing)
+            return orchestrator._accepted_for_run(session, existing, replayed=True)
     pending_revision = session.scalar(
         select(ResponseRevision.id).where(
             ResponseRevision.message_id == message_id,

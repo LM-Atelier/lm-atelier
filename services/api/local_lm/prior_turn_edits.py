@@ -664,7 +664,9 @@ async def queue_prior_turn_edit(
         replay = orchestrator._idempotent_run(session, chat_id, payload.idempotency_key)
         if replay is not None:
             return _edit_result(
-                session, orchestrator._accepted_for_run(session, replay), fingerprint
+                session,
+                orchestrator._accepted_for_run(session, replay, replayed=True),
+                fingerprint,
             )
         prepared = await prepare_prior_turn_edit(orchestrator, session, message_id, payload)
         source = prepared.source
