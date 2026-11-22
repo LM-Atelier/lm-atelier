@@ -3073,16 +3073,21 @@ def _expected_refusals(case: ActionReferenceDrift, line: int) -> list[str]:
 
 
 def _main_refusals(
-    tree: Path, monkeypatch: pytest.MonkeyPatch, workflow: str, content: str
+    tree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workflow: str,
+    content: str,
+    prepare: Callable[[Path], object] | None = None,
 ) -> list[str]:
     """Run main over a copy of the repository's workflows with one of them replaced.
 
     main reads every input relative to the working directory: each workflow,
-    the allowlist it compares their references with, and the merge decision
-    script that has to be present. The decision's own cases run in tests of
-    their own and start an interpreter apiece, so none of them run here. The
-    validator is loaded afresh for that, leaving any copy the caller holds as
-    it was.
+    the rulesets whose required checks their job names are compared with, the
+    allowlist it compares their references with, and the merge decision script
+    that has to be present. `prepare`, when given, changes the copy before main
+    runs. The decision's own cases run in tests of their own and start an
+    interpreter apiece, so none of them run here. The validator is loaded
+    afresh for that, leaving any copy the caller holds as it was.
     """
 
     main = _workflow_namespace()["main"]
@@ -3093,9 +3098,15 @@ def _main_refusals(
         if source.suffix in {".yml", ".yaml"}:
             shutil.copyfile(source, workflows / source.name)
     (workflows / workflow).write_text(content, encoding="utf-8", newline="\n")
+    rulesets = tree / ".github" / "rulesets"
+    rulesets.mkdir()
+    for source in (ROOT / ".github" / "rulesets").glob("*.json"):
+        shutil.copyfile(source, rulesets / source.name)
     (tree / "scripts").mkdir()
     for script in ("configure-public-repository.ps1", "ci-merge-gate.py"):
         shutil.copyfile(ROOT / "scripts" / script, tree / "scripts" / script)
+    if prepare is not None:
+        prepare(tree)
     monkeypatch.setitem(main.__globals__, "MERGE_GATE_MATRIX", ())
     monkeypatch.chdir(tree)
     try:
@@ -3103,6 +3114,253 @@ def _main_refusals(
     except SystemExit as refusal:
         return str(refusal.code).splitlines()
     return []
+
+
+# A workflow a pull request could add beside the shipped ones.
+ADDED_WORKFLOW = "confirm-merge.yml"
+RULESETS = Path(".github/rulesets")
+BRANCH_RULESET = RULESETS / "public-branches.json"
+# Why the workflow policy reads the rulesets, as each refusal of one says.
+RULESET_USE = "job names outside ci.yml are compared with the checks a ruleset requires"
+
+
+class RequiredCheckDrift(NamedTuple):
+    """A job outside ci.yml that reports a required check, and every refusal main reports.
+
+    The drift inserts `text` before `anchor` in a shipped workflow or, with no
+    anchor, adds the workflow with `text` as its whole content. `prepare`,
+    when given, changes the copy main runs over, as `_main_refusals` takes it.
+    """
+
+    label: str
+    workflow: str
+    anchor: str | None
+    text: str
+    refusals: tuple[str, ...]
+    prepare: Callable[[Path], object] | None = None
+
+
+def _required_check_mutations() -> list[RequiredCheckDrift]:
+    """Return jobs outside ci.yml that report a required check, or can."""
+
+    def job(key: str, name: str) -> str:
+        return f"  {key}:\n{name}    runs-on: ubuntu-24.04\n    steps:\n      - run: exit 0\n"
+
+    def matched(workflow: str, key: str, name: str, check: str) -> str:
+        return (
+            f"{Path('.github/workflows') / workflow}: job {key} reports its check as {name}, "
+            f"which matches the required check {check}; only ci.yml may report a required check"
+        )
+
+    def added(jobs: str) -> str:
+        return (
+            "name: Confirm merge\n"
+            "on:\n"
+            "  pull_request:\n"
+            "permissions:\n"
+            "  contents: read\n"
+            "jobs:\n" + jobs
+        )
+
+    release = "release.yml"
+    gate = "'Merge gate'"
+    ubuntu = "'Ubuntu compatibility'"
+    # A job id holds only letters, digits, '-' and '_', and each shipped
+    # required check holds a space, so the jobs that report their ids are
+    # held to a check the copied branch ruleset is made to require.
+    release_gate = "'release-gate'"
+    require_release_gate = _require_check("release-gate")
+    return [
+        RequiredCheckDrift(
+            "a release job named like the merge gate",
+            release,
+            RELEASE_JOB,
+            job("merge-confirmation", "    name: Merge gate\n"),
+            (matched(release, "'merge-confirmation'", gate, gate),),
+        ),
+        # A job with no name, or only an empty or null one, reports its id.
+        RequiredCheckDrift(
+            "a nameless job in an added workflow whose id is a required check",
+            ADDED_WORKFLOW,
+            None,
+            added(job("release-gate", "")),
+            (matched(ADDED_WORKFLOW, release_gate, release_gate, release_gate),),
+            require_release_gate,
+        ),
+        RequiredCheckDrift(
+            "a job in an added workflow whose name is empty and whose id is a required check",
+            ADDED_WORKFLOW,
+            None,
+            added(job("release-gate", "    name: ''\n")),
+            (matched(ADDED_WORKFLOW, release_gate, release_gate, release_gate),),
+            require_release_gate,
+        ),
+        RequiredCheckDrift(
+            "a job in an added workflow whose name is null and whose id is a required check",
+            ADDED_WORKFLOW,
+            None,
+            added(job("release-gate", "    name: ~\n")),
+            (matched(ADDED_WORKFLOW, release_gate, release_gate, release_gate),),
+            require_release_gate,
+        ),
+        # Only ci.yml itself is left to CI_JOBS, so a workflow beside it under
+        # the other extension GitHub runs is held to the rule like any other.
+        RequiredCheckDrift(
+            "an added ci.yaml whose job is named like the merge gate",
+            "ci.yaml",
+            None,
+            added(job("merge-confirmation", "    name: Merge gate\n")),
+            (matched("ci.yaml", "'merge-confirmation'", gate, gate),),
+        ),
+        RequiredCheckDrift(
+            "a release job named like a required check but for case",
+            release,
+            RELEASE_JOB,
+            job("ubuntu-confirmation", "    name: ubuntu COMPATIBILITY\n"),
+            (matched(release, "'ubuntu-confirmation'", "'ubuntu COMPATIBILITY'", ubuntu),),
+        ),
+        # Written without the optional spaces inside the braces, so only the
+        # opening `${{` itself marks it as an expression.
+        RequiredCheckDrift(
+            "a release job named by an expression",
+            release,
+            RELEASE_JOB,
+            job("merge-confirmation", "    name: ${{format('{0} gate', 'Merge')}}\n"),
+            (
+                f"{Path('.github/workflows') / release}: job 'merge-confirmation' names its "
+                "check with an expression, \"${{format('{0} gate', 'Merge')}}\", which is "
+                "evaluated only when the workflow runs and so cannot be compared with the "
+                "required checks; outside ci.yml a job's name must be literal",
+            ),
+        ),
+        RequiredCheckDrift(
+            "a release job whose quoted name pads a required check with spaces",
+            release,
+            RELEASE_JOB,
+            job("merge-confirmation", '    name: " Merge gate "\n'),
+            (matched(release, "'merge-confirmation'", "' Merge gate '", gate),),
+        ),
+        # A loader keeps the last of a repeated key, so only a required name
+        # placed first tells reading every name from reading the loaded one.
+        RequiredCheckDrift(
+            "a release job that repeats its name with a required check first",
+            release,
+            RELEASE_JOB,
+            job("merge-confirmation", "    name: Merge gate\n    'name': Confirm merge\n"),
+            (matched(release, "'merge-confirmation'", gate, gate),),
+        ),
+        # A pair merged in with `<<` is read like one written in place, so
+        # neither a job's name nor a whole job can bring a required check in.
+        RequiredCheckDrift(
+            "release jobs that merge in a required check",
+            release,
+            RELEASE_JOB,
+            job("merge-confirmation", "    <<: {name: Merge gate}\n")
+            + "  <<: {ubuntu-confirmation: {name: Ubuntu compatibility, runs-on: ubuntu-24.04, "
+            "steps: [{run: exit 0}]}}\n",
+            (
+                matched(release, "'merge-confirmation'", gate, gate),
+                matched(release, "'ubuntu-confirmation'", ubuntu, ubuntu),
+            ),
+        ),
+    ]
+
+
+def _apply_required_check_drift(case: RequiredCheckDrift) -> str:
+    """Return the whole content of the workflow a required check drift writes."""
+
+    shipped = ROOT / ".github/workflows" / case.workflow
+    if case.anchor is None:
+        assert not shipped.exists(), case.label
+        return case.text
+    original = shipped.read_text(encoding="utf-8")
+    assert case.anchor in original, case.label
+    return original.replace(case.anchor, case.text + case.anchor, 1)
+
+
+def _rewrite_branch_ruleset(change: Callable[[dict[str, Any]], object]) -> Callable[[Path], None]:
+    """Return a change to the copied branch ruleset, made to its parsed JSON."""
+
+    def apply(tree: Path) -> None:
+        path = tree / BRANCH_RULESET
+        ruleset = json.loads(path.read_text(encoding="utf-8"))
+        assert isinstance(ruleset, dict)
+        change(ruleset)
+        path.write_text(json.dumps(ruleset), encoding="utf-8")
+
+    return apply
+
+
+def _status_check_rule(ruleset: dict[str, Any]) -> dict[str, Any]:
+    rule = next(rule for rule in ruleset["rules"] if rule["type"] == "required_status_checks")
+    assert isinstance(rule, dict)
+    return rule
+
+
+def _require_check(context: str) -> Callable[[Path], None]:
+    """Return a change to the copied branch ruleset that also requires `context`."""
+
+    return _rewrite_branch_ruleset(
+        lambda ruleset: _status_check_rule(ruleset)["parameters"]["required_status_checks"].append(
+            {"context": context}
+        )
+    )
+
+
+def _ruleset_faults() -> list[tuple[str, Callable[[Path], object], list[str]]]:
+    """Rulesets no required check can be read from, each with every refusal main reports."""
+
+    # Nested far deeper than Python's JSON decoder recurses on Windows or
+    # Linux, so on either the decoder gives up before reading the ruleset.
+    depth = 100_000
+    deep = RULESETS / "deep.json"
+    return [
+        (
+            "no ruleset definitions",
+            lambda tree: shutil.rmtree(tree / RULESETS),
+            [f"{RULESETS}: no ruleset definitions found; {RULESET_USE}"],
+        ),
+        (
+            "a ruleset that is not JSON",
+            lambda tree: (tree / BRANCH_RULESET).write_text("rules: []\n", encoding="utf-8"),
+            [
+                f"{BRANCH_RULESET}: ruleset cannot be read: "
+                f"Expecting value: line 1 column 1 (char 0); {RULESET_USE}"
+            ],
+        ),
+        (
+            "a ruleset nested deeper than the decoder recurses",
+            lambda tree: (tree / deep).write_text("[" * depth + "]" * depth, encoding="utf-8"),
+            [
+                f"{deep}: ruleset cannot be read: maximum recursion depth exceeded while "
+                f"decoding a JSON array from a unicode string; {RULESET_USE}"
+            ],
+        ),
+        (
+            "a ruleset whose rules are not a list",
+            _rewrite_branch_ruleset(lambda ruleset: ruleset.update({"rules": {}})),
+            [f"{BRANCH_RULESET}: ruleset must declare its rules as a list; {RULESET_USE}"],
+        ),
+        (
+            "a required check without a context",
+            _rewrite_branch_ruleset(
+                lambda ruleset: _status_check_rule(ruleset)["parameters"][
+                    "required_status_checks"
+                ].append({"integration_id": 15368})
+            ),
+            [
+                f"{BRANCH_RULESET}: a required_status_checks rule must name each check "
+                f"by its context; {RULESET_USE}"
+            ],
+        ),
+        (
+            "no ruleset that requires a status check",
+            _rewrite_branch_ruleset(
+                lambda ruleset: ruleset["rules"].remove(_status_check_rule(ruleset))
+            ),
+            [f"{RULESETS}: no ruleset requires a status check; {RULESET_USE}"],
+        ),
+    ]
 
 
 def _queue_binding_mutations() -> list[tuple[str, WorkflowMutation]]:
@@ -3302,7 +3560,9 @@ def test_workflow_policy_refuses_every_recorded_production_drift(
     `validate_workflow_document` - the function `main` calls per file - so a
     rule that stops being wired in fails here rather than passing silently.
     The action reference spellings run through `main` itself, because the
-    allowlist comparison that refuses some of them happens there.
+    allowlist comparison that refuses some of them happens there, and so do
+    the jobs outside ci.yml that report a required check, which are compared
+    with the rulesets main reads.
     """
     namespace = _workflow_namespace()
     validate_document = namespace["validate_workflow_document"]
@@ -3317,11 +3577,13 @@ def test_workflow_policy_refuses_every_recorded_production_drift(
     tree_cases = _all_workflow_mutations()
     text_cases = _content_mutations()
     reference_cases = _action_reference_mutations()
+    required_check_cases = _required_check_mutations()
+    recorded = len(tree_cases) + len(text_cases) + len(reference_cases) + len(required_check_cases)
     # Pinned exactly, so a case cannot be dropped while the suite stays green.
     # The gate requires at least 77 production-entry mutations; the extra
     # cases are neighbours of accepted drifts that cost nothing to keep.
-    assert len(tree_cases) + len(text_cases) + len(reference_cases) == 164
-    assert len(tree_cases) + len(text_cases) + len(reference_cases) >= 77
+    assert recorded == 174
+    assert recorded >= 77
 
     accepted: list[str] = []
     for label, mutate in tree_cases:
@@ -3342,6 +3604,11 @@ def test_workflow_policy_refuses_every_recorded_production_drift(
         tree = tmp_path / f"drift-{index}"
         if not _main_refusals(tree, monkeypatch, case.workflow, drifted):
             accepted.append(case.label)
+    for index, required in enumerate(required_check_cases):
+        drifted = _apply_required_check_drift(required)
+        tree = tmp_path / f"required-{index}"
+        if not _main_refusals(tree, monkeypatch, required.workflow, drifted, required.prepare):
+            accepted.append(required.label)
     assert not accepted, f"workflow policy accepted: {accepted}"
 
 
@@ -3410,6 +3677,177 @@ def test_workflow_policy_accepts_local_references_and_a_pin_audited_on_its_value
     )
 
     assert _main_refusals(tmp_path, monkeypatch, "release.yml", accepted) == []
+
+
+@pytest.mark.parametrize("case", _required_check_mutations(), ids=lambda case: case.label)
+def test_workflow_policy_refuses_each_job_outside_ci_that_reports_a_required_check(
+    case: RequiredCheckDrift, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each job draws a refusal naming its workflow, the job and the check it reports.
+
+    The drift enters through main, over a copy whose other workflows and
+    rulesets are the shipped ones but for a check a drift adds to a ruleset,
+    so every refusal belongs to the drift.
+    """
+
+    drifted = _apply_required_check_drift(case)
+
+    refusals = _main_refusals(tmp_path, monkeypatch, case.workflow, drifted, case.prepare)
+
+    assert refusals == list(case.refusals)
+
+
+def test_workflow_policy_refuses_the_ci_workflow_renamed_by_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a workflow named exactly ci.yml may report a required check.
+
+    GitHub runs CI.yml as a workflow of its own, which none of the rules that
+    pin ci.yml reach, so the shipped ci.yml renamed by case alone is refused
+    for each required check its jobs report.
+    """
+
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    renamed = Path(".github/workflows/CI.yml")
+
+    def rename(tree: Path) -> None:
+        (tree / ".github/workflows/ci.yml").rename(tree / renamed)
+
+    assert _main_refusals(tmp_path, monkeypatch, "ci.yml", ci, rename) == [
+        f"{renamed}: job 'compatibility' reports its check as 'Ubuntu compatibility', which "
+        "matches the required check 'Ubuntu compatibility'; only ci.yml may report a "
+        "required check",
+        f"{renamed}: job 'merge-gate' reports its check as 'Merge gate', which matches the "
+        "required check 'Merge gate'; only ci.yml may report a required check",
+    ]
+
+
+def test_workflow_policy_passes_release_jobs_whose_names_no_ruleset_requires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ordinary release jobs pass, because no ruleset requires a name they report.
+
+    A job named with a required check's name inside a longer one, or with no
+    name and an id that spells a required check as an identifier, reports a
+    check of its own. Once a ruleset requires the name a shipped release job
+    reports, that job is refused, so the passes come from comparing names with
+    the rulesets rather than from a rule that compares nothing.
+    """
+
+    original = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    assert RELEASE_JOB in original
+    neighbours = (
+        "  merge-gate:\n"
+        "    runs-on: ubuntu-24.04\n"
+        "    steps:\n"
+        "      - run: exit 0\n"
+        "  merge-summary:\n"
+        "    name: Merge gate summary\n"
+        "    runs-on: ubuntu-24.04\n"
+        "    steps:\n"
+        "      - run: exit 0\n"
+    )
+    with_neighbours = original.replace(RELEASE_JOB, neighbours + RELEASE_JOB, 1)
+    require_release_source = _require_check("Validate release source")
+
+    shipped = _main_refusals(tmp_path / "shipped", monkeypatch, "release.yml", original)
+    near = _main_refusals(tmp_path / "near", monkeypatch, "release.yml", with_neighbours)
+    required = _main_refusals(
+        tmp_path / "required", monkeypatch, "release.yml", original, require_release_source
+    )
+
+    assert shipped == []
+    assert near == []
+    assert required == [
+        f"{Path('.github/workflows/release.yml')}: job 'validate-release' reports its check as "
+        "'Validate release source', which matches the required check 'Validate release source'; "
+        "only ci.yml may report a required check"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("change", "refusals"),
+    [(change, refusals) for _, change, refusals in _ruleset_faults()],
+    ids=[label for label, _, _ in _ruleset_faults()],
+)
+def test_workflow_policy_refuses_rulesets_it_cannot_read_required_checks_from(
+    change: Callable[[Path], object],
+    refusals: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ruleset main cannot read required checks from is refused, never read as requiring none.
+
+    The workflows are the shipped ones, so every refusal belongs to the ruleset.
+    """
+
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    assert _main_refusals(tmp_path, monkeypatch, "ci.yml", ci, change) == refusals
+
+
+def test_workflow_policy_refuses_a_ruleset_that_cannot_be_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ruleset path that cannot be read as a file is refused like one that is not JSON."""
+
+    unreadable = RULESETS / "unreadable.json"
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    refusals = _main_refusals(
+        tmp_path, monkeypatch, "ci.yml", ci, lambda tree: (tree / unreadable).mkdir()
+    )
+
+    assert len(refusals) == 1, refusals
+    assert refusals[0].startswith(f"{unreadable}: ruleset cannot be read: "), refusals
+    assert refusals[0].endswith(f"; {RULESET_USE}"), refusals
+
+
+def test_a_workflow_checked_alone_is_held_to_the_rulesets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Given no required checks, the coordinator reads them from the rulesets.
+
+    So a workflow checked on its own is compared with the checks main would
+    compare it with, and one checked where no ruleset can be read is refused.
+    """
+
+    validate_document = _workflow_namespace()["validate_workflow_document"]
+    assert callable(validate_document)
+    case = next(
+        case
+        for case in _required_check_mutations()
+        if case.label == "a release job named like the merge gate"
+    )
+    drifted = _apply_required_check_drift(case)
+    workflow = yaml.safe_load(drifted)
+    path = Path(".github/workflows") / case.workflow
+
+    monkeypatch.chdir(ROOT)
+    beside_rulesets = validate_document(path, drifted, workflow)
+    monkeypatch.chdir(tmp_path)
+    without_rulesets = validate_document(path, drifted, workflow)
+
+    assert beside_rulesets == list(case.refusals)
+    assert without_rulesets == [f"{RULESETS}: no ruleset definitions found; {RULESET_USE}"]
+
+
+def test_required_check_names_refuse_a_workflow_that_cannot_be_composed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A document whose job names cannot be read is refused, never passed as clean."""
+
+    validate_document = _workflow_namespace()["validate_workflow_document"]
+    assert callable(validate_document)
+    path = Path(".github/workflows/example.yml")
+    workflow = {"permissions": {"contents": "read"}, "jobs": {}}
+    monkeypatch.chdir(ROOT)
+
+    errors = validate_document(path, "jobs:\n  build:\n    steps: [\n", workflow)
+
+    assert len(errors) == 2, errors
+    assert errors[0].startswith(f"{path}: invalid YAML: "), errors
+    assert errors[1].startswith(f"{path}: job names cannot be read: "), errors
 
 
 def test_exact_comparator_refuses_every_equal_but_differently_typed_value() -> None:
@@ -3528,9 +3966,11 @@ def test_workflow_validator_wiring_is_intact() -> None:
 
     # 1. The coordinator exists and is importable.
     assert callable(namespace["validate_workflow_document"])
-    # 2. main delegates to it rather than inlining the rules again.
+    # 2. main delegates to it rather than inlining the rules again, handing it
+    # the required checks it read once from the rulesets.
     main_source = source[source.index("def main()") :]
-    assert "validate_workflow_document(path, content, workflow)" in main_source
+    assert "required_checks, errors = required_status_checks()" in main_source
+    assert "validate_workflow_document(path, content, workflow, required_checks)" in main_source
     # 3. main calls no per-rule validator directly any more.
     assert not any(
         f"errors.extend({rule}(" in main_source
@@ -3542,6 +3982,7 @@ def test_workflow_validator_wiring_is_intact() -> None:
             "validate_untrusted_triggers",
             "validate_pull_request_triggers",
             "validate_workflow_keys",
+            "validate_required_check_names",
             "validate_merge_gate",
             "validate_verification_bindings",
         )
@@ -3558,6 +3999,7 @@ def test_workflow_validator_wiring_is_intact() -> None:
         "validate_untrusted_triggers",
         "validate_pull_request_triggers",
         "validate_workflow_keys",
+        "validate_required_check_names",
         "validate_merge_gate",
         "validate_verification_bindings",
     ):
