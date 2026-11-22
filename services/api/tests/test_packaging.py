@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import FunctionType
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 import yaml
@@ -847,12 +847,26 @@ def test_workflow_policy_rejects_docker_actions() -> None:
 
     errors = validate_action_pins(
         workflow_path,
-        "steps:\n  - uses: docker://example.invalid/tool@sha256:" + ("a" * 64),
+        "jobs:\n  build:\n    steps:\n      - uses: docker://example.invalid/tool@sha256:"
+        + ("a" * 64),
     )
 
     assert errors == [
-        f"{workflow_path}:2: docker actions are prohibited; use a reviewed SHA-pinned action"
+        f"{workflow_path}:4: docker actions are prohibited; use a reviewed SHA-pinned action"
     ]
+
+
+def test_action_pins_report_a_workflow_that_cannot_be_composed() -> None:
+    """A document the pin check cannot read is refused, never passed as clean."""
+
+    namespace = runpy.run_path(str(ROOT / "scripts/validate-workflows.py"))
+    validate_action_pins = namespace["validate_action_pins"]
+    workflow_path = Path(".github/workflows/example.yml")
+
+    errors = validate_action_pins(workflow_path, "jobs:\n  build:\n    steps: [\n")
+
+    assert len(errors) == 1, errors
+    assert errors[0].startswith(f"{workflow_path}: invalid YAML: "), errors
 
 
 def test_workflow_policy_limits_release_write_permission_to_the_draft_job() -> None:
@@ -2763,6 +2777,334 @@ def _content_mutations() -> list[tuple[str, str, str]]:
     ]
 
 
+# The references the spelling cases below are built from. Of these, only the
+# first is in the selected Actions allowlist.
+LISTED_PIN = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+MUTABLE_REF = "actions/upload-artifact@main"
+UNLISTED_SHA = "0123456789abcdef0123456789abcdef01234567"
+UNLISTED_PIN = f"example/unlisted-action@{UNLISTED_SHA}"
+SHARED_WORKFLOW = "example/shared-workflows/.github/workflows/build.yml"
+# Where those cases add a step or a job. Neither release.yml nor ci.yml's
+# scheduled audit is pinned whole, so the pin check and the allowlist are all
+# that read the references there.
+RELEASE_STEP = "      - name: Attest release provenance\n"
+AUDIT_STEP = "      - name: Install audit dependencies\n"
+RELEASE_JOB = "\n  draft-release:\n"
+UNPINNED = "external action must use a full commit SHA"
+UNAUDITED = "pinned action needs an auditable version comment"
+NOT_PLAIN = "uses must be a plain, unquoted string naming an action or workflow"
+DOCKER = "docker actions are prohibited; use a reviewed SHA-pinned action"
+
+
+class ActionReferenceDrift(NamedTuple):
+    """One spelling of an action reference, and every refusal main reports for it.
+
+    The drift replaces `find` with `replace` in one workflow. Each pin refusal
+    names the line `located` is on, which is where the reference's value
+    starts, and `unlisted` is the reference the allowlist comparison reports
+    missing.
+    """
+
+    label: str
+    workflow: str
+    find: str
+    replace: str
+    located: str
+    refusals: tuple[str, ...]
+    unlisted: str | None = None
+
+
+def _action_reference_mutations() -> list[ActionReferenceDrift]:
+    """Return the action reference spellings a line-by-line reading misses or misreads."""
+
+    anchors = {
+        "release step": ("release.yml", RELEASE_STEP),
+        "audit step": ("ci.yml", AUDIT_STEP),
+        "release job": ("release.yml", RELEASE_JOB),
+    }
+
+    def drift(
+        label: str,
+        where: str,
+        text: str,
+        located: str,
+        refusals: tuple[str, ...],
+        unlisted: str | None = None,
+    ) -> ActionReferenceDrift:
+        workflow, anchor = anchors[where]
+        return ActionReferenceDrift(
+            label, workflow, anchor, text + anchor, located, refusals, unlisted
+        )
+
+    return [
+        drift(
+            "unpinned step action with its value on the next line",
+            "release step",
+            f"      - uses:\n          {MUTABLE_REF}\n",
+            MUTABLE_REF,
+            (UNPINNED, UNAUDITED),
+            MUTABLE_REF,
+        ),
+        drift(
+            "unpinned step action folded",
+            "audit step",
+            f"      - uses: >-\n          {MUTABLE_REF}\n",
+            "uses: >-",
+            (NOT_PLAIN,),
+            MUTABLE_REF,
+        ),
+        drift(
+            "unpinned step action in a flow mapping",
+            "release step",
+            f"      - {{uses: {MUTABLE_REF}, with: {{name: drift}}}}\n",
+            MUTABLE_REF,
+            (UNPINNED, UNAUDITED),
+            MUTABLE_REF,
+        ),
+        drift(
+            "unpinned step action under a quoted key",
+            "audit step",
+            f"      - 'uses': {MUTABLE_REF}\n",
+            MUTABLE_REF,
+            (UNPINNED, UNAUDITED),
+            MUTABLE_REF,
+        ),
+        drift(
+            "unpinned step action whose comment runs on past a version",
+            "release step",
+            f"      - uses: {MUTABLE_REF} # v7.0.1 or later\n",
+            MUTABLE_REF,
+            (UNPINNED, UNAUDITED),
+            MUTABLE_REF,
+        ),
+        drift(
+            "unlisted step action with its value on the next line",
+            "audit step",
+            f"      - uses:\n          {UNLISTED_PIN} # v1.0.0\n",
+            UNLISTED_PIN,
+            (),
+            UNLISTED_PIN,
+        ),
+        drift(
+            "unlisted step action folded",
+            "release step",
+            f"      - uses: >-\n          {UNLISTED_PIN}\n",
+            "uses: >-",
+            (NOT_PLAIN,),
+            UNLISTED_PIN,
+        ),
+        drift(
+            "unlisted step action in a flow mapping",
+            "audit step",
+            f"      - {{uses: {UNLISTED_PIN}}} # v1.0.0\n",
+            UNLISTED_PIN,
+            (UNAUDITED,),
+            UNLISTED_PIN,
+        ),
+        drift(
+            "unlisted step action under a quoted key",
+            "release step",
+            f"      - 'uses': {UNLISTED_PIN} # v1.0.0\n",
+            UNLISTED_PIN,
+            (),
+            UNLISTED_PIN,
+        ),
+        drift(
+            "unpinned reusable workflow called by a job",
+            "release job",
+            f"  shared-build:\n    uses:\n      {SHARED_WORKFLOW}@main\n",
+            SHARED_WORKFLOW,
+            (UNPINNED, UNAUDITED),
+            f"{SHARED_WORKFLOW}@main",
+        ),
+        drift(
+            "unlisted reusable workflow called by a job under a quoted key",
+            "release job",
+            f"  shared-build:\n    'uses': {SHARED_WORKFLOW}@{UNLISTED_SHA} # v1.0.0\n",
+            SHARED_WORKFLOW,
+            (),
+            f"{SHARED_WORKFLOW}@{UNLISTED_SHA}",
+        ),
+        drift(
+            "pinned step action whose version comment ends the line of its key",
+            "release step",
+            f"      - uses: # v7.0.1\n          {LISTED_PIN}\n",
+            LISTED_PIN,
+            (UNAUDITED,),
+        ),
+        drift(
+            "pinned step action folded under its version comment",
+            "audit step",
+            f"      - uses: >- # v7.0.1\n          {LISTED_PIN}\n",
+            "uses: >-",
+            (NOT_PLAIN,),
+        ),
+        drift(
+            "pinned step action in a flow mapping that its version comment follows",
+            "release step",
+            f"      - {{uses: {LISTED_PIN}, with: {{name: drift}}}} # v7.0.1\n",
+            LISTED_PIN,
+            (UNAUDITED,),
+        ),
+        drift(
+            "pinned step action under a quoted key with its version comment below",
+            "audit step",
+            f"      - 'uses': {LISTED_PIN}\n        # v7.0.1\n",
+            LISTED_PIN,
+            (UNAUDITED,),
+        ),
+        drift(
+            "step that repeats uses with an unpinned second value",
+            "release step",
+            f"      - uses: {LISTED_PIN} # v7.0.1\n        'uses': {MUTABLE_REF}\n",
+            MUTABLE_REF,
+            (UNPINNED, UNAUDITED),
+            MUTABLE_REF,
+        ),
+        # A loader keeps the last of a repeated key, so only an unpinned value
+        # placed first tells checking every occurrence from checking that one.
+        drift(
+            "step that repeats uses with an unpinned first value",
+            "release step",
+            f"      - 'uses': {MUTABLE_REF}\n        uses: {LISTED_PIN} # v7.0.1\n",
+            MUTABLE_REF,
+            (UNPINNED, UNAUDITED),
+            MUTABLE_REF,
+        ),
+        drift(
+            "job that repeats steps with an unpinned action in the first",
+            "release job",
+            "  repeated-steps:\n"
+            "    runs-on: ubuntu-24.04\n"
+            "    steps:\n"
+            f"      - uses: {MUTABLE_REF}\n"
+            "    'steps':\n"
+            "      - run: echo second\n",
+            MUTABLE_REF,
+            (UNPINNED, UNAUDITED),
+            MUTABLE_REF,
+        ),
+        drift(
+            "step action given as a list",
+            "release step",
+            f"      - uses: [{MUTABLE_REF}]\n",
+            MUTABLE_REF,
+            (NOT_PLAIN,),
+        ),
+        drift(
+            "pinned step action in quotes",
+            "release step",
+            f'      - uses: "{LISTED_PIN}" # v7.0.1\n',
+            LISTED_PIN,
+            (NOT_PLAIN,),
+        ),
+        # The line break a kept block value ends with, and the space a quoted
+        # value carries, are no part of the listed pin, so the only refusal is
+        # the spelling's own.
+        drift(
+            "pinned step action in a block that keeps its line break",
+            "release step",
+            f"      - uses: >\n          {LISTED_PIN}\n",
+            "uses: >",
+            (NOT_PLAIN,),
+        ),
+        drift(
+            "pinned step action in quotes with a space inside them",
+            "audit step",
+            f'      - uses: "{LISTED_PIN} " # v7.0.1\n',
+            LISTED_PIN,
+            (NOT_PLAIN,),
+        ),
+        drift(
+            "unpinned step action merged in from an anchor",
+            "release step",
+            "      - name: Describe the shared upload\n"
+            "        env:\n"
+            f"          SHARED: &shared-upload {{uses: {MUTABLE_REF}}}\n"
+            "        run: echo shared\n"
+            "      - <<: *shared-upload\n",
+            MUTABLE_REF,
+            (UNPINNED, UNAUDITED),
+            MUTABLE_REF,
+        ),
+        drift(
+            "unpinned step action merged in from a list of anchors",
+            "release step",
+            "      - name: Describe the shared upload\n"
+            "        env:\n"
+            f"          SHARED: &shared-upload {{uses: {MUTABLE_REF}}}\n"
+            "          NAMED: &shared-name {name: Shared upload}\n"
+            "        run: echo shared\n"
+            "      - <<: [*shared-name, *shared-upload]\n",
+            MUTABLE_REF,
+            (UNPINNED, UNAUDITED),
+            MUTABLE_REF,
+        ),
+        drift(
+            "docker image with its value on the next line",
+            "audit step",
+            "      - uses:\n          docker://example.invalid/tool@sha256:" + "a" * 64 + "\n",
+            "docker://",
+            (DOCKER,),
+        ),
+    ]
+
+
+def _apply_reference_drift(content: str, case: ActionReferenceDrift) -> tuple[str, int]:
+    """Return the drifted workflow and the line its reference's value starts on."""
+
+    start = content.index(case.find)
+    drifted = content[:start] + case.replace + content[start + len(case.find) :]
+    before = case.replace[: case.replace.index(case.located)]
+    return drifted, content[:start].count("\n") + before.count("\n") + 1
+
+
+def _expected_refusals(case: ActionReferenceDrift, line: int) -> list[str]:
+    """Return every refusal main reports for a drift, in the order it reports them."""
+
+    workflow = Path(".github/workflows") / case.workflow
+    expected = [f"{workflow}:{line}: {refusal}" for refusal in case.refusals]
+    if case.unlisted is not None:
+        expected.append(
+            f"{Path('scripts/configure-public-repository.ps1')}: selected Actions allowlist "
+            f"is out of sync with workflows (missing {case.unlisted})"
+        )
+    return expected
+
+
+def _main_refusals(
+    tree: Path, monkeypatch: pytest.MonkeyPatch, workflow: str, content: str
+) -> list[str]:
+    """Run main over a copy of the repository's workflows with one of them replaced.
+
+    main reads every input relative to the working directory: each workflow,
+    the allowlist it compares their references with, and the merge decision
+    script that has to be present. The decision's own cases run in tests of
+    their own and start an interpreter apiece, so none of them run here. The
+    validator is loaded afresh for that, leaving any copy the caller holds as
+    it was.
+    """
+
+    main = _workflow_namespace()["main"]
+    assert isinstance(main, FunctionType)
+    workflows = tree / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    for source in (ROOT / ".github" / "workflows").iterdir():
+        if source.suffix in {".yml", ".yaml"}:
+            shutil.copyfile(source, workflows / source.name)
+    (workflows / workflow).write_text(content, encoding="utf-8", newline="\n")
+    (tree / "scripts").mkdir()
+    for script in ("configure-public-repository.ps1", "ci-merge-gate.py"):
+        shutil.copyfile(ROOT / "scripts" / script, tree / "scripts" / script)
+    monkeypatch.setitem(main.__globals__, "MERGE_GATE_MATRIX", ())
+    monkeypatch.chdir(tree)
+    try:
+        main()
+    except SystemExit as refusal:
+        return str(refusal.code).splitlines()
+    return []
+
+
 def _queue_binding_mutations() -> list[tuple[str, WorkflowMutation]]:
     def job(
         name: str, key: str, apply: Callable[[dict[str, Any]], object]
@@ -2950,30 +3292,36 @@ def _all_workflow_mutations() -> list[tuple[str, WorkflowMutation]]:
     )
 
 
-def test_workflow_policy_refuses_every_recorded_production_drift() -> None:
-    """Seventy-seven drifts, each entering where production enters.
+def test_workflow_policy_refuses_every_recorded_production_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The policy refuses every recorded drift, each entering where production enters.
 
     Every case was accepted by some earlier version of this validator, or is
     the immediate neighbour of one that was. They run through
     `validate_workflow_document` - the function `main` calls per file - so a
     rule that stops being wired in fails here rather than passing silently.
+    The action reference spellings run through `main` itself, because the
+    allowlist comparison that refuses some of them happens there.
     """
     namespace = _workflow_namespace()
     validate_document = namespace["validate_workflow_document"]
     assert callable(validate_document)
     named, content, shipped = _shipped_ci()
 
-    # The shipped file must satisfy the whole coordinator, or every refusal
-    # below proves nothing.
+    # The shipped file must satisfy the whole coordinator, and the shipped
+    # workflows the whole of main, or every refusal below proves nothing.
     assert validate_document(named, content, shipped) == []
+    assert _main_refusals(tmp_path / "shipped", monkeypatch, "ci.yml", content) == []
 
     tree_cases = _all_workflow_mutations()
     text_cases = _content_mutations()
+    reference_cases = _action_reference_mutations()
     # Pinned exactly, so a case cannot be dropped while the suite stays green.
     # The gate requires at least 77 production-entry mutations; the extra
     # cases are neighbours of accepted drifts that cost nothing to keep.
-    assert len(tree_cases) + len(text_cases) == 139
-    assert len(tree_cases) + len(text_cases) >= 77
+    assert len(tree_cases) + len(text_cases) + len(reference_cases) == 164
+    assert len(tree_cases) + len(text_cases) + len(reference_cases) >= 77
 
     accepted: list[str] = []
     for label, mutate in tree_cases:
@@ -2987,6 +3335,13 @@ def test_workflow_policy_refuses_every_recorded_production_drift() -> None:
         workflow = yaml.safe_load(mutated)
         if not validate_document(named, mutated, workflow):
             accepted.append(label)
+    for index, case in enumerate(reference_cases):
+        original = (ROOT / ".github/workflows" / case.workflow).read_text(encoding="utf-8")
+        assert case.find in original, case.label
+        drifted, _line = _apply_reference_drift(original, case)
+        tree = tmp_path / f"drift-{index}"
+        if not _main_refusals(tree, monkeypatch, case.workflow, drifted):
+            accepted.append(case.label)
     assert not accepted, f"workflow policy accepted: {accepted}"
 
 
@@ -3007,6 +3362,54 @@ def test_workflow_policy_names_each_change_to_how_verification_runs() -> None:
         if not any(expected in error for error in errors):
             misreported.append((label, errors))
     assert not misreported, misreported
+
+
+@pytest.mark.parametrize("case", _action_reference_mutations(), ids=lambda case: case.label)
+def test_workflow_policy_reports_every_spelling_of_an_action_reference(
+    case: ActionReferenceDrift, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each spelling draws every refusal its reference earns, at the value's line.
+
+    The drift enters through main, which checks each workflow on its own and
+    then compares the references of all of them with the allowlist. The copy
+    main runs over passes untouched, so every refusal belongs to the drift.
+    """
+
+    original = (ROOT / ".github/workflows" / case.workflow).read_text(encoding="utf-8")
+    assert case.find in original, case.label
+    drifted, line = _apply_reference_drift(original, case)
+
+    unchanged = _main_refusals(tmp_path / "shipped", monkeypatch, case.workflow, original)
+    refusals = _main_refusals(tmp_path / "drifted", monkeypatch, case.workflow, drifted)
+
+    assert unchanged == []
+    assert refusals == _expected_refusals(case, line)
+
+
+def test_workflow_policy_accepts_local_references_and_a_pin_audited_on_its_value_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading references from the parsed workflow refuses nothing the rules allow.
+
+    A local action or reusable workflow written as a plain value needs no pin,
+    in a flow mapping or under a quoted key alike, and a listed pin may sit on
+    the line after its key, since its version comment still follows the value
+    directly.
+    """
+
+    original = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    assert RELEASE_STEP in original
+    assert RELEASE_JOB in original
+    steps = (
+        "      - {uses: ./.github/actions/prepare}\n"
+        f"      - uses:\n          {LISTED_PIN} # v7.0.1\n"
+    )
+    job = "  shared-checks:\n    'uses': ./.github/workflows/shared-checks.yml\n"
+    accepted = original.replace(RELEASE_STEP, steps + RELEASE_STEP, 1).replace(
+        RELEASE_JOB, job + RELEASE_JOB, 1
+    )
+
+    assert _main_refusals(tmp_path, monkeypatch, "release.yml", accepted) == []
 
 
 def test_exact_comparator_refuses_every_equal_but_differently_typed_value() -> None:

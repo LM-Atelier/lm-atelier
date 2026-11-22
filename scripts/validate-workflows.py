@@ -14,12 +14,13 @@ import yaml
 
 WORKFLOW_ROOT = Path(".github/workflows")
 PUBLIC_CONFIGURATION = Path("scripts/configure-public-repository.ps1")
-ACTION_USE = re.compile(
-    r"^\s*(?:-\s*)?uses:\s*(?P<target>\S+)"
-    r"(?:\s+#\s*(?P<version>\S+))?\s*$"
-)
 FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 VERSION_COMMENT = re.compile(r"v[0-9]+(?:\.[0-9]+){1,2}(?:-[0-9A-Za-z.-]+)?")
+# The audit comment a pinned reference carries, matched where its value ends:
+# whitespace, `#`, the version, and nothing else before the end of that line.
+TRAILING_VERSION = re.compile(r"[ \t]+#[ \t]*(?P<version>\S+)[ \t]*\r?$", re.MULTILINE)
+STRING_TAG = "tag:yaml.org,2002:str"
+MERGE_TAG = "tag:yaml.org,2002:merge"
 PULL_REQUEST_TARGET = re.compile(r"^\s*pull_request_target\s*:", re.MULTILINE)
 ALLOWED_ACTIONS_BLOCK = re.compile(
     r"^\$AllowedActionPatterns\s*=\s*@\(\s*$"
@@ -94,13 +95,105 @@ def validate_permissions(path: Path, workflow: dict[str, Any]) -> list[str]:
     return errors
 
 
-def validate_action_pins(path: Path, content: str) -> list[str]:
-    errors: list[str] = []
-    for line_number, line in enumerate(content.splitlines(), start=1):
-        match = ACTION_USE.match(line)
-        if not match:
+def mapping_pairs(node: yaml.Node) -> list[tuple[yaml.Node, yaml.Node]]:
+    """Return a mapping's key-value pairs, with every pair a `<<` merge key adds.
+
+    Loading a mapping that merges others in gives it their pairs as well, so a
+    pair that arrives that way is checked like one written in place. A node
+    that is not a mapping has no pairs.
+    """
+
+    pairs: list[tuple[yaml.Node, yaml.Node]] = []
+    pending = [node]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        # A mapping can merge itself in through an alias, so each is read once.
+        if not isinstance(current, yaml.MappingNode) or id(current) in visited:
             continue
-        target = match.group("target")
+        visited.add(id(current))
+        for key, value in current.value:
+            if key.tag == MERGE_TAG:
+                pending.extend(value.value if isinstance(value, yaml.SequenceNode) else [value])
+            else:
+                pairs.append((key, value))
+    return pairs
+
+
+def string_value(node: yaml.Node) -> str | None:
+    """Return a scalar's text when it loads as a string, however it is quoted."""
+
+    if isinstance(node, yaml.ScalarNode) and node.tag == STRING_TAG:
+        return str(node.value)
+    return None
+
+
+def values_named(node: yaml.Node, name: str) -> list[yaml.Node]:
+    """Return the value of every pair whose key loads as the string `name`.
+
+    A mapping can repeat a key. A loader keeps only the last occurrence, so
+    every occurrence is returned rather than the first.
+    """
+
+    return [value for key, value in mapping_pairs(node) if string_value(key) == name]
+
+
+def action_references(content: str) -> list[yaml.Node]:
+    """Return the value of every `uses` a workflow's jobs and steps declare, in file order.
+
+    The document is composed rather than read line by line, so a value on the
+    line after its key, a block or quoted value, a flow mapping, a quoted or
+    repeated key and an alias are all found, just as the one-line spelling is.
+    A job's own `uses` calls a reusable workflow and a step's runs an action.
+    Composed nodes keep their place in the file, which is where an audit
+    comment is looked for. A value that aliases reach more than once is
+    returned once. Raises yaml.YAMLError for a document that cannot be composed.
+    """
+
+    root = yaml.compose(content, Loader=yaml.SafeLoader)
+    if not isinstance(root, yaml.MappingNode):
+        return []
+    found: dict[int, yaml.Node] = {}
+    for jobs in values_named(root, "jobs"):
+        for _name, job in mapping_pairs(jobs):
+            references = values_named(job, "uses")
+            for steps in values_named(job, "steps"):
+                if isinstance(steps, yaml.SequenceNode):
+                    for step in steps.value:
+                        references.extend(values_named(step, "uses"))
+            found.update((id(reference), reference) for reference in references)
+    return sorted(found.values(), key=lambda reference: int(reference.start_mark.index))
+
+
+def validate_action_pins(path: Path, content: str) -> list[str]:
+    """Refuse an action or reusable workflow reference that is not pinned and audited.
+
+    Every reference a job or step makes is read from the composed document,
+    so no spelling of one goes unchecked, and each must be a plain, unquoted
+    string, so that the text a reviewer reads, with its audit comment straight
+    after it, is exactly the reference that runs, with no escape, quote or
+    block indicator between them. A local reference needs nothing more and a
+    docker image is refused. Any other must name a full commit SHA and say which version that
+    commit is in a comment straight after the value, on its line, where an
+    update to the pin changes the version beside it. A document that cannot be
+    composed is reported rather than passed over.
+    """
+
+    try:
+        references = action_references(content)
+    except yaml.YAMLError as error:
+        return [f"{path}: invalid YAML: {error}"]
+    errors: list[str] = []
+    for node in references:
+        line_number = node.start_mark.line + 1
+        plain = isinstance(node, yaml.ScalarNode) and node.tag == STRING_TAG and node.style is None
+        if not plain:
+            errors.append(
+                f"{path}:{line_number}: uses must be a plain, unquoted string "
+                "naming an action or workflow"
+            )
+            continue
+        target = str(node.value)
         if target.startswith("docker://"):
             errors.append(
                 f"{path}:{line_number}: docker actions are prohibited; "
@@ -112,24 +205,24 @@ def validate_action_pins(path: Path, content: str) -> list[str]:
         action, separator, reference = target.rpartition("@")
         if not separator or not action or not FULL_COMMIT.fullmatch(reference):
             errors.append(f"{path}:{line_number}: external action must use a full commit SHA")
-        version = match.group("version")
-        if version is None or not VERSION_COMMENT.fullmatch(version):
+        comment = TRAILING_VERSION.match(content, node.end_mark.index)
+        if comment is None or not VERSION_COMMENT.fullmatch(comment.group("version")):
             errors.append(f"{path}:{line_number}: pinned action needs an auditable version comment")
     return errors
 
 
 def external_actions(content: str) -> set[str]:
-    """Return every external action reference in one workflow."""
+    """Return every external action and reusable workflow reference in one workflow.
 
-    actions: set[str] = set()
-    for line in content.splitlines():
-        match = ACTION_USE.match(line)
-        if not match:
-            continue
-        target = match.group("target")
-        if not target.startswith(("./", "docker://")):
-            actions.add(target)
-    return actions
+    The references come from the same composed walk the pin check reads, so
+    the allowlist is compared with each of them however it is spelled. The
+    line break a block value keeps and the spaces a quoted one carries are no
+    part of the reference: the pin check already refuses those spellings, and
+    the allowlist reports the reference as a reader sees it.
+    """
+
+    texts = (text.strip() for text in map(string_value, action_references(content)) if text)
+    return {text for text in texts if text and not text.startswith(("./", "docker://"))}
 
 
 def validate_action_allowlist(workflow_actions: set[str]) -> list[str]:
