@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from run_waits import PATIENCE_SECONDS
+from run_waits import PATIENCE_SECONDS, wait_until
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -23,8 +23,24 @@ from local_lm.db import (
     init_db,
 )
 from local_lm.domain import JobStatus, utcnow
-from local_lm.models import Chat, Job, Message, Run, WorkPlan, WorkStep, WorkStepDependency
-from local_lm.scheduler import _ELIGIBILITY_SHARE_SECONDS, JobClaim, ResourceScheduler
+from local_lm.models import (
+    Chat,
+    GenerationQueuePolicy,
+    Job,
+    Message,
+    Run,
+    WorkPlan,
+    WorkPlanControl,
+    WorkStep,
+    WorkStepDependency,
+)
+from local_lm.power_inhibition import PowerInhibitor
+from local_lm.scheduler import (
+    _ELIGIBILITY_SHARE_SECONDS,
+    AdmissionCheck,
+    JobClaim,
+    ResourceScheduler,
+)
 
 
 class _FrozenClock:
@@ -1284,3 +1300,659 @@ async def test_an_abandoned_claim_survives_a_failed_expiry_write(settings: Setti
         job = session.get(Job, "job_expiry_failure")
         assert job is not None
         assert job.claim_owner is None
+
+
+#: The stage an admission check gives the job it holds back, in the tests below.
+_WAITING = "waiting for other work"
+
+
+class _RecordingPower:
+    """A keep-awake backend that records every request it is asked to make."""
+
+    name = "recording"
+    supported = True
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def acquire(self, reason: str) -> object:
+        self.calls.append("acquire")
+        return object()
+
+    def release(self, handle: object) -> None:
+        self.calls.append("release")
+
+
+class _Passes:
+    """Counts the scheduler's passes over the queue.
+
+    Every pass expires stale claims first, once, so counting that call counts
+    passes without a timer. With no event broker attached and a check that
+    answers at once, a pass never yields before its wait for the next poll, so
+    a count the test reads always belongs to finished passes.
+    """
+
+    def __init__(self, scheduler: ResourceScheduler, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.count = 0
+        expire = scheduler._expire_foreign_claims
+
+        def counted(group: str) -> list[str]:
+            self.count += 1
+            return expire(group)
+
+        monkeypatch.setattr(scheduler, "_expire_foreign_claims", counted)
+
+    async def wait(self, more: int) -> None:
+        """Return once the scheduler has passed over the queue `more` more times."""
+
+        target = self.count + more
+
+        async def read() -> int:
+            return self.count
+
+        await wait_until(read, lambda count: count >= target, what="passes over the queue")
+
+
+def _queue_media_jobs(settings: Settings, *job_ids: str, plan_id: str | None = None) -> None:
+    """Queue media jobs in one group, oldest first.
+
+    Under a named work plan, each job also owns a step that depends on the
+    plan's upstream step, which starts complete.
+    """
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    first_enqueued = utcnow() - timedelta(seconds=len(job_ids))
+    with SessionLocal() as session:
+        if plan_id is not None:
+            chat = Chat(id="chat_admission", title="Admission")
+            plan = WorkPlan(id=plan_id, chat_id=chat.id, transcript_sequence=1, summary_json={})
+            session.add_all([chat, plan])
+            session.flush()
+            upstream = WorkStep(
+                id=f"{plan_id}_upstream",
+                plan=plan,
+                ordinal=0,
+                operation="text",
+                status=JobStatus.COMPLETE.value,
+            )
+            steps = [
+                WorkStep(id=f"{plan_id}_{job_id}", plan=plan, ordinal=index + 1, operation="text")
+                for index, job_id in enumerate(job_ids)
+            ]
+            session.add_all([upstream, *steps])
+            session.flush()
+            session.add_all(
+                WorkStepDependency(step_id=step.id, depends_on_step_id=upstream.id)
+                for step in steps
+            )
+        session.add_all(
+            Job(
+                id=job_id,
+                kind="image",
+                status=JobStatus.QUEUED.value,
+                work_plan_id=plan_id,
+                work_step_id=None if plan_id is None else f"{plan_id}_{job_id}",
+                queue_group="primary",
+                queue_ticket=f"ticket-{index}",
+                enqueued_at=first_enqueued + timedelta(seconds=index),
+            )
+            for index, job_id in enumerate(job_ids)
+        )
+        session.commit()
+
+
+async def _queue_state(job_id: str) -> dict[str, Any]:
+    """What the queue records for a job: its status, claim, attempt, stage and place."""
+
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        progress = job.progress_json if isinstance(job.progress_json, dict) else {}
+        return {
+            "status": job.status,
+            "claimed": job.claim_owner is not None,
+            "attempt": job.attempt,
+            "stage": progress.get("stage"),
+            "position": progress.get("queue_position"),
+        }
+
+
+async def _shows(job_id: str, stage: str, waiting: asyncio.Task[None]) -> dict[str, Any]:
+    """Wait for the job to show `stage`, failing at once with the lease's own error."""
+
+    async def read() -> dict[str, Any]:
+        if waiting.done():
+            waiting.result()
+        return await _queue_state(job_id)
+
+    return await wait_until(
+        read, lambda state: state["stage"] == stage, what=f"the stage {job_id} shows"
+    )
+
+
+async def test_a_job_its_admission_holds_back_stays_queued_while_the_next_job_runs(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job that may not start yet waits unclaimed, and the next job goes first.
+
+    Its admission check answers with a stage to show instead of admitting it.
+    Keeping its place at the head of the queue, or the group's only slot, while
+    it waits would hold every other job in the group up behind work that is not
+    theirs. Once the check admits it, it takes its turn like any other job.
+    """
+
+    _queue_media_jobs(settings, "job_a", "job_b")
+    monkeypatch.setattr(scheduler_module, "_ADMISSION_RECHECK_SECONDS", 0.05)
+    scheduler = ResourceScheduler(session_factory=SessionLocal)
+    slot = scheduler._lock("primary", 1)
+    busy = True
+    asked_holding_the_slot: list[bool] = []
+
+    async def admission() -> str | None:
+        asked_holding_the_slot.append(slot.locked())
+        # A real check waits for an answer from somewhere, so this one gives way
+        # once too. A scheduler that went on asking without waiting for its
+        # next poll then fails this test within its patience rather than
+        # stalling it.
+        await asyncio.sleep(0)
+        return _WAITING if busy else None
+
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    claims: list[JobClaim] = []
+
+    async def held_back_job() -> None:
+        async with scheduler.job_lease(
+            "job_a", resource="media_compute", group="primary", admission=admission
+        ) as claim:
+            claims.append(claim)
+            started.set()
+            await finish.wait()
+
+    waiting = asyncio.create_task(held_back_job())
+    try:
+        held_back = await _shows("job_a", _WAITING, waiting)
+        assert held_back == {
+            "status": JobStatus.QUEUED.value,
+            "claimed": False,
+            "attempt": 0,
+            "stage": _WAITING,
+            "position": None,
+        }
+        assert asked_holding_the_slot[0], "the check just before the claim ran without the slot"
+        assert scheduler.peek_next_eligible_job("primary") == ("job_b", None)
+
+        async with asyncio.timeout(PATIENCE_SECONDS):
+            async with scheduler.job_lease("job_b", resource="media_compute", group="primary"):
+                assert (await _queue_state("job_b"))["status"] == JobStatus.RUNNING.value
+                assert await _queue_state("job_a") == held_back
+                assert scheduler.peek_next_eligible_job("primary") is None
+
+                busy = False
+                back_in_line = await _shows("job_a", "queued", waiting)
+                assert back_in_line == {
+                    "status": JobStatus.QUEUED.value,
+                    "claimed": False,
+                    "attempt": 0,
+                    "stage": "queued",
+                    "position": 0,
+                }
+                assert scheduler.peek_next_eligible_job("primary") == ("job_a", None)
+                assert not started.is_set(), "the admitted job started while the slot was taken"
+
+        await asyncio.wait_for(started.wait(), timeout=PATIENCE_SECONDS)
+        assert claims[0].attempt == 1
+        assert (await _queue_state("job_a"))["status"] == JobStatus.RUNNING.value
+    finally:
+        finish.set()
+        if not started.is_set():
+            waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+@pytest.mark.parametrize(
+    "ending", ["refused-at-once", "refused-while-waiting", "cancelled-while-waiting"]
+)
+async def test_however_a_held_back_wait_ends_it_leaves_nothing_claimed_or_held(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, ending: str
+) -> None:
+    """A refusal or a cancellation ends the wait with nothing to undo.
+
+    The job never claimed, so its attempt count is unchanged, the slot is free
+    for the rest of the group and nothing keeps the computer awake. It is next
+    in line again, rather than passed over for a check that no longer runs.
+    """
+
+    _queue_media_jobs(settings, "job_a", "job_b")
+    monkeypatch.setattr(scheduler_module, "_ADMISSION_RECHECK_SECONDS", 0.05)
+    keep_awake = _RecordingPower()
+    power = PowerInhibitor(keep_awake)
+    scheduler = ResourceScheduler(session_factory=SessionLocal, power=power)
+
+    class Refused(Exception):
+        pass
+
+    asked = 0
+
+    async def admission() -> str | None:
+        nonlocal asked
+        asked += 1
+        if ending == "refused-at-once" or (ending == "refused-while-waiting" and asked > 1):
+            raise Refused
+        return _WAITING
+
+    async def held_back_job() -> None:
+        async with scheduler.job_lease(
+            "job_a", resource="media_compute", group="primary", admission=admission
+        ):
+            raise AssertionError("a job its admission check did not admit was claimed")
+
+    waiting = asyncio.create_task(held_back_job())
+    if ending == "cancelled-while-waiting":
+        await _shows("job_a", _WAITING, waiting)
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+        assert waiting.cancelled()
+    else:
+        with pytest.raises(Refused):
+            await asyncio.wait_for(waiting, timeout=PATIENCE_SECONDS)
+        assert asked == (1 if ending == "refused-at-once" else 2)
+
+    state = await _queue_state("job_a")
+    assert (state["status"], state["claimed"], state["attempt"]) == (
+        JobStatus.QUEUED.value,
+        False,
+        0,
+    )
+    assert not scheduler._lock("primary", 1).locked()
+    assert keep_awake.calls == []
+    assert power.state().holder_count == 0
+    assert scheduler.peek_next_eligible_job("primary") == ("job_a", None)
+
+
+@pytest.mark.parametrize(
+    ("stop", "stage"),
+    [("hold", "held"), ("pause", "generation paused"), ("dependency", _WAITING)],
+    ids=["hold", "pause", "dependency"],
+)
+async def test_a_held_back_job_is_asked_again_only_once_a_hold_pause_or_dependency_ends(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, stop: str, stage: str
+) -> None:
+    """A hold, a paused lane or an unfinished dependency stops the check being asked.
+
+    No answer could start the job meanwhile, and a check that bounds its own
+    wait would spend it on a stretch no answer could end. Another job holding
+    the slot is no such stop: the job stood aside for that job and is asked
+    all the while. A hold or a pause is what the job shows while it lasts;
+    behind an unfinished dependency it goes on showing the check's stage. Once
+    the stop ends, the check is asked again.
+    """
+
+    _queue_media_jobs(settings, "job_a", plan_id="plan_admission")
+    monkeypatch.setattr(scheduler_module, "_ADMISSION_RECHECK_SECONDS", 0.05)
+    scheduler = ResourceScheduler(session_factory=SessionLocal)
+    passes = _Passes(scheduler, monkeypatch)
+    asked = 0
+
+    async def admission() -> str | None:
+        nonlocal asked
+        asked += 1
+        return _WAITING
+
+    async def times_asked() -> int:
+        return asked
+
+    def stopped(active: bool) -> None:
+        with SessionLocal() as session:
+            if stop == "hold":
+                session.merge(
+                    WorkPlanControl(
+                        plan_id="plan_admission",
+                        state="held" if active else "eligible",
+                        revision=1 if active else 2,
+                        eligible_since=None if active else utcnow(),
+                    )
+                )
+            elif stop == "pause":
+                session.merge(
+                    GenerationQueuePolicy(
+                        lane="generation",
+                        dispatch_state="paused" if active else "open",
+                        revision=1 if active else 2,
+                    )
+                )
+            else:
+                upstream = session.get(WorkStep, "plan_admission_upstream")
+                assert upstream is not None
+                upstream.status = JobStatus.RUNNING.value if active else JobStatus.COMPLETE.value
+            session.commit()
+
+    async def held_back_job() -> None:
+        async with scheduler.job_lease(
+            "job_a", resource="media_compute", group="primary", admission=admission
+        ):
+            raise AssertionError("a job its admission check did not admit was claimed")
+
+    waiting = asyncio.create_task(held_back_job())
+    try:
+        await _shows("job_a", _WAITING, waiting)
+        await wait_until(times_asked, lambda count: count >= 2, what="asks while held back")
+        stopped(True)
+        await _shows("job_a", stage, waiting)
+        # Every pass reads the stop by now: a pass scans afresh once the last
+        # shared scan is older than a quarter of the poll interval.
+        await passes.wait(2)
+        asked_when_stopped = asked
+        await passes.wait(3)
+        assert asked == asked_when_stopped, f"the check was asked while stopped by a {stop}"
+
+        stopped(False)
+        await _shows("job_a", _WAITING, waiting)
+        await wait_until(
+            times_asked, lambda count: count > asked_when_stopped, what="asks once it ended"
+        )
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+async def test_a_held_back_job_asks_again_at_its_own_pace_without_the_slot(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The job asks again every few seconds, not every time it looks at the queue.
+
+    It looks five times a second, and the check may have to ask another program
+    each time, so the check keeps a slower pace of its own. Only the check just
+    before a claim holds the slot; asking again while held back holds nothing.
+    """
+
+    _queue_media_jobs(settings, "job_a")
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(scheduler_module, "time", _FrozenClock(clock))
+    scheduler = ResourceScheduler(session_factory=SessionLocal)
+    passes = _Passes(scheduler, monkeypatch)
+    slot = scheduler._lock("primary", 1)
+    asked_holding_the_slot: list[bool] = []
+
+    async def admission() -> str | None:
+        asked_holding_the_slot.append(slot.locked())
+        return _WAITING
+
+    async def held_back_job() -> None:
+        async with scheduler.job_lease(
+            "job_a", resource="media_compute", group="primary", admission=admission
+        ):
+            raise AssertionError("a job its admission check did not admit was claimed")
+
+    waiting = asyncio.create_task(held_back_job())
+    try:
+        await _shows("job_a", _WAITING, waiting)
+        await passes.wait(3)
+        assert asked_holding_the_slot == [True]
+
+        clock["t"] = 1000.0 + scheduler_module._ADMISSION_RECHECK_SECONDS - 0.1
+        await passes.wait(3)
+        assert asked_holding_the_slot == [True], "the job asked again before its pace allowed"
+
+        clock["t"] = 1000.0 + scheduler_module._ADMISSION_RECHECK_SECONDS + 0.1
+        await passes.wait(3)
+        assert asked_holding_the_slot == [True, False]
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+async def test_a_dispatcher_sharing_the_pool_passes_over_the_same_held_back_job(
+    settings: Settings,
+) -> None:
+    """Every dispatcher on one pool passes over a job any of them is holding back.
+
+    They share the slots, so a dispatcher that did not know of the hold would
+    keep a place for a job that cannot start yet, and wait behind it.
+    """
+
+    _queue_media_jobs(settings, "job_a", "job_b")
+    pool = ResourceScheduler(session_factory=SessionLocal)
+    scheduler = ResourceScheduler(session_factory=SessionLocal, resource_pool=pool)
+
+    async def admission() -> str | None:
+        return _WAITING
+
+    async def held_back_job() -> None:
+        async with pool.job_lease(
+            "job_a", resource="media_compute", group="primary", admission=admission
+        ):
+            raise AssertionError("a job its admission check did not admit was claimed")
+
+    waiting = asyncio.create_task(held_back_job())
+    try:
+        await _shows("job_a", _WAITING, waiting)
+        assert scheduler.peek_next_eligible_job("primary") == ("job_b", None)
+        async with asyncio.timeout(PATIENCE_SECONDS):
+            async with scheduler.job_lease("job_b", resource="media_compute", group="primary"):
+                assert (await _queue_state("job_b"))["status"] == JobStatus.RUNNING.value
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+class _Runs:
+    """Media jobs that each keep their claim until the test lets them all finish.
+
+    Records the order the jobs start in, and every answer their admission
+    checks give: the job, the answer, and whether the slot was held when the
+    check was asked. A check answers at once, so an answer recorded here has
+    already been acted on by the time the test reads it.
+    """
+
+    def __init__(self, scheduler: ResourceScheduler) -> None:
+        self.scheduler = scheduler
+        self.slot = scheduler._lock("primary", 1)
+        self.started: list[str] = []
+        self.asked: list[tuple[str, str | None, bool]] = []
+        self.finish = asyncio.Event()
+        self.tasks: list[asyncio.Task[None]] = []
+
+    def start(
+        self, job_id: str, *, held_back: Callable[[], bool] | None, priority: int = 0
+    ) -> asyncio.Task[None]:
+        """Start waiting for the job's turn; `held_back` None gives it no check at all."""
+
+        admission = None if held_back is None else self._check(job_id, held_back)
+
+        async def run() -> None:
+            async with self.scheduler.job_lease(
+                job_id,
+                resource="media_compute",
+                group="primary",
+                priority=priority,
+                admission=admission,
+            ):
+                self.started.append(job_id)
+                await self.finish.wait()
+
+        task = asyncio.create_task(run())
+        self.tasks.append(task)
+        return task
+
+    def _check(self, job_id: str, held_back: Callable[[], bool]) -> AdmissionCheck:
+        async def admission() -> str | None:
+            answer = _WAITING if held_back() else None
+            self.asked.append((job_id, answer, self.slot.locked()))
+            return answer
+
+        return admission
+
+    async def times_asked(self, job_id: str) -> int:
+        return sum(1 for asked_job, _answer, _slot in self.asked if asked_job == job_id)
+
+    async def first_to_start(self) -> list[str]:
+        """Wait for a job to start, failing at once with any job's own error."""
+
+        async def read() -> list[str]:
+            for task in self.tasks:
+                if task.done():
+                    task.result()
+            return list(self.started)
+
+        return await wait_until(read, bool, what="a job starting")
+
+    async def finish_all(self) -> None:
+        """Let every job finish, and wait for the ones still queued to run too."""
+
+        self.finish.set()
+        await asyncio.wait_for(asyncio.gather(*self.tasks), timeout=PATIENCE_SECONDS)
+
+    async def stop(self) -> None:
+        self.finish.set()
+        for task in self.tasks:
+            task.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+
+
+async def _claim_state(job_id: str) -> tuple[str, bool, int]:
+    """The job's status, whether it is claimed, and its attempt count."""
+
+    state = await _queue_state(job_id)
+    return state["status"], state["claimed"], state["attempt"]
+
+
+#: What `_claim_state` reads for a job that is still waiting and never claimed.
+_UNCLAIMED = (JobStatus.QUEUED.value, False, 0)
+
+
+@pytest.mark.parametrize(
+    ("queued", "priorities"),
+    [
+        (("job_a", "job_b"), {"job_a": 0, "job_b": 0}),
+        (("job_b", "job_a"), {"job_a": 10, "job_b": 0}),
+    ],
+    ids=["queued-first", "higher-priority"],
+)
+async def test_jobs_held_back_by_the_same_work_start_in_queue_order_once_it_ends(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    queued: tuple[str, ...],
+    priorities: dict[str, int],
+) -> None:
+    """The job ranked first starts first, whichever of them hears first that it may.
+
+    Each job held back asks again at its own pace, so once the work holding
+    both back ends, the job ranked second can be the first to be admitted. It
+    must not start ahead of the first, which has not been asked since: the
+    first goes back in line, is asked under the slot and starts, and the
+    second waits its turn behind it. The same holds whether queue order or
+    priority ranks them.
+    """
+
+    _queue_media_jobs(settings, *queued)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(scheduler_module, "time", _FrozenClock(clock))
+    pace = scheduler_module._ADMISSION_RECHECK_SECONDS
+    runs = _Runs(ResourceScheduler(session_factory=SessionLocal))
+    busy = True
+    try:
+        first = runs.start("job_a", held_back=lambda: busy, priority=priorities["job_a"])
+        await _shows("job_a", _WAITING, first)
+        # job_b is held back later in the same stretch of work, and job_a then
+        # asks again, so job_b's next ask falls due before job_a's.
+        clock["t"] = 1000.0 + pace - 1.0
+        second = runs.start("job_b", held_back=lambda: busy, priority=priorities["job_b"])
+        await _shows("job_b", _WAITING, second)
+        clock["t"] = 1000.0 + pace + 0.1
+
+        async def job_a_asks() -> int:
+            return await runs.times_asked("job_a")
+
+        await wait_until(job_a_asks, lambda count: count >= 2, what="job_a asking again")
+        asked_while_busy = len(runs.asked)
+
+        busy = False
+        clock["t"] = 1000.0 + 2 * pace - 0.9
+        assert await runs.first_to_start() == ["job_a"], "the job ranked second started first"
+        assert runs.asked[asked_while_busy] == ("job_b", None, False), (
+            "job_b was not the first to hear that the work had ended"
+        )
+        assert await _claim_state("job_b") == _UNCLAIMED
+
+        await runs.finish_all()
+        assert runs.started == ["job_a", "job_b"]
+    finally:
+        await runs.stop()
+
+
+@pytest.mark.parametrize("check", ["admits", "none"])
+async def test_a_job_never_held_back_starts_behind_one_held_back_ahead_of_it(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, check: str
+) -> None:
+    """A job that reaches the slot after the work ends starts behind the job held back.
+
+    The held-back job asks again only at its own pace, so a job queued behind
+    it can reach the slot after the work holding it back has ended but before
+    it asks again. Whether that job's own check admits it or it has no check,
+    it puts the held-back job back in line first, and that job starts first.
+    """
+
+    _queue_media_jobs(settings, "job_a", "job_c")
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(scheduler_module, "time", _FrozenClock(clock))
+    runs = _Runs(ResourceScheduler(session_factory=SessionLocal))
+    busy = True
+    try:
+        held_back = runs.start("job_a", held_back=lambda: busy)
+        await _shows("job_a", _WAITING, held_back)
+        # The work ends long before job_a's own next ask falls due.
+        busy = False
+        runs.start("job_c", held_back=(lambda: False) if check == "admits" else None)
+        assert await runs.first_to_start() == ["job_a"], (
+            "the job that was never held back started first"
+        )
+        assert await _claim_state("job_c") == _UNCLAIMED
+
+        await runs.finish_all()
+        assert runs.started == ["job_a", "job_c"]
+    finally:
+        await runs.stop()
+
+
+async def test_a_job_still_held_back_ahead_is_asked_once_more_and_no_more(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job still held back ahead is asked once more, under the slot, then passed over.
+
+    Its check has then answered since the job behind it was admitted, so that
+    job starts. Asking it again each time the job behind it comes back to the
+    slot would keep that job waiting for good.
+    """
+
+    _queue_media_jobs(settings, "job_a", "job_b")
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(scheduler_module, "time", _FrozenClock(clock))
+    scheduler = ResourceScheduler(session_factory=SessionLocal)
+    passes = _Passes(scheduler, monkeypatch)
+    runs = _Runs(scheduler)
+    try:
+        held_back = runs.start("job_a", held_back=lambda: True)
+        await _shows("job_a", _WAITING, held_back)
+        runs.start("job_b", held_back=lambda: False)
+        assert await runs.first_to_start() == ["job_b"]
+        assert runs.asked == [
+            ("job_a", _WAITING, True),
+            ("job_b", None, True),
+            ("job_a", _WAITING, True),
+            ("job_b", None, True),
+        ], "job_a was not asked exactly once more, under the slot, before job_b started"
+        assert await _queue_state("job_a") == {
+            "status": JobStatus.QUEUED.value,
+            "claimed": False,
+            "attempt": 0,
+            "stage": _WAITING,
+            "position": None,
+        }
+
+        await passes.wait(5)
+        assert await runs.times_asked("job_a") == 2, "job_a was asked again while job_b ran"
+    finally:
+        await runs.stop()

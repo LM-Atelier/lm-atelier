@@ -4,7 +4,7 @@ import asyncio
 import logging
 import secrets
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -51,6 +51,17 @@ _QUEUE_POLL_SECONDS = 0.2
 #: go on being served. It does not bound the AGE of that answer, which is the
 #: scan duration plus the residency and has no poll-interval bound at all.
 _ELIGIBILITY_SHARE_SECONDS = _QUEUE_POLL_SECONDS / 4
+#: How often a job its admission check holds back asks again. The job waits
+#: queued and unclaimed, holding nothing, so a slow pace costs only how soon it
+#: notices that what held it back has gone. It never costs the job its place: a
+#: job behind it puts it back in line before starting.
+_ADMISSION_RECHECK_SECONDS = 5.0
+
+#: Asked before a queued job may claim its slot. None admits the job. A string
+#: holds it back, still queued and unclaimed, and is the stage it shows while it
+#: waits; the rest of its group goes ahead of it meanwhile. A raise ends the
+#: wait with no claim made.
+AdmissionCheck = Callable[[], Awaitable[str | None]]
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +129,10 @@ class ResourceScheduler:
         self._abandoned_claims: set[str] = (
             resource_pool._abandoned_claims if resource_pool else set()
         )
+        # Jobs an admission check is holding back, by group, with the stage each
+        # shows. Shared with the pool like the slots, so no dispatcher waits
+        # behind a job that would not start if the slot came free.
+        self._deferred: dict[str, dict[str, str]] = resource_pool._deferred if resource_pool else {}
         self._events = events
         self.session_factory = session_factory
 
@@ -142,6 +157,7 @@ class ResourceScheduler:
         priority: int = 0,
         capacity: int = 1,
         on_claim_lost: Callable[[], None] | None = None,
+        admission: AdmissionCheck | None = None,
     ) -> AsyncIterator[JobClaim]:
         lock = self._lock(group, capacity)
         claim = await self._acquire_job(
@@ -151,6 +167,7 @@ class ResourceScheduler:
             priority=priority,
             capacity=capacity,
             local_lock=lock,
+            admission=admission,
         )
         renewal = (
             self._heartbeat(job_id, claim.token)
@@ -312,13 +329,65 @@ class ResourceScheduler:
         priority: int,
         capacity: int,
         local_lock: asyncio.Semaphore,
+        admission: AdmissionCheck | None = None,
+    ) -> JobClaim:
+        """Wait for the job's turn, then claim it once `admission` lets it start.
+
+        A job its admission check holds back stands aside while it waits, and the
+        rest of its group starts ahead of it. A job about to start first puts any
+        job held back ahead of it back in line, to be asked again under the slot,
+        because what held that job back may have gone since it last asked. However
+        the wait ends - with a claim, a refusal or a cancellation - the job stops
+        standing aside, so no job is ever passed over for a check that has stopped
+        running.
+        """
+
+        try:
+            return await self._wait_and_claim(
+                job_id,
+                resource=resource,
+                group=group,
+                priority=priority,
+                capacity=capacity,
+                local_lock=local_lock,
+                admission=admission,
+            )
+        finally:
+            self._drop_deferral(group, job_id)
+
+    def _drop_deferral(self, group: str, job_id: str) -> None:
+        deferred = self._deferred.get(group)
+        if deferred is None:
+            return
+        deferred.pop(job_id, None)
+        if not deferred:
+            del self._deferred[group]
+
+    async def _wait_and_claim(
+        self,
+        job_id: str,
+        *,
+        resource: str,
+        group: str,
+        priority: int,
+        capacity: int,
+        local_lock: asyncio.Semaphore,
+        admission: AdmissionCheck | None,
     ) -> JobClaim:
         token = f"{self._owner}_{secrets.token_hex(12)}"
+        # When a job its admission check holds back next asks again.
+        next_admission = 0.0
+        # Whether this job has put the jobs held back ahead of it back in line
+        # since it began waiting or its own check last held it back. Once is
+        # enough: a job held back again after that has answered since, and asking
+        # it once more would only hold this job up behind the same answer.
+        released_held_back = False
         while True:
             for expired_job_id in self._expire_foreign_claims(group):
                 await self._publish_job(expired_job_id)
             changed = False
             should_try_claim = False
+            admission_due = False
             try:
                 with self.session_factory() as session:
                     job = session.get(Job, job_id)
@@ -332,7 +401,14 @@ class ResourceScheduler:
                     job.queue_priority = priority
                     job.queue_ticket = job.queue_ticket or job.id
 
-                    candidates = self._eligible_job_ids(session, group, now)
+                    eligible = self._eligible_job_ids(session, group, now)
+                    deferred = self._deferred.get(group, {})
+                    # A job its admission check holds back never takes a place,
+                    # so the next job starts rather than waiting behind it.
+                    candidates = tuple(
+                        candidate for candidate in eligible if candidate not in deferred
+                    )
+                    deferred_stage = deferred.get(job.id)
                     position = next(
                         (
                             index
@@ -365,6 +441,22 @@ class ResourceScheduler:
                             indeterminate=True,
                             now=now,
                         )
+                    elif deferred_stage is not None:
+                        update_job_progress(
+                            job,
+                            stage=deferred_stage,
+                            queue_resource=resource,
+                            queue_position=None,
+                            queue_length=len(candidates),
+                            indeterminate=True,
+                            now=now,
+                        )
+                        # Asked again unless a hold, a pause or an unfinished
+                        # dependency keeps the job waiting, since no answer could
+                        # start it then. Another job holding the slot does not
+                        # stop the asking: the job stood aside for that job, and a
+                        # check that bounds its own wait counts that time too.
+                        admission_due = job.id in eligible and time.monotonic() >= next_admission
                     elif position is None:
                         failed_dependencies = self._failed_dependencies(
                             session,
@@ -451,86 +543,128 @@ class ResourceScheduler:
                     claimed = False
                     claimed_attempt = 0
                     try:
-                        with self.session_factory() as session:
-                            current = session.get(Job, job_id)
-                            control_snapshot = job_controls(session, [job_id]).get(job_id)
-                            dispatch_snapshots = queue_dispatches(session)
-                            claimed_at = utcnow()
-                            # Fresh, never shared: this decides whether the job
-                            # STARTS. The final update also compares the control
-                            # revision captured before ranking, including Hold/Release.
-                            candidates = self._fresh_eligible_job_ids(session, group, claimed_at)
-                            position = next(
-                                (
-                                    index
-                                    for index, candidate in enumerate(candidates)
-                                    if current and candidate == current.id
-                                ),
-                                None,
-                            )
-                            active_claims = (
-                                session.scalar(
-                                    select(func.count(Job.id)).where(
-                                        Job.queue_group == group,
-                                        Job.claim_owner.is_not(None),
-                                    )
+                        # Asked as late as it can be while the job is still
+                        # unclaimed, so the answer is as fresh as it can be when
+                        # the job starts, and holding the job back here undoes
+                        # nothing: no attempt, heartbeat or keep-awake hold exists
+                        # yet. A raise leaves through the release below.
+                        waiting_stage = await admission() if admission is not None else None
+                        if waiting_stage is not None:
+                            self._deferred.setdefault(group, {})[job_id] = waiting_stage
+                            next_admission = time.monotonic() + _ADMISSION_RECHECK_SECONDS
+                            released_held_back = False
+                            # The job no longer stands in front of the rest of
+                            # its group, so they need not wait for their next poll.
+                            self._queue_event(group).set()
+                            # Looked at again at once, so it shows what it waits
+                            # for before a job behind it can start: the pass that
+                            # brought it here showed it next in line.
+                            continue
+                        else:
+                            with self.session_factory() as session:
+                                current = session.get(Job, job_id)
+                                control_snapshot = job_controls(session, [job_id]).get(job_id)
+                                dispatch_snapshots = queue_dispatches(session)
+                                claimed_at = utcnow()
+                                # Fresh, never shared: this decides whether the job
+                                # STARTS. The final update also compares the control
+                                # revision captured before ranking, including Hold/Release.
+                                ranked = self._fresh_eligible_job_ids(session, group, claimed_at)
+                                deferred = self._deferred.get(group, {})
+                                candidates = tuple(
+                                    candidate for candidate in ranked if candidate not in deferred
                                 )
-                                or 0
-                            )
-                            if (
-                                position is not None
-                                and position < max(0, capacity - active_claims)
-                                and control_snapshot is not None
-                            ):
-                                result = cast(
-                                    CursorResult[Any],
-                                    session.execute(
-                                        update(Job)
-                                        .where(
-                                            Job.id == job_id,
-                                            Job.status == JobStatus.QUEUED.value,
-                                            Job.claim_owner.is_(None),
-                                            claim_control_predicate(control_snapshot),
-                                            *[
-                                                lane_claim_predicate(snapshot)
-                                                for snapshot in dispatch_snapshots.values()
-                                            ],
-                                        )
-                                        .values(
-                                            status=JobStatus.RUNNING.value,
-                                            claim_owner=token,
-                                            claim_expires_at=claimed_at
-                                            + timedelta(seconds=_CLAIM_SECONDS),
-                                            heartbeat_at=claimed_at,
-                                            started_at=claimed_at,
-                                            attempt=Job.attempt + 1,
-                                        )
-                                        .execution_options(synchronize_session="fetch")
+                                position = next(
+                                    (
+                                        index
+                                        for index, candidate in enumerate(candidates)
+                                        if current and candidate == current.id
                                     ),
+                                    None,
                                 )
-                                if result.rowcount == 1:
-                                    claimed_job = session.get(Job, job_id)
-                                    if claimed_job:
-                                        # The ORM-enabled UPDATE synchronizes the
-                                        # identity map using the returned row, so the
-                                        # cached row already shows the incremented
-                                        # attempt; a refresh here would re-read
-                                        # what the session already holds.
-                                        claimed_attempt = claimed_job.attempt
-                                        update_job_progress(
-                                            claimed_job,
-                                            stage="starting",
-                                            queue_resource=resource,
-                                            queue_position=0,
-                                            queue_length=len(candidates),
-                                            indeterminate=True,
-                                            now=claimed_at,
+                                active_claims = (
+                                    session.scalar(
+                                        select(func.count(Job.id)).where(
+                                            Job.queue_group == group,
+                                            Job.claim_owner.is_not(None),
                                         )
-                                    session.commit()
-                                    claimed = True
-                                    self._invalidate_eligibility(group)
-                                else:
+                                    )
+                                    or 0
+                                )
+                                its_turn = position is not None and position < max(
+                                    0, capacity - active_claims
+                                )
+                                # A job held back ahead of this one may be free to
+                                # start too: what held it back may have gone since
+                                # it last asked, and it asks again only at its own
+                                # pace. Back in line, it is asked first, under the
+                                # slot, and starts if its check lets it; if the check
+                                # holds it back again, this job starts next time.
+                                held_back_ahead = (
+                                    tuple(
+                                        candidate
+                                        for candidate in ranked[: ranked.index(job_id)]
+                                        if candidate in deferred
+                                    )
+                                    if its_turn and not released_held_back
+                                    else ()
+                                )
+                                if held_back_ahead:
                                     session.rollback()
+                                    for held_back in held_back_ahead:
+                                        self._drop_deferral(group, held_back)
+                                    released_held_back = True
+                                    self._queue_event(group).set()
+                                elif its_turn and control_snapshot is not None:
+                                    result = cast(
+                                        CursorResult[Any],
+                                        session.execute(
+                                            update(Job)
+                                            .where(
+                                                Job.id == job_id,
+                                                Job.status == JobStatus.QUEUED.value,
+                                                Job.claim_owner.is_(None),
+                                                claim_control_predicate(control_snapshot),
+                                                *[
+                                                    lane_claim_predicate(snapshot)
+                                                    for snapshot in dispatch_snapshots.values()
+                                                ],
+                                            )
+                                            .values(
+                                                status=JobStatus.RUNNING.value,
+                                                claim_owner=token,
+                                                claim_expires_at=claimed_at
+                                                + timedelta(seconds=_CLAIM_SECONDS),
+                                                heartbeat_at=claimed_at,
+                                                started_at=claimed_at,
+                                                attempt=Job.attempt + 1,
+                                            )
+                                            .execution_options(synchronize_session="fetch")
+                                        ),
+                                    )
+                                    if result.rowcount == 1:
+                                        claimed_job = session.get(Job, job_id)
+                                        if claimed_job:
+                                            # The ORM-enabled UPDATE synchronizes the
+                                            # identity map using the returned row, so the
+                                            # cached row already shows the incremented
+                                            # attempt; a refresh here would re-read
+                                            # what the session already holds.
+                                            claimed_attempt = claimed_job.attempt
+                                            update_job_progress(
+                                                claimed_job,
+                                                stage="starting",
+                                                queue_resource=resource,
+                                                queue_position=0,
+                                                queue_length=len(candidates),
+                                                indeterminate=True,
+                                                now=claimed_at,
+                                            )
+                                        session.commit()
+                                        claimed = True
+                                        self._invalidate_eligibility(group)
+                                    else:
+                                        session.rollback()
                     finally:
                         if not claimed:
                             local_lock.release()
@@ -552,6 +686,20 @@ class ResourceScheduler:
                 self._contended_groups.discard(group)
                 if changed:
                     await self._publish_job(job_id)
+                if admission is not None and admission_due:
+                    # Outside any session and without the slot, so the check
+                    # holds up neither the database nor the rest of the group.
+                    waiting_stage = await admission()
+                    if waiting_stage is None:
+                        self._drop_deferral(group, job_id)
+                        # Back in line now: the group recounts its places at
+                        # once, and this job looks for its turn without waiting
+                        # out a poll.
+                        self._queue_event(group).set()
+                        continue
+                    self._deferred.setdefault(group, {})[job_id] = waiting_stage
+                    next_admission = time.monotonic() + _ADMISSION_RECHECK_SECONDS
+                    released_held_back = False
             event = self._queue_event(group)
             event.clear()
             with suppress(TimeoutError):
@@ -612,14 +760,54 @@ class ResourceScheduler:
         return apply_manual_order(session, ranked, controls, now)
 
     def peek_next_eligible_job(self, group: str) -> tuple[str, str | None] | None:
-        """Return the next durable job without claiming or changing it."""
+        """Return the next durable job without claiming or changing it.
 
+        A job its admission check is holding back is never next: it would not
+        start if the slot came free now.
+        """
+
+        deferred = self._deferred.get(group, {})
         with self.session_factory() as session:
-            candidates = self._eligible_jobs(session, group, utcnow())
-            if not candidates:
+            job = next(
+                (
+                    candidate
+                    for candidate in self._eligible_jobs(session, group, utcnow())
+                    if candidate.id not in deferred
+                ),
+                None,
+            )
+            if job is None:
                 return None
-            job = candidates[0]
             return job.id, job.run_id
+
+    def startable_jobs(self, job_ids: Iterable[str]) -> frozenset[str]:
+        """Which of these jobs would start now if their turn came.
+
+        A job would start once it is queued and unclaimed, not held, in an open
+        lane, and every job it depends on has finished: what makes it eligible
+        in its own group. Its place in line is left out, and so is its own
+        admission check: a job that check holds back is asked again whenever it
+        could start, and starts once the check lets it. A job that is held,
+        whose lane is paused or that waits for a job it depends on is not asked
+        at all, and starts only once someone releases it or that job finishes.
+        """
+
+        wanted = set(job_ids)
+        if not wanted:
+            return frozenset()
+        with self.session_factory() as session:
+            groups = {
+                group
+                for group in session.scalars(select(Job.queue_group).where(Job.id.in_(wanted)))
+                if group is not None
+            }
+            now = utcnow()
+            return frozenset(
+                job.id
+                for group in groups
+                for job in self._eligible_jobs(session, group, now)
+                if job.id in wanted
+            )
 
     @staticmethod
     def _blocking_steps(session: Session, work_step_id: str | None) -> list[str]:

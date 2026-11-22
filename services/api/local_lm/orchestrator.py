@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, object_session, selectinload
 
 from .accepted_turn_context import (
@@ -67,7 +67,7 @@ from .context_compaction import (
     MIN_COMPACTION_CHARACTERS,
     compact_context_messages,
 )
-from .db import SessionLocal
+from .db import SessionLocal, database_is_contended
 from .default_output_shape import DefaultOutputSize, default_output_size, size_is_chosen
 from .domain import (
     ArtifactKind,
@@ -155,6 +155,14 @@ from .media_references import (
     guide_video_refusal,
     videos_required,
 )
+from .media_worker_use import (
+    MEDIA_IDLE_SETTLE_SECONDS,
+    MEDIA_WAIT_STEP_SECONDS,
+    WAIT_LABELS,
+    MediaReplacementWait,
+    MediaUse,
+    MediaWorkerBusy,
+)
 from .message_references import (
     carry_message_references_if_absent,
     record_message_references,
@@ -234,7 +242,7 @@ from .prompt_helpers import PROMPT_HELPER_SCOPE, prompt_helper_system_message
 from .recovery_previews import RecoveryPreviewConflict
 from .references import parse_reference_requests
 from .routing import ModalityRouter, RouteConfirmationRequired
-from .scheduler import JobClaim, ResourceScheduler
+from .scheduler import AdmissionCheck, JobClaim, ResourceScheduler
 from .schemas import (
     EngineCapabilities,
     GenerationOffer,
@@ -478,6 +486,47 @@ PENDING_OUTPUT_REFERENCE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _NeededLaunch:
+    """The ComfyUI launch a queued media run will ask for.
+
+    `scope_sha256` names the activation scope the run starts its worker with,
+    and None the broad worker that serves every run without one.
+    """
+
+    scope_sha256: str | None
+
+
+def _queued_progress_part(message: Message | None) -> MessagePart | None:
+    """The progress part that says where a queued media run stands, if it has one."""
+
+    if message is None:
+        return None
+    return next(
+        (
+            part
+            for part in message.parts
+            if part.position == 0 and part.type == PartType.PROGRESS.value
+        ),
+        None,
+    )
+
+
+def _show_queued_phase(progress: MessagePart, label: str | None) -> None:
+    """Show `label` as why a queued media run has not started, or "Queued" for None.
+
+    The text is the label in title case, and the rest of the part's metadata,
+    such as which of several outputs the part belongs to, is kept.
+    """
+
+    progress.text = (label or "Queued").title()
+    progress.metadata_json = {
+        **progress.metadata_json,
+        "phase": label or "queued",
+        "indeterminate": True,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1164,6 +1213,20 @@ class ConversationOrchestrator:
         #: Whether something outside this class's runs relies on the live media
         #: worker, such as an open native editor session; set by the application.
         self.media_worker_in_use: Callable[[], bool] = lambda: False
+        #: Queued media runs waiting, by job, for someone else's use of ComfyUI
+        #: to end before they restart it with the launch they need.
+        self._media_waits: dict[str, MediaReplacementWait] = {}
+        #: When checks began finding ComfyUI free, None while a check finds it
+        #: in use. One time for every run that would restart it, so the runs
+        #: that sit out a quiet spell after someone else's prompts sit out the
+        #: same one, and forgotten with the last wait. Whether a run's checks
+        #: saw those prompts is kept on its own wait.
+        self._media_free_since: float | None = None
+        #: The media runs whose generation has begun. Only these are told to the
+        #: media engine when they are stopped: a run stopped before then has
+        #: nothing in the engine to stop, and an engine that remembers a stop
+        #: for a run it is not generating applies it to that run's next attempt.
+        self._media_generating: set[str] = set()
         #: The window's expiry, or the settlement a chat load inside it left.
         self._media_warm_task: asyncio.Task[None] | None = None
         self._admission_open = True
@@ -1204,6 +1267,18 @@ class ConversationOrchestrator:
                     if run:
                         run.status = RunStatus.QUEUED.value
                         self._set_work_status(session, run, JobStatus.QUEUED.value)
+                        # A run waits for someone else's use of ComfyUI only in
+                        # the process that asked it to, so one whose
+                        # conversation still says why it waited shows "Queued"
+                        # until it is asked again.
+                        progress = _queued_progress_part(
+                            session.get(Message, run.assistant_message_id)
+                        )
+                        if (
+                            progress is not None
+                            and progress.metadata_json.get("phase") in WAIT_LABELS.values()
+                        ):
+                            _show_queued_phase(progress, None)
                         queued.append((job.id, run.id))
                 elif job.kind == JobKind.EDIT_VERIFY.value:
                     queued.append((job.id, None))
@@ -4282,22 +4357,27 @@ class ConversationOrchestrator:
     ) -> None:
         if run_id and not self._is_image_edit_verification_retry(run_id):
             await self._preempt_running_image_edit_verifications()
-        while not self._closing:
-            await self._execute(job_id, run_id)
-            if run_id is None:
-                return
-            with self.session_factory() as session:
-                job = session.get(Job, job_id)
-                run = session.get(Run, run_id)
-                pending = (
-                    job is not None
-                    and job.status == JobStatus.QUEUED.value
-                    and run is not None
-                    and retry_is_pending(run.provenance_json)
-                )
-            if not pending:
-                return
-            await asyncio.sleep(1)
+        try:
+            while not self._closing:
+                await self._execute(job_id, run_id)
+                if run_id is None:
+                    return
+                with self.session_factory() as session:
+                    job = session.get(Job, job_id)
+                    run = session.get(Run, run_id)
+                    pending = (
+                        job is not None
+                        and job.status == JobStatus.QUEUED.value
+                        and run is not None
+                        and retry_is_pending(run.provenance_json)
+                    )
+                if not pending:
+                    return
+                await asyncio.sleep(1)
+        finally:
+            # However the execution ended, its run waits for nothing now. A wait
+            # left behind would keep a warm window open for a run that is gone.
+            self._forget_media_wait(job_id)
 
     def _is_image_edit_verification_retry(self, run_id: str) -> bool:
         with self.session_factory() as session:
@@ -4474,7 +4554,9 @@ class ConversationOrchestrator:
             try:
                 if operation == Operation.TEXT.value:
                     await self.engines.chat.cancel(run_id)
-                else:
+                elif run_id in self._media_generating:
+                    # A run that has not begun generating is ended by cancelling
+                    # its task below, which stops one that begins meanwhile too.
                     await self.engines.media.cancel(run_id)
             except Exception:
                 logger.exception(
@@ -4565,7 +4647,10 @@ class ConversationOrchestrator:
                 elif operation == Operation.TEXT.value:
                     assert run_id is not None
                     await self.engines.chat.cancel(run_id)
-                else:
+                elif run_id in self._media_generating:
+                    # Read before this method's first await, so the run's task,
+                    # cancelled above, has not yet run on to change it. A run
+                    # still queued or preparing has nothing in the engine to stop.
                     assert run_id is not None
                     await self.engines.media.cancel(run_id)
             except Exception:
@@ -4643,12 +4728,21 @@ class ConversationOrchestrator:
                 )
                 group = job.queue_group or "primary"
                 priority = job.queue_priority
+            # A media run is asked before it claims whether it may start yet,
+            # so one that would restart ComfyUI under someone else's work waits
+            # queued, holding no slot and leaving chat loaded.
+            admission = (
+                self._media_admission(job_id, run_id)
+                if run_id is not None and not verification_job and operation != Operation.TEXT.value
+                else None
+            )
             async with self.scheduler.job_lease(
                 job_id,
                 resource=resource,
                 group=group,
                 priority=priority,
                 on_claim_lost=stop_displaced_execution,
+                admission=admission,
             ) as claim:
                 if verification_job:
                     await self._execute_image_edit_verification(job_id, claim)
@@ -4715,7 +4809,7 @@ class ConversationOrchestrator:
                     job_id=job_id,
                     run_id=run_id,
                 )
-                media_failed = False
+                media_failure: Exception | None = None
                 try:
                     if operation == Operation.TEXT.value:
                         try:
@@ -4728,11 +4822,12 @@ class ConversationOrchestrator:
                         queued_verification_job_id = await self._execute_media(
                             job_id, run_id, claim
                         )
-                except Exception:
+                except Exception as exc:
                     # `_fail` writes this failure once the lease is released,
                     # after the handoff below; noting it here is what lets the
                     # handoff tell an attempt that is about to be retried.
-                    media_failed = operation != Operation.TEXT.value
+                    if operation != Operation.TEXT.value:
+                        media_failure = exc
                     raise
                 finally:
                     if operation == Operation.TEXT.value and not claim_lost:
@@ -4763,7 +4858,13 @@ class ConversationOrchestrator:
                         # Skipping owes nothing either way - `_ensure_chat_worker`
                         # loads whatever the next text execution needs.
                         if pending and (claim is None or self._attempt_current(job_id, claim)):
-                            if media_failed and self._media_failure_retries(job_id, run_id, claim):
+                            # A run stopped rather than restart ComfyUI under
+                            # someone else's work is not retried: the retry
+                            # would meet the same work.
+                            retryable = media_failure is not None and not isinstance(
+                                media_failure, MediaWorkerBusy
+                            )
+                            if retryable and self._media_failure_retries(job_id, run_id, claim):
                                 await self._hold_media_handoff_for_retry(pending)
                             else:
                                 # Only a run that finished with its result keeps
@@ -4773,7 +4874,7 @@ class ConversationOrchestrator:
                                 # prompt.
                                 await self._complete_media_handoff(
                                     pending,
-                                    keep_warm=not media_failed and self._run_completed(run_id),
+                                    keep_warm=media_failure is None and self._run_completed(run_id),
                                 )
                 if queued_verification_job_id and not claim_lost:
                     self.start(queued_verification_job_id, None)
@@ -4861,7 +4962,13 @@ class ConversationOrchestrator:
                 return
             assert run_id is not None
             detail = str(exc).strip() or f"Generation failed ({type(exc).__name__})"
-            await self._fail(job_id, run_id, detail, claim=claim)
+            await self._fail(
+                job_id,
+                run_id,
+                detail,
+                claim=claim,
+                retryable=not isinstance(exc, MediaWorkerBusy),
+            )
         if run_id is not None and not claim_lost:
             await self._finalize_setup_verification_run(job_id, run_id, claim)
 
@@ -6490,7 +6597,8 @@ class ConversationOrchestrator:
 
         `keep_warm` is False after a failed run, and when a warm window's expiry
         calls this, so the expiry hands the device back instead of opening
-        another window.
+        another window. A worker someone else is using is held for them rather
+        than recycled, whatever `keep_warm` says.
         """
 
         # The obligation is recorded BEFORE anything that can fail, and this is
@@ -6571,6 +6679,19 @@ class ConversationOrchestrator:
             recycle_wanted = False
             recycled_activation_scope = False
 
+        if (
+            recycle_wanted
+            and await self._media_runtime_busy()
+            and self._open_media_warm_window(hold=True)
+        ):
+            # Someone else is using ComfyUI, from its own page or a workflow
+            # editor, and the recycle would end their work. The worker is held
+            # for them instead, even when keeping it warm is turned off, and the
+            # window's expiry recycles it once they are done. Until then chat
+            # stays displaced and owed, as behind a queued image, and a chat
+            # model that something needs meanwhile loads beside ComfyUI.
+            self._chat_planner_ready.set()
+            return
         if recycle_wanted:
             try:
                 await self.processes.stop("media")
@@ -6614,7 +6735,7 @@ class ConversationOrchestrator:
         else:
             self._schedule_media_restart()
 
-    def _open_media_warm_window(self) -> bool:
+    def _open_media_warm_window(self, *, hold: bool = False) -> bool:
         """Keep the managed ComfyUI worker for a following media turn, if it can be.
 
         Returns whether a window was opened. Only a ready, managed worker is
@@ -6624,9 +6745,15 @@ class ConversationOrchestrator:
         run of that same activation reuses it, since the supervisor keeps an
         identical scoped launch, and any other run replaces it with the worker
         it needs before it starts, so keeping it costs a later run nothing.
+
+        With `hold`, the worker is kept because someone else is using it: the
+        window opens even when keeping it warm is turned off, and it lasts only
+        as long as a busy window waits between checks.
         """
 
-        seconds = self.engines.settings.media_keep_warm_seconds
+        seconds = (
+            MEDIA_BUSY_RECHECK_SECONDS if hold else self.engines.settings.media_keep_warm_seconds
+        )
         if seconds <= 0 or self.engines.settings.media_engine != "comfyui":
             return False
         try:
@@ -6686,30 +6813,380 @@ class ConversationOrchestrator:
             and media_worker.pid == self._media_warm_launch
         )
 
-    async def _media_runtime_busy(self) -> bool:
-        """Whether something other than LM Atelier's own runs is using ComfyUI.
+    async def _media_runtime_use(self) -> MediaUse | None:
+        """What other than LM Atelier's own runs is using ComfyUI, if anything.
 
         That is a native editor session, whose return needs the launch it was
-        opened on, or a prompt ComfyUI holds that this class did not send: no
-        media run of this class is in flight while a window is open, and only
-        a run that finished keeps its worker, so any prompt ComfyUI reports
-        then belongs to someone using it from its own page. A worker that
-        cannot say is treated as idle, which is the handoff as it was.
+        opened on, or prompts ComfyUI holds that LM Atelier did not submit,
+        which belong to someone using it from its own page. A prompt LM Atelier
+        left behind is not such use: the adapter tells its own prompts apart
+        when it can, and an adapter that cannot reports every prompt it holds.
+        A worker that cannot say is treated as idle, which is the handoff as it
+        was.
         """
 
         try:
             if self.media_worker_in_use():
-                return True
+                return "editor"
         except Exception:
             logger.exception("Could not tell whether a workflow editor is using the media worker")
-        probe = getattr(self.engines.media, "queue_remaining", None)
+        # Read from the registry with a default: an engine double may have no
+        # media adapter at all, and that is no use of ComfyUI either.
+        media = getattr(self.engines, "media", None)
+        probe = getattr(media, "foreign_prompt_count", None)
         if probe is None:
-            return False
+            probe = getattr(media, "queue_remaining", None)
+        if probe is None:
+            return None
         try:
             remaining = await probe()
         except Exception:
+            return None
+        if isinstance(remaining, int) and not isinstance(remaining, bool) and remaining > 0:
+            return "prompts"
+        return None
+
+    async def _media_runtime_busy(self) -> bool:
+        """Whether something other than LM Atelier's own runs is using ComfyUI."""
+
+        return await self._media_runtime_use() is not None
+
+    def _needed_media_launch(self, run_id: str) -> _NeededLaunch | None:
+        """The ComfyUI launch a queued run will ask for, read without starting anything.
+
+        Reads what `_execute_media` and `_media_activation_scope` read to choose
+        the worker, and stops short of their checks: those run once the run has
+        started, and a run that fails them fails there as it always has. None
+        means the run will not use the managed ComfyUI worker, or its record
+        cannot be read, and either way nothing here should keep it waiting.
+        """
+
+        try:
+            with self.session_factory() as session:
+                run = session.get(Run, run_id)
+                if run is None:
+                    return None
+                accepted_inputs = accepted_context(session, run)
+                media_engine = (
+                    accepted_inputs.media_engine
+                    if accepted_inputs is not None
+                    else self.engines.settings.media_engine
+                )
+                if media_engine != "comfyui" or media_engine != self.engines.settings.media_engine:
+                    return None
+                revision = (
+                    resolve_accepted_workflow(session, accepted_inputs.workflow)
+                    if accepted_inputs is not None
+                    else session.get(WorkflowRevision, run.workflow_revision_id)
+                    if run.workflow_revision_id
+                    else None
+                )
+                if revision is None or revision.dependency_contract_sha256 is None:
+                    return _NeededLaunch(None)
+                workflow = run.provenance_json.get("workflow")
+                snapshot = (
+                    accepted_inputs.workflow_activation
+                    if accepted_inputs is not None
+                    else workflow.get("activation")
+                    if isinstance(workflow, dict)
+                    else None
+                )
+                launch = snapshot.get("launch_sha256") if isinstance(snapshot, dict) else None
+                if not isinstance(launch, str) or not launch:
+                    return None
+                return _NeededLaunch(launch)
+        except Exception:
+            logger.warning("Could not read which media worker run %s needs", run_id, exc_info=True)
+            return None
+
+    def _replaces_live_media_worker(self, launch: _NeededLaunch) -> bool:
+        """Whether starting this launch would stop a ready ComfyUI worker.
+
+        The worker is kept only when it was started for the same scope, which
+        is the choice `_ensure_media_worker` and the supervisor make. A worker
+        the supervisor replaces for another reason, such as a changed command,
+        is not foreseen here; the check at the moment of the restart catches it.
+        """
+
+        media_worker = next(item for item in self.processes.statuses() if item.name == "media")
+        return (
+            media_worker.running
+            and media_worker.state == "ready"
+            and self._media_worker_scope() != launch.scope_sha256
+        )
+
+    def _media_admission(self, job_id: str, run_id: str) -> AdmissionCheck:
+        """The scheduler's check of whether this queued media run may start yet."""
+
+        async def admit() -> str | None:
+            try:
+                stage = await self._admit_media_run(job_id, run_id)
+            except MediaWorkerBusy:
+                # The run gives up without starting, so chat it finds owed and
+                # down comes back once ComfyUI is free, as for a run that waits.
+                self._hold_owed_chat_for_wait()
+                raise
+            except Exception:
+                # Started as it would have been without the check. The restart
+                # itself still refuses to stop a worker someone is using.
+                logger.exception("Could not tell whether media run %s may start yet", run_id)
+                await self._abandon_media_wait(job_id, run_id)
+                return None
+            if stage is not None:
+                self._hold_owed_chat_for_wait()
+            return stage
+
+        return admit
+
+    async def _admit_media_run(self, job_id: str, run_id: str) -> str | None:
+        """None to let the run start, or the stage it shows while it waits.
+
+        A run waits only when it would restart ComfyUI under someone else's
+        work, and raises `MediaWorkerBusy` once it has waited as long as the
+        settings allow. The wait adds up the time between the checks that find
+        ComfyUI in use, each gap up to `MEDIA_WAIT_STEP_SECONDS`. The scheduler
+        asks again unless the run is held, paused or waiting for earlier
+        steps, so time it stands aside for another job counts, and a stretch
+        in which it is not asked adds no more than one late check would.
+
+        After someone else's prompts, ComfyUI must stay free for a quiet spell
+        before a run restarts it, timed from when checks began finding it
+        free, the same for every run. A run sits it out when its own wait saw
+        those prompts, or when the wait of a run that could start now did, so
+        runs that met the same work start at the same moment, in their order
+        in the queue, and a run first asked inside the spell waits behind
+        them. A run that is held, paused or waiting for earlier steps is not
+        asked, so what it saw may have ended long ago: it holds back no other
+        run, though its own sighting still holds it to the spell once it is
+        asked again.
+        """
+
+        if self.engines.settings.media_engine != "comfyui":
+            return await self._end_media_wait(job_id, run_id)
+        launch = self._needed_media_launch(run_id)
+        if launch is None or not self._replaces_live_media_worker(launch):
+            return await self._end_media_wait(job_id, run_id)
+        use = await self._media_runtime_use()
+        now = time.monotonic()
+        wait = self._media_waits.get(job_id)
+        if use is None:
+            if self._media_free_since is None:
+                self._media_free_since = now
+            settling = now - self._media_free_since < MEDIA_IDLE_SETTLE_SECONDS
+            # The clock first: it costs nothing, and a sighting may read the queue.
+            if settling and self._prompts_hold_back(wait):
+                # Work from ComfyUI's own page can leave a moment between two
+                # of its prompts, so no run restarts ComfyUI until it has
+                # stayed free for a while. Like every check that finds it
+                # free, this adds nothing to the run's wait.
+                if wait is None:
+                    wait = self._media_waits[job_id] = MediaReplacementWait()
+                return await self._hold_back_media_run(job_id, run_id, wait, WAIT_LABELS["prompts"])
+            return await self._end_media_wait(job_id, run_id)
+        self._media_free_since = None
+        if wait is None:
+            wait = self._media_waits[job_id] = MediaReplacementWait()
+        elif wait.last_busy is not None:
+            wait.counted += min(now - wait.last_busy, MEDIA_WAIT_STEP_SECONDS)
+        wait.last_busy = now
+        wait.prompts_seen = wait.prompts_seen or use == "prompts"
+        limit = self.engines.settings.media_replace_wait_seconds
+        if wait.counted >= limit:
+            raise MediaWorkerBusy(use, late=False, limit_seconds=limit)
+        return await self._hold_back_media_run(job_id, run_id, wait, WAIT_LABELS[use])
+
+    def _prompts_hold_back(self, wait: MediaReplacementWait | None) -> bool:
+        """Whether someone else's prompts that a waiting run saw hold this run to the spell.
+
+        They do when this run's own wait saw them, or when the wait of a run
+        that could start now did: that run is asked every few seconds and sits
+        out the spell, and a run beside it waits with it rather than restart
+        ComfyUI between two of someone's prompts. What a run that is held,
+        paused or waiting for earlier steps saw holds back no other run. A
+        queue that cannot be read counts the sighting, so the run sits out the
+        spell rather than risk that restart.
+        """
+
+        if wait is not None and wait.prompts_seen:
+            return True
+        seen = tuple(job_id for job_id, other in self._media_waits.items() if other.prompts_seen)
+        if not seen:
             return False
-        return isinstance(remaining, int) and remaining > 0
+        try:
+            return bool(self.scheduler.startable_jobs(seen))
+        except Exception:
+            logger.exception("Could not tell whether a run that met other media work could start")
+            return True
+
+    async def _hold_back_media_run(
+        self, job_id: str, run_id: str, wait: MediaReplacementWait, label: str
+    ) -> str:
+        """Hold the run back with `label`, showing it in the conversation if it is not yet."""
+
+        if label != wait.announced and await self._write_queued_media_phase(job_id, run_id, label):
+            wait.announced = label
+        return label
+
+    async def _end_media_wait(self, job_id: str, run_id: str) -> str | None:
+        """Forget the run's wait, putting its conversation back to "Queued" if it showed one.
+
+        Returns None, which lets the run start. While another writer holds the
+        database the conversation cannot be put back, so the wait is kept and
+        the stage it shows is returned instead: the run waits on until a check
+        can put the conversation back, rather than going on showing a reason
+        to wait that it no longer has.
+        """
+
+        wait = self._media_waits.get(job_id)
+        if (
+            wait is not None
+            and wait.announced is not None
+            and not await self._write_queued_media_phase(job_id, run_id, None)
+        ):
+            return wait.announced
+        self._forget_media_wait(job_id)
+        return None
+
+    async def _abandon_media_wait(self, job_id: str, run_id: str) -> None:
+        """Forget the wait of a run let start without an answer, as best it can be.
+
+        Its conversation is put back to "Queued" when that can be written. The
+        run starts either way, so a failure here is only logged.
+        """
+
+        try:
+            await self._end_media_wait(job_id, run_id)
+        except Exception:
+            logger.exception("Could not show media run %s as queued again", run_id)
+        self._forget_media_wait(job_id)
+
+    def _forget_media_wait(self, job_id: str) -> None:
+        """Drop the run's wait, and with the last one, when checks began finding ComfyUI free.
+
+        What the run's checks saw of someone else's prompts goes with its wait.
+        Once no wait is left, a later run goes by what its own checks see, and
+        an old observation never holds it back.
+        """
+
+        self._media_waits.pop(job_id, None)
+        if not self._media_waits:
+            self._media_free_since = None
+
+    async def _write_queued_media_phase(self, job_id: str, run_id: str, label: str | None) -> bool:
+        """Write the stage a queued media run shows; False while another writer holds the database.
+
+        The stage only says why the run has not started, so a held database is
+        no reason to start the run or to give it up. The caller leaves the
+        run's wait as it was, and the run's next check writes the stage again.
+        Any other failure is raised.
+        """
+
+        try:
+            await self._set_queued_media_phase(job_id, run_id, label)
+        except OperationalError as error:
+            if not database_is_contended(error):
+                raise
+            logger.info(
+                "Media run %s will show why it is queued once another writer releases the database",
+                run_id,
+            )
+            return False
+        return True
+
+    async def _set_queued_media_phase(self, job_id: str, run_id: str, label: str | None) -> None:
+        """Show in the conversation why a queued media run has not started, or None for "Queued".
+
+        Written only while the job is still queued and unclaimed, in the same
+        transaction that checks it, so a run that has since started or been
+        stopped is never shown as waiting. The scheduler writes the job's own
+        stage.
+        """
+
+        with self.session_factory() as session:
+            unclaimed = (
+                cast(
+                    "CursorResult[Any]",
+                    session.execute(
+                        update(Job)
+                        .where(
+                            Job.id == job_id,
+                            Job.status == JobStatus.QUEUED.value,
+                            Job.claim_owner.is_(None),
+                        )
+                        .values(claim_owner=None)
+                    ),
+                ).rowcount
+                == 1
+            )
+            run = session.get(Run, run_id) if unclaimed else None
+            progress = _queued_progress_part(
+                session.get(Message, run.assistant_message_id) if run else None
+            )
+            if progress is None:
+                session.rollback()
+                return
+            _show_queued_phase(progress, label)
+            session.commit()
+        await self.events.publish(
+            "generation.progress",
+            run_id,
+            {"progress": 0, "phase": label or "queued", "job_id": job_id},
+        )
+
+    def _hold_owed_chat_for_wait(self) -> None:
+        """Bring chat back later if a run's wait ends without the run starting.
+
+        Chat can be down and owed when a run waits, as after a media run that
+        left it down for the run queued behind it. If the waiting run is then
+        stopped, gives up, or is held or paused, nothing would load chat back
+        until a text turn needs it. A held window does, once ComfyUI is free
+        and no run that could start now is waiting to restart it. Asked at
+        every answer that holds a run back and before a run gives up; it opens
+        a window only when chat is owed and down and none is open.
+        """
+
+        if (
+            self._displaced_chat_profile_id is not None
+            and self._media_warm_window is None
+            and not self._chat_worker_running()
+        ):
+            self._open_media_warm_window(hold=True)
+
+    async def _refuse_busy_replacement(self) -> None:
+        """Refuse to stop a ComfyUI worker that someone else is using.
+
+        Asked by the supervisor under the worker's lock, immediately before it
+        stops the worker to start another, so whatever someone else has on it
+        then is left running. That may have begun while the run was being
+        prepared, or have been there all along when the run's check could not
+        tell or did not foresee this restart.
+        """
+
+        use = await self._media_runtime_use()
+        if use is not None:
+            raise MediaWorkerBusy(use, late=True)
+
+    def _waiting_run_could_start(self) -> bool:
+        """Whether a run waiting to restart ComfyUI would start now if its turn came.
+
+        Only such a run keeps a window open, because it releases chat again as
+        soon as it starts. A run that is held, whose lane is paused or that
+        waits for work it depends on is not asked whether it may start until
+        someone releases it or that work is done, which may be never, and a
+        window kept for it would keep chat off the device with nobody using
+        ComfyUI. Its wait stays recorded all the same: the time it has counted
+        stays counted, and it goes on waiting once it may start again. A queue
+        that cannot be read counts as holding a run that could start, so the
+        window is kept and looked at again soon.
+        """
+
+        if not self._media_waits:
+            return False
+        try:
+            return bool(self.scheduler.startable_jobs(tuple(self._media_waits)))
+        except Exception:
+            logger.exception("Could not tell whether a waiting media run could start")
+            return True
 
     async def _expire_media_warm_window(self, generation: int, seconds: float) -> None:
         """Hand the device back to chat once a warm window passes unused."""
@@ -6723,7 +7200,13 @@ class ConversationOrchestrator:
             async with self.scheduler.lease("primary"):
                 if self._closing or self._media_warm_window != generation:
                     return
-                if not await self._media_runtime_busy():
+                # A run waiting to restart the worker releases chat again as
+                # soon as it starts, so chat is not loaded back in between. A
+                # waiting run that is held or paused, or that waits for work it
+                # depends on, starts only once it is let go or that work is
+                # done, which may be never, so it does not keep the device from
+                # chat meanwhile.
+                if not self._waiting_run_could_start() and not await self._media_runtime_busy():
                     await self._end_media_warm_window()
                     return
             # Someone is using ComfyUI directly or through the native editor,
@@ -7132,6 +7615,14 @@ class ConversationOrchestrator:
                 )
             await asyncio.shield(restart_task)
         status = next(item for item in self.processes.statuses() if item.name == "media")
+        # A running worker is stopped only once the supervisor, holding its
+        # lock, has asked whether someone else is using it. The run's check
+        # waits out such use before the run starts; this catches use that
+        # began while it was being prepared, use the check could not tell was
+        # there, and a replacement the check could not foresee.
+        guarded: dict[str, Any] = (
+            {"replacement_guard": self._refuse_busy_replacement} if status.running else {}
+        )
         # A worker launched for one activation sees only that activation's
         # models and custom nodes, so a run without one never runs on it: it
         # is replaced by the broad worker first. A run with a scope always asks
@@ -7165,18 +7656,19 @@ class ConversationOrchestrator:
                         await self.processes.start_media(
                             phase_callback=report_phase,
                             activation_scope=activation_scope,
+                            **guarded,
                         )
                     else:
-                        await self.processes.start_media(phase_callback=report_phase)
+                        await self.processes.start_media(phase_callback=report_phase, **guarded)
                 except WorkerStartRefused as refusal:
                     raise ClaimLost(
                         f"job {job_id} is no longer this execution's at {str(refusal)!r}"
                     ) from refusal
             else:
                 if activation_scope is not None:
-                    await self.processes.start_media(activation_scope=activation_scope)
+                    await self.processes.start_media(activation_scope=activation_scope, **guarded)
                 else:
-                    await self.processes.start_media()
+                    await self.processes.start_media(**guarded)
 
     def _media_activation_scope(
         self,
@@ -8101,6 +8593,13 @@ class ConversationOrchestrator:
         producer = self.engines.media.generate(request)
         try:
             async for event in producer:
+                # Generating from its first event on, not from the call above.
+                # A generator stopped before its body runs never reaches its own
+                # cleanup, so a stop told to the engine before then would stay
+                # behind in the engine, and an engine that keeps one ends the
+                # run's next attempt at once. ComfyUI's first event comes before
+                # it submits anything.
+                self._media_generating.add(run_id)
                 if event.type in {"progress", "queued"}:
                     indeterminate = event.type == "queued" or bool(event.data.get("indeterminate"))
                     reported = _reported_step(event.data)
@@ -8245,6 +8744,9 @@ class ConversationOrchestrator:
                                     )
                                 session.commit()
         finally:
+            # Closing the producer stops whatever it began in the engine, so a
+            # stop from here on has nothing more to tell the engine.
+            self._media_generating.discard(run_id)
             # The producer is typed as an iterator by the adapter contract, and a
             # close that raises or hangs must not replace the refusal that
             # ended this execution; the shared bounded close does both.
@@ -8896,6 +9398,23 @@ class ConversationOrchestrator:
                         "provenance": run.provenance_json,
                     }
         return True
+
+    def _skip_image_edit_verification(
+        self, job_id: str, reason: VerificationReason, claim: JobClaim
+    ) -> None:
+        """Finish a verification as skipped for `reason`, in its own transaction.
+
+        Nothing is written when the claim no longer owns the row.
+        """
+
+        with self.session_factory() as session:
+            job = session.get(Job, job_id)
+            if job is None:
+                return
+            if self._finish_image_edit_verification(session, job, reason, claim=claim):
+                session.commit()
+            else:
+                session.rollback()
 
     def _finish_image_edit_verification(
         self,
@@ -9840,6 +10359,14 @@ class ConversationOrchestrator:
                     and media_status.managed
                     and media_status.running
                 ):
+                    if await self._media_runtime_busy():
+                        # Stopping ComfyUI would end someone else's work, and
+                        # this review is best-effort, so it is skipped instead.
+                        # Nothing has moved, so the teardown restores nothing.
+                        self._skip_image_edit_verification(
+                            job_id, VerificationReason.ASSESSMENT_UNAVAILABLE, claim
+                        )
+                        return
                     await self.processes.stop("media")
                     media_stopped_for_verification = True
                     # Stopping media is an await, and a successor can claim the
@@ -10180,7 +10707,21 @@ class ConversationOrchestrator:
                     self._release_deferred_media_restart()
         await self.scheduler.publish_job(job_id)
 
-    async def _fail(self, job_id: str, run_id: str, error: str, *, claim: JobClaim | None) -> None:
+    async def _fail(
+        self,
+        job_id: str,
+        run_id: str,
+        error: str,
+        *,
+        claim: JobClaim | None,
+        retryable: bool = True,
+    ) -> None:
+        """Fail the run, or queue it again when its retry allowance covers the failure.
+
+        `retryable` is False for a failure another attempt would only meet
+        again, which spends none of the allowance.
+        """
+
         with self.session_factory() as session:
             job = session.get(Job, job_id)
             run = session.get(Run, run_id)
@@ -10227,7 +10768,7 @@ class ConversationOrchestrator:
                 return
             retry = (
                 self._reserve_failed_media_retry(session, job, run, claim)
-                if reserve_retry(run.provenance_json, run.operation) is not None
+                if retryable and reserve_retry(run.provenance_json, run.operation) is not None
                 else None
             )
             if retry is None:

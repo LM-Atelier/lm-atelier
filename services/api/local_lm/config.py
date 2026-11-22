@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     #: and its models between media turns; a chat model still loads whenever
     #: something needs one, stopping ComfyUI first.
     media_keep_warm_seconds: float = Field(default=120, ge=0, le=604_800)
+    #: How long a media run that needs ComfyUI restarted with a different set of
+    #: models and custom nodes waits, queued, for work LM Atelier did not start
+    #: or an open workflow editor, before it fails rather than end that work.
+    #: The time counts while the run is not held, paused or waiting for earlier
+    #: steps, including while other LM Atelier jobs use the device, and a
+    #: stretch in which the run is not asked adds at most one recheck step,
+    #: `MEDIA_WAIT_STEP_SECONDS`. 0 fails such a run at once.
+    media_replace_wait_seconds: float = Field(default=3600, ge=0, le=86_400)
     hf_token: str | None = None
     civitai_token: str | None = None
     crw_endpoint: str | None = Field(default=None, max_length=2000)

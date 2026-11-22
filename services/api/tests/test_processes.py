@@ -25,10 +25,12 @@ from sqlalchemy.orm import Session, object_session
 
 import local_lm.comfy_registry_interpreter as registry_interpreter_module
 import local_lm.processes as processes_module
+import local_lm.workflow_completion_jobs as workflow_completion_jobs_module
 from local_lm.comfy_editor_bridge import (
     BRIDGE_COORDINATOR_CONFIG,
     ComfyEditorBridgeError,
     ComfyEditorBridgeSupport,
+    PreparedComfyEditorBridge,
     bridge_directory_name,
 )
 from local_lm.comfy_registry_installs import ComfyRegistryLaunchContract
@@ -1176,6 +1178,133 @@ async def test_media_replacement_rotates_verified_editor_launch_authority(
     await supervisor.stop("media")
     assert supervisor.workflow_editor_runtime_identity() is None
     assert supervisor.workflow_editor_bridge_support() is None
+
+
+async def test_a_refused_replacement_leaves_the_live_media_worker_running(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A guard that refuses stops the replacement before the running worker is touched.
+
+    The guard is asked under the worker's lock, and only when a running worker
+    would be stopped: nothing to stop, or a launch identical to the running one,
+    asks nothing. After a refusal the worker keeps its process and its editor
+    launch, so an editor open on it can still save. The stop that disables
+    cancelled extensions is refused the same way, and a guard that allows the
+    replacement lets it go ahead.
+    """
+
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+
+    async def healthy_immediately(*_args: object) -> None:
+        return None
+
+    monkeypatch.setattr(supervisor, "_wait_healthy", healthy_immediately)
+    monkeypatch.setattr(supervisor, "_ensure_port_available", AsyncMock())
+    monkeypatch.setattr(
+        workflow_completion_jobs_module,
+        "cancelled_workflow_activation_packages",
+        lambda _session: ("neutral-cancelled-extension",),
+    )
+    disabled = Mock()
+    monkeypatch.setattr(
+        workflow_completion_jobs_module, "deactivate_cancelled_workflow_activations", disabled
+    )
+    health = "http://127.0.0.1:9/health"
+    command = [sys.executable, "-c", "import time; time.sleep(30)"]
+    different = [sys.executable, "-c", "import time; time.sleep(31)"]
+    support = ComfyEditorBridgeSupport(
+        True,
+        "ready",
+        "Native workflow editing is available.",
+        "0.28.0",
+        "1.45.21",
+    )
+    asked_holding_the_lock: list[bool] = []
+
+    class Refused(Exception):
+        pass
+
+    async def refuse() -> None:
+        asked_holding_the_lock.append(supervisor._locks["media"].locked())
+        raise Refused
+
+    async def allow() -> None:
+        asked_holding_the_lock.append(supervisor._locks["media"].locked())
+
+    try:
+        await supervisor._replace(
+            "media",
+            command,
+            health,
+            launch_scope_sha256="a" * 64,
+            editor_bridge_support=support,
+            replacement_guard=refuse,
+        )
+        assert asked_holding_the_lock == [], "the guard was asked with no worker running"
+        first = supervisor._workers["media"]
+        identity = supervisor.workflow_editor_runtime_identity()
+        assert identity
+
+        await supervisor._replace(
+            "media",
+            list(command),
+            health,
+            launch_scope_sha256="a" * 64,
+            editor_bridge_support=support,
+            replacement_guard=refuse,
+        )
+        assert asked_holding_the_lock == [], "the guard was asked about the running launch"
+        assert supervisor._workers["media"] is first
+
+        with pytest.raises(Refused):
+            await supervisor._replace(
+                "media",
+                different,
+                health,
+                launch_scope_sha256="b" * 64,
+                editor_bridge_support=support,
+                replacement_guard=refuse,
+            )
+        assert asked_holding_the_lock == [True]
+        assert supervisor._workers["media"] is first
+        assert first.process.returncode is None
+        assert psutil.Process(first.process.pid).is_running()
+        assert supervisor.workflow_editor_runtime_identity() == identity
+        assert not supervisor._locks["media"].locked()
+
+        with pytest.raises(Refused):
+            await supervisor._clear_cancelled_workflow_activations(replacement_guard=refuse)
+        assert asked_holding_the_lock == [True, True]
+        disabled.assert_not_called()
+        assert supervisor._workers["media"] is first
+        assert first.process.returncode is None
+        assert supervisor.workflow_editor_runtime_identity() == identity
+
+        await supervisor._replace(
+            "media",
+            different,
+            health,
+            launch_scope_sha256="b" * 64,
+            editor_bridge_support=support,
+            replacement_guard=allow,
+        )
+        assert asked_holding_the_lock == [True, True, True]
+        assert supervisor._workers["media"] is not first
+        assert first.process.returncode is not None
+        replaced = supervisor.workflow_editor_runtime_identity()
+        assert replaced
+        assert replaced != identity
+
+        await supervisor.stop("media")
+        await supervisor._clear_cancelled_workflow_activations(replacement_guard=refuse)
+        assert asked_holding_the_lock == [True, True, True], (
+            "the guard was asked with no worker running"
+        )
+        disabled.assert_called_once()
+    finally:
+        await supervisor.close()
 
 
 async def test_loading_health_503_lines_do_not_displace_stderr_tail(
@@ -2918,6 +3047,114 @@ async def test_media_start_uses_only_verified_registry_overlay_contract(
     assert command[4:6] == [str(site_packages.resolve()), str((runtime / "main.py").resolve())]
     assert captured["environment_overrides"] == {"PYTHONDONTWRITEBYTECODE": "1"}
     assert callable(captured["ready_check"])
+
+
+@pytest.mark.parametrize("launch", ["scoped", "registry-overlay", "plain"])
+async def test_starting_media_asks_the_guard_before_every_stop_it_can_make(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    launch: str,
+) -> None:
+    """Every way a media start can stop the running worker carries the guard.
+
+    A start stops the worker to disable extensions whose install was cancelled,
+    and to replace it with a different launch, so the guard goes to both; a
+    start given none passes none.
+    """
+
+    runtime = tmp_path / "comfyui"
+    runtime.mkdir()
+    (runtime / "main.py").touch()
+    executable = tmp_path / "python.exe"
+    executable.touch()
+    model_paths = tmp_path / "extra-model-paths.yaml"
+    model_paths.touch()
+    site_packages = tmp_path / "registry-environment" / "site-packages"
+    site_packages.mkdir(parents=True)
+    settings.comfy_directory = runtime
+    settings.comfy_executable = executable
+    supervisor = ProcessSupervisor(settings)
+    scope = (
+        WorkflowActivationLaunchScope(
+            "wfact_selected",
+            "wfrev_selected",
+            "b" * 64,
+            "a" * 64,
+            (),
+            (),
+            (),
+            (),
+            (),
+            (),
+            (),
+            (),
+            (),
+            (),
+        )
+        if launch == "scoped"
+        else None
+    )
+    contract = (
+        ComfyRegistryLaunchContract(
+            ("lm-atelier-registry_example",), (site_packages,), ("ExampleLoader",)
+        )
+        if launch == "registry-overlay"
+        else ComfyRegistryLaunchContract((), (), ())
+    )
+
+    async def no_nodes() -> list[str]:
+        return []
+
+    async def no_scoped_nodes(_scope: object) -> tuple[list[str], tuple[str, ...]]:
+        return [], ()
+
+    monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", no_nodes)
+    monkeypatch.setattr(supervisor, "_scoped_comfy_node_folders", no_scoped_nodes)
+    monkeypatch.setattr(
+        supervisor, "_verified_comfy_registry_contract", AsyncMock(return_value=(contract, None))
+    )
+    monkeypatch.setattr(supervisor, "_write_comfy_model_paths", lambda: model_paths)
+    monkeypatch.setattr(supervisor, "_write_scoped_comfy_model_paths", lambda _scope: model_paths)
+    monkeypatch.setattr(
+        processes_module,
+        "prepare_comfy_editor_bridge",
+        lambda **_kwargs: PreparedComfyEditorBridge(
+            ComfyEditorBridgeSupport(False, "workflow-editor-runtime-unavailable", "Unavailable"),
+            None,
+        ),
+    )
+    clear = AsyncMock()
+    replace = AsyncMock()
+    monkeypatch.setattr(supervisor, "_clear_cancelled_workflow_activations", clear)
+    monkeypatch.setattr(supervisor, "_replace", replace)
+
+    async def guard() -> None:
+        return None
+
+    await supervisor.start_media(activation_scope=scope, replacement_guard=guard)
+
+    assert replace.await_args is not None
+    options = replace.await_args.kwargs
+    assert options["replacement_guard"] is guard
+    if launch == "scoped":
+        assert options["launch_scope_sha256"] == "a" * 64
+        clear.assert_not_awaited()
+    else:
+        assert "launch_scope_sha256" not in options
+        assert ("ready_check" in options) is (launch == "registry-overlay")
+        assert clear.await_args is not None
+        assert clear.await_args.kwargs == {"replacement_guard": guard}
+
+    replace.reset_mock()
+    clear.reset_mock()
+    await supervisor.start_media(activation_scope=scope)
+
+    assert replace.await_args is not None
+    assert "replacement_guard" not in replace.await_args.kwargs
+    if launch != "scoped":
+        assert clear.await_args is not None
+        assert clear.await_args.kwargs == {}
 
 
 def test_registry_launch_contracts_use_the_managed_registry_root(

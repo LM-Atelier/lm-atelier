@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from copy import deepcopy
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
@@ -9,6 +10,7 @@ from fastapi import FastAPI
 from httpx2 import AsyncClient
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from test_workflow_editor_sessions import _Clock
 from workflow_fixtures import seed_workflow_trust
 
 from local_lm import api as api_module
@@ -274,6 +276,106 @@ async def test_start_and_cancel_bind_exact_revision_without_mutating_workflow(
         item for item in (await client.get("/api/workflows")).json() if item["id"] == workflow["id"]
     )
     assert after == before
+
+
+async def test_the_heartbeat_authenticates_like_cancel_and_never_extends_the_session(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    clock = _Clock()
+    monkeypatch.setattr(
+        app.state.services,
+        "workflow_editor_sessions",
+        WorkflowEditorSessions(ttl=timedelta(minutes=10), clock=clock),
+    )
+    workflow = await _create_workflow(client)
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    path = f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/heartbeat"
+    assert datetime.fromisoformat(started["expires_at"]) == clock.value + timedelta(minutes=10)
+
+    clock.value += timedelta(minutes=9)
+    reported = await client.post(path, json={"nonce": started["nonce"]})
+    assert reported.status_code == 204, reported.text
+    assert reported.content == b""
+
+    wrong_nonce = await client.post(path, json={"nonce": "wrong"})
+    assert wrong_nonce.status_code == 403
+    assert wrong_nonce.json()["code"] == "workflow-editor-session-authentication-failed"
+    wrong_workflow = await client.post(
+        f"/api/workflows/workflow_two/editor-sessions/{started['id']}/heartbeat",
+        json={"nonce": started["nonce"]},
+    )
+    assert wrong_workflow.status_code == 409
+    assert wrong_workflow.json()["code"] == "workflow-editor-session-mismatch"
+    invalid = await client.post(path, json={"nonce": "has whitespace"})
+    assert invalid.status_code == 422
+    assert invalid.json()["code"] == "workflow-editor-session-invalid"
+    assert invalid.json()["reason_code"] == "invalid-workflow-editor-session"
+    extra_field = await client.post(
+        path,
+        json={"nonce": started["nonce"], "query_nonce": started["nonce"]},
+    )
+    assert extra_field.status_code == 422
+
+    # Reported in a minute before its end, the session still ends when it was granted to.
+    clock.value += timedelta(minutes=1)
+    expired = await client.post(path, json={"nonce": started["nonce"]})
+    assert expired.status_code == 404
+    assert expired.json()["code"] == "workflow-editor-session-not-found"
+
+    second = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    second_path = f"/api/workflows/{workflow['id']}/editor-sessions/{second['id']}"
+    reported = await client.post(f"{second_path}/heartbeat", json={"nonce": second["nonce"]})
+    assert reported.status_code == 204, reported.text
+    cancelled = await client.post(f"{second_path}/cancel", json={"nonce": second["nonce"]})
+    assert cancelled.status_code == 204
+    gone = await client.post(f"{second_path}/heartbeat", json={"nonce": second["nonce"]})
+    assert gone.status_code == 404
+    assert gone.json()["code"] == "workflow-editor-session-not-found"
+
+
+async def test_the_application_counts_an_editor_only_while_it_reports_in(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_editor(app, monkeypatch)
+    services = app.state.services
+    clock = _Clock()
+    monkeypatch.setattr(services, "workflow_editor_sessions", WorkflowEditorSessions(clock=clock))
+    orchestrator = services.orchestrator
+    workflow = await _create_workflow(client)
+    assert orchestrator.media_worker_in_use() is False
+
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    path = f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}"
+    assert orchestrator.media_worker_in_use() is True
+
+    clock.value += timedelta(seconds=181)
+    assert orchestrator.media_worker_in_use() is False
+
+    reported = await client.post(f"{path}/heartbeat", json={"nonce": started["nonce"]})
+    assert reported.status_code == 204, reported.text
+    assert orchestrator.media_worker_in_use() is True
+
+    # The session needs only the launch it was opened on.
+    identity = services.processes.workflow_editor_runtime_identity
+    monkeypatch.setattr(
+        services.processes,
+        "workflow_editor_runtime_identity",
+        lambda: "runtime_two",
+    )
+    assert orchestrator.media_worker_in_use() is False
+    monkeypatch.setattr(services.processes, "workflow_editor_runtime_identity", lambda: None)
+    assert orchestrator.media_worker_in_use() is False
+    monkeypatch.setattr(services.processes, "workflow_editor_runtime_identity", identity)
+    assert orchestrator.media_worker_in_use() is True
+
+    cancelled = await client.post(f"{path}/cancel", json={"nonce": started["nonce"]})
+    assert cancelled.status_code == 204
+    assert orchestrator.media_worker_in_use() is False
 
 
 @pytest.mark.parametrize(

@@ -25,7 +25,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import FastAPI
@@ -47,14 +47,26 @@ from local_lm.schemas import WorkerStatus
 
 
 def _warm_orchestrator(
-    seconds: float, *, scope: str | None = None
+    seconds: float,
+    *,
+    scope: str | None = None,
+    counts_foreign: bool = False,
+    replace_wait_seconds: float = 3600,
 ) -> tuple[ConversationOrchestrator, dict[str, Any], asyncio.Lock]:
+    """An orchestrator over a managed ComfyUI worker that is ready, with chat down.
+
+    `comfy_queue` is every prompt ComfyUI holds. With `counts_foreign`, the
+    adapter also tells LM Atelier's own prompts apart, as ComfyUI's does, and
+    `foreign` is how many of those prompts someone else queued.
+    """
+
     record: dict[str, Any] = {
         "order": [],
         "chat_running": False,
         "media_running": True,
         "media_pid": 31,
         "comfy_queue": 0,
+        "foreign": 0,
         "stop_gate": None,
         "probe_gate": None,
         "probes": 0,
@@ -88,7 +100,7 @@ def _warm_orchestrator(
             await gate.wait()
         record[f"{name}_running"] = False
 
-    async def start_media() -> None:
+    async def start_media(**_checks: object) -> None:
         record["order"].append("start media")
         record["media_running"] = True
         record["media_pid"] += 1
@@ -100,6 +112,19 @@ def _warm_orchestrator(
             await gate.wait()
         return int(record["comfy_queue"])
 
+    async def foreign_prompt_count() -> int:
+        record["probes"] += 1
+        return int(record["foreign"])
+
+    media = (
+        Mock(
+            spec_set=["queue_remaining", "foreign_prompt_count"],
+            queue_remaining=queue_remaining,
+            foreign_prompt_count=foreign_prompt_count,
+        )
+        if counts_foreign
+        else Mock(spec_set=["queue_remaining"], queue_remaining=queue_remaining)
+    )
     processes = Mock(
         spec_set=["settings", "statuses", "stop", "start_media", "launch_scope_sha256"],
         settings=SimpleNamespace(auto_unload_chat_for_media=True),
@@ -112,15 +137,21 @@ def _warm_orchestrator(
     orchestrator = ConversationOrchestrator(
         engines=Mock(
             spec_set=["settings", "media"],
-            settings=SimpleNamespace(media_engine="comfyui", media_keep_warm_seconds=seconds),
-            media=Mock(spec_set=["queue_remaining"], queue_remaining=queue_remaining),
+            settings=SimpleNamespace(
+                media_engine="comfyui",
+                media_keep_warm_seconds=seconds,
+                media_replace_wait_seconds=replace_wait_seconds,
+            ),
+            media=media,
         ),
         artifacts=Mock(),
         events=Mock(),
         scheduler=Mock(
-            spec_set=["lease", "peek_next_eligible_job"],
+            spec_set=["lease", "peek_next_eligible_job", "startable_jobs"],
             lease=lease,
             peek_next_eligible_job=lambda _group: None,
+            # Nothing is held or paused, so a run a test has waiting could start.
+            startable_jobs=frozenset,
         ),
         processes=processes,
     )
@@ -508,6 +539,19 @@ async def test_the_window_waits_while_comfyui_runs_a_prompt_of_its_own() -> None
     await orchestrator.close()
 
 
+async def test_a_window_whose_only_prompt_is_lm_ateliers_own_hands_the_device_back() -> None:
+    orchestrator, record, _ = _warm_orchestrator(0.01, counts_foreign=True)
+    # The one prompt ComfyUI holds was left behind by one of LM Atelier's own
+    # runs, such as a node that hung through a stop. Nobody else is using it.
+    record["comfy_queue"] = 1
+
+    await orchestrator._complete_media_handoff("profile-chat")
+    await asyncio.wait_for(_settled(orchestrator), PATIENCE_SECONDS)
+
+    assert record["order"] == ["stop media", "resume profile-chat", "start media"]
+    await orchestrator.close()
+
+
 async def test_a_media_run_supersedes_what_a_chat_load_left_to_settle() -> None:
     orchestrator, record, device = _warm_orchestrator(60)
     await orchestrator._complete_media_handoff("profile-chat")
@@ -549,6 +593,33 @@ async def test_a_failed_run_hands_the_device_back_at_once() -> None:
 
     assert record["order"][:2] == ["stop media", "resume profile-chat"]
     assert orchestrator._media_warm_window is None
+    await orchestrator.close()
+
+
+@pytest.mark.parametrize("keep_warm_seconds", [60, 0])
+async def test_a_stopped_or_failed_run_leaves_comfyui_running_for_its_other_user(
+    monkeypatch: pytest.MonkeyPatch, keep_warm_seconds: float
+) -> None:
+    monkeypatch.setattr("local_lm.orchestrator.MEDIA_BUSY_RECHECK_SECONDS", 0.01)
+    orchestrator, record, _ = _warm_orchestrator(keep_warm_seconds, counts_foreign=True)
+    # Someone queued a prompt in ComfyUI's own page while the run was going.
+    record["comfy_queue"] = 2
+    record["foreign"] = 1
+    # The run that displaced chat cleared the readiness latch, as it does.
+    orchestrator._chat_planner_ready.clear()
+
+    await orchestrator._complete_media_handoff("profile-chat", keep_warm=False)
+
+    # Recycling would end their work, so the worker is held for them, even with
+    # keeping it warm turned off, and chat stays owed.
+    assert record["order"] == []
+    assert orchestrator._media_warm_window is not None
+    assert orchestrator._displaced_chat_profile_id == "profile-chat"
+    assert orchestrator._chat_planner_ready.is_set()
+
+    record["foreign"] = 0
+    await asyncio.wait_for(_settled(orchestrator), PATIENCE_SECONDS)
+    assert record["order"] == ["stop media", "resume profile-chat", "start media"]
     await orchestrator.close()
 
 
@@ -693,6 +764,62 @@ async def test_an_open_editor_session_keeps_the_warm_worker() -> None:
     editing["open"] = False
     await _settled(orchestrator)
     assert record["order"] == ["stop media", "resume profile-chat", "start media"]
+    await orchestrator.close()
+
+
+async def test_a_window_is_kept_while_a_run_waits_to_take_its_worker_over() -> None:
+    from local_lm.media_worker_use import MediaReplacementWait
+
+    orchestrator, record, _ = _warm_orchestrator(0.01)
+    # A queued run waits to restart the worker. ComfyUI has gone quiet, and the
+    # run starts once that has lasted a moment; handing the device back now
+    # would load chat only for that run to release it again.
+    orchestrator._media_waits["job-waiting"] = MediaReplacementWait()
+    await orchestrator._complete_media_handoff("profile-chat")
+
+    await asyncio.sleep(0.1)
+    assert record["order"] == []
+    assert orchestrator._media_warm_window is not None
+
+    # The wait ended without the run starting, so the window gives chat back.
+    del orchestrator._media_waits["job-waiting"]
+    await asyncio.wait_for(_settled(orchestrator), PATIENCE_SECONDS)
+    assert record["order"] == ["stop media", "resume profile-chat", "start media"]
+    await orchestrator.close()
+
+
+async def test_a_wait_that_finds_chat_owed_and_down_gives_it_back_if_the_run_never_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_lm.orchestrator import _NeededLaunch
+
+    monkeypatch.setattr("local_lm.orchestrator.MEDIA_BUSY_RECHECK_SECONDS", 0.01)
+    # The live worker was launched for another workflow's own models and nodes,
+    # and an earlier media run left chat down and owed for the run queued next.
+    orchestrator, record, _ = _warm_orchestrator(60, scope=SCOPE)
+    orchestrator._displaced_chat_profile_id = "profile-chat"
+    monkeypatch.setattr(orchestrator, "_needed_media_launch", lambda _run_id: _NeededLaunch(None))
+    shown = AsyncMock()
+    monkeypatch.setattr(orchestrator, "_set_queued_media_phase", shown)
+    # Someone queued a prompt in ComfyUI's own page.
+    record["comfy_queue"] = 1
+
+    admit = orchestrator._media_admission("job-waiting", "run-waiting")
+    assert await admit() == "Waiting for other media work to finish"
+
+    shown.assert_awaited_once_with(
+        "job-waiting", "run-waiting", "Waiting for other media work to finish"
+    )
+    assert orchestrator._media_warm_window is not None
+    assert record["order"] == []
+
+    # The run is stopped while it waits, and the other work then ends.
+    orchestrator._media_waits.pop("job-waiting")
+    record["comfy_queue"] = 0
+    await asyncio.wait_for(_settled(orchestrator), PATIENCE_SECONDS)
+
+    # Chat comes back, and no broad worker is started in the scoped one's place.
+    assert record["order"] == ["stop media", "resume profile-chat"]
     await orchestrator.close()
 
 

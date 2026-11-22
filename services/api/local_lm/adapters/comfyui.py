@@ -229,6 +229,25 @@ class ComfyUIAdapter:
         self._jobs: dict[str, str] = {}
         self._cancelled: set[str] = set()
         self._cancel_events: dict[str, asyncio.Event] = {}
+        # Every prompt this adapter submits carries a client id that starts
+        # with this prefix, and ComfyUI returns the client id on each queue
+        # row, so a prompt LM Atelier left behind is told from other work by
+        # its row alone, even one whose prompt id never arrived. The
+        # application keeps one adapter, and the worker it manages never
+        # outlives the process, so a prefix fixed for the adapter's life covers
+        # every prompt of its own that the worker can hold.
+        self._client_prefix = uuid4().hex[:16]
+        # These counts say whether a prompt of this adapter's may still be in
+        # ComfyUI. `_in_flight` counts generations that have sent their prompt
+        # and not yet finished, and `_unsettled` those that finished without
+        # collecting their outputs: ComfyUI records a prompt's outputs only once
+        # the prompt has left its queue, so collected outputs are the one sign
+        # it is gone. `_settled_through` is how many of the unsettled ones are
+        # known to have left, because ComfyUI was later seen holding none of
+        # these prompts.
+        self._in_flight = 0
+        self._unsettled = 0
+        self._settled_through = 0
         self._last_output_sweep = 0.0
         self._object_info_by_hash: dict[str, dict[str, Any]] = {}
         self._latest_object_info_hash: str | None = None
@@ -655,6 +674,7 @@ class ComfyUIAdapter:
         self._jobs.pop(request.run_id, None)
         prompt_id: str | None = None
         outputs_collected = False
+        submitted = False
         abandoned = False
         refused_after_acceptance = False
         bound_after_submission_failure = False
@@ -668,7 +688,7 @@ class ComfyUIAdapter:
                 yield MediaEvent(type="cancelled")
                 return
             await self._sweep_stale_outputs()
-            client_id = uuid4().hex
+            client_id = f"{self._client_prefix}{uuid4().hex}"
             if request.input_paths:
                 yield MediaEvent(
                     type="progress",
@@ -711,6 +731,10 @@ class ComfyUIAdapter:
                     "prompt": graph,
                     "client_id": client_id,
                 }
+                # From this request on, ComfyUI may hold the prompt whatever the
+                # reply turns out to be, until its outputs are collected.
+                submitted = True
+                self._in_flight += 1
                 try:
                     response = await self._client.post(
                         "/prompt",
@@ -912,6 +936,10 @@ class ComfyUIAdapter:
                 self._jobs.pop(request.run_id, None)
                 self._cancel_events.pop(request.run_id, None)
                 self._cancelled.discard(request.run_id)
+            if submitted:
+                self._in_flight -= 1
+                if not outputs_collected:
+                    self._unsettled += 1
             if prompt_id and not outputs_collected:
                 if bound_after_submission_failure or (
                     (abandoned or refused_after_acceptance) and not cancel_event.is_set()
@@ -1387,6 +1415,81 @@ class ComfyUIAdapter:
         if isinstance(remaining, bool) or not isinstance(remaining, int) or remaining < 0:
             return None
         return remaining
+
+    async def foreign_prompt_count(self) -> int | None:
+        """How many prompts ComfyUI holds that LM Atelier did not submit, or None if it cannot say.
+
+        A prompt LM Atelier submitted can outlive the generation that sent it:
+        a node can hang through a stop, and a stop can fail to reach ComfyUI.
+        That prompt is LM Atelier's own work, so it is no reason to wait before
+        ending what ComfyUI is doing; only work someone else queued is.
+
+        The count is read first, and the queue only when one of this adapter's
+        prompts may still be there: a generation has sent one and not finished,
+        or one finished without collecting its outputs since ComfyUI was last
+        seen holding none of them. The queue holds every prompt's graph, so
+        only the client ids are taken from it. A queue that cannot be read
+        counts every prompt as someone else's: waiting on a wrong answer costs
+        time, and stopping ComfyUI on one ends work that cannot be given back.
+        """
+
+        # Only generations that finished before ComfyUI answered can be shown
+        # gone by its answer; one that finishes meanwhile stays unsettled.
+        seen = self._unsettled
+        total = await self.queue_remaining()
+        if total is None:
+            return None
+        if total == 0:
+            self._settled_through = max(self._settled_through, seen)
+            return 0
+        if not self._in_flight and self._settled_through >= self._unsettled:
+            return total
+        clients = await self._queued_client_ids()
+        if clients is None:
+            return total
+        ours = sum(
+            1 for client in clients if client is not None and client.startswith(self._client_prefix)
+        )
+        if not ours:
+            self._settled_through = max(self._settled_through, seen)
+        return len(clients) - ours
+
+    async def _queued_client_ids(self) -> list[str | None] | None:
+        """The client id of each prompt ComfyUI holds, running or waiting.
+
+        A queue row is `[number, prompt_id, prompt, extra_data,
+        outputs_to_execute]`, with the client id in `extra_data`. The rest of a
+        row is a graph and the workflow it came from, often someone else's, so
+        only the client ids are taken from the body. None of it is logged or
+        kept, and no error leaves this method to carry it. A row whose client
+        id is missing or not a string is None, which counts as someone else's.
+
+        None means ComfyUI could not say: no answer within the reconcile
+        deadline, an error status, a body over the JSON bound, or a body or
+        section of another shape. A section is never skipped, because a partial
+        reading could miss another application's prompt.
+        """
+
+        with suppress(Exception):
+            async with asyncio.timeout(RECONCILE_SECONDS):
+                response = await self._client.get("/queue")
+                response.raise_for_status()
+                if len(response.content) > _MAX_COMFY_JSON_BYTES:
+                    return None
+                payload = response.json()
+            if not isinstance(payload, dict):
+                return None
+            clients: list[str | None] = []
+            for key in ("queue_running", "queue_pending"):
+                rows = payload.get(key)
+                if not isinstance(rows, list):
+                    return None
+                for row in rows:
+                    extra = row[3] if isinstance(row, list) and len(row) >= 4 else None
+                    client = extra.get("client_id") if isinstance(extra, dict) else None
+                    clients.append(client if isinstance(client, str) else None)
+            return clients
+        return None
 
     async def _prompt_id_for_client(self, client_id: str) -> str | None:
         """The queued prompt this submission's client id names, if there is one.

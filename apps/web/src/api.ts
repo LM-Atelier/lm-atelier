@@ -1814,6 +1814,11 @@ export const api = {
       `/api/workflows/${encodeURIComponent(workflowId)}/editor-sessions/${encodeURIComponent(sessionId)}/cancel`,
       { method: "POST", body: JSON.stringify({ nonce }) },
     ),
+  heartbeatWorkflowEditor: (workflowId: string, sessionId: string, nonce: string) =>
+    request<void>(
+      `/api/workflows/${encodeURIComponent(workflowId)}/editor-sessions/${encodeURIComponent(sessionId)}/heartbeat`,
+      { method: "POST", body: JSON.stringify({ nonce }) },
+    ),
   importWorkflow: (bundle: WorkflowBundle) =>
     request<Workflow>("/api/workflows/import", { method: "POST", body: JSON.stringify(bundle) }),
   editTemplates: () => request<EditTemplate[]>("/api/edit-templates"),

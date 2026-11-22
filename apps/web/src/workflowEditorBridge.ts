@@ -12,6 +12,11 @@ const CONNECT_TIMEOUT_MS = 30_000;
 const LOAD_TIMEOUT_MS = 30_000;
 const CLOSE_POLL_MS = 250;
 const EXPIRY_WARNING_MS = 5 * 60_000;
+// The server counts an open editor as use of the media worker only while this
+// page reports in, so a page closed without cancelling stops holding the worker.
+// A returned edit the page holds for a retry that could still succeed is
+// reported at the same pace.
+export const EDITOR_HEARTBEAT_MS = 30_000;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -53,6 +58,7 @@ export interface WorkflowEditorApi {
     validatedReturnId: string,
   ): Promise<WorkflowEditorDraft>;
   cancelWorkflowEditor(workflowId: string, sessionId: string, nonce: string): Promise<void>;
+  heartbeatWorkflowEditor(workflowId: string, sessionId: string, nonce: string): Promise<void>;
 }
 
 interface PopupWindow {
@@ -296,6 +302,7 @@ export async function runWorkflowEditor(
   let keepPopupOpen = false;
   let inbox: PortInbox | null = null;
   let expiryWarningTimer: number | null = null;
+  let heartbeat: number | null = null;
   options.onPhase?.("preparing");
   const start = api.startWorkflowEditor(workflowId);
   try {
@@ -307,6 +314,14 @@ export async function runWorkflowEditor(
     if (session.protocol_version !== PROTOCOL_VERSION) {
       throw new Error("This ComfyUI editor bridge version is not supported.");
     }
+    heartbeat = environment.setPoll(() => {
+      if (popup.closed) return;
+      void api.heartbeatWorkflowEditor(workflowId, started.id, started.nonce).catch(() => {
+        // Nothing here depends on the answer. Once the session is consumed,
+        // cancelled or expired the server says it is gone, and the editor has
+        // stopped counting as use either way.
+      });
+    }, EDITOR_HEARTBEAT_MS);
     options.onPhase?.("connecting");
     const channel = environment.createChannel();
     inbox = new PortInbox(channel.port1, popup, environment, options.signal);
@@ -397,6 +412,7 @@ export async function runWorkflowEditor(
     }
     throw error;
   } finally {
+    if (heartbeat !== null) environment.clearPoll(heartbeat);
     if (expiryWarningTimer !== null) environment.clearTimer(expiryWarningTimer);
     inbox?.close();
     if (!keepPopupOpen && !popup.closed) popup.close();

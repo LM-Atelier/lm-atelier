@@ -238,6 +238,8 @@ async def test_verifier_starts_after_media_handoff_and_inside_primary_lease(
     async def lease(*_args, **kwargs):  # type: ignore[no-untyped-def]
         on_claim_lost = kwargs.pop("on_claim_lost")
         assert callable(on_claim_lost)
+        # A media run is asked whether it may start before it claims.
+        assert callable(kwargs.pop("admission"))
         assert kwargs == {"resource": "media_compute", "group": "primary", "priority": 0}
         order.append("lease entered")
         yield
@@ -1084,6 +1086,27 @@ async def test_a_verification_that_keeps_its_claim_restores_the_workers() -> Non
 
     assert orchestrator.processes.load_chat.await_count == 2
     orchestrator._schedule_media_restart.assert_called_once()
+
+
+async def test_an_edit_check_leaves_a_busy_comfyui_running() -> None:
+    """A best-effort review never stops ComfyUI while someone else is using it.
+
+    The review needs the vision model, and loading it means stopping ComfyUI
+    first. When ComfyUI holds a prompt LM Atelier did not submit, that stop
+    would end someone else's work, so the review is skipped instead. It moved
+    no worker, so its teardown restores none.
+    """
+
+    job, orchestrator, _world = _verification_world(lose_at="never")
+    orchestrator.engines.media.foreign_prompt_count = AsyncMock(return_value=1)
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    orchestrator.processes.stop.assert_not_awaited()
+    orchestrator.processes.load_chat.assert_not_awaited()
+    record = orchestrator._persist_image_edit_verification.call_args.args[2]
+    assert record["reason"] == VerificationReason.ASSESSMENT_UNAVAILABLE.value
+    orchestrator._schedule_media_restart.assert_not_called()
 
 
 async def test_a_verification_that_loses_its_claim_after_its_workers_streams_nothing() -> None:
