@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
@@ -14,6 +15,10 @@ import yaml
 
 WORKFLOW_ROOT = Path(".github/workflows")
 PUBLIC_CONFIGURATION = Path("scripts/configure-public-repository.ps1")
+# The rulesets the public configuration script applies to the repository.
+RULESET_ROOT = Path(".github/rulesets")
+# Why the workflow policy reads the rulesets, given with each refusal of one.
+RULESET_USE = "job names outside ci.yml are compared with the checks a ruleset requires"
 FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 VERSION_COMMENT = re.compile(r"v[0-9]+(?:\.[0-9]+){1,2}(?:-[0-9A-Za-z.-]+)?")
 # The audit comment a pinned reference carries, matched where its value ends:
@@ -21,6 +26,9 @@ VERSION_COMMENT = re.compile(r"v[0-9]+(?:\.[0-9]+){1,2}(?:-[0-9A-Za-z.-]+)?")
 TRAILING_VERSION = re.compile(r"[ \t]+#[ \t]*(?P<version>\S+)[ \t]*\r?$", re.MULTILINE)
 STRING_TAG = "tag:yaml.org,2002:str"
 MERGE_TAG = "tag:yaml.org,2002:merge"
+NULL_TAG = "tag:yaml.org,2002:null"
+# What opens a GitHub expression, whose value is known only once the workflow runs.
+EXPRESSION_START = "${{"
 PULL_REQUEST_TARGET = re.compile(r"^\s*pull_request_target\s*:", re.MULTILINE)
 ALLOWED_ACTIONS_BLOCK = re.compile(
     r"^\$AllowedActionPatterns\s*=\s*@\(\s*$"
@@ -1770,7 +1778,135 @@ def validate_workflow_keys(path: Path, workflow: dict[str, Any]) -> list[str]:
     return problems
 
 
-def validate_workflow_document(path: Path, content: str, workflow: dict[str, Any]) -> list[str]:
+def required_status_checks() -> tuple[frozenset[str], list[str]]:
+    """Return the status checks the repository's rulesets require, and why any is unknown.
+
+    The public configuration script applies every ruleset in `.github/rulesets`,
+    and a ruleset requires a check by naming its context in a rule of type
+    `required_status_checks`. Finding no ruleset, one that cannot be read or
+    parsed, one that requires a check without naming its context, or no
+    required check at all is reported rather than read as requiring nothing,
+    because a job name compared with nothing is never refused.
+    """
+
+    paths = sorted(RULESET_ROOT.glob("*.json"))
+    if not paths:
+        return frozenset(), [f"{RULESET_ROOT}: no ruleset definitions found; {RULESET_USE}"]
+    contexts: set[str] = set()
+    problems: list[str] = []
+    for path in paths:
+        # The decoder raises RecursionError, which is not a ValueError, for a
+        # ruleset nested deeper than it can recurse.
+        try:
+            ruleset = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, RecursionError, ValueError) as error:
+            problems.append(f"{path}: ruleset cannot be read: {error}; {RULESET_USE}")
+            continue
+        rules = ruleset.get("rules") if isinstance(ruleset, dict) else None
+        if not isinstance(rules, list):
+            problems.append(f"{path}: ruleset must declare its rules as a list; {RULESET_USE}")
+            continue
+        for rule in rules:
+            if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
+                continue
+            parameters = rule.get("parameters")
+            checks = (
+                parameters.get("required_status_checks") if isinstance(parameters, dict) else None
+            )
+            named = [
+                check.get("context") if isinstance(check, dict) else None
+                for check in (checks if isinstance(checks, list) else [])
+            ]
+            valid = [name for name in named if isinstance(name, str) and name.strip()]
+            if not named or len(valid) != len(named):
+                problems.append(
+                    f"{path}: a required_status_checks rule must name each check by its "
+                    f"context; {RULESET_USE}"
+                )
+                continue
+            contexts.update(valid)
+    if not contexts and not problems:
+        problems.append(f"{RULESET_ROOT}: no ruleset requires a status check; {RULESET_USE}")
+    return frozenset(contexts), problems
+
+
+def job_check_names(content: str) -> list[tuple[str, str]]:
+    """Return each job's id with the name its check is reported under, once per name.
+
+    A job's check is reported under the job's name, or under the job's id when
+    the job has no name or only an empty one. The document is composed as the
+    action references are, so a repeated key, a quoted one and a pair merged in
+    from an anchor are all read, and a name a loader would drop is still
+    returned. Raises yaml.YAMLError for a document that cannot be composed.
+    """
+
+    root = yaml.compose(content, Loader=yaml.SafeLoader)
+    if not isinstance(root, yaml.MappingNode):
+        return []
+    reported: list[tuple[str, str]] = []
+    for jobs in values_named(root, "jobs"):
+        for key, job in mapping_pairs(jobs):
+            job_id = str(key.value)
+            names = [
+                str(name.value)
+                for name in values_named(job, "name")
+                if isinstance(name, yaml.ScalarNode)
+                and name.tag != NULL_TAG
+                and str(name.value).strip()
+            ]
+            reported.extend((job_id, name) for name in names or [job_id])
+    return reported
+
+
+def validate_required_check_names(
+    path: Path, content: str, required_checks: Collection[str] | None = None
+) -> list[str]:
+    """Refuse a job outside ci.yml that reports, or can report, a required check.
+
+    GitHub matches a required check by the name a job reports, whatever
+    workflow the job is in, so a job elsewhere that reports one satisfies it
+    without any of the verification ci.yml runs. ci.yml is left to CI_JOBS,
+    which pins every name it reports. A name holding an expression is refused
+    too, since it is evaluated only when the workflow runs and so cannot be
+    compared with the required checks. Names are compared without surrounding
+    whitespace and without regard to case: GitHub matches a status context
+    regardless of case, and may trim a check's name and match it as loosely,
+    so a name that differs from a required check only in those ways is
+    refused. `required_checks` are read from the rulesets when none are given.
+    """
+
+    if path.name == "ci.yml":
+        return []
+    problems: list[str] = []
+    if required_checks is None:
+        required_checks, problems = required_status_checks()
+    try:
+        reported = job_check_names(content)
+    except yaml.YAMLError as error:
+        return problems + [f"{path}: job names cannot be read: {error}"]
+    required = {check.strip().casefold(): check for check in sorted(required_checks)}
+    for job, name in reported:
+        folded = name.strip().casefold()
+        if EXPRESSION_START in name:
+            problems.append(
+                f"{path}: job {job!r} names its check with an expression, {name!r}, which is "
+                "evaluated only when the workflow runs and so cannot be compared with the "
+                "required checks; outside ci.yml a job's name must be literal"
+            )
+        elif folded in required:
+            problems.append(
+                f"{path}: job {job!r} reports its check as {name!r}, which matches the "
+                f"required check {required[folded]!r}; only ci.yml may report a required check"
+            )
+    return problems
+
+
+def validate_workflow_document(
+    path: Path,
+    content: str,
+    workflow: dict[str, Any],
+    required_checks: Collection[str] | None = None,
+) -> list[str]:
     """Every policy this repository applies to one workflow file.
 
     Extracted from `main` so that a regression can enter where production
@@ -1778,6 +1914,10 @@ def validate_workflow_document(path: Path, content: str, workflow: dict[str, Any
     isolation and proves nothing about whether the rule is still wired in - a
     check that stops being called is indistinguishable from one that passes,
     and only a caller-level entry point can tell the difference.
+
+    `required_checks` are the status checks the repository's rulesets require.
+    `main` reads them once for every file it checks; when none are given, they
+    are read from the rulesets here.
     """
     errors: list[str] = []
     errors.extend(validate_permissions(path, workflow))
@@ -1787,6 +1927,7 @@ def validate_workflow_document(path: Path, content: str, workflow: dict[str, Any
     errors.extend(validate_untrusted_triggers(path, content))
     errors.extend(validate_pull_request_triggers(path, workflow))
     errors.extend(validate_workflow_keys(path, workflow))
+    errors.extend(validate_required_check_names(path, content, required_checks))
     errors.extend(validate_verification_bindings(path, workflow))
     if errors:
         return errors
@@ -1800,7 +1941,9 @@ def main() -> None:
     if not paths:
         raise SystemExit("No GitHub workflow files found")
 
-    errors: list[str] = []
+    # Read once for every file, so a ruleset that cannot be read is refused
+    # once, and is refused even when no workflow outside ci.yml needs it.
+    required_checks, errors = required_status_checks()
     workflow_actions: set[str] = set()
     for path in paths:
         content = path.read_text(encoding="utf-8")
@@ -1812,7 +1955,7 @@ def main() -> None:
         if not isinstance(workflow, dict):
             errors.append(f"{path}: workflow root must be a mapping")
             continue
-        errors.extend(validate_workflow_document(path, content, workflow))
+        errors.extend(validate_workflow_document(path, content, workflow, required_checks))
         workflow_actions.update(external_actions(content))
         print(path)
 
