@@ -4,7 +4,9 @@ A turn route given an idempotency key it has already accepted in that chat
 answers with the run the first submission created, and a sent turn is matched
 by its key alone, so even a changed turn under a reused key gets that run.
 `replayed` says which happened, so a client can tell a safe retry after a lost
-response from a submission that started new work.
+response from a submission that started new work. A replay changes nothing
+else either: a retried stop and send stops nothing, as the work it would stop
+can be the very run it is answered with.
 """
 
 from __future__ import annotations
@@ -119,6 +121,103 @@ async def test_a_reused_stop_and_send_key_answers_as_a_replay(client: AsyncClien
     other = _accepted(await client.post(url, json={**turn, "idempotency_key": "stop-twice"}))
 
     _assert_only_the_reused_key_replays(first, again, other)
+
+
+async def _run_job_statuses(client: AsyncClient) -> dict[str, str]:
+    response = await client.get("/api/jobs")
+    assert response.status_code == 200, response.text
+    return {job["run_id"]: job["status"] for job in response.json()}
+
+
+async def test_a_retried_stop_and_send_stops_nothing_and_answers_its_first_turn(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    chat_id = await _chat(client, "Retried stop and send")
+    url = f"/api/chats/{chat_id}/stop-and-send"
+    turn = {"text": "Name a paper boat", "mode": "text", "idempotency_key": "stop-retried"}
+    # Nothing starts while the lease is held, so the first turn is still the
+    # chat's current work when the same submission arrives again.
+    async with app.state.services.scheduler.lease("primary"):
+        first = _accepted(await client.post(url, json=turn))
+        again = _accepted(await client.post(url, json=turn))
+        statuses = await _run_job_statuses(client)
+
+    assert (first.get("replayed"), again.get("replayed")) == (False, True)
+    for part in ("run", "user_message", "assistant_message"):
+        assert again[part]["id"] == first[part]["id"], part
+    assert again["run"]["status"] == "queued"
+    assert statuses == {first["run"]["id"]: "queued"}
+    await _complete(client, first["run"]["id"])
+
+
+async def test_a_stop_and_send_under_a_new_key_stops_the_turn_before_it(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The chat takes one pending item, so the new turn fits only because the
+    # item it stops is stopped before the chat's pending work is counted.
+    monkeypatch.setattr("local_lm.orchestrator.MAX_PENDING_WORK_PER_CHAT", 1)
+    chat_id = await _chat(client, "Stopped by a new submission")
+    url = f"/api/chats/{chat_id}/stop-and-send"
+    turn = {"text": "Name a paper boat", "mode": "text", "idempotency_key": "stop-first"}
+    second = {**turn, "text": "Name a paper kite", "idempotency_key": "stop-second"}
+    async with app.state.services.scheduler.lease("primary"):
+        first = _accepted(await client.post(url, json=turn))
+        other = _accepted(await client.post(url, json=second))
+        statuses = await _run_job_statuses(client)
+
+    assert (first.get("replayed"), other.get("replayed")) == (False, False)
+    assert other["run"]["id"] != first["run"]["id"]
+    assert statuses == {first["run"]["id"]: "cancelled", other["run"]["id"]: "queued"}
+    plan = await client.get(f"/api/work-plans/{other['run']['work_plan_id']}")
+    assert plan.status_code == 200, plan.text
+    assert plan.json()["source_action"] == "stop_and_send"
+    await _complete(client, other["run"]["id"])
+
+
+async def test_a_stop_and_send_retried_before_its_turn_exists_stops_nothing(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chat_id = await _chat(client, "Retried while sending")
+    orchestrator = app.state.services.orchestrator
+    planning = asyncio.Event()
+    release = asyncio.Event()
+    plan = orchestrator.router.plan_with_model
+
+    async def held_plan(**kwargs: Any) -> Any:
+        planning.set()
+        await release.wait()
+        return await plan(**kwargs)
+
+    turns = f"/api/chats/{chat_id}/turns"
+    url = f"/api/chats/{chat_id}/stop-and-send"
+    turn = {"text": "Name a paper boat", "mode": "text", "idempotency_key": "stop-in-flight"}
+    async with app.state.services.scheduler.lease("primary"):
+        older = _accepted(await client.post(turns, json={"text": "Name a kite", "mode": "text"}))
+        newer = _accepted(await client.post(turns, json={"text": "Name a crane", "mode": "text"}))
+        monkeypatch.setattr(orchestrator.router, "plan_with_model", held_plan)
+        sending = asyncio.create_task(client.post(url, json=turn))
+        try:
+            # The first submission has stopped the older item and is still
+            # creating its turn when the same submission arrives again.
+            await asyncio.wait_for(planning.wait(), timeout=PATIENCE_SECONDS)
+            retrying = asyncio.create_task(client.post(url, json=turn))
+            await asyncio.sleep(0.05)
+            assert not retrying.done()
+        finally:
+            release.set()
+        first = _accepted(await sending)
+        again = _accepted(await retrying)
+        statuses = await _run_job_statuses(client)
+
+    assert (first.get("replayed"), again.get("replayed")) == (False, True)
+    assert again["run"]["id"] == first["run"]["id"]
+    assert statuses == {
+        older["run"]["id"]: "cancelled",
+        newer["run"]["id"]: "queued",
+        first["run"]["id"]: "queued",
+    }
+    for accepted in (newer, first):
+        await _complete(client, accepted["run"]["id"])
 
 
 async def test_a_reused_branch_key_answers_as_a_replay(client: AsyncClient) -> None:
