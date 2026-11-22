@@ -10,8 +10,10 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
+from application_environment import application_environment_kept
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
+from local_name_lookups import NameLookupGuard, refused_during_test, refused_unanswered
 from verification_phase_timings import register_verification_phase_timings
 
 import local_lm
@@ -57,6 +59,61 @@ if _IMPORTED_FROM != _EXPECTED_PACKAGE:
 
 def pytest_configure(config: pytest.Config) -> None:
     register_verification_phase_timings(config)
+
+
+@pytest.fixture(autouse=True)
+def application_environment_restored() -> Iterator[None]:
+    """Every test leaves the application's environment exactly as it found it.
+
+    The launcher and the saved runtime settings write what they configure into
+    this process's environment, which every later Settings reads. Clearing an
+    absent name with monkeypatch leaves nothing to undo, so a value written
+    after it outlived the test, and every later test in the same worker read
+    it as configured. Used automatically at function scope, this is set up
+    before the test's other function-scoped fixtures and restores only after
+    they have finished.
+    """
+
+    with application_environment_kept():
+        yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def names_resolve_only_locally() -> Iterator[NameLookupGuard]:
+    """No name beyond this computer resolves while tests run.
+
+    A client that reaches a service by name is refused at the lookup, before
+    anything is sent. Lookups of this computer's own names, such as a test's
+    own loopback server, are untouched. A connection made straight to an
+    address looks nothing up and is not seen here, as local_name_lookups
+    describes. Refusals no test could answer for fail the session at its end.
+    """
+
+    guard = NameLookupGuard()
+    with pytest.MonkeyPatch.context() as patch:
+        guard.install(patch)
+        yield guard
+    if unanswered := guard.unanswered():
+        pytest.fail(refused_unanswered(unanswered), pytrace=False)
+
+
+@pytest.fixture(autouse=True)
+def refused_lookups_fail_the_test(
+    request: pytest.FixtureRequest, names_resolve_only_locally: NameLookupGuard
+) -> Iterator[None]:
+    """A test refused a lookup beyond this computer fails, even where it absorbed the refusal.
+
+    The application treats a failed lookup as a host it could not reach and
+    carries on, often successfully, so the refusal alone would pass unnoticed.
+    Only lookups this test made count, its threads' included: a thread an
+    earlier test left running is that test's, never this one's.
+    """
+
+    test = request.node.nodeid
+    names_resolve_only_locally.begin(test)
+    yield
+    if refused := names_resolve_only_locally.end(test):
+        pytest.fail(refused_during_test(refused), pytrace=False)
 
 
 @pytest.fixture(scope="session")
