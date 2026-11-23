@@ -1348,6 +1348,8 @@ BROWSER_SUITE_STEPS = (
     {
         "name": "Install golden-path browser",
         "if": FULL_PLAN,
+        # apt can hang past its own timeouts; the step's limit ends a hang.
+        "timeout-minutes": 15,
         "run": "npx playwright install --with-deps chromium",
     },
     {"name": "Run browser golden path", "if": FULL_PLAN, "run": "npm run e2e:run"},
@@ -1533,6 +1535,8 @@ VERIFICATION_STEPS: dict[str, tuple[dict[str, Any], ...]] = {
         {
             "name": "Finish installing ffmpeg for media pipeline tests",
             "if": FULL_PLAN,
+            # A background install that hangs in apt ends the wait here.
+            "timeout-minutes": 20,
             "run": FFMPEG_FINISH_SCRIPT,
         },
         UBUNTU_VERIFICATION_STEP,

@@ -1409,6 +1409,24 @@ def test_ffmpeg_installs_in_the_background_and_is_awaited_before_verification() 
     assert "ffprobe -version" in finished
 
 
+def test_a_hung_package_install_ends_at_its_step_not_at_the_job_limit() -> None:
+    """Each wait on apt has a limit of its own, well inside its job's.
+
+    apt has hung on a mirror that stopped answering for a job's whole limit,
+    whatever its own download timeouts were set to, so only a limit on the
+    step bounds it: the browser install, and the wait for the background ffmpeg
+    install, each end a hang long before their job would.
+    """
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    for job, name in (
+        ("compatibility", "Finish installing ffmpeg for media pipeline tests"),
+        ("browser-suites", "Install golden-path browser"),
+    ):
+        limit = workflow["jobs"][job]["timeout-minutes"]
+        step = next(item for item in workflow["jobs"][job]["steps"] if item.get("name") == name)
+        assert 0 < step["timeout-minutes"] <= limit // 2, (job, name)
+
+
 def test_verification_has_room_to_finish_inside_the_merge_queue_window() -> None:
     """Each verification job's limit sits between what it needs and what the queue allows.
 
