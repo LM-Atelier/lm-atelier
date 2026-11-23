@@ -1009,7 +1009,11 @@ from .workspace_lock_api import router as workspace_lock_router
 if TYPE_CHECKING:
     from .main import Services
 
-SessionDep = Annotated[Session, Depends(get_session)]
+# Every request's session closes as soon as its endpoint has built the response,
+# not once the response has been sent: a response on its way out would hold a
+# pooled connection, and a burst of reads could take the whole pool from a write
+# waiting on the event loop. The other API modules declare theirs the same way.
+SessionDep = Annotated[Session, Depends(get_session, scope="function")]
 
 
 async def get_conversation_session(request: Request) -> AsyncGenerator[Session, None]:
@@ -1020,7 +1024,7 @@ async def get_conversation_session(request: Request) -> AsyncGenerator[Session, 
         session.close()
 
 
-ConversationSessionDep = Annotated[Session, Depends(get_conversation_session)]
+ConversationSessionDep = Annotated[Session, Depends(get_conversation_session, scope="function")]
 
 
 def _services(request: Request) -> Services:
@@ -10875,7 +10879,7 @@ async def _custom_node_lifecycle(
         yield
 
 
-CustomNodeLifecycleDep = Annotated[None, Depends(_custom_node_lifecycle)]
+CustomNodeLifecycleDep = Annotated[None, Depends(_custom_node_lifecycle, scope="function")]
 
 
 @router.get("/custom-nodes", response_model=list[CustomNodeOut])

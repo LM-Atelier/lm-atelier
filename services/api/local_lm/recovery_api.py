@@ -62,7 +62,7 @@ from .workflow_recovery import (
 if TYPE_CHECKING:
     from .main import Services
 
-SessionDep = Annotated[Session, Depends(get_session)]
+SessionDep = Annotated[Session, Depends(get_session, scope="function")]
 router = APIRouter()
 router.include_router(bulk_router)
 

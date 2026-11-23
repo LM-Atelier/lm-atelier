@@ -49,7 +49,7 @@ from .workspace_lock_policy import (
 if TYPE_CHECKING:
     from .main import Services
 
-SessionDep = Annotated[Session, Depends(get_session)]
+SessionDep = Annotated[Session, Depends(get_session, scope="function")]
 router = APIRouter(prefix="/privacy")
 
 

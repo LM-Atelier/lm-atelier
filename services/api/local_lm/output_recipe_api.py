@@ -544,7 +544,9 @@ async def plan_an_exact_replay(request: Request) -> JSONResponse:
 
 @router.get("/runs/{run_id}/recipe-draft", response_model=OutputRecipeDraftOut)
 async def draft_output_recipe(
-    run_id: str, request: Request, session: Annotated[Session, Depends(get_session)]
+    run_id: str,
+    request: Request,
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> OutputRecipeDraftOut:
     """A recipe to review from one generation: the settings it ran with that a recipe can hold.
 
@@ -561,7 +563,7 @@ async def draft_output_recipe(
 
 @router.get("/runs/{run_id}/edit-recipe-draft", response_model=EditRecipeDraftOut)
 async def draft_edit_recipe(
-    run_id: str, session: Annotated[Session, Depends(get_session)]
+    run_id: str, session: Annotated[Session, Depends(get_session, scope="function")]
 ) -> EditRecipeDraftOut:
     """The words an edit was asked with, to keep it as an Image Studio recipe; nothing is saved."""
 

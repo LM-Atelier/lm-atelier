@@ -34,7 +34,7 @@ from .models import GenerationExperiment
 if TYPE_CHECKING:
     from .main import Services
 
-SessionDep = Annotated[Session, Depends(get_session)]
+SessionDep = Annotated[Session, Depends(get_session, scope="function")]
 router = APIRouter()
 
 REFUSALS: dict[str, tuple[int, str]] = {

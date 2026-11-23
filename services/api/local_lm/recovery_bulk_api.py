@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from .main import Services
 
 router = APIRouter()
-SessionDep = Annotated[Session, Depends(get_session)]
+SessionDep = Annotated[Session, Depends(get_session, scope="function")]
 
 
 def _refusal(error: RecoveryPreviewConflict) -> ApiError:
