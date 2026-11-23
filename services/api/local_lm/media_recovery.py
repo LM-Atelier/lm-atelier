@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
+from .artifact_deletion_authority import ArtifactReferenceIndexStale
 from .artifact_library import (
     ArtifactLibraryDataError,
     ArtifactReferenceDataError,
@@ -114,6 +115,10 @@ def _snapshot(session: Session, entry_id: str, now: datetime) -> RecoverySnapsho
         # Membership purge leaves bytes to retention; validate its complete
         # reference graph before any pins are changed.
         referenced_artifact_ids(session, for_deletion=True)
+    except ArtifactReferenceIndexStale:
+        # Nothing is wrong with this item: the index is catching up, and its
+        # own conflict says to try again shortly.
+        raise
     except (ArtifactReferenceDataError, ChatRecoveryGraphError):
         raise RecoveryPreviewConflict("media-recovery-graph-invalid") from None
     actions: tuple[RecoveryAction, ...] = ()

@@ -6,8 +6,9 @@ import pytest
 from httpx2 import ASGITransport, AsyncClient
 from test_setup_verification import seed_ready_role
 from test_startup_recovery_preview import _pin_a_preview
+from test_unreadable_references_decline import _plant_a_document_only_the_database_refuses
 
-from local_lm import artifact_library, db
+from local_lm import db
 from local_lm.artifact_library import ArtifactReferenceDataError
 from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
@@ -20,11 +21,10 @@ from local_lm.setup_verification import (
 )
 
 
-async def test_a_reference_row_limit_keeps_previews_and_allows_restart(
-    settings: Settings, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_a_refused_reference_keeps_previews_and_allows_restart(settings: Settings) -> None:
     preview_id, job_id = _pin_a_preview(settings.data_dir)
-    monkeypatch.setattr(artifact_library, "MAX_REFERENCE_ROWS", 0)
+    with db.SessionLocal() as session:
+        _plant_a_document_only_the_database_refuses(session)
 
     app = create_app(settings)
     async with app.router.lifespan_context(app):
@@ -48,7 +48,7 @@ async def test_a_reference_row_limit_keeps_previews_and_allows_restart(
 
 
 def test_refused_reference_authority_declines_preview_cleanup_without_deleting(
-    settings: Settings, monkeypatch: pytest.MonkeyPatch
+    settings: Settings,
 ) -> None:
     preview_id, _job_id = _pin_a_preview(settings.data_dir)
     store = ArtifactStore(settings)
@@ -61,7 +61,7 @@ def test_refused_reference_authority_declines_preview_cleanup_without_deleting(
         assert assistant is not None
         assistant.parts.clear()
         session.commit()
-        monkeypatch.setattr(artifact_library, "MAX_REFERENCE_ROWS", 0)
+        _plant_a_document_only_the_database_refuses(session)
 
         assert store.delete_temporary_preview(session, preview_id) is False
         session.commit()
@@ -93,7 +93,7 @@ def test_valid_unreferenced_previews_are_still_removed(settings: Settings) -> No
 
 @pytest.mark.parametrize("with_job", [False, True])
 async def test_restart_keeps_setup_and_preview_bytes_without_reference_authority(
-    settings: Settings, monkeypatch: pytest.MonkeyPatch, with_job: bool
+    settings: Settings, with_job: bool
 ) -> None:
     preview_id, job_id = _pin_a_preview(settings.data_dir)
     install, profile, _workflow = seed_ready_role(settings, "image", operation="text_to_image")
@@ -135,7 +135,7 @@ async def test_restart_keeps_setup_and_preview_bytes_without_reference_authority
         artifact_id, verification_id = artifact.id, verification.id
         expected_bytes = store.verified_path(artifact).read_bytes()
         session.commit()
-    monkeypatch.setattr(artifact_library, "MAX_REFERENCE_ROWS", 0)
+        _plant_a_document_only_the_database_refuses(session)
     app = create_app(settings)
     async with app.router.lifespan_context(app):
         await asyncio.wait_for(app.state.retention_sweep, timeout=30)

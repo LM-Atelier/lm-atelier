@@ -40,12 +40,22 @@ verification inputs, visible library membership, message references, run and
 work-step settings, studio chat origin, and bounded nested artifact ids in job
 payloads and results.
 
+It is answered from the artifact reference index, which records the artifacts
+each stored document names. Triggers on the six document tables record every
+changed row in the statement that changes it, and the index reads those rows
+again with the same readers, so it answers exactly what reading every document
+would. A stamp of the schema, the migration, the SQLite library and the reader
+version says when the index may be trusted; anything else rebuilds it, a small
+store at once and a large one in the background after startup. While a large
+store is rebuilt, deletions decline with 409 `artifact-references-indexing`.
+
 Corrupt JSON aborts retention with fixed text: `Stored artifact reference data
 is invalid.` Visible or recoverable membership pins bytes even without favorites
 or message parts. Destructive paths reserve the SQLite writer before reference
-proof and deletion. JSON-reference writers use the same reservation and recheck
-referenced artifacts before flush. Database triggers provide the bulk and raw-SQL
-backstop.
+proof and deletion. A proven deletion is checked again by the database at the
+delete statement, against the same index. JSON-reference writers use the same
+reservation and recheck referenced artifacts before flush. Database triggers
+provide the bulk and raw-SQL backstop.
 
 ## Delete behavior
 

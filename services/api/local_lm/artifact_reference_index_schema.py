@@ -19,6 +19,7 @@ from typing import Final
 
 from .artifact_library_schema import (
     _TABLE_COLUMNS,
+    ARTIFACT_DELETION_AUTHORIZED_SQL,
     ARTIFACT_JSON_DELETE_TRIGGER,
     ARTIFACT_REFERENCE_INDEX_WRITER_SQL,
     JSON_WRITE_TRIGGER_SQL,
@@ -26,7 +27,7 @@ from .artifact_library_schema import (
     _member_depth,
     _table_invalid,
 )
-from .artifact_reference_extractors import SOURCE_CHATS, SOURCE_COLUMNS
+from .artifact_reference_extractors import SOURCE_ARTIFACTS, SOURCE_CHATS, SOURCE_COLUMNS
 
 #: Where a statement below takes its list of keys: one placeholder per key,
 #: filled by `with_keys`, so every key is bound and matched exactly as stored.
@@ -163,17 +164,90 @@ def with_keys(statement: str, count: int) -> str:
     return statement.replace(KEYS, ", ".join("?" * count))
 
 
-DROP_TRIGGER_SQL: Final = tuple(
-    f"DROP TRIGGER IF EXISTS {trigger_name(statement)}" for statement in CREATE_TRIGGER_SQL
+#: The columns that retain an artifact directly, as the reference walk reads
+#: them. A message part retains whatever it shows; a revision part counts only
+#: through its revision. A subject's cover is a replaceable choice, not a hold.
+RETAINING_COLUMNS: Final = (
+    ("reference_assets", "artifact_id"),
+    ("run_context_artifacts", "artifact_id"),
+    ("setup_verifications", "input_artifact_id"),
+    ("artifact_library_entries", "artifact_id"),
+    ("comfy_registry_source_artifact_reviews", "artifact_id"),
+    ("chat_composer_draft_attachments", "artifact_id"),
+    ("message_parts", "artifact_id"),
+)
+REVISION_PARTS_SQL: Final = (
+    "SELECT part.artifact_id FROM response_revision_parts AS part "
+    "JOIN response_revisions AS revision ON revision.id = part.response_revision_id"
+)
+
+
+def _rooted(target: str) -> str:
+    """SQL true when a stored row other than an artifact retains `target` itself."""
+
+    probes = [
+        f"EXISTS (SELECT 1 FROM {EDGES_TABLE} "
+        f"WHERE artifact_id = {target} AND source BETWEEN 1 AND {SOURCE_ARTIFACTS - 1})",
+        *(
+            f"EXISTS (SELECT 1 FROM {table} WHERE {column} = {target})"
+            for table, column in RETAINING_COLUMNS
+        ),
+        f"EXISTS ({REVISION_PARTS_SQL} WHERE part.artifact_id = {target})",
+    ]
+    return "\n    OR ".join(probes)
+
+
+#: Whether some row other than an artifact names the one bound as ?1.
+ROOTED_SQL: Final = f"SELECT {_rooted('?1')}"
+#: The artifacts whose metadata names the one bound.
+NAMERS_SQL: Final = (
+    f"SELECT source_key FROM {EDGES_TABLE} WHERE artifact_id = ? AND source = {SOURCE_ARTIFACTS}"
+)
+#: Every metadata naming: which artifact names which.
+NAMINGS_SQL: Final = (
+    f"SELECT artifact_id, source_key FROM {EDGES_TABLE} WHERE source = {SOURCE_ARTIFACTS}"
+)
+#: Every name a row other than an artifact gives, with the row giving it.
+ROOT_EDGES_SQL: Final = (
+    f"SELECT artifact_id, source, source_key FROM {EDGES_TABLE} "
+    f"WHERE source BETWEEN 1 AND {SOURCE_ARTIFACTS - 1}"
+)
+
+#: A deletion proven from the index is checked again inside SQLite, by the same
+#: rule the proof applied: nothing recorded and undrained, nothing unreadable,
+#: and nothing that survives naming the artifact. A proof minted wrongly then
+#: fails at the statement rather than deleting something still held.
+DELETE_GUARD_SQL: Final = f"""CREATE TRIGGER artifact_reference_index_delete_guard
+BEFORE DELETE ON artifacts
+WHEN {ARTIFACT_DELETION_AUTHORIZED_SQL}(OLD.id) = 1
+BEGIN
+  SELECT CASE
+    WHEN EXISTS (SELECT 1 FROM {CHANGES_TABLE})
+      THEN RAISE(ABORT, 'artifact references are not indexed')
+    WHEN EXISTS (SELECT 1 FROM {EDGES_TABLE} WHERE artifact_id = '')
+      THEN RAISE(ABORT, 'artifact reference data is invalid')
+    WHEN {_rooted("OLD.id")}
+    OR EXISTS (SELECT 1 FROM {EDGES_TABLE}
+               WHERE artifact_id = OLD.id AND source = {SOURCE_ARTIFACTS})
+      THEN RAISE(ABORT, 'artifact is retained by reference')
+  END;
+END"""
+DROP_DELETE_GUARD_SQL: Final = "DROP TRIGGER IF EXISTS artifact_reference_index_delete_guard"
+
+DROP_TRIGGER_SQL: Final = (
+    DROP_DELETE_GUARD_SQL,
+    *(f"DROP TRIGGER IF EXISTS {trigger_name(statement)}" for statement in CREATE_TRIGGER_SQL),
 )
 
 #: Every trigger whose exact text the index relies on. The write guards keep
 #: every stored document valid, which is what lets a deletion skip checking
-#: them all again; the change and authority triggers keep the index exact.
+#: them all again; the change and authority triggers keep the index exact; the
+#: delete guard checks every proven deletion again.
 REQUIRED_TRIGGER_SQL: Final = (
     *JSON_WRITE_TRIGGER_SQL,
     ARTIFACT_JSON_DELETE_TRIGGER,
     *CREATE_TRIGGER_SQL,
+    DELETE_GUARD_SQL,
 )
 
 

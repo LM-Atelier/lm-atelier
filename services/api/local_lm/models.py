@@ -82,6 +82,9 @@ from .artifact_reference_index_schema import (
     CREATE_TRIGGER_SQL as CREATE_REFERENCE_INDEX_TRIGGER_SQL,
 )
 from .artifact_reference_index_schema import (
+    DELETE_GUARD_SQL as REFERENCE_INDEX_DELETE_GUARD_SQL,
+)
+from .artifact_reference_index_schema import (
     DROP_TRIGGER_SQL as DROP_REFERENCE_INDEX_TRIGGER_SQL,
 )
 from .artifact_reference_index_schema import SEED_STAMP_SQL as SEED_REFERENCE_INDEX_STAMP_SQL
@@ -3342,7 +3345,7 @@ def _seed_reference_index_stamp(_target: object, connection: Connection, **_kwar
 # The stamp's row first: once its authority trigger exists, inserting it
 # would need the writer window.
 event.listen(Base.metadata, "after_create", _seed_reference_index_stamp)
-for _statement in CREATE_REFERENCE_INDEX_TRIGGER_SQL:
+for _statement in (*CREATE_REFERENCE_INDEX_TRIGGER_SQL, REFERENCE_INDEX_DELETE_GUARD_SQL):
     event.listen(Base.metadata, "after_create", _install_sqlite_trigger(_statement))
 
 

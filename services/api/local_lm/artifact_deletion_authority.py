@@ -11,7 +11,7 @@ from collections.abc import Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 from sqlalchemy import Connection, Engine, event
 from sqlalchemy.orm import Session
@@ -19,10 +19,10 @@ from sqlalchemy.orm import Session
 from .artifact_library_schema import (
     ARTIFACT_DELETION_AUTHORIZED_SQL,
     ARTIFACT_REFERENCE_INDEX_WRITER_SQL,
-    STORED_JSON_INVALID_SQL,
 )
 
 _CONNECTION_STATE = "artifact_deletion_authority"
+_Item = TypeVar("_Item")
 _PROOF_SEAL = object()
 _REFERENCE_GRAPH_COVERAGE = object()
 
@@ -50,7 +50,31 @@ class ArtifactReferenceRefusal(ArtifactReferenceDataError, ArtifactDeletionProof
     """
 
 
-class _ArtifactReferenceSnapshot(frozenset[str]):
+class ArtifactReferenceIndexStale(ArtifactReferenceRefusal):
+    """The reference index is being rebuilt or is behind, so nothing is proven yet.
+
+    It passes on its own once the index catches up, which on a large store
+    takes seconds after an upgrade or a restore. Callers decline exactly as
+    they do for any other reference refusal.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Media references are still being indexed.")
+
+
+class ArtifactReferenceSnapshot(AbstractSet[str]):
+    """One transaction's complete reference graph, valid while its writer holds still.
+
+    Membership is retention: an artifact is in the snapshot while something that
+    survives retains it, directly or through the artifacts whose metadata names
+    it. `namers` answers the stricter question deletion also asks: which
+    surviving artifacts name this one, whether or not they are retained.
+
+    A snapshot is bound to the session, transaction and connection it was formed
+    in, and to SQLite's change counter at that moment. Any write other than a
+    deletion recorded through `record_artifact_deletion` expires it.
+    """
+
     _session: Session
     _transaction: object
     _nested_transaction: object
@@ -59,30 +83,28 @@ class _ArtifactReferenceSnapshot(frozenset[str]):
     _driver: sqlite3.Connection
     _changes: int
     _coverage: object
-    _referrers: dict[str, frozenset[str]]
     _removed: set[str]
 
-    def __new__(
-        cls,
-        values: Iterable[str],
-        *,
-        session: Session,
-        connection: Connection,
-        driver: sqlite3.Connection,
-        referrers: dict[str, set[str]],
-    ) -> _ArtifactReferenceSnapshot:
-        snapshot = super().__new__(cls, values)
-        snapshot._session = session
-        snapshot._transaction = session.get_transaction()
-        snapshot._nested_transaction = session.get_nested_transaction()
-        snapshot._connection = connection
-        snapshot._connection_transaction = connection.get_transaction()
-        snapshot._driver = driver
-        snapshot._changes = driver.total_changes
-        snapshot._coverage = _REFERENCE_GRAPH_COVERAGE
-        snapshot._referrers = {key: frozenset(ids) for key, ids in referrers.items()}
-        snapshot._removed = set()
-        return snapshot
+    def __init__(self, *, session: Session, connection: Connection, driver: sqlite3.Connection):
+        self._session = session
+        self._transaction = session.get_transaction()
+        self._nested_transaction = session.get_nested_transaction()
+        self._connection = connection
+        self._connection_transaction = connection.get_transaction()
+        self._driver = driver
+        self._changes = driver.total_changes
+        self._coverage = _REFERENCE_GRAPH_COVERAGE
+        self._removed = set()
+
+    @classmethod
+    def _from_iterable(cls, it: Iterable[_Item]) -> frozenset[_Item]:
+        # Set operations answer plain sets; only a formed snapshot carries authority.
+        return frozenset(it)
+
+    def namers(self, artifact_id: str) -> frozenset[str]:
+        """Ids of surviving artifacts whose metadata names this one."""
+
+        raise NotImplementedError
 
     def current_identity(self, session: Session) -> bool:
         return (
@@ -101,7 +123,7 @@ class _ArtifactDeletionProof:
     session: Session
     transaction: object
     candidate_ids: frozenset[str]
-    references: _ArtifactReferenceSnapshot
+    references: ArtifactReferenceSnapshot
     seal: object
 
 
@@ -159,29 +181,12 @@ def open_reference_index_writer(connection: Connection) -> Iterator[None]:
         state.index_writers -= 1
 
 
-def complete_reference_snapshot(
-    session: Session,
-    values: Iterable[str],
-    *,
-    referrers: dict[str, set[str]],
-) -> AbstractSet[str]:
-    connection = session.connection()
-    driver = connection.connection.driver_connection
-    if not isinstance(driver, sqlite3.Connection) or not driver.in_transaction:
-        return frozenset(values)
-    if connection.exec_driver_sql(STORED_JSON_INVALID_SQL).scalar_one():
-        raise ArtifactReferenceRefusal("artifact JSON reference is invalid")
-    return _ArtifactReferenceSnapshot(
-        values, session=session, connection=connection, driver=driver, referrers=referrers
-    )
-
-
 def validate_complete_reference_snapshot(
     session: Session,
     references: object,
-) -> _ArtifactReferenceSnapshot:
+) -> ArtifactReferenceSnapshot:
     if (
-        not isinstance(references, _ArtifactReferenceSnapshot)
+        not isinstance(references, ArtifactReferenceSnapshot)
         or references._coverage is not _REFERENCE_GRAPH_COVERAGE
         or not references.current_identity(session)
     ):
@@ -214,7 +219,7 @@ def artifact_metadata_retains(
     """
 
     snapshot = validate_complete_reference_snapshot(session, references)
-    return bool(snapshot._referrers.get(artifact_id, frozenset()) - snapshot._removed)
+    return bool(snapshot.namers(artifact_id) - snapshot._removed)
 
 
 def mint_artifact_deletion_proof(
@@ -227,12 +232,9 @@ def mint_artifact_deletion_proof(
     candidates = frozenset(candidate_ids)
     if not candidates:
         raise ArtifactDeletionProofError("artifact deletion proof cannot be empty")
-    if candidates & references:
+    if any(artifact_id in references for artifact_id in candidates):
         raise ArtifactDeletionProofError("artifact deletion proof includes a retained artifact")
-    if any(
-        references._referrers.get(artifact_id, frozenset()) - references._removed
-        for artifact_id in candidates
-    ):
+    if any(references.namers(artifact_id) - references._removed for artifact_id in candidates):
         raise ArtifactDeletionProofError("This artifact is still retained by metadata.")
     return _ArtifactDeletionProof(
         session=session,
