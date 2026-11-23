@@ -154,6 +154,14 @@ class ChatCreate(ApiModel):
     generation_settings_json: GenerationSettingsByRole = Field(default_factory=dict)
     generation_preset_ids_json: GenerationPresetIdsByRole = Field(default_factory=dict)
     vision_settings_json: VisionSettings = Field(default_factory=new_chat_vision_settings)
+    # A create retried with the same key returns the chat the first one made,
+    # whatever else the retry asks, and says so in `ChatCreated.replayed`.
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$",
+    )
 
 
 class ChatUpdate(ApiModel):
@@ -488,6 +496,12 @@ class ChatOut(ApiModel):
     origin_json: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
+
+
+class ChatCreated(ChatOut):
+    """A chat a create request made, and whether an earlier request with its key had."""
+
+    replayed: bool = False
 
 
 class WebSearchResultOut(ApiModel):

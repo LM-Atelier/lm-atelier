@@ -35,7 +35,9 @@ from fastapi import (
 from fastapi import (
     Path as PathParam,
 )
-from sqlalchemy import Select, and_, func, or_, select, text
+from sqlalchemy import Select, and_, func, or_, select, text, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.sql.elements import ColumnElement
@@ -268,6 +270,7 @@ from .models import (
     Artifact,
     ArtifactLibraryEntry,
     Chat,
+    ChatCreationKey,
     ChatWorkflowSelection,
     ComfyRegistryInstall,
     CustomNodeInstall,
@@ -519,6 +522,7 @@ from .schemas import (
     ChatComposerDraftOut,
     ChatComposerDraftWrite,
     ChatCreate,
+    ChatCreated,
     ChatDetail,
     ChatEditLineagePage,
     ChatItemRemovalExecute,
@@ -2917,12 +2921,83 @@ async def list_chat_summaries(
     ]
 
 
-@router.post("/chats", response_model=ChatOut, status_code=201)
+class _CreationKeyTaken(Exception):
+    """Another create with the same key finished first."""
+
+
+def _chat_a_key_made(session: Session, key: str) -> ChatCreated | None:
+    """The chat an earlier create with this key made, or None while the key is free."""
+
+    made = session.get(ChatCreationKey, key)
+    if made is None:
+        return None
+    chat = session.get(Chat, made.chat_id)
+    if chat is None:
+        # That chat was deleted for good, so the key makes a new one.
+        return None
+    if chat_is_deleted(session, chat.id):
+        raise api_error(
+            409,
+            "chat-creation-key-deleted",
+            "The chat this key made is in Recently Deleted. Restore it, or use another key.",
+        )
+    made_before = _chat_outputs(session, [chat])[0]
+    return ChatCreated.model_validate({**made_before.model_dump(), "replayed": True})
+
+
+def _remember_creation_key(session: Session, key: str, chat_id: str) -> None:
+    """Record the chat this key made, taking the key back from a chat deleted for good.
+
+    Runs while this create holds the database writer, so the key as read here
+    is the key as it stands: a chat it names that still exists was made by a
+    create that finished first.
+    """
+
+    inserted = cast(
+        "CursorResult[Any]",
+        session.execute(
+            sqlite_insert(ChatCreationKey)
+            .values(idempotency_key=key, chat_id=chat_id, created_at=utcnow())
+            .on_conflict_do_nothing()
+        ),
+    )
+    if inserted.rowcount == 1:
+        return
+    held = session.scalar(
+        select(ChatCreationKey.chat_id).where(ChatCreationKey.idempotency_key == key)
+    )
+    if held is None or session.get(Chat, held) is not None:
+        raise _CreationKeyTaken
+    # Taken back only from the chat read just now: should anything have moved
+    # the key since, this create makes no chat of its own.
+    taken_back = cast(
+        "CursorResult[Any]",
+        session.execute(
+            update(ChatCreationKey)
+            .where(ChatCreationKey.idempotency_key == key, ChatCreationKey.chat_id == held)
+            .values(chat_id=chat_id, created_at=utcnow())
+            .execution_options(synchronize_session=False)
+        ),
+    )
+    if taken_back.rowcount != 1:
+        raise _CreationKeyTaken
+
+
+@router.post("/chats", response_model=ChatCreated, status_code=201)
 async def create_chat(
     payload: ChatCreate,
     request: Request,
+    response: Response,
     session: ConversationSessionDep,
-) -> ChatOut:
+) -> ChatCreated:
+    """Make a chat; a create retried with the same key returns the one the first made."""
+
+    key = payload.idempotency_key
+    if key is not None:
+        earlier = _chat_a_key_made(session, key)
+        if earlier is not None:
+            response.status_code = 200
+            return earlier
     if payload.project_id and live_project(session, payload.project_id) is None:
         raise api_error(404, "project-not-found", "project not found")
     values = payload.model_dump(mode="json")
@@ -2944,9 +3019,20 @@ async def create_chat(
     session.add(chat)
     session.flush()
     mirror_legacy_chat_workflow_selections(session, chat)
+    try:
+        if key is not None:
+            _remember_creation_key(session, key, chat.id)
+    except _CreationKeyTaken:
+        session.rollback()
+        earlier = _chat_a_key_made(session, key) if key is not None else None
+        if earlier is None:
+            raise
+        response.status_code = 200
+        return earlier
     session.commit()
     session.refresh(chat)
-    return _chat_outputs(session, [chat])[0]
+    made = _chat_outputs(session, [chat])[0]
+    return ChatCreated.model_validate({**made.model_dump(), "replayed": False})
 
 
 @router.get("/chats/{chat_id}", response_model=ChatDetail)
