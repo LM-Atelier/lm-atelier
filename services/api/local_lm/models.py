@@ -75,7 +75,16 @@ from sqlalchemy import (
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
+from .artifact_deletion_authority import open_reference_index_writer
 from .artifact_library_schema import CREATE_TRIGGER_SQL, DROP_TRIGGER_SQL
+from .artifact_reference_index import certify_if_empty
+from .artifact_reference_index_schema import (
+    CREATE_TRIGGER_SQL as CREATE_REFERENCE_INDEX_TRIGGER_SQL,
+)
+from .artifact_reference_index_schema import (
+    DROP_TRIGGER_SQL as DROP_REFERENCE_INDEX_TRIGGER_SQL,
+)
+from .artifact_reference_index_schema import SEED_STAMP_SQL as SEED_REFERENCE_INDEX_STAMP_SQL
 from .chat_item_removal_schema import (
     CREATE_CHAT_ITEM_REMOVAL_TRIGGER_SQL,
     DROP_CHAT_ITEM_REMOVAL_TRIGGER_SQL,
@@ -3276,3 +3285,84 @@ class GenerationExperimentBlindView(Base):
         unique=True,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ArtifactReferenceEdge(Base):
+    """One artifact that a stored row names; `artifact_reference_index` keeps these.
+
+    `source` says which table the row is in and `source_key` is its primary
+    key. An empty `artifact_id` says the row could not be read. There are no
+    foreign keys: a row may name an artifact that does not exist, and the
+    walk keeps such a name too.
+    """
+
+    __tablename__ = "artifact_reference_edges"
+    __table_args__ = (
+        Index("ix_artifact_reference_edges_source", "source", "source_key"),
+        {"sqlite_with_rowid": False},
+    )
+
+    artifact_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    source: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    source_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+
+
+class ArtifactReferenceChange(Base):
+    """A source row changed since the index last read it; `audit` asks for its check too."""
+
+    __tablename__ = "artifact_reference_changes"
+    __table_args__ = (
+        Index("ix_artifact_reference_changes_audit", "audit"),
+        {"sqlite_with_rowid": False},
+    )
+
+    source: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    source_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    audit: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+
+
+class ArtifactReferenceIndexStamp(Base):
+    """What the reference index was last rebuilt under; its one row has id 1."""
+
+    __tablename__ = "artifact_reference_index"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    format_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sqlite_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    schema_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    alembic_revision: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+def _seed_reference_index_stamp(_target: object, connection: Connection, **_kwargs: object) -> None:
+    if connection.dialect.name == "sqlite":
+        with open_reference_index_writer(connection):
+            connection.exec_driver_sql(SEED_REFERENCE_INDEX_STAMP_SQL)
+
+
+# The stamp's row first: once its authority trigger exists, inserting it
+# would need the writer window.
+event.listen(Base.metadata, "after_create", _seed_reference_index_stamp)
+for _statement in CREATE_REFERENCE_INDEX_TRIGGER_SQL:
+    event.listen(Base.metadata, "after_create", _install_sqlite_trigger(_statement))
+
+
+def _drop_reference_index_triggers(
+    _target: object, connection: Connection, **_kwargs: object
+) -> None:
+    if connection.dialect.name == "sqlite":
+        for statement in DROP_REFERENCE_INDEX_TRIGGER_SQL:
+            connection.exec_driver_sql(statement)
+
+
+event.listen(Base.metadata, "before_drop", _drop_reference_index_triggers)
+
+
+def _certify_empty_reference_index(
+    _target: object, connection: Connection, **_kwargs: object
+) -> None:
+    if connection.dialect.name == "sqlite":
+        certify_if_empty(connection)
+
+
+# Last, once every trigger the certificate reads is in place.
+event.listen(Base.metadata, "after_create", _certify_empty_reference_index)

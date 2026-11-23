@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from .artifact_library_schema import (
     ARTIFACT_DELETION_AUTHORIZED_SQL,
+    ARTIFACT_REFERENCE_INDEX_WRITER_SQL,
     STORED_JSON_INVALID_SQL,
 )
 
@@ -107,6 +108,12 @@ class _ArtifactDeletionProof:
 @dataclass
 class _ConnectionAuthority:
     active: _ArtifactDeletionProof | None = None
+    #: How many index writers are open on this connection; see
+    #: `open_reference_index_writer`.
+    index_writers: int = 0
+
+    def writes_reference_index(self) -> int:
+        return int(self.index_writers > 0)
 
     def allows(self, artifact_id: object) -> int:
         proof = self.active
@@ -130,6 +137,26 @@ def _register_artifact_deletion_authority(
     state = _ConnectionAuthority()
     connection_record.info[_CONNECTION_STATE] = state
     create_function(ARTIFACT_DELETION_AUTHORIZED_SQL, 1, state.allows)
+    create_function(ARTIFACT_REFERENCE_INDEX_WRITER_SQL, 0, state.writes_reference_index)
+
+
+@contextmanager
+def open_reference_index_writer(connection: Connection) -> Iterator[None]:
+    """Let this connection change the artifact reference index while the block runs.
+
+    The index tables refuse every change unless the connection's writer
+    function answers 1, which it does only inside this block. A connection that
+    never registered the function cannot even prepare such a statement.
+    """
+
+    state = connection.connection.info.get(_CONNECTION_STATE)
+    if not isinstance(state, _ConnectionAuthority):
+        raise RuntimeError("artifact reference index authority is unavailable")
+    state.index_writers += 1
+    try:
+        yield
+    finally:
+        state.index_writers -= 1
 
 
 def complete_reference_snapshot(

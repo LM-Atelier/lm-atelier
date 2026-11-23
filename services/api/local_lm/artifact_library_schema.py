@@ -72,6 +72,8 @@ _JOB_LIST_KEYS = ("artifact_ids", "input_artifact_ids")
 #: these sites share this object rather than repeating its literals.
 ARTIFACT_METADATA_REFERENCE_KEYS = ("poster_artifact_id", "browser_proxy_artifact_id")
 ARTIFACT_DELETION_AUTHORIZED_SQL = "artifact_deletion_authorized"
+#: The function only a connection writing the artifact reference index answers 1 to.
+ARTIFACT_REFERENCE_INDEX_WRITER_SQL = "artifact_reference_index_writer"
 MAX_JSON_BYTES = 1_048_576
 MAX_JSON_NODES = 100_000
 MAX_JSON_DEPTH = 16
