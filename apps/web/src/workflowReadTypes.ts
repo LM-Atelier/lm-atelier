@@ -1,3 +1,5 @@
+import type { WorkflowSize } from "./workflowSizeTypes";
+
 export interface WorkflowReadyRevision {
   family_id: string;
   family_name: string;
@@ -6,4 +8,5 @@ export interface WorkflowReadyRevision {
   revision_id: string;
   revision_version: number;
   operation: string;
+  size?: WorkflowSize | null;
 }

@@ -730,6 +730,7 @@ from .schemas import (
     WorkflowSelectionOut,
     WorkflowSelectionResponseMode,
     WorkflowSelectorCapability,
+    WorkflowSizeOut,
     WorkflowSourceCandidateOut,
     WorkflowSummaryOut,
     WorkflowUpdate,
@@ -984,6 +985,7 @@ from .workflow_revision_reviews import (
 from .workflow_revision_writes import stage_workflow_revision
 from .workflow_runtime_nodes import preflight_workflow_runtime_nodes
 from .workflow_runtime_targets import preflight_workflow_runtime_plan
+from .workflow_size_contract import workflow_size_contract
 from .workflow_source_candidates import collect_source_candidates
 from .workflow_summary_reads import (
     list_workflow_definitions,
@@ -991,6 +993,7 @@ from .workflow_summary_reads import (
     list_workflow_summaries,
     load_workflow_detail,
     load_workflow_revision_schema,
+    load_workflow_revision_schemas,
 )
 from .workflow_supplied_settings import (
     bind_api_workflow_settings,
@@ -11417,6 +11420,46 @@ def _workflow_family_out(
     )
 
 
+def _workflow_sizes(
+    session: Session, revisions: Sequence[tuple[Operation, str | None]]
+) -> list[WorkflowSizeOut | None]:
+    """The size a turn takes on each revision, read as that revision's size route reads it.
+
+    The stored schemas are read as columns, the way the settings-schema route
+    reads them, so describing a row loads no revision row of its own. They are
+    read together: checking that a workflow is visible scans the library, and
+    reading row by row made a long list cost that scan once for every row.
+    """
+    schemas = load_workflow_revision_schemas(
+        session, [revision_id for _, revision_id in revisions if revision_id]
+    )
+    sizes: list[WorkflowSizeOut | None] = []
+    for operation, revision_id in revisions:
+        schema = schemas.get(revision_id) if revision_id else None
+        sizes.append(
+            workflow_size_contract(operation, schema.input_schema_json) if schema else None
+        )
+    return sizes
+
+
+def _with_variant_sizes(
+    session: Session, families: list[WorkflowFamilyOut]
+) -> list[WorkflowFamilyOut]:
+    """Describe the size of every variant a response returns, once its page is final.
+
+    The variant projector runs for every visible definition before filters and
+    pages apply, once per readiness rank in a readiness-ordered listing, so the
+    size is read here instead, for the rows that are actually returned.
+    """
+    variants = [variant for family in families for variant in family.variants]
+    sizes = _workflow_sizes(
+        session, [(variant.operation, variant.current_revision_id) for variant in variants]
+    )
+    for variant, size in zip(variants, sizes, strict=True):
+        variant.size = size
+    return families
+
+
 def _workflow_family_row(session: Session, family_id: str) -> WorkflowFamily:
     from .workflow_recovery_visibility import visible_workflow_family
 
@@ -11519,7 +11562,7 @@ async def list_workflow_families(
         or workflow_ids
     ):
         services = _services(request)
-        return read_family_page(
+        page = read_family_page(
             session,
             lambda family: _workflow_family_out(
                 session,
@@ -11552,6 +11595,7 @@ async def list_workflow_families(
                 or variant_capability is not None
             ),
         )
+        return _with_variant_sizes(session, page)
     query = (
         select(WorkflowFamily)
         .where(visible_workflow_family(WorkflowFamily.id))
@@ -11584,7 +11628,7 @@ async def list_workflow_families(
                 dependency_count=summary.dependency_count, names=list(summary.names)
             )
         result.append(output)
-    return result
+    return _with_variant_sizes(session, result)
 
 
 @router.get("/workflow-ready-revisions", response_model=list[WorkflowReadyRevisionOut])
@@ -11599,7 +11643,7 @@ async def workflow_ready_revisions(
     revision_id: Annotated[list[str] | None, Query(max_length=200)] = None,
 ) -> list[WorkflowReadyRevisionOut]:
     services = _services(request)
-    return read_ready_revision_page(
+    rows = read_ready_revision_page(
         session,
         lambda definition, family, compatibility: _workflow_family_variant_out(
             session,
@@ -11615,6 +11659,12 @@ async def workflow_ready_revisions(
         search=search,
         revision_ids=revision_id or (),
     )
+    # Every candidate is projected before the readiness filter, so the size is
+    # read only for the rows returned.
+    sizes = _workflow_sizes(session, [(row.operation, row.revision_id) for row in rows])
+    for row, size in zip(rows, sizes, strict=True):
+        row.size = size
+    return rows
 
 
 @router.get("/workflow-family-operations", response_model=list[Operation])
@@ -11646,7 +11696,7 @@ async def get_workflow_family(
         family = session.get(WorkflowFamily, family_id)
         if family is None:
             raise api_error(404, "workflow-family-not-found", "workflow family not found")
-        return _workflow_family_out(
+        output = _workflow_family_out(
             session,
             _services(request),
             family,
@@ -11656,8 +11706,10 @@ async def get_workflow_family(
             readiness=readiness,
             variant_capability=variant_capability,
         )
-    family = _workflow_family_row(session, family_id)
-    return _workflow_family_out(session, _services(request), family)
+    else:
+        family = _workflow_family_row(session, family_id)
+        output = _workflow_family_out(session, _services(request), family)
+    return _with_variant_sizes(session, [output])[0]
 
 
 @router.patch("/workflow-families/{family_id}", response_model=WorkflowFamilyOut)
@@ -11721,7 +11773,9 @@ async def update_workflow_family(
         ensure_legacy_profile_workflow(session, compatibility_profile)
     session.commit()
     family = _workflow_family_row(session, family.id)
-    return _workflow_family_out(session, _services(request), family)
+    return _with_variant_sizes(
+        session, [_workflow_family_out(session, _services(request), family)]
+    )[0]
 
 
 def _normalized_workflow_family_tags(tags: list[str]) -> list[str]:
@@ -12110,6 +12164,19 @@ async def workflow_revision_settings_schema(
     if schema is None:
         raise api_error(404, "workflow-revision-not-found", "Workflow revision not found.")
     return schema
+
+
+@router.get("/workflow-revisions/{revision_id}/size", response_model=WorkflowSizeOut | None)
+async def workflow_revision_size(revision_id: str, session: SessionDep) -> WorkflowSizeOut | None:
+    """The size a turn on this revision takes, or null where its operation chooses none.
+
+    Read from the schema the settings-schema route returns, so a client that
+    pins one revision, from any list, sizes it the way the family lists do.
+    """
+    schema = load_workflow_revision_schema(session, revision_id)
+    if schema is None:
+        raise api_error(404, "workflow-revision-not-found", "Workflow revision not found.")
+    return workflow_size_contract(schema.operation, schema.input_schema_json)
 
 
 @router.get(

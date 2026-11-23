@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from itertools import islice
-from typing import Literal
+from collections.abc import Iterable, Sequence
+from itertools import batched, islice
+from typing import Any, Literal
 
-from sqlalchemy import Select, and_, func, or_, select
+from sqlalchemy import RowMapping, Select, and_, func, or_, select
 from sqlalchemy.orm import Session, aliased, selectinload
 
 from .models import WorkflowDefinition, WorkflowRevision
@@ -206,39 +206,71 @@ def list_workflow_revision_choices(
     return [WorkflowRevisionChoiceOut(**row) for row in islice(page, limit)]
 
 
+#: How many revisions one schema read names. The read keeps to visible
+#: workflows, and checking that scans the whole library once per statement, so
+#: a list reads its rows together rather than one at a time; a chunk keeps a
+#: long list under the number of parameters one SQLite statement may carry.
+_SCHEMA_READ_CHUNK = 500
+
+
 def load_workflow_revision_schema(
     session: Session, revision_id: str
 ) -> WorkflowRevisionSchemaOut | None:
-    statement = (
-        select(
-            WorkflowRevision.id.label("revision_id"),
-            WorkflowDefinition.id.label("workflow_id"),
-            WorkflowDefinition.operation,
-            WorkflowRevision.input_schema_json,
-        )
-        .join(WorkflowDefinition, WorkflowDefinition.id == WorkflowRevision.workflow_id)
-        .where(
-            WorkflowRevision.id == revision_id,
-            WorkflowDefinition.id.in_(_visible_workflow_ids()),
-        )
-        .execution_options(autoflush=False)
-    )
-    row = session.execute(statement).mappings().one_or_none()
-    if row is None:
-        return None
-    schema = row["input_schema_json"]
-    if (
-        workflow_declares_upscale(schema)
-        and schema["properties"][UPSCALE_SETTING_KEY].get("readOnly") is not True
-    ):
-        # Only enlargement declarations need the selected graph to distinguish
-        # an adjustable factor from a fixed output size.
-        graph = session.scalar(
-            select(WorkflowRevision.api_graph_json)
-            .where(WorkflowRevision.id == revision_id)
+    """One revision's settings schema, or None where it is missing or its workflow hidden."""
+    return load_workflow_revision_schemas(session, [revision_id]).get(revision_id)
+
+
+def load_workflow_revision_schemas(
+    session: Session, revision_ids: Iterable[str]
+) -> dict[str, WorkflowRevisionSchemaOut]:
+    """Each revision's settings schema as the settings-schema route returns it, by id.
+
+    A revision that does not exist, or whose workflow is hidden, is left out.
+    The revisions are read together, so a list of any length costs one scan of
+    the library for each chunk of its rows rather than one for every row.
+    """
+    rows: dict[str, RowMapping] = {}
+    for chunk in batched(sorted(set(revision_ids)), _SCHEMA_READ_CHUNK):
+        statement = (
+            select(
+                WorkflowRevision.id.label("revision_id"),
+                WorkflowDefinition.id.label("workflow_id"),
+                WorkflowDefinition.operation,
+                WorkflowRevision.input_schema_json,
+            )
+            .join(WorkflowDefinition, WorkflowDefinition.id == WorkflowRevision.workflow_id)
+            .where(
+                WorkflowRevision.id.in_(chunk),
+                WorkflowDefinition.id.in_(_visible_workflow_ids()),
+            )
             .execution_options(autoflush=False)
         )
-        if graph is None:
-            return None
-        schema = effective_upscale_schema(graph, schema)
-    return WorkflowRevisionSchemaOut(**{**row, "input_schema_json": schema})
+        rows.update((row["revision_id"], row) for row in session.execute(statement).mappings())
+    # Only enlargement declarations need the selected graph to distinguish an
+    # adjustable factor from a fixed output size.
+    enlarging = {
+        revision_id
+        for revision_id, row in rows.items()
+        if workflow_declares_upscale(row["input_schema_json"])
+        and row["input_schema_json"]["properties"][UPSCALE_SETTING_KEY].get("readOnly") is not True
+    }
+    graphs: dict[str, Any] = {}
+    for chunk in batched(sorted(enlarging), _SCHEMA_READ_CHUNK):
+        result = session.execute(
+            select(WorkflowRevision.id, WorkflowRevision.api_graph_json)
+            .where(WorkflowRevision.id.in_(chunk))
+            .execution_options(autoflush=False)
+        )
+        # Pairs, not the result itself: a result has keys(), so update would
+        # read it as a mapping of column names.
+        graphs.update((revision_id, graph) for revision_id, graph in result.tuples())
+    schemas: dict[str, WorkflowRevisionSchemaOut] = {}
+    for revision_id, row in rows.items():
+        schema = row["input_schema_json"]
+        if revision_id in enlarging:
+            graph = graphs.get(revision_id)
+            if graph is None:
+                continue
+            schema = effective_upscale_schema(graph, schema)
+        schemas[revision_id] = WorkflowRevisionSchemaOut(**{**row, "input_schema_json": schema})
+    return schemas

@@ -429,6 +429,32 @@ async def test_workflow_family_catalog_reports_variants_preferences_and_readines
         "setup_resolution": None,
         "install_offer": None,
         "install_progress": None,
+        # A revision that declares no settings keeps the picture role's own size.
+        "size": {
+            "version": 1,
+            "control": "width_height",
+            "width": {
+                "key": "width",
+                "default": 1024,
+                "minimum": 64,
+                "maximum": 4096,
+                "multiple_of": None,
+                "step": 64,
+                "choices": [],
+            },
+            "height": {
+                "key": "height",
+                "default": 1024,
+                "minimum": 64,
+                "maximum": 4096,
+                "multiple_of": None,
+                "step": 64,
+                "choices": [],
+            },
+            "aspect_ratio": None,
+            "megapixels": None,
+            "round_to_multiple": None,
+        },
     }
 
 

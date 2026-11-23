@@ -11,6 +11,8 @@ import type { WorkerStatus } from "./workerStatusTypes";
 export type * from "./workerStatusTypes";
 import type { WorkflowInstallOffer } from "./workflowInstallOfferTypes";
 export type * from "./workflowInstallOfferTypes";
+import type { WorkflowSize } from "./workflowSizeTypes";
+export type * from "./workflowSizeTypes";
 export type * from "./priorTurnEditTypes";
 export type * from "./videoUtilityTypes";
 export type * from "./studioLocalEditTypes";
@@ -1984,6 +1986,7 @@ export interface WorkflowFamilyVariant {
   setup_resolution?: "reviewed_download_available" | "attention_required" | null;
   install_offer?: WorkflowInstallOffer | null;
   install_progress?: WorkflowInstallProgress | null;
+  size?: WorkflowSize | null;
 }
 
 export interface WorkflowFamilyPreference {
