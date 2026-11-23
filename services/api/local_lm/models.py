@@ -879,6 +879,9 @@ class ChatItemRemovalReceipt(TimestampMixin, Base):
 
 class Artifact(TimestampMixin, Base):
     __tablename__ = "artifacts"
+    # The order a retention pass reads in, so each batch finds where it goes on
+    # without sorting the table.
+    __table_args__ = (Index("ix_artifacts_created_at_id", "created_at", "id"),)
 
     id: Mapped[str] = mapped_column(String(80), primary_key=True)
     sha256: Mapped[str] = mapped_column(String(64), unique=True, index=True)

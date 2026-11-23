@@ -22,7 +22,7 @@ from itertools import batched
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, Final
 
-from sqlalchemy import event, func, select
+from sqlalchemy import String, event, func, literal, select, tuple_, type_coerce
 from sqlalchemy.orm import Session
 
 from .artifact_deletion_authority import (
@@ -92,6 +92,9 @@ _STAGED_DELETION = re.compile(r"^(?P<digest>[0-9a-f]{64})\.[0-9a-f]{32}$")
 #: How many staged digests one lookup names, so each statement stays small
 #: however many files are staged.
 _STAGED_LOOKUP_CHUNK: Final = 500
+#: Artifacts a retention pass reads at a time, in its order. Small, because a
+#: batch that stops on its clock has read the rest of its chunk for nothing.
+_RETENTION_READ_CHUNK: Final = 200
 _MAX_VIDEO_POSTER_BYTES = 16 * 1024 * 1024
 _TOOL_INPUT_PREFIX: Final = "tool-input-"
 #: Exactly the names the copy below makes, and so the only ones the sweep may remove.
@@ -250,6 +253,34 @@ RETENTION_BATCH_SECONDS = 0.5
 # is why such a backlog can hold the writer for minutes: each row pays for
 # another whole reference snapshot.
 RETENTION_UNTIMED_BATCH_DELETIONS = 25
+# How many artifacts one batch of an automatic pass may mark or unmark before
+# it stops and leaves the rest to the next. Each change rewrites that artifact's
+# metadata when the batch flushes, under the writer, and a first pass over a
+# store of kept artifacts would otherwise flush thousands at once.
+RETENTION_BATCH_METADATA_CHANGES = 500
+
+
+def _namer_lookup(namings: dict[str, set[str]]) -> Callable[[str], AbstractSet[str]]:
+    def namers_of(artifact_id: str) -> AbstractSet[str]:
+        return namings.get(artifact_id, set())
+
+    return namers_of
+
+
+@dataclass(frozen=True)
+class RetentionCursor:
+    """Where one batch of an automatic pass goes on from the batch before it.
+
+    `after` is the last artifact the earlier batch examined: its creation time
+    as the database stores it, and its id, which is the order a pass reads in.
+    The next batch starts just past it, so a pass examines each artifact once
+    however many batches it takes, even when that artifact is gone by then.
+    `rows_done` says every artifact has been examined and only the walk of the
+    store's files goes on. A cursor with neither starts a pass.
+    """
+
+    after: tuple[str, str] | None = None
+    rows_done: bool = False
 
 
 @dataclass(frozen=True)
@@ -266,6 +297,11 @@ class RetentionCleanupSummary:
     examined_count: int = 0
     #: Unindexed files included in removed_count, or eligible files during a dry run.
     removed_orphan_file_count: int = 0
+    #: Where the next batch goes on, for a batch given a cursor that stopped
+    #: early; None once its pass is finished, and always without a cursor.
+    cursor: RetentionCursor | None = None
+    #: Leaf shards of the store's files this batch finished walking.
+    walked_shards: int = 0
 
     @property
     def removed_row_count(self) -> int:
@@ -1346,6 +1382,7 @@ class ArtifactStore:
         should_stop: Callable[[], bool] | None = None,
         report_phase: Callable[[str], None] | None = None,
         walk_seconds: float | None = None,
+        cursor: RetentionCursor | None = None,
     ) -> RetentionCleanupSummary:
         """Remove expired unretained artifacts within the caller's stop/budget.
 
@@ -1363,6 +1400,13 @@ class ArtifactStore:
         walk runs to the end of the store, as a preview and a person's own
         request need it to.
 
+        With `cursor`, this call is one batch of an automatic pass. It examines
+        the artifacts after `cursor.after`, asks `should_stop` before each one
+        rather than only before a deletion, so its clock bounds what it reads as
+        well as what it removes, and says in the summary's `cursor` where the
+        next batch goes on. A cursor with `rows_done` goes straight on with the
+        walk. Without a cursor, a pass examines every artifact.
+
         The windows are given either as `retention_days` and `temporary_hours`,
         or as `windows_from`, which returns both and is called once the writer
         reservation is held, so a choice committed before this pass took the
@@ -1374,6 +1418,8 @@ class ArtifactStore:
                 raise TypeError("give the retention windows or windows_from, not both")
         elif retention_days is None or temporary_hours is None:
             raise TypeError("give both retention windows, or windows_from")
+        if cursor is not None and dry_run:
+            raise TypeError("a preview examines every artifact, so it takes no cursor")
         phase: Callable[[str], None] = report_phase or (lambda _name: None)
         current = now or datetime.now(UTC)
         if not dry_run:
@@ -1388,40 +1434,77 @@ class ArtifactStore:
         if not dry_run:
             phase("recover-staged-deletions")
             self._recover_staged_deletions(session, should_stop=should_stop)
-        phase("reference-snapshot")
-        referenced = self.referenced_artifact_ids(session, for_deletion=not dry_run)
         examined_count = 0
         marked_count = 0
         pending_count = 0
         removed_count = 0
         reclaimed_bytes = 0
         truncated = False
-        phase("load-artifact-rows")
-        ordered: Iterable[Any]
-        if isinstance(referenced, ArtifactReferenceSnapshot):
-            # The order first, then each artifact's columns as the pass
-            # reaches it. Reading and sorting every row with its metadata
-            # cost seconds on a large store, all of it under the writer, while
-            # a batch that stops early needs only the rows it examined.
-            ordered = self._rows_in_order(session)
-            phase("metadata-references")
-            # Read once, to ask about every artifact; the proof asks the same
-            # snapshot, so the pass and the proof cannot disagree.
-            retained: AbstractSet[str] = frozenset(referenced)
-            referrers = self._namers_by_name(referenced)
+        rows_done = cursor is not None and cursor.rows_done
+        resume: RetentionCursor | None = None
+        ordered: Iterable[tuple[tuple[str, str] | None, Any]]
+        namers_of: Callable[[str], AbstractSet[str]]
+        if rows_done:
+            # Every artifact of this pass was examined by an earlier batch, so
+            # this one needs no snapshot: only the walk of the files goes on.
+            referenced: AbstractSet[str] = frozenset()
+            ordered = ()
+            retained: AbstractSet[str] = frozenset()
+            namers_of = _namer_lookup({})
         else:
-            # A preview holds no writer and has to see every row to say who
-            # names whom, so it reads them all.
-            ordered = session.execute(
-                select(*_RETENTION_COLUMNS).order_by(Artifact.created_at, Artifact.id)
-            ).all()
-            phase("metadata-references")
-            retained = referenced
-            referrers = metadata_referrers(ordered)
+            phase("reference-snapshot")
+            referenced = self.referenced_artifact_ids(session, for_deletion=not dry_run)
+            phase("load-artifact-rows")
+            if isinstance(referenced, ArtifactReferenceSnapshot):
+                # Each artifact's columns as the pass reaches it, a chunk at a
+                # time in index order. Reading and sorting every row with its
+                # metadata cost seconds on a large store, all of it under the
+                # writer, while a batch that stops early needs only the rows it
+                # examined.
+                after = cursor.after if cursor is not None else None
+                ordered = self._rows_after(session, after=after)
+                phase("metadata-references")
+                if cursor is not None and isinstance(referenced, IndexedReferenceSnapshot):
+                    # A batch examines a few hundred artifacts, so it asks its
+                    # snapshot about each one as it comes instead of first
+                    # reading every retained artifact and naming in the store.
+                    # The proof asks the same snapshot, so the two agree.
+                    retained = referenced
+                    namers_of = referenced.namers
+                else:
+                    # Read once, to ask about every artifact; the proof asks the
+                    # same snapshot, so the pass and the proof cannot disagree.
+                    retained = frozenset(referenced)
+                    namers_of = _namer_lookup(self._namers_by_name(referenced))
+            else:
+                # A preview holds no writer and has to see every row to say who
+                # names whom, so it reads them all.
+                rows = session.execute(
+                    select(*_RETENTION_COLUMNS).order_by(Artifact.created_at, Artifact.id)
+                ).all()
+                phase("metadata-references")
+                ordered = ((None, row) for row in rows)
+                retained = referenced
+                namers_of = _namer_lookup(metadata_referrers(rows))
         removed_ids: set[str] = set()
         metadata_updates: list[tuple[str, dict[str, Any]]] = []
+        # The last artifact this batch finished with; the next batch of the
+        # pass starts just past it.
+        finished = cursor.after if cursor is not None else None
+        # Reported by a batch that only walks the files too: the sweep starts
+        # its clock at this phase, and the walk has to run under that clock.
         phase("examine-artifacts")
-        for artifact in ordered:
+        for place, artifact in ordered:
+            if cursor is not None and (
+                (should_stop is not None and should_stop())
+                or len(metadata_updates) >= RETENTION_BATCH_METADATA_CHANGES
+            ):
+                # An automatic batch is bounded by its clock whatever it reads,
+                # and by how much metadata it has to rewrite, so a pass of kept
+                # artifacts stops here too and goes on next batch rather than
+                # reading or rewriting the whole store under the writer.
+                truncated = True
+                break
             examined_count += 1
             metadata = dict(artifact.metadata_json)
             # A favorite pins against the automatic sweep exactly like a live
@@ -1431,6 +1514,7 @@ class ArtifactStore:
                 if "unreferenced_at" in metadata and not dry_run:
                     metadata.pop("unreferenced_at", None)
                     metadata_updates.append((artifact.id, metadata))
+                finished = place
                 continue
             temporary = bool(metadata.get("temporary_preview") or metadata.get("intermediate"))
             age = current - self._aware(artifact.created_at)
@@ -1438,9 +1522,7 @@ class ArtifactStore:
             unreferenced_at = self._metadata_datetime(metadata.get("unreferenced_at"))
             if not temporary and unreferenced_at:
                 eligible = current - unreferenced_at >= timedelta(days=retention_days)
-            if eligible and any(
-                naming not in removed_ids for naming in referrers.get(artifact.id, ())
-            ):
+            if eligible and any(naming not in removed_ids for naming in namers_of(artifact.id)):
                 # The delete trigger refuses while a SURVIVING artifact names
                 # this one, so attempting it aborts the pass and everything
                 # after it. A referrer already removed in this pass no longer
@@ -1465,6 +1547,7 @@ class ArtifactStore:
                 removed_count += 1
                 reclaimed_bytes += artifact.size_bytes
                 removed_ids.add(artifact.id)
+                finished = place
                 continue
             if not temporary:
                 pending_count += 1
@@ -1473,7 +1556,12 @@ class ArtifactStore:
                     if not dry_run:
                         metadata["unreferenced_at"] = current.isoformat()
                         metadata_updates.append((artifact.id, metadata))
-        if not dry_run:
+            finished = place
+        if cursor is not None and truncated:
+            # A stop before a deletion leaves that artifact unfinished, so the
+            # next batch examines it again rather than passing it by.
+            resume = RetentionCursor(after=finished)
+        if not dry_run and not rows_done:
             phase("flush-metadata")
             updates = dict(metadata_updates)
             # Every row is read before any is changed, so no read flushes a
@@ -1495,6 +1583,7 @@ class ArtifactStore:
                 session.flush()
         orphan_count = 0
         orphan_bytes = 0
+        walked_shards = 0
         if not truncated:
             # The orphan walk spends what the row loop left of the bound and
             # answers to the same stop request, so the final batch of a pass
@@ -1521,39 +1610,54 @@ class ArtifactStore:
                     walk=walk,
                 )
             truncated = budget.truncated
+            walked_shards = walk.leaves if walk is not None else 0
+            if cursor is not None and truncated:
+                resume = RetentionCursor(rows_done=True)
         return RetentionCleanupSummary(
             examined_count=examined_count,
             marked_count=marked_count,
             pending_count=pending_count,
             removed_count=removed_count + orphan_count,
             removed_orphan_file_count=orphan_count,
+            walked_shards=walked_shards,
             reclaimed_bytes=reclaimed_bytes + orphan_bytes,
             truncated=truncated,
+            cursor=resume,
         )
 
     @staticmethod
-    def _rows_in_order(session: Session) -> Iterator[Any]:
-        """Artifacts oldest first, each read with the columns retention decides with.
+    def _rows_after(
+        session: Session, *, after: tuple[str, str] | None = None
+    ) -> Iterator[tuple[tuple[str, str], Any]]:
+        """Artifacts oldest first, past `after`, each with its place and the columns retention uses.
 
-        Ids are read and sorted on their own, then the rest a chunk at a time,
-        so a pass that stops early reads only what it examined. An artifact
-        removed before its chunk is read is skipped, as a fresh read would.
+        A place is the creation time as the database stores it, with the id.
+        Each chunk starts just past the last place read, compared as a row value
+        with the same columns the order sorts by, so the index finds it without
+        a sort and no artifact falls between two chunks whatever a stored time
+        looks like. A chunk is read whole before any of it is examined, so no
+        statement stays open across a deletion, and a pass that stops early has
+        read at most one chunk it did not examine.
         """
 
-        order = list(
-            session.scalars(select(Artifact.id).order_by(Artifact.created_at, Artifact.id))
-        )
-        for chunk in batched(order, _STAGED_LOOKUP_CHUNK):
-            rows = {
-                row.id: row
-                for row in session.execute(
-                    select(*_RETENTION_COLUMNS).where(Artifact.id.in_(chunk))
+        stored = type_coerce(Artifact.created_at, String)
+        while True:
+            statement = (
+                select(stored.label("stored_created_at"), *_RETENTION_COLUMNS)
+                .order_by(Artifact.created_at, Artifact.id)
+                .limit(_RETENTION_READ_CHUNK)
+            )
+            if after is not None:
+                statement = statement.where(
+                    tuple_(stored, Artifact.id)
+                    > tuple_(literal(after[0], String), literal(after[1], String))
                 )
-            }
-            for artifact_id in chunk:
-                row = rows.get(artifact_id)
-                if row is not None:
-                    yield row
+            rows = session.execute(statement).all()
+            for row in rows:
+                after = (str(row.stored_created_at), str(row.id))
+                yield after, row
+            if len(rows) < _RETENTION_READ_CHUNK:
+                return
 
     @staticmethod
     def _namers_by_name(references: ArtifactReferenceSnapshot) -> dict[str, set[str]]:
