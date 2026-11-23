@@ -21,7 +21,6 @@ from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -509,8 +508,10 @@ async def test_a_truncated_batch_does_not_count_as_a_pass(
     async with app.router.lifespan_context(app):
         await asyncio.wait_for(app.state.retention_sweep, timeout=30)
 
-    assert every_call == [(3, False), (0, True), (0, False)], every_call
-    assert completed_passes == [3, 0], "a truncated batch was counted as a pass"
+    # The second pass removed nothing across two batches, so one more pass reads
+    # the store from the oldest for anything that changed behind it.
+    assert every_call == [(3, False), (0, True), (0, False), (0, False)], every_call
+    assert completed_passes == [3, 0, 0], "a truncated batch was counted as a pass"
 
 
 def _aged_orphan(store: ArtifactStore, index: int) -> Path:
@@ -1052,18 +1053,17 @@ async def test_retention_cancellation_reports_committed_unindexed_files(
 async def test_a_batch_that_removed_nothing_continues_in_bulk_not_one_at_a_time(
     settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The batches after one that removed nothing must not pay a snapshot each.
+    """The batches after one that could do nothing must not pay a snapshot each.
 
-    A batch removes nothing when its row pass finds nothing to remove and the
-    walk of stored files after it spends the whole budget without removing one.
-    Dropping the clock for the batches after that is right, because a budget one
-    batch could not spend the next cannot spend either. Dropping to a single
-    deletion as well is not: every row then pays for another complete reference
-    snapshot, which is what held the writer for minutes on a store with a real
-    backlog behind it.
+    A batch does nothing when its clock runs out before it examines a single
+    artifact, which a budget of zero makes certain. Dropping the clock for the
+    batches after that is right, because a budget one batch could not spend the
+    next cannot spend either. Dropping to a single deletion as well is not:
+    every row then pays for another complete reference snapshot, which is what
+    held the writer for minutes on a store with a real backlog behind it.
 
-    The store here keeps everything it holds, so the row pass has nothing to
-    remove and the file walk runs into the budget.
+    A batch that examined artifacts or walked files moved its pass on, so it
+    keeps the clock: test_retention_passes_read_each_artifact_once.py has that.
     """
 
     caplog.set_level(logging.INFO)
@@ -1088,21 +1088,15 @@ async def test_a_batch_that_removed_nothing_continues_in_bulk_not_one_at_a_time(
         summaries.append(summary)
         return summary
 
-    # Half a second a reading, so the first batch's walk of the stored files
-    # outlasts its two-second budget after a handful of them rather than at
-    # once. The batches after it run without a clock and never read it.
-    readings = count()
-    monkeypatch.setattr(
-        main_module, "time", SimpleNamespace(monotonic=lambda: next(readings) * 0.5)
-    )
     monkeypatch.setattr(ArtifactStore, "cleanup_retention", recording_cleanup)
 
-    await main_module.sweep_artifact_retention(store, settings, pause_seconds=0)
+    await main_module.sweep_artifact_retention(store, settings, pause_seconds=0, batch_seconds=0)
 
-    # The first batch really did remove nothing and really was truncated: that
-    # is the state this whole branch exists for, reached through the sweep
-    # rather than asserted of it.
+    # The first batch really did nothing and really was truncated: that is the
+    # state this whole branch exists for, reached through the sweep rather than
+    # asserted of it.
     assert summaries[0].removed_count == 0 and summaries[0].truncated is True
+    assert summaries[0].examined_count == 0
     # Nothing here changes the batch sizes, so the sweep used the defined ones.
     assert requested[0] == artifacts_module.RETENTION_BATCH_DELETIONS
     # The behaviour first: the batch after it may delete in bulk. The ceiling

@@ -41,6 +41,7 @@ from .artifacts import (
     RETENTION_UNTIMED_BATCH_DELETIONS,
     ArtifactStore,
     RetentionCleanupSummary,
+    RetentionCursor,
 )
 from .backups import BackupManager
 from .catalog import HuggingFaceCatalog
@@ -560,11 +561,12 @@ async def sweep_artifact_retention(
     """Run retention after the port opens, committing one bounded batch at a time.
 
     Each batch holds its writer reservation through one complete reference
-    snapshot and a deletion phase bounded by time and count. Snapshot cost is
-    fixed work before the deletion clock starts. A stop request still ends the
-    batch at the next deletion boundary, and completed deletions are committed
-    before the next batch. Failures are logged while the application keeps
-    running; the next start resumes the sweep.
+    snapshot and a phase of reading and deleting bounded by time and count, and
+    goes on from the artifact where the batch before it stopped, so a pass reads
+    each artifact once. Snapshot cost is fixed work before the clock starts. A
+    stop request still ends the batch at the next artifact, and completed
+    deletions are committed before the next batch. Failures are logged while
+    the application keeps running; the next start resumes the sweep.
     """
 
     # Resolved at call time, not at definition time, so the module constants
@@ -587,7 +589,9 @@ async def sweep_artifact_retention(
     # rebinding cannot redirect a batch mid-sweep.
     bind = SessionLocal.kw.get("bind")
 
-    def run_batch(*, deletions: int, seconds: float | None) -> RetentionCleanupSummary:
+    def run_batch(
+        *, deletions: int, seconds: float | None, cursor: RetentionCursor
+    ) -> RetentionCleanupSummary:
         deadline: float | None = None
         deletion_phase = False
 
@@ -599,8 +603,12 @@ async def sweep_artifact_retention(
                 return False
             if deadline is None:
                 # The complete graph and validity scan are fixed work. Charge
-                # the budget from the first deletion boundary after that mint.
+                # the budget from the first artifact examined after them. Arming
+                # never ends a positive budget at once, however the clock moved
+                # between two readings, so every batch that has a budget examines
+                # an artifact and only a budget of zero can take the clock off.
                 deadline = time.monotonic() + seconds
+                return seconds <= 0
             return time.monotonic() >= deadline
 
         with _retention_batch_progress() as progress, SessionLocal(bind=bind) as session:
@@ -624,6 +632,10 @@ async def sweep_artifact_retention(
                     # stopped: walking every shard of a large store at once
                     # held the writer past every other writer's patience.
                     walk_seconds=batch_seconds,
+                    # The rows do the same: each batch goes on where the one
+                    # before it stopped, so a pass reads each artifact once
+                    # instead of every batch reading again the kept ones ahead.
+                    cursor=cursor,
                 )
                 progress.phase("commit")
                 session.commit()
@@ -661,6 +673,15 @@ async def sweep_artifact_retention(
     passes = 0
     locked_out = 0
     single = False
+    # Where the next batch goes on, and what the pass it belongs to has removed
+    # so far: a pass spans its batches, so whether another pass is owed is
+    # decided on all of them, not on the last.
+    cursor = RetentionCursor()
+    pass_removed = 0
+    # How many batches the pass took, and whether it is the pass that reads the
+    # store once more from the oldest after one that removed nothing.
+    pass_batches = 0
+    confirming = False
     try:
         while True:
             deletions = batch_deletions
@@ -676,7 +697,7 @@ async def sweep_artifact_retention(
                 deletions = min(batch_deletions, RETENTION_UNTIMED_BATCH_DELETIONS)
                 seconds = None
             operation = asyncio.create_task(
-                asyncio.to_thread(run_batch, deletions=deletions, seconds=seconds),
+                asyncio.to_thread(run_batch, deletions=deletions, seconds=seconds, cursor=cursor),
                 name="artifact-retention-batch",
             )
             try:
@@ -732,8 +753,28 @@ async def sweep_artifact_retention(
             examined += summary.examined_count
             removed_rows += summary.removed_row_count
             removed_orphan_files += summary.removed_orphan_file_count
+            pass_removed += summary.removed_count
+            pass_batches += 1
             if summary.truncated:
-                if summary.removed_count == 0 and not single:
+                # A batch moved the pass on if it examined an artifact, finished
+                # the rows, or finished a shard of the walk of the files, even
+                # when its clock ran out before anything could be removed; the
+                # next batch goes on from there under the same clock. A batch
+                # that did none of these - a walk whose clock ran out while it
+                # listed the store, before one shard was done - would be repeated
+                # by the next exactly, so the clock comes off for it.
+                moved_on = (
+                    summary.examined_count > 0
+                    or summary.walked_shards > 0
+                    or (
+                        not cursor.rows_done
+                        and summary.cursor is not None
+                        and summary.cursor.rows_done
+                    )
+                )
+                if summary.cursor is not None:
+                    cursor = summary.cursor
+                if summary.removed_count == 0 and not single and not moved_on:
                     single = True
                     logger.info(
                         "Artifact retention batch %s removed nothing within %.1fs; "
@@ -743,6 +784,12 @@ async def sweep_artifact_retention(
                         min(batch_deletions, RETENTION_UNTIMED_BATCH_DELETIONS),
                     )
                 else:
+                    if single and (moved_on or summary.removed_count > 0):
+                        # The batch without the clock got past what stopped the
+                        # one with it, so the next goes back on the clock: left
+                        # off, every later batch would read as far as its
+                        # deletions allow, the whole store when there are none.
+                        single = False
                     logger.info(
                         "Artifact retention batch %s removed %s artifact row(s), "
                         "%s unindexed file(s); more remain",
@@ -753,11 +800,34 @@ async def sweep_artifact_retention(
                 await asyncio.sleep(pause_seconds)
                 continue
             passes += 1
-            if summary.removed_count == 0 or passes >= RETENTION_MAX_PASSES:
+            if passes >= RETENTION_MAX_PASSES:
                 break
+            if pass_removed == 0:
+                if confirming or pass_batches == 1:
+                    break
+                # Each batch read only the artifacts after the one before it, so
+                # a reference released or added behind the pass's place after
+                # its batch went by was never seen: a preview freed then would
+                # wait for the next start, and a mark the new reference should
+                # have cleared would outlive it. Reading every batch from the
+                # oldest saw those; one more pass from the oldest sees them too.
+                confirming = True
+                logger.info(
+                    "Artifact retention pass removed nothing in %s batches; reading "
+                    "the store once more from the oldest for changes behind it",
+                    pass_batches,
+                )
+            else:
+                confirming = False
             # A completed pass that removed something may have freed more: a
-            # poster goes only once the artifact naming it is gone. Sweep again
-            # until a whole pass finds nothing, rather than once per start.
+            # poster goes only once the artifact naming it is gone, and one
+            # whose namer a later batch removed was already passed by. Sweep
+            # again from the oldest until a whole pass finds nothing.
+            cursor = RetentionCursor()
+            pass_removed = 0
+            pass_batches = 0
+            # A new pass starts on the clock, whatever ended the last one.
+            single = False
             await asyncio.sleep(pause_seconds)
     except asyncio.CancelledError:
         logger.info(
