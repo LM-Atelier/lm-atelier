@@ -3,11 +3,18 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from typing import Any, Final, Literal, cast
 
 from .auxiliary_assets import lora_setting_property
 from .saved_settings import MAX_SETTING_FIELDS, unusable_as_a_number
 from .schemas import EngineCapabilities, SettingField
+from .setting_refusals import (
+    SettingRefusal,
+    SettingRefusalCode,
+    SettingRefused,
+    saved_setting_source,
+)
 from .upscale_workflows import UPSCALE_SCHEMA_KIND, UPSCALE_SETTING_KEY
 from .video_length import video_duration_field, workflow_video_length
 from .workflow_graph_settings_v1 import (
@@ -775,61 +782,90 @@ def resolve_settings(*layers: Mapping[str, Any] | None) -> dict[str, Any]:
     return resolved
 
 
-def _validate_setting_value(key: str, value: Any) -> None:
+#: The first way a value breaks the shape every setting keeps: why, the limit it
+#: passed, and the words it has always been refused with. No reason means a
+#: value no JSON request can hold, which is a fault of the caller, not a refusal.
+_ValueProblem = tuple[SettingRefusalCode | None, int | None, str]
+
+
+def _setting_value_problem(key: str, value: Any) -> _ValueProblem | None:
     nodes = 0
 
-    def walk(candidate: Any, depth: int) -> None:
+    def walk(candidate: Any, depth: int) -> _ValueProblem | None:
         nonlocal nodes
         nodes += 1
         if nodes > MAX_SETTING_VALUE_NODES:
-            raise ValueError(
-                f"{key} is too complex; use at most {MAX_SETTING_VALUE_NODES} nested values"
+            return (
+                SettingRefusalCode.TOO_COMPLEX,
+                MAX_SETTING_VALUE_NODES,
+                f"{key} is too complex; use at most {MAX_SETTING_VALUE_NODES} nested values",
             )
         if depth > MAX_SETTING_NESTING_DEPTH:
-            raise ValueError(
-                f"{key} is nested too deeply; use at most {MAX_SETTING_NESTING_DEPTH} levels"
+            return (
+                SettingRefusalCode.TOO_DEEP,
+                MAX_SETTING_NESTING_DEPTH,
+                f"{key} is nested too deeply; use at most {MAX_SETTING_NESTING_DEPTH} levels",
             )
         if isinstance(candidate, float):
             if not math.isfinite(candidate):
-                raise ValueError(f"{key} numbers must be finite")
-            return
+                return (SettingRefusalCode.NOT_FINITE, None, f"{key} numbers must be finite")
+            return None
         if isinstance(candidate, str):
             if len(candidate) > MAX_SETTING_STRING_LENGTH:
-                raise ValueError(
-                    f"{key} strings must be at most {MAX_SETTING_STRING_LENGTH} characters"
+                return (
+                    SettingRefusalCode.TOO_LONG,
+                    MAX_SETTING_STRING_LENGTH,
+                    f"{key} strings must be at most {MAX_SETTING_STRING_LENGTH} characters",
                 )
-            return
+            return None
         if isinstance(candidate, list):
             if len(candidate) > MAX_SETTING_ARRAY_ITEMS:
-                raise ValueError(
-                    f"{key} arrays must contain at most {MAX_SETTING_ARRAY_ITEMS} items"
+                return (
+                    SettingRefusalCode.TOO_MANY_ITEMS,
+                    MAX_SETTING_ARRAY_ITEMS,
+                    f"{key} arrays must contain at most {MAX_SETTING_ARRAY_ITEMS} items",
                 )
             for item in candidate:
-                walk(item, depth + 1)
-            return
+                problem = walk(item, depth + 1)
+                if problem is not None:
+                    return problem
+            return None
         if isinstance(candidate, dict):
             if len(candidate) > MAX_SETTING_OBJECT_ITEMS:
-                raise ValueError(
-                    f"{key} objects must contain at most {MAX_SETTING_OBJECT_ITEMS} items"
+                return (
+                    SettingRefusalCode.TOO_MANY_ITEMS,
+                    MAX_SETTING_OBJECT_ITEMS,
+                    f"{key} objects must contain at most {MAX_SETTING_OBJECT_ITEMS} items",
                 )
             for nested_key, nested_value in candidate.items():
                 if not isinstance(nested_key, str):
-                    raise ValueError(f"{key} object keys must be strings")
+                    return (None, None, f"{key} object keys must be strings")
                 if len(nested_key) > MAX_WORKFLOW_SETTING_KEY_LENGTH:
-                    raise ValueError(
+                    return (
+                        SettingRefusalCode.TOO_LONG,
+                        MAX_WORKFLOW_SETTING_KEY_LENGTH,
                         f"{key} object keys must be at most "
-                        f"{MAX_WORKFLOW_SETTING_KEY_LENGTH} characters"
+                        f"{MAX_WORKFLOW_SETTING_KEY_LENGTH} characters",
                     )
-                walk(nested_value, depth + 1)
-            return
+                problem = walk(nested_value, depth + 1)
+                if problem is not None:
+                    return problem
+            return None
         if isinstance(candidate, int) and not isinstance(candidate, bool):
             if unusable_as_a_number(candidate):
-                raise ValueError(f"{key} numbers must be finite")
-            return
+                return (SettingRefusalCode.NOT_FINITE, None, f"{key} numbers must be finite")
+            return None
         if candidate is not None and not isinstance(candidate, bool):
-            raise ValueError(f"{key} contains a value that cannot be stored as JSON")
+            return (None, None, f"{key} contains a value that cannot be stored as JSON")
+        return None
 
-    walk(value, 0)
+    return walk(value, 0)
+
+
+def _validate_setting_value(key: str, value: Any) -> None:
+    problem = _setting_value_problem(key, value)
+    if problem is not None:
+        raise ValueError(problem[2])
 
 
 def validate_workflow_input_schema(input_schema: Mapping[str, Any] | None) -> None:
@@ -1156,62 +1192,161 @@ def _setting_type_for_value(value: Any) -> str | None:
     return None
 
 
+_EXPECTED_TYPES: Final[dict[str, type[Any] | tuple[type[Any], ...]]] = {
+    "boolean": bool,
+    "integer": int,
+    "number": (int, float),
+    "string": str,
+    "enum": (str, int, float, bool),
+    "array": list,
+    "object": dict,
+}
+#: Why a value of the wrong type is refused, by the type its field takes. A
+#: value an enum cannot hold is not one of its choices.
+_TYPE_REFUSALS: Final[dict[str, SettingRefusalCode]] = {
+    "boolean": SettingRefusalCode.NOT_A_BOOLEAN,
+    "integer": SettingRefusalCode.NOT_AN_INTEGER,
+    "number": SettingRefusalCode.NOT_A_NUMBER,
+    "string": SettingRefusalCode.NOT_A_STRING,
+    "enum": SettingRefusalCode.NOT_A_CHOICE,
+    "array": SettingRefusalCode.NOT_AN_ARRAY,
+    "object": SettingRefusalCode.NOT_AN_OBJECT,
+}
+
+
+def _value_refusals(key: str, value: Any, field: SettingField) -> list[tuple[SettingRefusal, str]]:
+    """Every reason one value is not one its field takes, each with the words it is refused with.
+
+    The checks run in the order they always have, so the first reason is the
+    one a refusal has always been worded by. A value that is not the field's
+    type, or breaks the shape every setting keeps, is not checked further. A
+    field whose own limits cannot be used is a fault of the schema that
+    declared it, and a value no JSON request can hold is a fault of the caller:
+    neither is a refusal of what was asked, so each raises a plain ValueError.
+    """
+
+    choices = tuple(field.choices)
+    if not field.available:
+        return [
+            (
+                SettingRefusal(SettingRefusalCode.NOT_OFFERED, key),
+                field.unavailable_reason or f"{key} is unavailable",
+            )
+        ]
+    if not isinstance(value, _EXPECTED_TYPES[field.type]) or (
+        field.type in {"integer", "number"} and isinstance(value, bool)
+    ):
+        code = _TYPE_REFUSALS[field.type]
+        allowed = choices if code == SettingRefusalCode.NOT_A_CHOICE else None
+        return [(SettingRefusal(code, key, allowed=allowed), f"{key} must be a {field.type}")]
+    problem = _setting_value_problem(key, value)
+    if problem is not None:
+        code_or_fault, limit, message = problem
+        if code_or_fault is None:
+            raise ValueError(message)
+        return [(SettingRefusal(code_or_fault, key, limit=limit), message)]
+    for constraint_name, constraint in (
+        ("minimum", field.minimum),
+        ("maximum", field.maximum),
+        ("step", field.step),
+        ("multiple", field.multiple_of),
+    ):
+        if constraint is not None and not math.isfinite(constraint):
+            raise ValueError(f"{key} {constraint_name} must be finite")
+    if field.multiple_of is not None and field.multiple_of <= 0:
+        raise ValueError(f"{key} multiple must be greater than zero")
+    found: list[tuple[SettingRefusal, str]] = []
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if field.minimum is not None and value < field.minimum:
+            found.append(
+                (
+                    SettingRefusal(SettingRefusalCode.BELOW_MINIMUM, key, limit=field.minimum),
+                    f"{key} must be at least {field.minimum}",
+                )
+            )
+        if field.maximum is not None and value > field.maximum:
+            found.append(
+                (
+                    SettingRefusal(SettingRefusalCode.ABOVE_MAXIMUM, key, limit=field.maximum),
+                    f"{key} must be at most {field.maximum}",
+                )
+            )
+        if field.multiple_of is not None:
+            quotient = value / field.multiple_of
+            if not math.isfinite(quotient):
+                # Too large to divide by its step. A value past one of its bounds
+                # is refused for that already; any other cannot be used at all.
+                if not found:
+                    found.append(
+                        (
+                            SettingRefusal(SettingRefusalCode.NOT_FINITE, key),
+                            f"{key} is too large to use with a multiple of {field.multiple_of}",
+                        )
+                    )
+            elif not math.isclose(quotient, round(quotient), rel_tol=1e-9, abs_tol=1e-9):
+                found.append(
+                    (
+                        SettingRefusal(
+                            SettingRefusalCode.NOT_A_MULTIPLE, key, limit=field.multiple_of
+                        ),
+                        f"{key} must be a multiple of {field.multiple_of}",
+                    )
+                )
+    if choices and not any(
+        value == choice and isinstance(value, bool) == isinstance(choice, bool)
+        for choice in choices
+    ):
+        found.append(
+            (
+                SettingRefusal(SettingRefusalCode.NOT_A_CHOICE, key, allowed=choices),
+                f"{key} must be one of {field.choices}",
+            )
+        )
+    return found
+
+
 def validate_settings(values: Mapping[str, Any], fields: Iterable[SettingField]) -> dict[str, Any]:
+    """Return the values when each is one its field takes as it is; never adjust one.
+
+    Every key is checked before anything is raised, so one SettingRefused names
+    each key no field has, then each field that is not offered and each value
+    that is refused, in the order the values are given, with why. Its message
+    is the first refusal's, worded as it always was. A schema whose own fields
+    cannot be used raises a plain ValueError instead, unless a refusal was
+    already found before it.
+    """
+
     if len(values) > MAX_SETTING_FIELDS:
-        raise ValueError(f"settings must contain at most {MAX_SETTING_FIELDS} fields")
+        raise SettingRefused(
+            f"settings must contain at most {MAX_SETTING_FIELDS} fields",
+            [SettingRefusal(SettingRefusalCode.TOO_MANY_SETTINGS, None, limit=MAX_SETTING_FIELDS)],
+        )
     definitions: dict[str, SettingField] = {}
     for field in fields:
         if field.key in definitions:
             raise ValueError(f"settings schema contains duplicate key: {field.key}")
         definitions[field.key] = field
-    unknown = set(values) - set(definitions)
-    if unknown:
-        raise ValueError(f"unsupported settings: {', '.join(sorted(unknown))}")
+    unknown = [key for key in values if key not in definitions]
+    refusals = [SettingRefusal(SettingRefusalCode.UNKNOWN, key) for key in unknown]
+    first = f"unsupported settings: {', '.join(sorted(unknown))}" if unknown else None
     validated: dict[str, Any] = {}
     for key, value in values.items():
-        field = definitions[key]
-        if not field.available:
-            raise ValueError(field.unavailable_reason or f"{key} is unavailable")
-        expected_types: dict[str, type[Any] | tuple[type[Any], ...]] = {
-            "boolean": bool,
-            "integer": int,
-            "number": (int, float),
-            "string": str,
-            "enum": (str, int, float, bool),
-            "array": list,
-            "object": dict,
-        }
-        expected = expected_types[field.type]
-        if not isinstance(value, expected) or (
-            field.type in {"integer", "number"} and isinstance(value, bool)
-        ):
-            raise ValueError(f"{key} must be a {field.type}")
-        _validate_setting_value(key, value)
-        for constraint_name, constraint in (
-            ("minimum", field.minimum),
-            ("maximum", field.maximum),
-            ("step", field.step),
-            ("multiple", field.multiple_of),
-        ):
-            if constraint is not None and not math.isfinite(constraint):
-                raise ValueError(f"{key} {constraint_name} must be finite")
-        if field.multiple_of is not None and field.multiple_of <= 0:
-            raise ValueError(f"{key} multiple must be greater than zero")
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            if field.minimum is not None and value < field.minimum:
-                raise ValueError(f"{key} must be at least {field.minimum}")
-            if field.maximum is not None and value > field.maximum:
-                raise ValueError(f"{key} must be at most {field.maximum}")
-            if field.multiple_of is not None:
-                quotient = value / field.multiple_of
-                if not math.isclose(quotient, round(quotient), rel_tol=1e-9, abs_tol=1e-9):
-                    raise ValueError(f"{key} must be a multiple of {field.multiple_of}")
-        if field.choices and not any(
-            value == choice and isinstance(value, bool) == isinstance(choice, bool)
-            for choice in field.choices
-        ):
-            raise ValueError(f"{key} must be one of {field.choices}")
-        validated[key] = value
+        definition = definitions.get(key)
+        if definition is None:
+            continue
+        try:
+            found = _value_refusals(key, value, definition)
+        except ValueError:
+            if first is not None:
+                raise SettingRefused(first, refusals) from None
+            raise
+        if found:
+            first = first if first is not None else found[0][1]
+            refusals.extend(refusal for refusal, _ in found)
+        else:
+            validated[key] = value
+    if first is not None:
+        raise SettingRefused(first, refusals)
     return validated
 
 
@@ -1256,14 +1391,15 @@ def _whole(value: object) -> str:
     return str(value)
 
 
-class SavedSizeUnsupported(ValueError):
+class SavedSizeUnsupported(SettingRefused):
     """A size saved on a profile, preset, project or chat that the turn's workflow cannot make.
 
     Saved layers are otherwise read leniently, value by value, by
     `compatible_stored_settings`. A size is not dropped that way: the
     workflow's own width beside a saved height is a picture nobody asked for,
     and nothing would say so. The message names where the size is saved and
-    the sizes the workflow makes.
+    the sizes the workflow makes; its refusals say the same with the limit the
+    size passed and the saved layer it came from.
     """
 
     def __init__(self, key: str, value: object, field: SettingField, where: str) -> None:
@@ -1279,9 +1415,15 @@ class SavedSizeUnsupported(ValueError):
             span = "only the sizes it offers"
         if field.multiple_of is not None and not field.choices:
             span += f", in steps of {_whole(field.multiple_of)}"
+        source = saved_setting_source(where)
+        try:
+            found = _value_refusals(key, value, field)
+        except ValueError:
+            found = []
         super().__init__(
             f"The {key} of {_whole(value)} px saved {where} is not one this workflow makes "
-            f"({span}). Change it there, or choose another workflow."
+            f"({span}). Change it there, or choose another workflow.",
+            [replace(refusal, source=source) for refusal, _ in found],
         )
         self.key = key
         self.where = where
@@ -1312,5 +1454,12 @@ def resolve_generation_settings(
     for layers in (project_defaults, chat_defaults):
         for layer in layers:
             resolved.update(compatible_stored_settings(layer, allowed_request_fields))
-    resolved.update(validate_settings(turn_overrides or {}, allowed_request_fields))
-    return validate_settings(resolved, all_fields)
+    try:
+        resolved.update(validate_settings(turn_overrides or {}, allowed_request_fields))
+        return validate_settings(resolved, all_fields)
+    except SettingRefused as refused:
+        # A turn's own values are refused where they are read, before this. A
+        # refusal here is of a value from somewhere else - a recipe, or the
+        # workflow's own default - that cannot be named as the request's, so
+        # it keeps its words and names no setting.
+        raise ValueError(str(refused)) from None

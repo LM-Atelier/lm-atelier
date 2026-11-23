@@ -18,6 +18,7 @@ export type * from "./enlargementTypes";
 export type * from "./recipeDraftTypes";
 export type * from "./workspaceLockTypes";
 export type * from "./backupArchiveTypes";
+export type * from "./settingRefusalTypes";
 import type { PriorTurnEditConfiguration } from "./priorTurnEditTypes";
 
 import type { ComposerPromptSource } from "./composerPromptSource";
