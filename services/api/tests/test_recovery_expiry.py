@@ -226,7 +226,7 @@ async def test_shutdown_keeps_the_chat_lock_until_the_database_thread_finishes(
     started, release = threading.Event(), threading.Event()
     original = recovery_maintenance._purge
 
-    def pause(candidate: _Candidate, now: datetime) -> bool:
+    def pause(candidate: _Candidate, now: datetime) -> str | None:
         started.set()
         assert release.wait(3)
         return original(candidate, now)
