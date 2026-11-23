@@ -1250,6 +1250,43 @@ def compatible_stored_settings(
     return compatible
 
 
+def _whole(value: object) -> str:
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+class SavedSizeUnsupported(ValueError):
+    """A size saved on a profile, preset, project or chat that the turn's workflow cannot make.
+
+    Saved layers are otherwise read leniently, value by value, by
+    `compatible_stored_settings`. A size is not dropped that way: the
+    workflow's own width beside a saved height is a picture nobody asked for,
+    and nothing would say so. The message names where the size is saved and
+    the sizes the workflow makes.
+    """
+
+    def __init__(self, key: str, value: object, field: SettingField, where: str) -> None:
+        if field.choices:
+            span = f"{', '.join(_whole(choice) for choice in field.choices)} px"
+        elif field.minimum is not None and field.maximum is not None:
+            span = f"{_whole(field.minimum)} to {_whole(field.maximum)} px"
+        elif field.maximum is not None:
+            span = f"up to {_whole(field.maximum)} px"
+        elif field.minimum is not None:
+            span = f"from {_whole(field.minimum)} px"
+        else:
+            span = "only the sizes it offers"
+        if field.multiple_of is not None and not field.choices:
+            span += f", in steps of {_whole(field.multiple_of)}"
+        super().__init__(
+            f"The {key} of {_whole(value)} px saved {where} is not one this workflow makes "
+            f"({span}). Change it there, or choose another workflow."
+        )
+        self.key = key
+        self.where = where
+
+
 def resolve_generation_settings(
     fields: Iterable[SettingField],
     *,

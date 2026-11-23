@@ -68,7 +68,11 @@ from .outpaint_workflows import OUTPAINT_SETTING_KEY, extends_by_nothing
 from .picture_shape import media_runtime_reads
 from .routing import ModalityRouter
 from .schemas import SettingField, TurnRequest
-from .settings_registry import WORKFLOW_LORA_OVERRIDES_SETTING_KEY, validate_settings
+from .settings_registry import (
+    WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
+    SavedSizeUnsupported,
+    validate_settings,
+)
 from .source_fit_image import MAX_SOURCE_BYTES, MAX_SOURCE_PIXELS
 from .source_fit_preview import source_fit_capability
 from .workflow_edit_calibration import safe_workflow_edit_calibration
@@ -138,6 +142,9 @@ REFUSAL_MESSAGES: Final = {
     ),
     "remix-edit-unusable": (
         "This workflow does not change a picture it is given in a way a remix can check."
+    ),
+    "remix-size-unsupported": (
+        "A size saved for this conversation or its model is not one this workflow makes."
     ),
 }
 #: Where a remixed run keeps which picture and choices it came from.
@@ -882,6 +889,8 @@ async def _resolve(
             fields,
             workflow_revision=chosen_revision,
         )
+    except SavedSizeUnsupported:
+        raise _Refused("remix-size-unsupported") from None
     except (ValueError, TypeError, OverflowError):
         raise _Refused(unusable) from None
     if layers.mask is not None or layers.relight is not None:

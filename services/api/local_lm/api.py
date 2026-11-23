@@ -735,6 +735,7 @@ from .schemas import (
 from .security import SessionSecurity
 from .settings_registry import (
     WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
+    SavedSizeUnsupported,
     defaults,
     validate_settings,
     validate_workflow_input_schema,
@@ -4545,6 +4546,9 @@ async def queue_prompt_batch(
     except WorkflowLoraAdmissionError as exc:
         session.rollback()
         raise api_error(409 if exc.conflict else 422, exc.code, str(exc)) from exc
+    except SavedSizeUnsupported as exc:
+        session.rollback()
+        raise api_error(422, "turn-size-unsupported", str(exc)) from exc
     except ValueError as exc:
         session.rollback()
         raise api_error(422, "generation-settings-invalid", str(exc)) from exc
@@ -5260,6 +5264,8 @@ async def _accept_turn(
             "The selected enlargement workflow is no longer available. Refresh Enhance "
             "before applying this edit.",
         ) from None
+    except SavedSizeUnsupported as exc:
+        raise api_error(422, "turn-size-unsupported", str(exc)) from exc
     except ValueError as exc:
         recipe_error = workflow_use_case_error(exc)
         if recipe_error is not None:
@@ -15467,6 +15473,8 @@ async def preview_chat_upscale(
         raise api_error(
             404, "upscale-preview-not-found", "The conversation or source image is unavailable."
         ) from None
+    except SavedSizeUnsupported as exc:
+        raise api_error(422, "turn-size-unsupported", str(exc)) from None
     except ValueError as exc:
         recipe_error = workflow_use_case_error(exc)
         if recipe_error is not None:
