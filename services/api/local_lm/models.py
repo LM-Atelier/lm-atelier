@@ -793,6 +793,28 @@ class ResponseRevisionPart(TimestampMixin, Base):
     artifact: Mapped[Artifact | None] = relationship()
 
 
+class ChatCreationKey(Base):
+    """Which chat a create request with this key made, so a retried create returns it.
+
+    It carries no foreign key on purpose. A key is neither work nor part of the
+    conversation, so it stays out of the chat's recovery graph and out of what
+    makes a chat look busy, and it outlives its chat: once that chat is
+    permanently deleted, the next create with the key makes a new one.
+    """
+
+    __tablename__ = "chat_creation_keys"
+    __table_args__ = (
+        CheckConstraint(
+            "length(idempotency_key) BETWEEN 1 AND 200 AND instr(idempotency_key, char(0)) = 0",
+            name="ck_chat_creation_key",
+        ),
+    )
+
+    idempotency_key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    chat_id: Mapped[str] = mapped_column(String(40), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class TurnCreationClaim(Base):
     """Short-lived database lease that deduplicates turn planning across orchestrators."""
 
