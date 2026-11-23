@@ -212,6 +212,16 @@ class ResourceScheduler:
             try:
                 await self._release_job(job_id, claim.token, group)
                 released = True
+            except OperationalError as error:
+                # A held database leaves the row naming this token, which the
+                # next pass clears as an abandoned claim. The execution's own
+                # outcome stands: a release that cannot write yet must not
+                # replace it, least of all a success.
+                if not database_is_contended(error):
+                    raise
+                logger.info(
+                    "Job %s keeps its claim until another writer releases the database", job_id
+                )
             finally:
                 if not released:
                     # The row still names this token although the lease is
@@ -383,12 +393,16 @@ class ResourceScheduler:
         # it once more would only hold this job up behind the same answer.
         released_held_back = False
         while True:
-            for expired_job_id in self._expire_foreign_claims(group):
-                await self._publish_job(expired_job_id)
             changed = False
             should_try_claim = False
             admission_due = False
             try:
+                # Inside the try with everything else this pass writes: clearing
+                # an old claim is a write, and a database another writer holds
+                # is a reason to wait for the next pass, never to fail a job
+                # that has not started.
+                for expired_job_id in self._expire_foreign_claims(group):
+                    await self._publish_job(expired_job_id)
                 with self.session_factory() as session:
                     job = session.get(Job, job_id)
                     if not job or job.status in _TERMINAL_STATUSES:
@@ -915,8 +929,16 @@ class ResourceScheduler:
             jobs = session.scalars(
                 select(Job).where(
                     Job.queue_group == group,
+                    # A paused job keeps a claim its lease could not clear, from
+                    # this dispatcher's release or a dead one's, and nothing else
+                    # clears it: the group would count it as running for good.
                     Job.status.in_(
-                        [JobStatus.QUEUED.value, JobStatus.RUNNING.value, *_TERMINAL_STATUSES]
+                        [
+                            JobStatus.QUEUED.value,
+                            JobStatus.RUNNING.value,
+                            JobStatus.PAUSED.value,
+                            *_TERMINAL_STATUSES,
+                        ]
                     ),
                     Job.claim_owner.is_not(None),
                     or_(
@@ -936,8 +958,9 @@ class ResourceScheduler:
             for job in jobs:
                 if job.claim_owner:
                     cleared_tokens.append(job.claim_owner)
-                if job.status in _TERMINAL_STATUSES:
-                    # The result is settled; only an abandoned handoff remains.
+                if job.status in _TERMINAL_STATUSES or job.status == JobStatus.PAUSED.value:
+                    # The result is settled, or the job waits for someone to
+                    # resume it; only an abandoned handoff remains.
                     job.claim_owner = None
                     job.claim_expires_at = None
                     job.heartbeat_at = None
