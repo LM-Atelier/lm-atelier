@@ -61,8 +61,14 @@ async function scrollToTop(page: Page) {
 }
 
 for (const width of [1280, 390]) {
-  for (const loading of [false, true]) {
-    test(`keeps the conversation being read when another window sends a message ${loading ? "while older messages load" : "after older messages loaded"} at width ${width}`, async ({ browser, page, request }) => {
+  for (const { loading, laggingContext } of [
+    { loading: false, laggingContext: false },
+    { loading: true, laggingContext: false },
+    { loading: false, laggingContext: true },
+  ]) {
+    const stage = laggingContext ? "while response status reads lag"
+      : loading ? "while older messages load" : "after older messages loaded";
+    test(`keeps the conversation being read when another window sends a message ${stage} at width ${width}`, async ({ browser, page, request }) => {
       test.setTimeout(180_000);
       const headers = await session(request);
       const created = await request.post("/api/chats", { headers,
@@ -70,6 +76,7 @@ for (const width of [1280, 390]) {
       expect(created.status()).toBe(201);
       const { id } = await created.json() as { id: string };
       const other = await browser.newPage();
+      let release = () => {};
       await withScenarioCleanup(async () => {
         for (let index = 0; index < 43; index++) {
           expect((await request.post(`/api/chats/${id}/turns`, { headers,
@@ -85,7 +92,6 @@ for (const width of [1280, 390]) {
         await scrollToTop(page);
         let readingText = "Notebook entry 23.";
         let reading = page.locator(".message.user").filter({ hasText: readingText });
-        let release = () => {};
         if (loading) {
           // The older page is slow, as it can be on a busy machine.
           const held = new Promise<void>((done) => { release = done; });
@@ -105,6 +111,14 @@ for (const width of [1280, 390]) {
         const readingTop = (await reading.boundingBox())!.y;
         const before = await layout(page, readingText);
 
+        if (laggingContext) {
+          await page.route(`**/api/chats/${id}/context**`, async (route) => {
+            const response = await route.fetch();
+            const context = await response.json() as Record<string, unknown>;
+            await route.fulfill({ response, json: { ...context, has_pending_response: true } });
+          });
+        }
+
         const composer = other.getByRole("textbox", { name: "Message", exact: true });
         await composer.fill("A message from another window.");
         await composer.press("Enter");
@@ -113,6 +127,9 @@ for (const width of [1280, 390]) {
         release();
 
         await expect(messages).toHaveCount(82);
+        if (laggingContext) {
+          await expect(page.getByRole("button", { name: "Start a new thread here" }).first()).toHaveAttribute("aria-disabled", "true");
+        }
         await expect(reading).toBeVisible();
         try {
           await expect.poll(async () => Math.abs((await reading.boundingBox())!.y - readingTop)).toBeLessThan(3);
@@ -126,9 +143,14 @@ After: ${JSON.stringify(await layout(page, readingText))}`,
         await expect(page.locator(".transcript-history-button")).toBeFocused();
         expect(errors).toEqual([]);
       }, async () => {
-        await other.close();
-        await page.goto("about:blank");
-        await permanentlyDeleteChat(request, id, headers);
+        release();
+        await withScenarioCleanup(async () => {
+          await page.unrouteAll({ behavior: "wait" });
+        }, async () => {
+          await other.close();
+          await page.goto("about:blank");
+          await permanentlyDeleteChat(request, id, headers);
+        });
       });
     });
   }
