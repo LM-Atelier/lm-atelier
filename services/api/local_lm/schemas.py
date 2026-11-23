@@ -2398,6 +2398,91 @@ WorkflowSelectionResponseMode = Literal[
     "revision",
     "legacy",
 ]
+#: Which settings size what a workflow revision makes; see `WorkflowSizeOut`.
+WorkflowSizeControl = Literal[
+    "width_height",
+    "aspect_ratio",
+    "aspect_ratio_and_width_height",
+    "workflow",
+]
+#: A value a size control takes: a number or a string, sent back exactly as given.
+WorkflowSizeValue = int | float | str
+
+
+class WorkflowSizeSideOut(ApiModel):
+    """One side of a size, under the key a turn's settings name it by.
+
+    A side takes a whole number from `minimum` to `maximum`, or, when there are
+    `choices`, only one of them. Its default and bounds are integers where the
+    side takes whole numbers, so any of them can be sent back as it is.
+    `multiple_of` is enforced: a turn whose value is not a multiple of it is
+    refused. `step` is the increment the workflow's own control moves by. The
+    turn does not check it, so a value between steps is accepted, but the
+    workflow may round such a value itself, so a size chosen on the step is the
+    one that comes back.
+    """
+
+    key: str
+    default: WorkflowSizeValue | None
+    minimum: int | float | None
+    maximum: int | float | None
+    multiple_of: int | float | None
+    step: int | float | None
+    choices: list[WorkflowSizeValue]
+
+
+class WorkflowSizeChoiceOut(ApiModel):
+    """A size chosen from a menu, such as an aspect ratio, under the key a turn sends.
+
+    Only the listed choices are accepted. The pixels each one makes are the
+    workflow's own, so nothing here promises a width or a height.
+    """
+
+    key: str
+    default: WorkflowSizeValue | None
+    choices: list[WorkflowSizeValue]
+
+
+class WorkflowSizeNumberOut(ApiModel):
+    """A number that scales a chosen shape, such as a pixel budget, under its turn key.
+
+    Its bounds read as a side's do: `multiple_of` is enforced and `step` is
+    only the increment the workflow's own control moves by. A number that
+    takes whole values, such as a rounding multiple, reports integers; one
+    that takes fractions, such as a pixel budget, reports them as they are.
+    """
+
+    key: str
+    default: int | float | None
+    minimum: int | float | None
+    maximum: int | float | None
+    multiple_of: int | float | None
+    step: int | float | None
+
+
+class WorkflowSizeOut(ApiModel):
+    """Which settings size what one workflow revision makes, as a turn checks them.
+
+    `control` names what to send. `width_height` takes `width` and `height`.
+    Each side is described on its own: a side the workflow fixes is null, and a
+    turn sends only the sides that are present. `aspect_ratio` takes
+    `aspect_ratio`, with `megapixels` and `round_to_multiple` when the workflow
+    offers them. A workflow whose size node offers both reports
+    `aspect_ratio_and_width_height`, with the same rule for its sides, and how
+    that node combines them is its own. `workflow` means no single control sizes
+    the result - the graph fixes the size, or several inputs share it - so a
+    turn sends none. Each key is the one the turn's settings use, which can be a
+    generated name rather than the plain one. Nothing is snapped or clamped: a
+    value the control does not offer is refused, not adjusted.
+    """
+
+    version: Literal[1]
+    control: WorkflowSizeControl
+    width: WorkflowSizeSideOut | None = None
+    height: WorkflowSizeSideOut | None = None
+    aspect_ratio: WorkflowSizeChoiceOut | None = None
+    megapixels: WorkflowSizeNumberOut | None = None
+    round_to_multiple: WorkflowSizeNumberOut | None = None
 
 
 class WorkflowFamilyVariantOut(ApiModel):
@@ -2415,6 +2500,8 @@ class WorkflowFamilyVariantOut(ApiModel):
     setup_resolution: Literal["reviewed_download_available", "attention_required"] | None = None
     install_offer: WorkflowInstallOfferOut | None = None
     install_progress: WorkflowInstallProgressOut | None = None
+    # Filled only on the rows a response returns, from the revision reported here.
+    size: WorkflowSizeOut | None = None
 
 
 class WorkflowReadyRevisionOut(ApiModel):
@@ -2425,6 +2512,7 @@ class WorkflowReadyRevisionOut(ApiModel):
     revision_id: str
     revision_version: int
     operation: Operation
+    size: WorkflowSizeOut | None = None
 
 
 class WorkflowFamilyPreferenceOut(ApiModel):
