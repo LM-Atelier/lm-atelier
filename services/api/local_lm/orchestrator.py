@@ -7839,6 +7839,39 @@ class ConversationOrchestrator:
                 else:
                     await self.processes.start_media(**guarded)
 
+    def _prepare_media_run(
+        self, run_id: str
+    ) -> tuple[str, WorkflowActivationLaunchScope | None] | None:
+        """The run's media engine and, for ComfyUI, its revalidated activation.
+
+        None when the run is gone. Uses a session of its own, so it can run in a
+        worker thread. A refused activation is recorded before it raises.
+        """
+
+        with self.session_factory() as session:
+            run = session.get(Run, run_id)
+            if not run:
+                return None
+            accepted_inputs = accepted_context(session, run)
+            media_engine = (
+                accepted_inputs.media_engine
+                if accepted_inputs is not None
+                else self.engines.settings.media_engine
+            )
+            if media_engine != self.engines.settings.media_engine:
+                raise RuntimeError("Accepted media engine is no longer available.")
+            if media_engine != "comfyui":
+                return media_engine, None
+            try:
+                activation_scope = self._media_activation_scope(
+                    session, run, accepted_inputs=accepted_inputs
+                )
+            except Exception:
+                session.commit()
+                raise
+            session.commit()
+            return media_engine, activation_scope
+
     def _media_activation_scope(
         self,
         session: Session,
@@ -8436,28 +8469,13 @@ class ConversationOrchestrator:
         return replace(request, mask_content=mask), None
 
     async def _execute_media(self, job_id: str, run_id: str, claim: JobClaim) -> str | None:
-        activation_scope: WorkflowActivationLaunchScope | None = None
-        with self.session_factory() as session:
-            run = session.get(Run, run_id)
-            if not run:
-                return None
-            accepted_inputs = accepted_context(session, run)
-            media_engine = (
-                accepted_inputs.media_engine
-                if accepted_inputs is not None
-                else self.engines.settings.media_engine
-            )
-            if media_engine != self.engines.settings.media_engine:
-                raise RuntimeError("Accepted media engine is no longer available.")
-            if media_engine == "comfyui":
-                try:
-                    activation_scope = self._media_activation_scope(
-                        session, run, accepted_inputs=accepted_inputs
-                    )
-                except Exception:
-                    session.commit()
-                    raise
-                session.commit()
+        # Revalidating a workflow's activation checks every model file it binds,
+        # and the first check of a file reads all of its bytes, so it runs in a
+        # worker thread rather than stopping the event loop for the read.
+        prepared = await asyncio.to_thread(self._prepare_media_run, run_id)
+        if prepared is None:
+            return None
+        media_engine, activation_scope = prepared
         if media_engine == "comfyui":
             await self._ensure_media_worker(
                 claim=claim,

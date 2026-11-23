@@ -27,18 +27,28 @@ def _changed_install() -> Never:
 
 def _identity(path: Path) -> _FileIdentity:
     try:
-        value = path.stat()
-        changed = value.st_ctime_ns
-        if sys.platform == "win32" and stat.S_ISREG(value.st_mode):
-            # Windows stat exposes creation time as ctime. Read the actual
-            # change time so restoring mtime cannot conceal rewritten bytes.
-            with path.open("rb") as opened:
-                value = os.fstat(opened.fileno())
-                changed = _windows_change_time(opened.fileno())
+        return file_identity(path)
     except OSError as exc:
         raise activations.WorkflowActivationError(
             "dependency_content_drift", "Selected workflow files are unavailable"
         ) from exc
+
+
+def file_identity(path: Path) -> _FileIdentity:
+    """A file's device, file number, mode, size, modification and change times.
+
+    Writing to the file, or moving or copying another file over it, changes at
+    least one of them. Raises OSError when the file cannot be read.
+    """
+
+    value = path.stat()
+    changed = value.st_ctime_ns
+    if sys.platform == "win32" and stat.S_ISREG(value.st_mode):
+        # Windows stat exposes creation time as ctime. Read the actual
+        # change time so restoring mtime cannot conceal rewritten bytes.
+        with path.open("rb") as opened:
+            value = os.fstat(opened.fileno())
+            changed = _windows_change_time(opened.fileno())
     return (
         value.st_dev,
         value.st_ino,

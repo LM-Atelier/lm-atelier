@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import threading
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
@@ -63,6 +66,13 @@ MAX_NODE_TYPE_LENGTH = 200
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _RESOLVER_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$")
+#: How many files the process remembers having hashed to their expected digest.
+#: Past this, the least recently checked is read again when next needed.
+MAX_REMEMBERED_FILE_DIGESTS = 4096
+#: Each remembered file, by its resolved path and the digest its bytes matched,
+#: with the identity the file had when they matched.
+_matched_files: OrderedDict[tuple[str, str], tuple[int, int, int, int, int, int]] = OrderedDict()
+_matched_files_lock = threading.Lock()
 
 
 class WorkflowActivationError(ValueError):
@@ -1257,19 +1267,45 @@ def _relative_path(value: object, *, allow_root: bool) -> str:
 
 
 def _verify_file_digest(path: Path, expected: str, message: str) -> None:
+    """Refuse unless a file's bytes hash to `expected`, reading them only when needed.
+
+    A file whose bytes matched `expected` before, and whose identity (device,
+    file number, mode, size, modification and change times) is unchanged since,
+    has not been written to or replaced, so its bytes are not read again: every
+    run of a workflow re-verifies its model files, and those can be gigabytes.
+    A file read now must keep one identity throughout the read.
+    """
+
+    from .workflow_activation_files import file_identity
+
+    remembered = (os.fspath(path), expected)
     try:
-        before = path.stat()
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                digest.update(chunk)
-        after = path.stat()
+        before = file_identity(path)
+        with _matched_files_lock:
+            if _matched_files.get(remembered) == before:
+                _matched_files.move_to_end(remembered)
+                return
+        actual = _file_digest(path)
+        after = file_identity(path)
     except OSError as exc:
         raise WorkflowActivationError("dependency_content_drift", message) from exc
-    before_identity = (before.st_size, before.st_mtime_ns)
-    after_identity = (after.st_size, after.st_mtime_ns)
-    if before_identity != after_identity or digest.hexdigest() != expected:
+    if before != after or actual != expected:
         raise WorkflowActivationError("dependency_content_drift", message)
+    with _matched_files_lock:
+        _matched_files[remembered] = after
+        _matched_files.move_to_end(remembered)
+        while len(_matched_files) > MAX_REMEMBERED_FILE_DIGESTS:
+            _matched_files.popitem(last=False)
+
+
+def _file_digest(path: Path) -> str:
+    """The SHA-256 of a file's bytes, read a megabyte at a time."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _identity_text(identity: dict[str, Any], key: str) -> str:
