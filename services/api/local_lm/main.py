@@ -32,6 +32,7 @@ from .api import (
     shutdown_registry_preparations,
 )
 from .api_errors import register_api_error_handler
+from .artifact_deletion_authority import ArtifactReferenceIndexStale
 from .artifact_reference_errors import register_artifact_reference_error_handler
 from .artifact_reference_index import maintain_reference_index, start_reference_index
 from .artifacts import (
@@ -477,6 +478,10 @@ RETENTION_BATCH_PAUSE_SECONDS = 1.0
 # that keeps a pathological store from sweeping forever.
 RETENTION_LOCK_RETRIES = 5
 RETENTION_MAX_PASSES = 20
+# Rebuilding the artifact reference index takes minutes on a large store, so
+# the sweep waits for it longer than for a writer.
+RETENTION_INDEX_RETRIES = 120
+RETENTION_INDEX_PAUSE_SECONDS = 5.0
 
 
 RETENTION_PROGRESS_WARN_SECONDS = 30.0
@@ -550,6 +555,7 @@ async def sweep_artifact_retention(
     batch_deletions: int | None = None,
     pause_seconds: float | None = None,
     batch_seconds: float | None = None,
+    index_ready: asyncio.Event | None = None,
 ) -> None:
     """Run retention after the port opens, committing one bounded batch at a time.
 
@@ -641,9 +647,14 @@ async def sweep_artifact_retention(
         )
         return summary
 
+    if index_ready is not None:
+        # Every deletion is proven from the reference index, so the sweep waits
+        # for it; on a large store just upgraded, it is rebuilt first.
+        await index_ready.wait()
     started = time.monotonic()
     logger.info("Artifact retention sweep started")
     batches = 0
+    behind = 0
     examined = 0
     removed_rows = 0
     removed_orphan_files = 0
@@ -682,6 +693,20 @@ async def sweep_artifact_retention(
                     removed_rows += summary.removed_row_count
                     removed_orphan_files += summary.removed_orphan_file_count
                 raise
+            except ArtifactReferenceIndexStale:
+                # The index is being rebuilt or has rows due their check; its
+                # upkeep finishes either without the sweep's help.
+                behind += 1
+                if behind > RETENTION_INDEX_RETRIES:
+                    logger.error(
+                        "Artifact retention sweep gave up after %s consecutive waits on the "
+                        "artifact reference index; it runs again at the next start",
+                        behind - 1,
+                    )
+                    return
+                logger.info("Artifact retention batch waited on the artifact reference index")
+                await asyncio.sleep(RETENTION_INDEX_PAUSE_SECONDS)
+                continue
             except OperationalError as exc:
                 # A user transaction held the writer for longer than
                 # busy_timeout. That is contention, not corruption: wait and
@@ -702,6 +727,7 @@ async def sweep_artifact_retention(
                 await asyncio.sleep(max(pause_seconds, 1.0))
                 continue
             locked_out = 0
+            behind = 0
             batches += 1
             examined += summary.examined_count
             removed_rows += summary.removed_row_count
@@ -832,8 +858,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # After recovery, never before the yield: recovery removes the
             # preview parts of interrupted jobs, which is what makes those
             # previews eligible, and the port must not wait on any of it.
+            index_ready = asyncio.Event()
             retention_sweep = asyncio.create_task(
-                sweep_artifact_retention(services.artifacts, active_settings),
+                sweep_artifact_retention(
+                    services.artifacts, active_settings, index_ready=index_ready
+                ),
                 name="artifact-retention-sweep",
             )
             # Exposed so a caller that needs the sweep's result - a test, or a
@@ -847,7 +876,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 lock_when_idle(services.workspace_lock), name="workspace-idle-lock"
             )
             reference_index = asyncio.create_task(
-                maintain_reference_index(lambda: SessionLocal(bind=index_bind)),
+                maintain_reference_index(lambda: SessionLocal(bind=index_bind), ready=index_ready),
                 name="artifact-reference-index",
             )
             background = (

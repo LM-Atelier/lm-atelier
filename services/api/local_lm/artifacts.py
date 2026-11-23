@@ -26,6 +26,7 @@ from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
 from .artifact_deletion_authority import (
+    ArtifactReferenceSnapshot,
     activate_artifact_deletion_proof,
     artifact_deletion_proof_references,
     artifact_metadata_retains,
@@ -35,13 +36,13 @@ from .artifact_deletion_authority import (
 )
 from .artifact_library import (
     ArtifactReferenceDataError,
-    artifacts_naming,
     begin_artifact_write_fence,
     fenced_reference_snapshot,
     metadata_referrers,
     referenced_artifact_ids,
 )
 from .artifact_library_schema import ARTIFACT_METADATA_REFERENCE_KEYS
+from .artifact_reference_index import IndexedReferenceSnapshot, drain_after_deletion
 from .config import Settings
 from .domain import ArtifactKind, MessageRole, PartType
 from .filesystem_links import (
@@ -218,6 +219,16 @@ def _removed(anchor: AnchoredDirectory, name: str, *, counted: int, cutoff: date
     except (AnchoredDirectoryError, OSError):
         return False
     return True
+
+
+#: The columns a retention pass decides with, read without building objects.
+_RETENTION_COLUMNS: Final = (
+    Artifact.id,
+    Artifact.created_at,
+    Artifact.favorite,
+    Artifact.size_bytes,
+    Artifact.metadata_json,
+)
 
 
 # Automatic and manual cleanup share a count ceiling and deletion-phase clock.
@@ -1308,13 +1319,6 @@ class ArtifactStore:
         # startup path raising is the application failing to start.
         if artifact_metadata_retains(session, retained, artifact.id):
             return False
-        # Being unreachable from the walk is not the same as being
-        # deletable. A video that is itself unreferenced still NAMES its
-        # browser proxy in metadata, and the walk never reaches that
-        # naming because it does not enter an unreferenced artifact - but
-        # both the deletion proof and the delete trigger refuse while any
-        # surviving row names this one. Attempting it raises, and on the
-        # startup path raising is the application failing to start.
         try:
             self._delete_artifact(session, artifact, references=retained)
         except OSError as exc:
@@ -1393,13 +1397,29 @@ class ArtifactStore:
         reclaimed_bytes = 0
         truncated = False
         phase("load-artifact-rows")
-        ordered = session.scalars(select(Artifact).order_by(Artifact.created_at)).all()
-        # Who names whom, from rows already loaded above: no extra query, and
-        # bounded by this sweep's own working set rather than by the store.
-        phase("metadata-references")
-        referrers = metadata_referrers(ordered)
+        ordered: Iterable[Any]
+        if isinstance(referenced, ArtifactReferenceSnapshot):
+            # The order first, then each artifact's columns as the pass
+            # reaches it. Reading and sorting every row with its metadata
+            # cost seconds on a large store, all of it under the writer, while
+            # a batch that stops early needs only the rows it examined.
+            ordered = self._rows_in_order(session)
+            phase("metadata-references")
+            # Read once, to ask about every artifact; the proof asks the same
+            # snapshot, so the pass and the proof cannot disagree.
+            retained: AbstractSet[str] = frozenset(referenced)
+            referrers = self._namers_by_name(referenced)
+        else:
+            # A preview holds no writer and has to see every row to say who
+            # names whom, so it reads them all.
+            ordered = session.execute(
+                select(*_RETENTION_COLUMNS).order_by(Artifact.created_at, Artifact.id)
+            ).all()
+            phase("metadata-references")
+            retained = referenced
+            referrers = metadata_referrers(ordered)
         removed_ids: set[str] = set()
-        metadata_updates: list[tuple[Artifact, dict[str, Any]]] = []
+        metadata_updates: list[tuple[str, dict[str, Any]]] = []
         phase("examine-artifacts")
         for artifact in ordered:
             examined_count += 1
@@ -1407,10 +1427,10 @@ class ArtifactStore:
             # A favorite pins against the automatic sweep exactly like a live
             # reference: never marked, never removed here. Explicit deletion
             # is untouched - a user deleting a favorite means it.
-            if artifact.id in referenced or artifact.favorite:
+            if artifact.id in retained or artifact.favorite:
                 if "unreferenced_at" in metadata and not dry_run:
                     metadata.pop("unreferenced_at", None)
-                    metadata_updates.append((artifact, metadata))
+                    metadata_updates.append((artifact.id, metadata))
                 continue
             temporary = bool(metadata.get("temporary_preview") or metadata.get("intermediate"))
             age = current - self._aware(artifact.created_at)
@@ -1437,7 +1457,10 @@ class ArtifactStore:
                 if not dry_run:
                     phase("delete-artifact")
                     proof = mint_artifact_deletion_proof(session, {artifact.id}, referenced)
-                    self._delete_artifact(session, artifact, proof=proof)
+                    held = session.get(Artifact, artifact.id)
+                    if held is None:
+                        raise ValueError("This artifact changed while it was being removed.")
+                    self._delete_artifact(session, held, proof=proof)
                     phase("examine-artifacts")
                 removed_count += 1
                 reclaimed_bytes += artifact.size_bytes
@@ -1449,11 +1472,20 @@ class ArtifactStore:
                     marked_count += 1
                     if not dry_run:
                         metadata["unreferenced_at"] = current.isoformat()
-                        metadata_updates.append((artifact, metadata))
+                        metadata_updates.append((artifact.id, metadata))
         if not dry_run:
             phase("flush-metadata")
-            for artifact, metadata in metadata_updates:
-                artifact.metadata_json = metadata
+            updates = dict(metadata_updates)
+            # Every row is read before any is changed, so no read flushes a
+            # change outside the snapshot this flush is lent below.
+            held_rows: list[Artifact] = []
+            with session.no_autoflush:
+                for chunk in batched(sorted(updates), _STAGED_LOOKUP_CHUNK):
+                    held_rows.extend(
+                        session.scalars(select(Artifact).where(Artifact.id.in_(chunk)))
+                    )
+            for held in held_rows:
+                held.metadata_json = updates[held.id]
             # Marking `unreferenced_at` makes an artifact dirty, and if its
             # metadata names a poster then _pending_json_reference_ids is
             # non-empty here, so the listener walks the graph again on this final
@@ -1499,6 +1531,41 @@ class ArtifactStore:
             truncated=truncated,
         )
 
+    @staticmethod
+    def _rows_in_order(session: Session) -> Iterator[Any]:
+        """Artifacts oldest first, each read with the columns retention decides with.
+
+        Ids are read and sorted on their own, then the rest a chunk at a time,
+        so a pass that stops early reads only what it examined. An artifact
+        removed before its chunk is read is skipped, as a fresh read would.
+        """
+
+        order = list(
+            session.scalars(select(Artifact.id).order_by(Artifact.created_at, Artifact.id))
+        )
+        for chunk in batched(order, _STAGED_LOOKUP_CHUNK):
+            rows = {
+                row.id: row
+                for row in session.execute(
+                    select(*_RETENTION_COLUMNS).where(Artifact.id.in_(chunk))
+                )
+            }
+            for artifact_id in chunk:
+                row = rows.get(artifact_id)
+                if row is not None:
+                    yield row
+
+    @staticmethod
+    def _namers_by_name(references: ArtifactReferenceSnapshot) -> dict[str, set[str]]:
+        """Which surviving artifacts name each artifact, from the snapshot itself."""
+
+        namers: dict[str, set[str]] = {}
+        if isinstance(references, IndexedReferenceSnapshot):
+            for namer, names in references.namings().items():
+                for name in names:
+                    namers.setdefault(name, set()).add(namer)
+        return namers
+
     def delete_library_artifact(
         self,
         session: Session,
@@ -1533,23 +1600,25 @@ class ArtifactStore:
 
         removed_count = 1
         reclaimed_bytes = artifact.size_bytes
-        self._delete_artifact(session, artifact)
+        # One snapshot for the item and the poster or proxy it names: each
+        # proven deletion records itself on it, so it stays current between them.
+        references = self.referenced_artifact_ids(session, for_deletion=True)
+        self._delete_artifact(session, artifact, references=references)
 
-        referenced = self.referenced_artifact_ids(session)
         for linked_id in linked_ids:
             linked = session.get(Artifact, linked_id)
-            if not linked or linked.id in referenced:
+            if not linked or linked.id in references:
                 continue
             # The parent is already deleted above, so anything still naming this
             # poster or proxy is a DIFFERENT artifact - ingest deduplicates on
             # sha256, so two videos with identical extracted frames share one
-            # poster row. referenced_artifact_ids does not see that referrer when
-            # it is itself unreferenced, but the delete trigger does, and refuses.
-            if artifacts_naming(session, linked.id):
+            # poster row. Retention does not see that namer when it is itself
+            # unreferenced, but the deletion proof does, and refuses.
+            if artifact_metadata_retains(session, references, linked.id):
                 continue
             removed_count += 1
             reclaimed_bytes += linked.size_bytes
-            self._delete_artifact(session, linked)
+            self._delete_artifact(session, linked, references=references)
         # Revision parts are internal snapshots of the same user-visible message
         # reference. Clear them as well, but do not inflate the public reference
         # count with implementation details.
@@ -1629,7 +1698,7 @@ class ArtifactStore:
                 )
             ):
                 continue
-            if artifact.id in self.referenced_artifact_ids(session):
+            if artifact.id in self.referenced_artifact_ids(session, for_deletion=True):
                 continue
             _references, removed_count, _reclaimed_bytes = self.delete_library_artifact(
                 session, artifact
@@ -1676,6 +1745,7 @@ class ArtifactStore:
             session.delete(artifact)
             with activate_artifact_deletion_proof(session, selected_proof):
                 session.flush()
+                drain_after_deletion(session)
                 record_artifact_deletion(session, selected_proof)
             return
         staged: Path | None = None
@@ -1693,6 +1763,10 @@ class ArtifactStore:
             session.delete(artifact)
             with activate_artifact_deletion_proof(session, selected_proof):
                 session.flush()
+                # The database checks the next proven deletion against an
+                # index with nothing left to drain, so this one's own entries
+                # go before it is recorded as done.
+                drain_after_deletion(session)
                 record_artifact_deletion(session, selected_proof)
         except Exception:
             if staged is not None:

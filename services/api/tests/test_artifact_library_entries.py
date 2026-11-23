@@ -25,6 +25,7 @@ from local_lm.artifact_library import (
     library_entry_id,
     referenced_artifact_ids,
     set_library_favorite,
+    walk_references,
 )
 from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
@@ -281,7 +282,7 @@ def test_reference_row_cap_fails_before_parsing(
     )
 
     with pytest.raises(ArtifactReferenceDataError, match=f"^{REFERENCE_CORRUPT}$"):
-        referenced_artifact_ids(session)
+        walk_references(session)
 
 
 def test_job_reference_parser_is_bounded_and_keeps_exact_fields(

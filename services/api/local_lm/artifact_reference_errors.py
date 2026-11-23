@@ -3,12 +3,20 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from .artifact_deletion_authority import ArtifactReferenceDataError
+from .artifact_deletion_authority import ArtifactReferenceDataError, ArtifactReferenceIndexStale
 
 
 async def _reference_error_handler(_request: Request, exc: Exception) -> JSONResponse:
     if not isinstance(exc, ArtifactReferenceDataError):
         raise exc
+    if isinstance(exc, ArtifactReferenceIndexStale):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": "artifact-references-indexing",
+                "detail": "Media references are still being indexed. Try again in a moment.",
+            },
+        )
     return JSONResponse(
         status_code=409,
         content={

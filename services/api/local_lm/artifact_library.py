@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import re
+import sqlite3
 from collections.abc import Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from contextlib import contextmanager
@@ -21,17 +22,19 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
+from . import artifact_reference_index as reference_index
 from .artifact_deletion_authority import (
     ArtifactReferenceDataError as ArtifactReferenceDataError,
 )
 from .artifact_deletion_authority import (
+    ArtifactReferenceIndexStale,
+    ArtifactReferenceRefusal,
     active_artifact_deletion_proof,
     artifact_deletion_proof_references,
-    complete_reference_snapshot,
     validate_artifact_deletion_proof,
     validate_complete_reference_snapshot,
 )
-from .artifact_library_schema import ARTIFACT_METADATA_REFERENCE_KEYS
+from .artifact_library_schema import ARTIFACT_METADATA_REFERENCE_KEYS, STORED_JSON_INVALID_SQL
 from .artifact_reference_extractors import (
     MAX_REFERENCE_DEPTH as MAX_REFERENCE_DEPTH,
 )
@@ -68,7 +71,11 @@ from .artifact_reference_extractors import (
 from .artifact_reference_extractors import (
     _work_step_ids as _work_step_ids,
 )
-from .artifact_reference_index import compare_refusal_with_walk, compare_with_walk
+from .artifact_reference_index import (
+    WalkAnswer,
+    form_reference_snapshot,
+    indexed_references,
+)
 from .domain import ArtifactKind, utcnow
 from .models import (
     Artifact,
@@ -701,14 +708,16 @@ def guard_artifact_reference_flush(
             validate_complete_reference_snapshot(session, lent)
             known = cast(AbstractSet[str], lent)
         elif deleted:
-            known = referenced_artifact_ids(session)
+            # The index has not seen this flush's own deletions or writes yet;
+            # the walk reads what the session holds.
+            known = referenced_artifact_ids(session, include_unflushed=True)
         else:
             # The graph answers one question here: whether an artifact this
             # flush deletes is still retained. A flush that deletes none has
             # nothing to ask, and walking the whole store for it held every
             # other writer out for as long as the walk took.
             known = frozenset()
-    if deleted & known:
+    if any(artifact_id in known for artifact_id in deleted):
         raise ArtifactReferenceDataError(REFERENCE_CORRUPT)
     available = {
         value.id for value in session.new if isinstance(value, Artifact) and value.id not in deleted
@@ -763,19 +772,89 @@ def referenced_artifact_ids(
     exclude_message_payload_for: str | None = None,
     exclude_library_membership_for: AbstractSet[str] = frozenset(),
     for_deletion: bool = False,
+    include_unflushed: bool = False,
 ) -> AbstractSet[str]:
     """Return the complete strong-reference graph or fail closed on corrupt JSON.
 
     ``exclude_message_payload_for`` models one selective-removal preview. It
     excludes only that message's owned parts, revision parts, and historical
     references while leaving every independently retained edge in the graph.
-    Only for_deletion validates all stored JSON and binds deletion authority
-    to the current writer reservation. Ordinary publication needs reachability.
-    Library exclusions preview released membership without authorizing byte deletion.
+    Library exclusions preview released membership without authorizing byte
+    deletion. Ordinary publication needs reachability.
+
+    The answer comes from the artifact reference index. With ``for_deletion``
+    inside a transaction it is a snapshot bound to the writer, which a
+    deletion proof is minted from; see ``form_reference_snapshot``. A plain
+    answer is read from the index without writing, and from the walk below
+    only while the index is not current. ``include_unflushed`` asks the walk
+    for what the session holds but has not written, for a flush checking its
+    own pending deletions.
     """
 
     if for_deletion and (exclude_message_payload_for is not None or exclude_library_membership_for):
         raise ValueError("a selective reference preview cannot authorize deletion")
+
+    def walk() -> WalkAnswer:
+        return walk_references(
+            session,
+            exclude_message_payload_for=exclude_message_payload_for,
+            exclude_library_membership_for=exclude_library_membership_for,
+            for_deletion=for_deletion,
+        )
+
+    if include_unflushed:
+        return walk()[0]
+    # Flush exactly as the walk's first query did; inside a flush this is a no-op.
+    session.execute(select(Artifact.id).limit(0))
+    if for_deletion:
+        try:
+            snapshot = form_reference_snapshot(session)
+        except (ArtifactReferenceIndexStale, reference_index.ReferenceIndexUncertified):
+            # Neither says anything about the stored documents, so the walk
+            # has nothing to agree with.
+            raise
+        except ArtifactReferenceDataError:
+            if reference_index.CHECK_AGAINST_WALK:
+                reference_index.compare_refusal(walk)
+            raise
+        if snapshot is not None:
+            if reference_index.CHECK_AGAINST_WALK:
+                reference_index.compare_snapshot(snapshot, walk)
+            return snapshot
+    try:
+        indexed = indexed_references(
+            session.connection(),
+            complete=for_deletion,
+            exclude_message_payload_for=exclude_message_payload_for,
+            exclude_library_membership_for=exclude_library_membership_for,
+        )
+    except ArtifactReferenceDataError:
+        if reference_index.CHECK_AGAINST_WALK:
+            reference_index.compare_refusal(walk)
+        raise
+    if indexed is None:
+        return walk()[0]
+    if reference_index.CHECK_AGAINST_WALK:
+        reference_index.compare_answers(indexed.retained, walk)
+    return indexed.retained
+
+
+def walk_references(
+    session: Session,
+    *,
+    exclude_message_payload_for: str | None = None,
+    exclude_library_membership_for: AbstractSet[str] = frozenset(),
+    for_deletion: bool = False,
+) -> WalkAnswer:
+    """Read every stored reference and follow them: the index's oracle and fallback.
+
+    Returns the retained ids and, with ``for_deletion``, which surviving
+    artifacts name each id, having also run the stored-document check over the
+    whole store. It reads everything, so on a large store it takes seconds and
+    refuses past its row bounds; the index answers the same question from a
+    few indexed reads.
+    """
+
     found: set[str] = set()
     counted_tables = (
         MessagePart,
@@ -888,7 +967,7 @@ def referenced_artifact_ids(
                         retain({linked_id})
                         frontier.append(linked_id)
     if not for_deletion:
-        return frozenset(found)
+        return frozenset(found), None
     referrers: dict[str, set[str]] = {}
     for other_id, metadata_value in session.execute(select(Artifact.id, Artifact.metadata_json)):
         metadata = _mapping(metadata_value)
@@ -896,19 +975,19 @@ def referenced_artifact_ids(
             if key in metadata:
                 for named in _optional_id(metadata[key]):
                     referrers.setdefault(named, set()).add(other_id)
-    try:
-        snapshot = complete_reference_snapshot(session, found, referrers=referrers)
-    except ArtifactReferenceDataError:
-        # Only the stored-document check is left to refuse here, and a current
-        # index refuses exactly the rows it refuses.
-        compare_refusal_with_walk(session.connection())
-        raise
-    # Read-only, so the change counter the snapshot recorded still holds.
-    compare_with_walk(session.connection(), found, referrers)
-    return snapshot
+    # The index refuses a document this check refuses whether or not a deletion
+    # is under way, so the walk it is checked against does too.
+    connection = session.connection()
+    driver = connection.connection.driver_connection
+    if (
+        isinstance(driver, sqlite3.Connection)
+        and connection.exec_driver_sql(STORED_JSON_INVALID_SQL).scalar_one()
+    ):
+        raise ArtifactReferenceRefusal("artifact JSON reference is invalid")
+    return frozenset(found), referrers
 
 
-def metadata_referrers(artifacts: Iterable[Artifact]) -> dict[str, set[str]]:
+def metadata_referrers(artifacts: Iterable[Any]) -> dict[str, set[str]]:
     """Map each named artifact id to the ids of the artifacts naming it.
 
     This answers a different question from ``referenced_artifact_ids``, and the

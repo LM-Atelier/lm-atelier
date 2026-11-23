@@ -53,7 +53,6 @@ if TYPE_CHECKING:
 
     from local_lm.config import Settings
     from sqlalchemy import Engine
-    from sqlalchemy.orm import Session
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 
@@ -1636,7 +1635,7 @@ def calibrate(
 
         def walk() -> AbstractSet[str]:
             with Session(engine) as session:
-                return artifact_library.referenced_artifact_ids(session)
+                return artifact_library.walk_references(session)[0]
 
         def referrers() -> int:
             named: dict[str, set[str]] = {}
@@ -1708,34 +1707,42 @@ def calibrate(
 
 
 def _deletion_walk(engine: Engine) -> tuple[float, float, float]:
-    """One walk with deletion authority, timed whole and at the stored-document check."""
+    """One walk with deletion authority, timed whole and at the stored-document check.
+
+    The walk itself is timed, not the reference index that now answers in its
+    place, so the figures stay comparable with those taken before the index.
+    """
 
     from local_lm import artifact_library
-    from local_lm.artifact_deletion_authority import complete_reference_snapshot
+    from local_lm.artifact_library_schema import STORED_JSON_INVALID_SQL
+    from sqlalchemy import event
     from sqlalchemy.orm import Session
 
     marks: list[float] = []
 
-    def timed(
-        session: Session, values: Iterable[str], *, referrers: dict[str, set[str]]
-    ) -> AbstractSet[str]:
-        marks.append(time.perf_counter())
-        try:
-            return complete_reference_snapshot(session, values, referrers=referrers)
-        finally:
+    def mark(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _many: bool,
+    ) -> None:
+        if statement == STORED_JSON_INVALID_SQL:
             marks.append(time.perf_counter())
 
-    # Replaced where the walk looks it up: the reference module bound the name
-    # when it imported it, so replacing it at its source would time nothing.
-    with (
-        mock.patch.object(artifact_library, "complete_reference_snapshot", timed),
-        Session(engine) as session,
-    ):
-        started = time.perf_counter()
-        artifact_library.begin_artifact_write_fence(session)
-        artifact_library.referenced_artifact_ids(session, for_deletion=True)
-        finished = time.perf_counter()
-        session.rollback()
+    event.listen(engine, "before_cursor_execute", mark)
+    event.listen(engine, "after_cursor_execute", mark)
+    try:
+        with Session(engine) as session:
+            started = time.perf_counter()
+            artifact_library.begin_artifact_write_fence(session)
+            artifact_library.walk_references(session, for_deletion=True)
+            finished = time.perf_counter()
+            session.rollback()
+    finally:
+        event.remove(engine, "before_cursor_execute", mark)
+        event.remove(engine, "after_cursor_execute", mark)
     if len(marks) != 2:
         raise RuntimeError("the deletion walk did not reach the stored-document check")
     return finished - started, marks[0] - started, marks[1] - marks[0]

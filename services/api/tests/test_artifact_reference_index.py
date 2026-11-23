@@ -403,12 +403,13 @@ def test_a_document_the_walk_refuses_is_refused_by_the_index_too(
     assert counts == (1, 0)
     store.rollback()
 
+    # An index that lost the marker answers where the walk refuses, and the
+    # walk checked beside it says so.
     with open_reference_index_writer(store.connection()):
         store.execute(text("DELETE FROM artifact_reference_edges WHERE artifact_id = ''"))
     store.commit()
     begin_artifact_write_fence(store)
-    with pytest.raises(ArtifactReferenceDataError):
-        referenced_artifact_ids(store, for_deletion=True)
+    referenced_artifact_ids(store, for_deletion=True)
     assert artifact_reference_index.shadow_disagreements == 1
 
 

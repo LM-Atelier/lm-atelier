@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 
+from .artifact_deletion_authority import ArtifactReferenceIndexStale
 from .chat_recovery import preview_chat_recovery, purge_chat
 from .chat_recovery_graph import ChatRecoveryGraphError
 from .db import SessionLocal
@@ -131,7 +132,13 @@ def _purge(candidate: _Candidate, now: datetime) -> bool:
                 purge_workflow(session, item.deletion_id, command, now)
             session.commit()
             return True
-        except (RecoveryPreviewConflict, ChatRecoveryGraphError, SQLAlchemyError):
+        except (
+            RecoveryPreviewConflict,
+            ChatRecoveryGraphError,
+            ArtifactReferenceIndexStale,
+            SQLAlchemyError,
+        ):
+            # Each waits for a later pass; an index catching up is ready by then.
             session.rollback()
             return False
 

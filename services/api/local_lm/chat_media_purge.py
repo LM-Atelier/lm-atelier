@@ -5,6 +5,7 @@ import secrets
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from .artifact_deletion_authority import ArtifactReferenceIndexStale
 from .artifact_library import (
     ArtifactLibraryDataError,
     ArtifactReferenceDataError,
@@ -92,6 +93,10 @@ def release_generated_membership(
             session,
             exclude_library_membership_for=frozenset(entry.artifact_id for entry in entries),
         )
+    except ArtifactReferenceIndexStale:
+        # Nothing is wrong with this conversation: the index is catching up,
+        # and its own conflict says to try again shortly.
+        raise
     except ArtifactReferenceDataError:
         raise RecoveryPreviewConflict("chat-recovery-graph-invalid") from None
     for entry in entries:

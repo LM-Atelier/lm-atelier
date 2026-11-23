@@ -78,15 +78,20 @@ def application_environment_restored() -> Iterator[None]:
         yield
 
 
+#: Every answer the reference index gives during the tests is also checked
+#: against the walk that reads the whole store, which the application skips.
+artifact_reference_index.CHECK_AGAINST_WALK = True
+
+
 @pytest.fixture(autouse=True)
 def artifact_reference_index_agrees_with_the_walk() -> Iterator[None]:
-    """Every complete reference walk a test makes agrees with the reference index.
+    """Every reference answer a test gets from the index agrees with the walk.
 
-    The index is compared with each walk that reads the whole store while it is
-    current, and only logs a disagreement, so that nothing depends on it before
-    it has been shown exact. Here a disagreement fails the test, as does
-    upkeep that failed unexpectedly, so every test that walks is also a test of
-    the index.
+    The application asks the index which artifacts are retained instead of
+    reading every stored document. Here each answer is also compared with the
+    walk, and a disagreement fails the test, as does upkeep that failed
+    unexpectedly, so every test that touches references is also a test of the
+    index.
     """
 
     disagreements = artifact_reference_index.shadow_disagreements

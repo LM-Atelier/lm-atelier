@@ -15,9 +15,12 @@ still match. A rebuild records every row as changed and due the same
 stored-document check a deletion runs over the whole store, then drains them,
 so a row refused before is refused still, one row at a time.
 
-Nothing here decides whether an artifact may be deleted. The reference walk
-still does, and while the index is current every complete walk is compared
-with it, so a disagreement is seen before anything relies on the index.
+A deletion is proven from the index: `form_reference_snapshot` drains what is
+recorded under the writer and answers whether an artifact is retained from the
+rows that name it, and the database checks the proven delete again against the
+same index. Plain reads come from it too, without writing. The reference walk
+that reads every document still answers a plain read while the index is not
+current, and the test suite checks every answer here against it.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ import asyncio
 import logging
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Set as AbstractSet
 from contextlib import suppress
 from dataclasses import dataclass
 from itertools import batched
@@ -37,6 +41,9 @@ from sqlalchemy.orm import Session
 
 from .artifact_deletion_authority import (
     ArtifactReferenceDataError,
+    ArtifactReferenceIndexStale,
+    ArtifactReferenceRefusal,
+    ArtifactReferenceSnapshot,
     open_reference_index_writer,
 )
 from .artifact_reference_extractors import (
@@ -44,6 +51,7 @@ from .artifact_reference_extractors import (
     SOURCE_ARTIFACTS,
     SOURCE_CHATS,
     SOURCE_COLUMNS,
+    SOURCE_MESSAGE_REFERENCES,
     UNDERIVABLE,
     row_edges,
 )
@@ -56,8 +64,14 @@ from .artifact_reference_index_schema import (
     EDGES_TABLE,
     INSERT_EDGE_SQL,
     MARKED_SQL,
+    NAMERS_SQL,
+    NAMINGS_SQL,
     RECORD_CHANGE_SQL,
     REQUIRED_TRIGGER_SQL,
+    RETAINING_COLUMNS,
+    REVISION_PARTS_SQL,
+    ROOT_EDGES_SQL,
+    ROOTED_SQL,
     ROW_INVALID_SQL,
     ROWS_SQL,
     SEED_CHANGES_SQL,
@@ -86,6 +100,9 @@ DRAIN_CHUNK: Final = 500
 MAX_PENDING_OVERLAY: Final = 2_000
 #: How many rows of each source one audit reads again.
 AUDIT_SAMPLE: Final = 500
+#: How many naming artifacts one membership question follows before the whole
+#: retained set is read instead.
+MAX_REVERSE_SEARCH: Final = 1_000
 
 #: How many complete walks were compared with the index in this process,
 #: and how many of them disagreed with it.
@@ -98,11 +115,12 @@ Key = object
 Edge = tuple[str, int, Key]
 
 
-class ReferenceIndexUncertified(RuntimeError):
+class ReferenceIndexUncertified(ArtifactReferenceRefusal):
     """A trigger the index relies on is missing or does not read as written.
 
     The index stays stale rather than certified over a guard that might let a
-    document through unchecked. Only the trigger's name is reported.
+    document through unchecked. Only the trigger's name is reported. A
+    deletion that meets it is declined as for any other reference refusal.
     """
 
 
@@ -664,26 +682,35 @@ class IndexedReferences:
     namers: Mapping[str, frozenset[str]]
 
 
-#: The walk's direct retention columns and its two kinds of part, in the
-#: walk's own shape: a revision part counts only through its revision.
-_ROOT_COLUMN_SQL: Final = (
-    "SELECT artifact_id FROM reference_assets",
-    "SELECT artifact_id FROM run_context_artifacts",
-    "SELECT input_artifact_id FROM setup_verifications",
-    "SELECT artifact_id FROM artifact_library_entries",
-    "SELECT artifact_id FROM comfy_registry_source_artifact_reviews",
-    "SELECT artifact_id FROM chat_composer_draft_attachments",
-    "SELECT artifact_id FROM message_parts",
-    "SELECT part.artifact_id FROM response_revision_parts AS part "
-    "JOIN response_revisions AS revision ON revision.id = part.response_revision_id",
-)
+def _retaining_rows(
+    connection: Connection,
+    *,
+    exclude_message: str | None,
+    exclude_library: AbstractSet[str],
+) -> Iterator[str]:
+    """The artifacts rows other than documents retain, with the walk's own exclusions.
 
+    A previewed message's parts and revision parts are left out with `!=`, as
+    the walk leaves them out; a released library membership is left out by id.
+    """
 
-def _root_columns(connection: Connection) -> Iterator[str]:
-    for statement in _ROOT_COLUMN_SQL:
-        for value in connection.exec_driver_sql(statement).scalars():
-            if value:
+    for table, column in RETAINING_COLUMNS:
+        statement = f"SELECT {column} FROM {table}"
+        parameters: tuple[object, ...] = ()
+        if table == "message_parts" and exclude_message is not None:
+            statement += " WHERE message_id != ?"
+            parameters = (exclude_message,)
+        for value in connection.exec_driver_sql(statement, parameters).scalars():
+            if value and not (table == "artifact_library_entries" and value in exclude_library):
                 yield str(value)
+    statement = REVISION_PARTS_SQL
+    parameters = ()
+    if exclude_message is not None:
+        statement += " WHERE revision.message_id != ?"
+        parameters = (exclude_message,)
+    for value in connection.exec_driver_sql(statement, parameters).scalars():
+        if value:
+            yield str(value)
 
 
 def _current_edges(connection: Connection) -> list[Edge] | None:
@@ -724,34 +751,9 @@ def _current_edges(connection: Connection) -> list[Edge] | None:
     return edges
 
 
-def indexed_references(connection: Connection) -> IndexedReferences | None:
-    """What a complete walk would retain and who names whom, from the index.
-
-    None when the index is not current, a rebuild's checks are still due, or
-    more changes are recorded than `MAX_PENDING_OVERLAY`. Rows with a recorded
-    change are read again rather than trusted, and nothing is written, so this
-    never moves the change counter a deletion proof is bound to. Raises
-    `ArtifactReferenceDataError` where the walk refuses: a row cannot be read.
-    """
-
-    if not stamp_state(connection).matches:
-        return None
-    edges = _current_edges(connection)
-    if edges is None:
-        return None
-    roots: set[str] = set(_root_columns(connection))
-    names_by_namer: dict[str, set[str]] = {}
-    namers: dict[str, set[str]] = {}
-    for name, source, key in edges:
-        if name == UNDERIVABLE:
-            raise ArtifactReferenceDataError(REFERENCE_CORRUPT)
-        if source == SOURCE_ARTIFACTS:
-            names_by_namer.setdefault(str(key), set()).add(name)
-            namers.setdefault(name, set()).add(str(key))
-        else:
-            roots.add(name)
+def _closure(roots: Iterable[str], names_by_namer: Mapping[str, Iterable[str]]) -> set[str]:
     retained = set(roots)
-    frontier = list(roots)
+    frontier = list(retained)
     while frontier:
         reached: list[str] = []
         for artifact_id in frontier:
@@ -760,75 +762,316 @@ def indexed_references(connection: Connection) -> IndexedReferences | None:
                     retained.add(linked)
                     reached.append(linked)
         frontier = reached
+    return retained
+
+
+def indexed_references(
+    connection: Connection,
+    *,
+    complete: bool = True,
+    exclude_message_payload_for: str | None = None,
+    exclude_library_membership_for: AbstractSet[str] = frozenset(),
+) -> IndexedReferences | None:
+    """What the reference walk would retain, from the index, without writing.
+
+    `complete` asks what a deletion's walk asks, which refuses when any row
+    cannot be read. Otherwise this answers the plain walk, which refuses only
+    for a row it would follow: any document but an artifact's, and an
+    artifact's own only when that artifact is retained. The exclusions are
+    the walk's own, for previewing a removal.
+
+    None when the index is not current, a rebuild's checks are still due, or
+    more changes are recorded than `MAX_PENDING_OVERLAY`. Rows with a recorded
+    change are read again rather than trusted, and nothing is written, so this
+    never moves the change counter a deletion proof is bound to.
+    """
+
+    if complete and (exclude_message_payload_for is not None or exclude_library_membership_for):
+        raise ValueError("a selective reference preview cannot answer for a deletion")
+    if not stamp_state(connection).matches:
+        return None
+    edges = _current_edges(connection)
+    if edges is None:
+        return None
+    excluded_references: set[str] = set()
+    if exclude_message_payload_for is not None:
+        excluded_references = {
+            str(key)
+            for key in connection.exec_driver_sql(
+                "SELECT id FROM message_references WHERE message_id = ?",
+                (exclude_message_payload_for,),
+            ).scalars()
+        }
+    roots: set[str] = set(
+        _retaining_rows(
+            connection,
+            exclude_message=exclude_message_payload_for,
+            exclude_library=exclude_library_membership_for,
+        )
+    )
+    names_by_namer: dict[str, set[str]] = {}
+    namers: dict[str, set[str]] = {}
+    unreadable_artifacts: set[str] = set()
+    for name, source, key in edges:
+        if source == SOURCE_ARTIFACTS:
+            if name == UNDERIVABLE:
+                if complete:
+                    raise ArtifactReferenceDataError(REFERENCE_CORRUPT)
+                unreadable_artifacts.add(str(key))
+                continue
+            names_by_namer.setdefault(str(key), set()).add(name)
+            namers.setdefault(name, set()).add(str(key))
+            continue
+        if source == SOURCE_MESSAGE_REFERENCES and str(key) in excluded_references:
+            continue
+        if name == UNDERIVABLE:
+            raise ArtifactReferenceDataError(REFERENCE_CORRUPT)
+        roots.add(name)
+    retained = _closure(roots, names_by_namer)
+    if unreadable_artifacts & retained:
+        raise ArtifactReferenceDataError(REFERENCE_CORRUPT)
     return IndexedReferences(
         retained=frozenset(retained),
         namers={name: frozenset(keys) for name, keys in namers.items()},
     )
 
 
-def compare_refusal_with_walk(connection: Connection) -> None:
-    """The walk refused a stored document; a current index has to refuse as well.
+class IndexedReferenceSnapshot(ArtifactReferenceSnapshot):
+    """A deletion's reference graph answered from the index, a question at a time.
 
-    An index that would answer here is one a deletion could later trust over a
-    document the walk was right to refuse. Never raises and never writes.
+    Formed by `form_reference_snapshot` once the index is current and drained
+    under the writer, so the index is exactly what the walk would read. Asking
+    whether one artifact is retained follows only the artifacts that name it,
+    a few indexed reads, instead of reading the whole store. Answers are kept
+    for the snapshot's life: a recorded deletion removes only an unretained
+    artifact and the names it gave, which changes no other answer.
     """
 
-    global shadow_comparisons, shadow_disagreements
+    def __init__(
+        self, *, session: Session, connection: Connection, driver: sqlite3.Connection
+    ) -> None:
+        super().__init__(session=session, connection=connection, driver=driver)
+        self._answers: dict[str, bool] = {}
+        self._retained: frozenset[str] | None = None
+
+    def __contains__(self, value: object) -> bool:
+        if not isinstance(value, str):
+            return False
+        if self._retained is not None:
+            return value in self._retained
+        answer = self._answers.get(value)
+        if answer is None:
+            answer = self._search(value)
+        return answer
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.retained())
+
+    def __len__(self) -> int:
+        return len(self.retained())
+
+    def _rooted(self, artifact_id: str) -> bool:
+        return bool(self._connection.exec_driver_sql(ROOTED_SQL, (artifact_id,)).scalar_one())
+
+    def namers(self, artifact_id: str) -> frozenset[str]:
+        return frozenset(
+            str(namer)
+            for namer in self._connection.exec_driver_sql(NAMERS_SQL, (artifact_id,)).scalars()
+        )
+
+    def _search(self, artifact_id: str) -> bool:
+        """Retained when a row other than an artifact names it, or a retained artifact does."""
+
+        visited = {artifact_id}
+        frontier = [artifact_id]
+        while frontier:
+            reached: list[str] = []
+            for candidate in frontier:
+                if self._answers.get(candidate) is True or self._rooted(candidate):
+                    self._answers[artifact_id] = True
+                    return True
+                for namer in self.namers(candidate) - self._removed:
+                    if namer not in visited and self._answers.get(namer) is not False:
+                        visited.add(namer)
+                        reached.append(namer)
+            if len(visited) > MAX_REVERSE_SEARCH:
+                return artifact_id in self.retained()
+            frontier = reached
+        # Nothing that names it is retained, so nothing that names those is either.
+        for candidate in visited:
+            self._answers[candidate] = False
+        return False
+
+    def retained(self) -> frozenset[str]:
+        """Every retained artifact, read once for a caller that asks about them all."""
+
+        if self._retained is None:
+            self._retained = self._read_retained()
+        return self._retained
+
+    def _read_retained(self) -> frozenset[str]:
+        roots = {
+            str(name) for name, _source, _key in self._connection.exec_driver_sql(ROOT_EDGES_SQL)
+        }
+        roots.update(
+            _retaining_rows(self._connection, exclude_message=None, exclude_library=frozenset())
+        )
+        return frozenset(_closure(roots, self.namings()))
+
+    def namings(self) -> dict[str, set[str]]:
+        """Which surviving artifact names which, by the naming artifact."""
+
+        names_by_namer: dict[str, set[str]] = {}
+        for name, namer in self._connection.exec_driver_sql(NAMINGS_SQL):
+            if str(namer) not in self._removed:
+                names_by_namer.setdefault(str(namer), set()).add(str(name))
+        return names_by_namer
+
+
+def form_reference_snapshot(session: Session) -> IndexedReferenceSnapshot | None:
+    """This transaction's complete reference graph for a deletion, from the index.
+
+    Takes the writer with a write that changes nothing, so a read snapshot
+    another writer has since moved past fails here instead of being proven
+    against. A small store found stale is rebuilt in this transaction; a large
+    one raises `ArtifactReferenceIndexStale` until the background rebuild
+    finishes. Everything recorded is drained here, however much: this
+    transaction's own writes are among it, and nothing else can drain those.
+    A row that cannot be read refuses every deletion, as the walk's
+    whole-store check did. None outside a transaction, where nothing can be
+    proven.
+    """
+
+    session.flush()
+    connection = session.connection()
+    driver = connection.connection.driver_connection
+    if not isinstance(driver, sqlite3.Connection) or not driver.in_transaction:
+        return None
+    connection.exec_driver_sql(f"UPDATE {STAMP_TABLE} SET id = id WHERE 0")
+    stale = not stamp_state(connection).matches or (
+        connection.exec_driver_sql(
+            f"SELECT 1 FROM {CHANGES_TABLE} WHERE audit IS NOT 0 LIMIT 1"
+        ).first()
+        is not None
+    )
+    if stale:
+        if source_rows(connection, MAX_INLINE_REBUILD_ROWS) > MAX_INLINE_REBUILD_ROWS:
+            raise ArtifactReferenceIndexStale()
+        rebuild_inline(connection)
+    drain_changes(connection, limit=None)
+    if connection.exec_driver_sql(
+        f"SELECT 1 FROM {EDGES_TABLE} WHERE artifact_id = ? LIMIT 1", (UNDERIVABLE,)
+    ).first():
+        raise ArtifactReferenceRefusal(REFERENCE_CORRUPT)
+    return IndexedReferenceSnapshot(session=session, connection=connection, driver=driver)
+
+
+def drain_after_deletion(session: Session) -> None:
+    """Clear what a proven deletion's own flush recorded, before it is recorded as done.
+
+    The database checks every proven deletion against an index with nothing
+    left to drain, so the next deletion in the same pass needs this one's
+    entries gone first.
+    """
+
+    drain_changes(session.connection(), limit=None)
+
+
+#: Whether every reference answer from the index is also checked against the
+#: walk. Set for the test suite, where a disagreement fails the test; the walk
+#: costs what the index exists to avoid, so the application leaves it off.
+CHECK_AGAINST_WALK = False
+
+
+#: What the walk answers: the retained ids and, for a deletion's walk, which
+#: surviving artifacts name each id.
+WalkAnswer = tuple[frozenset[str], Mapping[str, AbstractSet[str]] | None]
+
+
+def _count_disagreement(message: str) -> None:
+    global shadow_disagreements
+    shadow_disagreements += 1
+    logger.error("Artifact reference index disagreed with the reference walk: %s", message)
+
+
+def _walk_to_compare(walk: Callable[[], WalkAnswer]) -> WalkAnswer | None:
+    """The walk's answer, counted as one comparison; None once its refusal is counted."""
+
+    global shadow_comparisons
+    shadow_comparisons += 1
     try:
-        indexed = indexed_references(connection)
+        return walk()
+    except ArtifactReferenceDataError:
+        _count_disagreement("the walk refused a store the index answered for")
+        return None
+
+
+def compare_answers(retained: AbstractSet[str], walk: Callable[[], WalkAnswer]) -> None:
+    """Check a plain read from the index against the walk's answer to the same question.
+
+    Counts and logs a disagreement and never raises.
+    """
+
+    answer = _walk_to_compare(walk)
+    if answer is None:
+        return
+    answered = frozenset(retained)
+    if answered != answer[0]:
+        _count_disagreement(f"{len(answered ^ answer[0])} retained id(s) differ")
+
+
+def compare_snapshot(snapshot: IndexedReferenceSnapshot, walk: Callable[[], WalkAnswer]) -> None:
+    """Check a deletion's snapshot against the walk, asking it what a deletion asks.
+
+    Every stored artifact, and every id the walk retains or the index names,
+    is asked about through a second snapshot of the same transaction, so the
+    answers checked are the reverse search's own, and the snapshot handed back
+    keeps nothing the check learned. The whole retained set and each id's
+    namers are checked too. Counts and logs a disagreement and never raises.
+    """
+
+    answer = _walk_to_compare(walk)
+    if answer is None:
+        return
+    walked, referrers = answer
+    connection = snapshot._connection
+    probe = IndexedReferenceSnapshot(
+        session=snapshot._session, connection=connection, driver=snapshot._driver
+    )
+    retained = probe._read_retained()
+    if retained != walked:
+        _count_disagreement(f"{len(retained ^ walked)} retained id(s) differ")
+        return
+    walked_namers = {name: frozenset(keys) for name, keys in (referrers or {}).items() if keys}
+    questions = sorted(
+        walked
+        | set(walked_namers)
+        | {str(name) for name, _namer in connection.exec_driver_sql(NAMINGS_SQL)}
+        | {str(key) for key in connection.exec_driver_sql("SELECT id FROM artifacts").scalars()}
+    )
+    searched = [question for question in questions if (question in probe) != (question in walked)]
+    if searched:
+        _count_disagreement(f"the search answered {len(searched)} id(s) wrongly")
+        return
+    if referrers is None:
+        return
+    differing = [
+        question
+        for question in questions
+        if probe.namers(question) != walked_namers.get(question, frozenset())
+    ]
+    if differing:
+        _count_disagreement(f"the namers of {len(differing)} id(s) differ")
+
+
+def compare_refusal(walk: Callable[[], WalkAnswer]) -> None:
+    """The index refused a stored row; check that the walk refuses the same store."""
+
+    global shadow_comparisons
+    try:
+        walk()
     except ArtifactReferenceDataError:
         shadow_comparisons += 1
         return
-    except Exception:
-        shadow_disagreements += 1
-        logger.exception("Artifact reference index could not be read for comparison")
-        return
-    if indexed is None:
-        return
     shadow_comparisons += 1
-    shadow_disagreements += 1
-    logger.error("Artifact reference index accepted stored documents the reference walk refused")
-
-
-def compare_with_walk(
-    connection: Connection,
-    retained: Iterable[str],
-    referrers: Mapping[str, Iterable[str]],
-) -> None:
-    """Compare one complete walk with the index, logging only counts.
-
-    Never raises and never writes: the walk is the authority, and the index
-    answers only so that a disagreement is seen.
-    """
-
-    global shadow_comparisons, shadow_disagreements
-    try:
-        indexed = indexed_references(connection)
-    except ArtifactReferenceDataError:
-        shadow_disagreements += 1
-        logger.error("Artifact reference index refused a store the reference walk read")
-        return
-    except Exception:
-        shadow_disagreements += 1
-        logger.exception("Artifact reference index could not be read for comparison")
-        return
-    if indexed is None:
-        return
-    shadow_comparisons += 1
-    walked = frozenset(retained)
-    walked_namers = {name: frozenset(keys) for name, keys in referrers.items()}
-    walked_namers = {name: keys for name, keys in walked_namers.items() if keys}
-    if indexed.retained == walked and dict(indexed.namers) == walked_namers:
-        return
-    shadow_disagreements += 1
-    differing = {
-        name
-        for name in set(indexed.namers) | set(walked_namers)
-        if indexed.namers.get(name) != walked_namers.get(name)
-    }
-    logger.error(
-        "Artifact reference index disagreed with the reference walk: %s retained id(s) "
-        "and the namers of %s id(s) differ",
-        len(indexed.retained ^ walked),
-        len(differing),
-    )
+    _count_disagreement("the index refused a store the walk read")
