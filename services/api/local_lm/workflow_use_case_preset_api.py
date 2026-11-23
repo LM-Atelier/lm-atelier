@@ -19,7 +19,7 @@ from .workflow_use_case_presets_v1 import (
 )
 from .workflow_use_cases_v1 import WorkflowUseCase
 
-SessionDep = Annotated[Session, Depends(get_session)]
+SessionDep = Annotated[Session, Depends(get_session, scope="function")]
 router = APIRouter()
 
 _REFUSALS: dict[service.ServiceRefusal, tuple[int, str]] = {

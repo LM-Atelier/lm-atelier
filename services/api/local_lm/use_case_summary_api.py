@@ -21,7 +21,7 @@ from .use_case_summaries import UseCaseSummaryError
 if TYPE_CHECKING:
     from .main import Services
 
-SessionDep = Annotated[Session, Depends(get_session)]
+SessionDep = Annotated[Session, Depends(get_session, scope="function")]
 router = APIRouter()
 _CONFLICT = "The saved use case changed. Refresh it before trying again."
 
