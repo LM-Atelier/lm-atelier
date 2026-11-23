@@ -64,7 +64,11 @@ from .orchestrator import (
 from .outpaint_workflows import OUTPAINT_SETTING_KEY, extends_by_nothing
 from .picture_remix import RemixSource, _changes_the_picture, read_remix_source
 from .schemas import SettingField, TurnRequest
-from .settings_registry import WORKFLOW_LORA_OVERRIDES_SETTING_KEY, validate_settings
+from .settings_registry import (
+    WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
+    SavedSizeUnsupported,
+    validate_settings,
+)
 from .studio_masks import MASK_SETTING_KEY
 from .studio_relight import RELIGHT_SETTING_KEY
 from .video_length import resolve_video_length_settings
@@ -415,6 +419,8 @@ async def _resolve_arm(
             fields,
             workflow_revision=chosen_revision,
         )
+    except SavedSizeUnsupported as exc:
+        raise ArmRefused(Code.ARM_SETTING_INVALID, setting=_setting_name(exc.key)) from None
     except (ValueError, TypeError, OverflowError):
         raise ArmRefused(Code.ARM_SETTING_INVALID) from None
     if layers.mask is not None or layers.relight is not None:

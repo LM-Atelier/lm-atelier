@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, cast
+from typing import Any, Final, cast
 from urllib.parse import urlparse
 
 from sqlalchemy import delete, func, or_, select, update
@@ -68,7 +68,12 @@ from .context_compaction import (
     compact_context_messages,
 )
 from .db import SessionLocal, database_is_contended
-from .default_output_shape import DefaultOutputSize, default_output_size, size_is_chosen
+from .default_output_shape import (
+    SIZE_SETTINGS,
+    DefaultOutputSize,
+    default_output_size,
+    size_is_chosen,
+)
 from .domain import (
     ArtifactKind,
     JobKind,
@@ -260,6 +265,7 @@ from .schemas import (
 )
 from .settings_registry import (
     WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
+    SavedSizeUnsupported,
     builtin_settings_for_role,
     compatible_stored_settings,
     resolve_generation_settings,
@@ -663,6 +669,73 @@ def _default_size_for_turn(
     ):
         return None
     return default_output_size(session, operation, revision, shapes.image, shapes.video)
+
+
+#: Where a turn's size can come from, from the one that wins down, and how a
+#: refusal names each saved one. A turn's preset outranks its recipe, and the
+#: recipe every other saved layer. None marks a layer checked strictly where
+#: it is read: the turn's own settings and the recipe's.
+_SIZE_SOURCES: Final[tuple[tuple[str, str | None], ...]] = (
+    ("turn", None),
+    ("turn_preset", "in the preset chosen for this turn"),
+    ("recipe", None),
+    ("chat", "for this conversation"),
+    ("chat_preset", "in this conversation's preset"),
+    ("project", "for this project"),
+    ("project_preset", "in this project's preset"),
+    ("default_preset", "in the default preset"),
+    ("profile_request", "in the model profile"),
+    ("profile_load", "in the model profile"),
+)
+
+
+def _offers_a_choice_of(field: SettingField | None) -> bool:
+    """Whether a workflow lets this setting be chosen, rather than taking none or fixing it."""
+    if field is None or not field.available or len(field.choices) == 1:
+        return False
+    return field.minimum is None or field.minimum != field.maximum
+
+
+def _refuse_a_saved_size_the_workflow_cannot_make(
+    layers: WorkflowLoraAdmissionLayers,
+    *,
+    turn: Mapping[str, Any],
+    recipe: Mapping[str, Any],
+    profile: ModelProfile | None,
+    fields: Sequence[SettingField],
+) -> None:
+    """Refuse the turn when the size a saved layer chose is one its workflow cannot make.
+
+    A saved layer is otherwise read leniently, so a setting the workflow no
+    longer offers cannot stop a conversation from working. Dropping a size
+    that way made the picture at the workflow's own width beside the saved
+    height, or at its own size, with nothing to say so. Width and height are
+    each taken from the highest layer that names them, in `_SIZE_SOURCES`
+    order; the turn's own value and the recipe's are checked strictly where
+    they are read, so meeting one ends the search. A workflow that fixes its
+    size, or takes none, offers no size to choose, so it keeps its own, as it
+    always has.
+    """
+    named = {
+        "turn": turn,
+        "recipe": recipe,
+        "profile_load": profile.load_settings_json if profile is not None else {},
+    }
+    definitions = {field.key: field for field in fields}
+    for key in SIZE_SETTINGS:
+        field = definitions.get(key)
+        if field is None or not _offers_a_choice_of(field):
+            continue
+        for origin, where in _SIZE_SOURCES:
+            layer = named[origin] if origin in named else layers.ordinary(origin)
+            if key not in layer:
+                continue
+            if where is not None:
+                try:
+                    validate_settings({key: layer[key]}, [field])
+                except ValueError:
+                    raise SavedSizeUnsupported(key, layer[key], field, where) from None
+            break
 
 
 def _fresh_media_seed(excluding: object = None) -> int:
@@ -12604,6 +12677,13 @@ class ConversationOrchestrator:
             for key, value in layer.items()
             if key != "loras" and compatible_stored_settings({key: value}, request_fields)
         )
+        _refuse_a_saved_size_the_workflow_cannot_make(
+            workflow_lora_layers,
+            turn=tunables,
+            recipe=use_case_admission.preset.settings_json if use_case_admission else {},
+            profile=profile,
+            fields=request_fields,
+        )
         effective_settings = resolve_generation_settings(
             fields,
             request_fields=request_fields,
@@ -13300,6 +13380,13 @@ class ConversationOrchestrator:
                 raise WorkflowUseCasePresetSettingsError(
                     "workflow-use-case-preset-settings-invalid"
                 ) from None
+        _refuse_a_saved_size_the_workflow_cannot_make(
+            workflow_lora_layers,
+            turn=tunables,
+            recipe=use_case_settings,
+            profile=profile,
+            fields=request_fields,
+        )
         default_size = _default_size_for_turn(
             session,
             operation,
