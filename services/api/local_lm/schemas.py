@@ -1825,6 +1825,39 @@ class WorkPlanOut(_WorkPlanFields):
     steps: list[WorkStepOut]
 
 
+#: Whether an output's seed reached its workflow. "bound": the graph reads the
+#: seed setting, so the number is what ran. "graph_literal": the graph keeps its
+#: own saved number and the setting was not used. "unknown": the graph could not
+#: be read back. "not_recorded": no seed was recorded for the output.
+SeedBinding = Literal["bound", "graph_literal", "unknown", "not_recorded"]
+
+
+class PlannedOutputArtifactOut(ApiModel):
+    artifact_id: str
+    sha256: str
+    kind: ArtifactKind
+    media_type: str
+    batch_index: int = Field(ge=0)
+
+
+class PlannedOutputOut(ApiModel):
+    index: int = Field(ge=1)
+    work_step_id: str
+    run_id: str | None
+    message_id: str | None
+    operation: str
+    status: WorkStepStatus
+    seed: int | None = Field(ge=0, le=2_147_483_647)
+    seed_binding: SeedBinding
+    batch_size: int = Field(ge=1, le=16)
+    artifacts: list[PlannedOutputArtifactOut]
+
+
+class WorkPlanOutputsOut(ApiModel):
+    plan_id: str
+    outputs: list[PlannedOutputOut]
+
+
 class EditedBranchOut(ApiModel):
     source_message_id: str
     source_run_id: str

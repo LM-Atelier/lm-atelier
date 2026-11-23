@@ -586,6 +586,7 @@ from .schemas import (
     ModelProfileUpdate,
     ModelStorageInfo,
     ModelUpdateOut,
+    PlannedOutputOut,
     PlatformMatrixEntry,
     PresetBundle,
     PresetClone,
@@ -734,6 +735,7 @@ from .schemas import (
     WorkflowUpdate,
     WorkflowVariantReadiness,
     WorkPlanOut,
+    WorkPlanOutputsOut,
     WorkStepOut,
 )
 from .security import SessionSecurity
@@ -809,6 +811,7 @@ from .web_search import CrwSearchProvider, WebSearchError
 from .web_search_configuration import configured_search_provider, search_provider_revision
 from .web_search_consent import SearchConsentConflict, decide_search, replace_search_proposal
 from .web_search_projection import chat_searches, search_for_run
+from .work_plan_outputs import plan_outputs
 from .workflow_activation_preparation import (
     WorkflowActivationPreparation,
     prepare_workflow_activation,
@@ -6081,6 +6084,31 @@ async def get_work_plan(plan_id: str, session: ConversationSessionDep) -> WorkPl
     if not plan or chat_is_deleted(session, plan.chat_id):
         raise api_error(404, "work-plan-not-found", "work plan not found")
     return plan
+
+
+@router.get("/work-plans/{plan_id}/outputs", response_model=WorkPlanOutputsOut)
+async def get_work_plan_outputs(
+    plan_id: str, session: ConversationSessionDep
+) -> WorkPlanOutputsOut:
+    """Each output of a plan in order, with the seed it was made with and the files it kept.
+
+    A multi-output turn makes each output with its own seed. seed_binding says
+    whether the workflow read that seed: only a "bound" seed is the number that
+    ran, so only a bound seed with a batch size of 1 can make the output again
+    from the same prompt, settings, workflow, model and inputs. Files one
+    engine call made together share its seed; batch_index tells them apart.
+    """
+
+    plan = session.scalar(
+        select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
+    )
+    if plan is None:
+        raise api_error(404, "work-plan-not-found", "work plan not found")
+    _refuse_comparison_chat(session, plan.chat_id, "work-plan-not-found", "work plan not found")
+    return WorkPlanOutputsOut(
+        plan_id=plan.id,
+        outputs=[PlannedOutputOut.model_validate(entry) for entry in plan_outputs(session, plan)],
+    )
 
 
 @router.get("/work-steps/{step_id}", response_model=WorkStepOut)

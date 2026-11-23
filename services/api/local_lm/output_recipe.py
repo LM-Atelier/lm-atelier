@@ -245,6 +245,22 @@ def describe_run(session: Session, run: Run) -> RunDescription:
     )
 
 
+def recorded_seed(session: Session, run: Run) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The run's seed as its record states it, and the settings the run executed with.
+
+    The seed is {"value", "binding"}, built from the same frozen inputs and
+    graph the record reads, so a seed reported anywhere else cannot disagree
+    with the record's own.
+    """
+
+    draft = _Draft()
+    snapshot = _snapshot(session, run, draft)
+    settings = _execution_settings(run, snapshot)
+    graph, _schema, _workflow_section = _workflow(session, run, snapshot, draft)
+    placeholders = set(_placeholders(graph)) if graph is not None else None
+    return _seed(settings, placeholders, draft), settings
+
+
 def _describe(
     session: Session, run: Run, include_prompts: bool, draft: _Draft
 ) -> tuple[dict[str, Any], AcceptedContext | None]:
