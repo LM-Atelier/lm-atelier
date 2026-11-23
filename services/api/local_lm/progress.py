@@ -138,11 +138,12 @@ def apply_engine_progress(
     event stream (no stamp, carry within the claim's own attempt); both are
     engine-derived and both are refused whole when the claim is stale.
 
-    The snapshot is computed from the row re-read inside this session's own
-    transaction. Under SQLite WAL a competing commit between that read and
-    this write surfaces as a busy error, never as a silent stale overwrite;
-    the per-claim writer is sequential, so that edge is crash-loud, not a
-    correctness path.
+    The snapshot is computed from the row as this session reads it. That read
+    is not part of the UPDATE's transaction - the driver begins one only at
+    the first write - so the guard above is what keeps a superseded producer
+    out. No other writer can slip a progress change between the read and the
+    write: one claim's events are written one after another, and the claim
+    heartbeat never writes progress_json.
     """
 
     job_row = session.get(Job, job_id)

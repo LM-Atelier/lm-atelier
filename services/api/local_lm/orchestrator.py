@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session, object_session, selectinload
 
 from .accepted_turn_context import (
@@ -67,7 +67,7 @@ from .context_compaction import (
     MIN_COMPACTION_CHARACTERS,
     compact_context_messages,
 )
-from .db import SessionLocal, database_is_contended
+from .db import SessionLocal, database_is_contended, shorten_busy_timeout
 from .default_output_shape import (
     SIZE_SETTINGS,
     DefaultOutputSize,
@@ -1258,6 +1258,53 @@ def _preview_media_type(content: bytes) -> str:
     return "application/octet-stream"
 
 
+def _run_failure_detail(error: Exception) -> str:
+    """The reason a failed run shows, never a database statement or the values it carried.
+
+    A database error's own text holds the SQL and every bound value, which can
+    include what someone typed; the run shows a plain reason instead and the
+    log keeps only SQLite's name for the error.
+    """
+
+    if isinstance(error, SQLAlchemyError):
+        logger.warning(
+            "A run stopped on a database error: %s",
+            getattr(getattr(error, "orig", None), "sqlite_errorname", type(error).__name__),
+        )
+        if isinstance(error, OperationalError) and database_is_contended(error):
+            return (
+                "This run stopped because another task held the database for too long. Try again."
+            )
+        return "This run stopped because of a database error."
+    return str(error).strip() or f"Generation failed ({type(error).__name__})"
+
+
+#: How long a render's progress update waits for another writer before it is
+#: left out. Each wait blocks the event loop, which reads the engine's stream.
+MEDIA_UPDATE_BUSY_WAIT_MS = 250
+#: How long a render leaves its progress updates out after one found the
+#: database held, before it tries again.
+MEDIA_UPDATE_QUIET_SECONDS = 2.0
+
+
+def _skip_held_media_write(job_id: str, what: str, error: OperationalError, started: float) -> None:
+    """Say that a render left out one update because another writer held the database.
+
+    SQLite's name for the error and how long the write waited tell the two
+    ways apart: a writer held past the busy timeout fails after it, while a
+    connection that still held an old read fails at once.
+    """
+
+    logger.info(
+        "Media job %s skipped a %s update while another writer held the database "
+        "(%s after %.0f ms)",
+        job_id,
+        what,
+        getattr(error.orig, "sqlite_errorname", type(error.orig).__name__),
+        (time.monotonic() - started) * 1000,
+    )
+
+
 class ConversationOrchestrator:
     def __init__(
         self,
@@ -1336,6 +1383,10 @@ class ConversationOrchestrator:
         #: process asked for. The execution fails each one with its reason once
         #: the device handoff is over, where every other media failure is written.
         self._media_stopped_in_engine: set[str] = set()
+        #: Until when each rendering job leaves its progress updates out, after
+        #: one found the database held: trying each event would block the event
+        #: loop, and the engine's stream with it, for as long as the hold lasts.
+        self._media_quiet_until: dict[str, float] = {}
         #: The window's expiry, or the settlement a chat load inside it left.
         self._media_warm_task: asyncio.Task[None] | None = None
         self._admission_open = True
@@ -5079,7 +5130,7 @@ class ConversationOrchestrator:
                 await self.scheduler.publish_job(job_id)
                 return
             assert run_id is not None
-            detail = str(exc).strip() or f"Generation failed ({type(exc).__name__})"
+            detail = _run_failure_detail(exc)
             await self._fail(
                 job_id,
                 run_id,
@@ -8725,37 +8776,10 @@ class ConversationOrchestrator:
                     reported = _reported_step(event.data)
                     if reported:
                         last_step = reported
-                    with self.session_factory() as session:
-                        job = session.get(Job, job_id)
-                        message = session.get(Message, assistant_id)
-                        if not job or not message:
-                            continue
-                        if job and message:
-                            # Provenance comes from the ADAPTER, which knows
-                            # which events the backend originated: only a
-                            # backend-originated event mints the liveness
-                            # stamp. Either way the write is conditional on
-                            # the claim at the database itself - a stale
-                            # producer's event refuses whole, parts included.
-                            snapshot = apply_engine_progress(
-                                session,
-                                job_id=job_id,
-                                claim_attempt=claim.attempt,
-                                claim_owner=claim.token,
-                                stage=event.phase,
-                                stage_progress=event.progress,
-                                queue_resource=job.queue_resource,
-                                indeterminate=indeterminate,
-                                stamp_engine_report=event.engine_sourced,
-                            )
-                            if snapshot is None:
-                                session.rollback()
-                                raise ClaimLost(
-                                    f"job {job_id} is no longer this execution's at "
-                                    f"{event.phase or 'progress'!r}"
-                                )
-                            self._replace_parts(message, self._media_progress_parts(message, event))
-                            session.commit()
+                    if not self._write_media_progress(
+                        job_id, assistant_id, claim, event, indeterminate=indeterminate
+                    ):
+                        continue
                     # A refused row refuses the broadcast too: clients
                     # must not hear a superseded producer's progress.
                     await self.scheduler.publish_job(job_id)
@@ -8770,60 +8794,13 @@ class ConversationOrchestrator:
                         },
                     )
                 elif event.type == "preview" and event.preview:
-                    with self.session_factory() as session:
-                        message = session.get(Message, assistant_id)
-                        job = session.get(Job, job_id)
-                        if message and job:
-                            snapshot = apply_engine_progress(
-                                session,
-                                job_id=job_id,
-                                claim_attempt=claim.attempt,
-                                claim_owner=claim.token,
-                                stage=event.phase or "preview",
-                                stage_progress=event.progress,
-                                queue_resource=job.queue_resource,
-                                stamp_engine_report=event.engine_sourced,
-                            )
-                            if snapshot is None:
-                                # A stale producer's preview must not be
-                                # persisted either, and the producer is done.
-                                session.rollback()
-                                raise ClaimLost(
-                                    f"job {job_id} is no longer this execution's at a preview"
-                                )
-                            preview = self.artifacts.ingest_bytes(
-                                session,
-                                event.preview,
-                                kind=ArtifactKind.THUMBNAIL,
-                                media_type=_preview_media_type(event.preview),
-                                original_name="generation-preview",
-                                metadata={
-                                    "run_id": run_id,
-                                    "temporary_preview": True,
-                                },
-                            )
-                            preview_artifact_id = preview.id
-                            self._replace_parts(
-                                message,
-                                [
-                                    MessagePart(
-                                        position=0,
-                                        type=PartType.PROGRESS.value,
-                                        text=event.phase.title() or "Preview",
-                                        metadata_json={
-                                            "progress": event.progress,
-                                            "phase": event.phase or "preview",
-                                        },
-                                    ),
-                                    MessagePart(
-                                        position=1,
-                                        type=PartType.IMAGE.value,
-                                        artifact_id=preview.id,
-                                        metadata_json={"preview": True},
-                                    ),
-                                ],
-                            )
-                            session.commit()
+                    written, preview_id = self._write_media_preview(
+                        job_id, run_id, assistant_id, claim, event, event.preview
+                    )
+                    if not written:
+                        continue
+                    if preview_id is not None:
+                        preview_artifact_id = preview_id
                     await self.scheduler.publish_job(job_id)
                     await self.events.publish(
                         "generation.preview",
@@ -8852,29 +8829,13 @@ class ConversationOrchestrator:
                         # every other engine write, and the completion
                         # transition's own write then carries the stamp
                         # forward within the attempt.
-                        with self.session_factory() as session:
-                            job = session.get(Job, job_id)
-                            if job:
-                                snapshot = apply_engine_progress(
-                                    session,
-                                    job_id=job_id,
-                                    claim_attempt=claim.attempt,
-                                    claim_owner=claim.token,
-                                    stage=event.phase or "complete",
-                                    queue_resource=job.queue_resource,
-                                )
-                                if snapshot is None:
-                                    session.rollback()
-                                    raise ClaimLost(
-                                        f"job {job_id} is no longer this execution's "
-                                        "at its completion"
-                                    )
-                                session.commit()
+                        self._stamp_media_completion(job_id, claim, event)
         finally:
             # Closing the producer stops whatever it began in the engine, so a
             # stop from here on has nothing more to tell the engine.
             self._media_generating.discard(run_id)
             self._media_stopping.discard(run_id)
+            self._media_quiet_until.pop(job_id, None)
             # The producer is typed as an iterator by the adapter contract, and a
             # close that raises or hangs must not replace the refusal that
             # ended this execution; the shared bounded close does both.
@@ -11408,6 +11369,184 @@ class ConversationOrchestrator:
                 )
             )
         return parts
+
+    def _write_media_progress(
+        self,
+        job_id: str,
+        assistant_id: str,
+        claim: JobClaim,
+        event: MediaEvent,
+        *,
+        indeterminate: bool,
+    ) -> bool:
+        """Persist one progress event; False when there is nothing to tell clients.
+
+        False when the job or its message is gone, and when another writer held
+        the database past the busy timeout. Progress only says how far the
+        render has got and the next event says it again with newer numbers, so
+        a held database skips this one and never ends the render. A refused
+        claim still ends it.
+        """
+
+        if time.monotonic() < self._media_quiet_until.get(job_id, 0.0):
+            return False
+        started = time.monotonic()
+        try:
+            with self.session_factory() as session:
+                shorten_busy_timeout(session, MEDIA_UPDATE_BUSY_WAIT_MS)
+                job = session.get(Job, job_id)
+                message = session.get(Message, assistant_id)
+                if not job or not message:
+                    return False
+                # Provenance comes from the ADAPTER, which knows which events
+                # the backend originated: only a backend-originated event mints
+                # the liveness stamp. Either way the write is conditional on the
+                # claim at the database itself - a stale producer's event
+                # refuses whole, parts included.
+                snapshot = apply_engine_progress(
+                    session,
+                    job_id=job_id,
+                    claim_attempt=claim.attempt,
+                    claim_owner=claim.token,
+                    stage=event.phase,
+                    stage_progress=event.progress,
+                    queue_resource=job.queue_resource,
+                    indeterminate=indeterminate,
+                    stamp_engine_report=event.engine_sourced,
+                )
+                if snapshot is None:
+                    session.rollback()
+                    raise ClaimLost(
+                        f"job {job_id} is no longer this execution's at "
+                        f"{event.phase or 'progress'!r}"
+                    )
+                self._replace_parts(message, self._media_progress_parts(message, event))
+                session.commit()
+        except OperationalError as error:
+            if not database_is_contended(error):
+                raise
+            _skip_held_media_write(job_id, "progress", error, started)
+            self._media_quiet_until[job_id] = time.monotonic() + MEDIA_UPDATE_QUIET_SECONDS
+            return False
+        return True
+
+    def _write_media_preview(
+        self,
+        job_id: str,
+        run_id: str,
+        assistant_id: str,
+        claim: JobClaim,
+        event: MediaEvent,
+        frame: bytes,
+    ) -> tuple[bool, str | None]:
+        """Persist one preview frame: whether to tell clients, and the new preview's id.
+
+        The id is None when the job or its message is gone. A preview is a
+        picture of a step the render has already passed, so a database another
+        writer holds skips it like progress, telling clients nothing. A refused
+        claim still ends the render.
+        """
+
+        if time.monotonic() < self._media_quiet_until.get(job_id, 0.0):
+            return False, None
+        started = time.monotonic()
+        try:
+            with self.session_factory() as session:
+                shorten_busy_timeout(session, MEDIA_UPDATE_BUSY_WAIT_MS)
+                message = session.get(Message, assistant_id)
+                job = session.get(Job, job_id)
+                if not message or not job:
+                    return True, None
+                snapshot = apply_engine_progress(
+                    session,
+                    job_id=job_id,
+                    claim_attempt=claim.attempt,
+                    claim_owner=claim.token,
+                    stage=event.phase or "preview",
+                    stage_progress=event.progress,
+                    queue_resource=job.queue_resource,
+                    stamp_engine_report=event.engine_sourced,
+                )
+                if snapshot is None:
+                    # A stale producer's preview must not be persisted either,
+                    # and the producer is done.
+                    session.rollback()
+                    raise ClaimLost(f"job {job_id} is no longer this execution's at a preview")
+                preview = self.artifacts.ingest_bytes(
+                    session,
+                    frame,
+                    kind=ArtifactKind.THUMBNAIL,
+                    media_type=_preview_media_type(frame),
+                    original_name="generation-preview",
+                    metadata={
+                        "run_id": run_id,
+                        "temporary_preview": True,
+                    },
+                )
+                self._replace_parts(
+                    message,
+                    [
+                        MessagePart(
+                            position=0,
+                            type=PartType.PROGRESS.value,
+                            text=event.phase.title() or "Preview",
+                            metadata_json={
+                                "progress": event.progress,
+                                "phase": event.phase or "preview",
+                            },
+                        ),
+                        MessagePart(
+                            position=1,
+                            type=PartType.IMAGE.value,
+                            artifact_id=preview.id,
+                            metadata_json={"preview": True},
+                        ),
+                    ],
+                )
+                session.commit()
+                return True, preview.id
+        except OperationalError as error:
+            if not database_is_contended(error):
+                raise
+            _skip_held_media_write(job_id, "preview", error, started)
+            self._media_quiet_until[job_id] = time.monotonic() + MEDIA_UPDATE_QUIET_SECONDS
+            return False, None
+
+    def _stamp_media_completion(self, job_id: str, claim: JobClaim, event: MediaEvent) -> None:
+        """Stamp the engine's completion under the claim, unless the database is held.
+
+        The stamp only records when the engine last spoke. The outputs are
+        already in hand, and saving them checks the claim again in its own
+        transaction, so a held database leaves the stamp out rather than ending
+        the render. A refused claim still ends it.
+        """
+
+        if time.monotonic() < self._media_quiet_until.get(job_id, 0.0):
+            return
+        started = time.monotonic()
+        try:
+            with self.session_factory() as session:
+                shorten_busy_timeout(session, MEDIA_UPDATE_BUSY_WAIT_MS)
+                job = session.get(Job, job_id)
+                if not job:
+                    return
+                snapshot = apply_engine_progress(
+                    session,
+                    job_id=job_id,
+                    claim_attempt=claim.attempt,
+                    claim_owner=claim.token,
+                    stage=event.phase or "complete",
+                    queue_resource=job.queue_resource,
+                )
+                if snapshot is None:
+                    session.rollback()
+                    raise ClaimLost(f"job {job_id} is no longer this execution's at its completion")
+                session.commit()
+        except OperationalError as error:
+            if not database_is_contended(error):
+                raise
+            _skip_held_media_write(job_id, "completion stamp", error, started)
+            self._media_quiet_until[job_id] = time.monotonic() + MEDIA_UPDATE_QUIET_SECONDS
 
     def _stamp_chat_engine_report(self, job_id: str, claim: JobClaim) -> None:
         """Record that the chat engine produced tokens, just now.
