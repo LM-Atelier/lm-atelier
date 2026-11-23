@@ -7,7 +7,7 @@ import hashlib
 import hmac
 import json
 import re
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -32,6 +32,43 @@ from .artifact_deletion_authority import (
     validate_complete_reference_snapshot,
 )
 from .artifact_library_schema import ARTIFACT_METADATA_REFERENCE_KEYS
+from .artifact_reference_extractors import (
+    MAX_REFERENCE_DEPTH as MAX_REFERENCE_DEPTH,
+)
+from .artifact_reference_extractors import (
+    MAX_REFERENCE_LIST as MAX_REFERENCE_LIST,
+)
+from .artifact_reference_extractors import (
+    MAX_REFERENCE_VALUES as MAX_REFERENCE_VALUES,
+)
+from .artifact_reference_extractors import (
+    REFERENCE_CORRUPT as REFERENCE_CORRUPT,
+)
+from .artifact_reference_extractors import (
+    _fail as _fail,
+)
+from .artifact_reference_extractors import (
+    _ids as _ids,
+)
+from .artifact_reference_extractors import (
+    _job_ids as _job_ids,
+)
+from .artifact_reference_extractors import (
+    _mapping as _mapping,
+)
+from .artifact_reference_extractors import (
+    _optional_id as _optional_id,
+)
+from .artifact_reference_extractors import (
+    _run_ids as _run_ids,
+)
+from .artifact_reference_extractors import (
+    _settings_ids as _settings_ids,
+)
+from .artifact_reference_extractors import (
+    _work_step_ids as _work_step_ids,
+)
+from .artifact_reference_index import compare_refusal_with_walk, compare_with_walk
 from .domain import ArtifactKind, utcnow
 from .models import (
     Artifact,
@@ -57,10 +94,6 @@ from .models import (
 )
 
 MAX_REFERENCE_ROWS = 100_000
-MAX_REFERENCE_LIST = 4_096
-MAX_REFERENCE_VALUES = 100_000
-MAX_REFERENCE_DEPTH = 16
-REFERENCE_CORRUPT = "Stored artifact reference data is invalid."
 LIBRARY_CURSOR_INVALID = "The Media Library cursor is invalid."
 LIBRARY_DATA_INVALID = "Stored Media Library data is invalid."
 _CURSOR_CONTEXT = b"artifact-library-page-v1"
@@ -584,114 +617,6 @@ def set_library_favorite(
     return entry
 
 
-def _fail() -> NoReturn:
-    raise ArtifactReferenceDataError(REFERENCE_CORRUPT)
-
-
-def _mapping(value: object) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        _fail()
-    if len(value) > MAX_REFERENCE_LIST:
-        _fail()
-    return value
-
-
-def _ids(value: object) -> set[str]:
-    if not isinstance(value, list) or len(value) > MAX_REFERENCE_LIST:
-        _fail()
-    if any(not isinstance(item, str) or not item or len(item) > 80 for item in value):
-        _fail()
-    return set(value)
-
-
-def _optional_id(value: object) -> set[str]:
-    if value is None:
-        return set()
-    if not isinstance(value, str) or not value or len(value) > 80:
-        _fail()
-    return {value}
-
-
-def _run_ids(value: object) -> set[str]:
-    row = _mapping(value)
-    found: set[str] = set()
-    for key in ("input_artifact_ids", "resolved_dependency_artifact_ids"):
-        if key in row:
-            found.update(_ids(row[key]))
-    outputs = row.get("outputs")
-    if outputs is not None:
-        if not isinstance(outputs, list) or len(outputs) > MAX_REFERENCE_LIST:
-            _fail()
-        for output in outputs:
-            item = _mapping(output)
-            for key in ("artifact_id", "poster_artifact_id", "browser_proxy_artifact_id"):
-                if key in item:
-                    found.update(_optional_id(item[key]))
-    return found
-
-
-def _work_step_ids(value: object) -> set[str]:
-    if not isinstance(value, list) or len(value) > MAX_REFERENCE_LIST:
-        _fail()
-    found: set[str] = set()
-    for raw in value:
-        item = _mapping(raw)
-        if "artifact_id" in item:
-            found.update(_optional_id(item["artifact_id"]))
-    return found
-
-
-def _settings_ids(value: object) -> set[str]:
-    row = _mapping(value)
-    mask = row.get("mask")
-    if mask is None:
-        return set()
-    mask_row = _mapping(mask)
-    if "artifact_id" not in mask_row:
-        _fail()
-    return _optional_id(mask_row["artifact_id"])
-
-
-_SCALAR_ARTIFACT_KEYS = {
-    "artifact_id",
-    "source_artifact_id",
-    "result_artifact_id",
-    "input_artifact_id",
-    "poster_artifact_id",
-    "browser_proxy_artifact_id",
-}
-_LIST_ARTIFACT_KEYS = {"artifact_ids", "input_artifact_ids"}
-
-
-def _job_ids(value: object, *, depth: int = 0, budget: list[int] | None = None) -> set[str]:
-    if budget is None:
-        budget = [0]
-    budget[0] += 1
-    if budget[0] > MAX_REFERENCE_VALUES or depth > MAX_REFERENCE_DEPTH:
-        _fail()
-    found: set[str] = set()
-    if isinstance(value, Mapping):
-        if len(value) > MAX_REFERENCE_LIST:
-            _fail()
-        for key, child in value.items():
-            if not isinstance(key, str):
-                _fail()
-            if key in _SCALAR_ARTIFACT_KEYS:
-                found.update(_optional_id(child))
-            elif key in _LIST_ARTIFACT_KEYS:
-                found.update(_ids(child))
-            else:
-                found.update(_job_ids(child, depth=depth + 1, budget=budget))
-    elif isinstance(value, list):
-        if len(value) > MAX_REFERENCE_LIST:
-            _fail()
-        for child in value:
-            found.update(_job_ids(child, depth=depth + 1, budget=budget))
-    elif value is not None and not isinstance(value, str | int | float | bool):
-        _fail()
-    return found
-
-
 def _pending_json_reference_ids(session: Session) -> set[str]:
     """Parse every new or changed JSON reference producer before it is written."""
 
@@ -971,7 +896,16 @@ def referenced_artifact_ids(
             if key in metadata:
                 for named in _optional_id(metadata[key]):
                     referrers.setdefault(named, set()).add(other_id)
-    return complete_reference_snapshot(session, found, referrers=referrers)
+    try:
+        snapshot = complete_reference_snapshot(session, found, referrers=referrers)
+    except ArtifactReferenceDataError:
+        # Only the stored-document check is left to refuse here, and a current
+        # index refuses exactly the rows it refuses.
+        compare_refusal_with_walk(session.connection())
+        raise
+    # Read-only, so the change counter the snapshot recorded still holds.
+    compare_with_walk(session.connection(), found, referrers)
+    return snapshot
 
 
 def metadata_referrers(artifacts: Iterable[Artifact]) -> dict[str, set[str]]:

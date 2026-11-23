@@ -33,6 +33,7 @@ from .api import (
 )
 from .api_errors import register_api_error_handler
 from .artifact_reference_errors import register_artifact_reference_error_handler
+from .artifact_reference_index import maintain_reference_index, start_reference_index
 from .artifacts import (
     RETENTION_BATCH_DELETIONS,
     RETENTION_BATCH_SECONDS,
@@ -783,6 +784,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with _api_file_logging(active_settings):
             with _startup_stage("database-migrations"):
                 upgrade_database(active_settings)
+            # Bound to the engine it started with, like the retention sweep, so
+            # a later rebinding cannot point its upkeep at another database.
+            index_bind = SessionLocal.kw.get("bind")
+            with _startup_stage("artifact-reference-index"):
+                start_reference_index(lambda: SessionLocal(bind=index_bind))
             with _startup_stage("archive-staging-cleanup"):
                 sweep_staging(active_settings.export_dir)
             with SessionLocal() as session:
@@ -840,12 +846,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             idle_lock = asyncio.create_task(
                 lock_when_idle(services.workspace_lock), name="workspace-idle-lock"
             )
+            reference_index = asyncio.create_task(
+                maintain_reference_index(lambda: SessionLocal(bind=index_bind)),
+                name="artifact-reference-index",
+            )
             background = (
                 worker_restore,
                 backup_maintenance,
                 retention_sweep,
                 recovery_maintenance,
                 idle_lock,
+                reference_index,
             )
             try:
                 yield

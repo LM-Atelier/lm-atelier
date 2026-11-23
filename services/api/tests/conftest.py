@@ -17,7 +17,7 @@ from local_name_lookups import NameLookupGuard, refused_during_test, refused_una
 from verification_phase_timings import register_verification_phase_timings
 
 import local_lm
-from local_lm import db
+from local_lm import artifact_reference_index, db
 from local_lm import main as application
 from local_lm.config import Settings
 from local_lm.database_migrations import upgrade_database
@@ -78,6 +78,26 @@ def application_environment_restored() -> Iterator[None]:
         yield
 
 
+@pytest.fixture(autouse=True)
+def artifact_reference_index_agrees_with_the_walk() -> Iterator[None]:
+    """Every complete reference walk a test makes agrees with the reference index.
+
+    The index is compared with each walk that reads the whole store while it is
+    current, and only logs a disagreement, so that nothing depends on it before
+    it has been shown exact. Here a disagreement fails the test, as does
+    upkeep that failed unexpectedly, so every test that walks is also a test of
+    the index.
+    """
+
+    disagreements = artifact_reference_index.shadow_disagreements
+    failures = artifact_reference_index.upkeep_failures
+    yield
+    if artifact_reference_index.shadow_disagreements != disagreements:
+        pytest.fail("the artifact reference index disagreed with the reference walk")
+    if artifact_reference_index.upkeep_failures != failures:
+        pytest.fail("artifact reference index upkeep failed")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def names_resolve_only_locally() -> Iterator[NameLookupGuard]:
     """No name beyond this computer resolves while tests run.
@@ -128,6 +148,9 @@ def migrated_database_template(tmp_path_factory: pytest.TempPathFactory) -> Path
     settings.prepare()
     configure_database(settings)
     upgrade_database(settings)
+    # Certified once here, as startup would, so every copy starts current and
+    # a test that never starts the app still has the index checked.
+    assert artifact_reference_index.start_reference_index(db.SessionLocal)
     db.engine.dispose()
     database_path = settings.state_dir / "local-lm.sqlite3"
     with sqlite3.connect(database_path) as connection:
