@@ -6,16 +6,16 @@ import asyncio
 import hashlib
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from sqlalchemy import and_, or_, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from .artifact_deletion_authority import ArtifactReferenceIndexStale
 from .chat_recovery import preview_chat_recovery, purge_chat
 from .chat_recovery_graph import ChatRecoveryGraphError
-from .db import SessionLocal
+from .db import SessionLocal, database_is_contended
 from .media_recovery import preview_media_recovery, purge_media
 from .models import RecoveryItem
 from .project_recovery import preview_project_recovery, purge_project
@@ -29,6 +29,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger("local_lm")
 EXPIRY_INTERVAL_SECONDS = 60.0
 EXPIRY_BATCH_SIZE = 10
+#: A due item that keeps failing is tried again after a wait that doubles from
+#: the first to the longest. Each try takes SQLite's writer for as long as the
+#: item takes to check, so an item that cannot be purged must not take it every
+#: minute for as long as it stays stuck.
+EXPIRY_RETRY_FIRST_SECONDS = 120.0
+EXPIRY_RETRY_LONGEST_SECONDS = 6 * 60 * 60.0
 _SUPPORTED = (
     RecoveryKind.CHAT.value,
     RecoveryKind.PROJECT.value,
@@ -49,6 +55,16 @@ class ExpiryBatch:
     purged: int
     deferred: int
     next_cursor: ExpiryCursor | None
+    #: Due items passed over because an earlier failure's wait is not over.
+    waiting: int = 0
+
+
+@dataclass(frozen=True)
+class ExpiryWait:
+    """How many times a due item has failed in a row, and when it may be tried again."""
+
+    failures: int
+    retry_at: datetime
 
 
 @dataclass(frozen=True)
@@ -91,7 +107,9 @@ def _candidates(now: datetime, after: ExpiryCursor | None, limit: int) -> list[_
         ]
 
 
-def _purge(candidate: _Candidate, now: datetime) -> bool:
+def _purge(candidate: _Candidate, now: datetime) -> str | None:
+    """Purge one due item: None once it is purged, otherwise the fixed reason it waits."""
+
     with SessionLocal() as session:
         try:
             reserve_recovery_write(session)
@@ -105,7 +123,7 @@ def _purge(candidate: _Candidate, now: datetime) -> bool:
                 or _utc(item.purge_after) > _utc(now)
             ):
                 session.rollback()
-                return False
+                return "recovery-item-changed"
             preview_action = {
                 RecoveryKind.CHAT.value: preview_chat_recovery,
                 RecoveryKind.PROJECT.value: preview_project_recovery,
@@ -131,16 +149,23 @@ def _purge(candidate: _Candidate, now: datetime) -> bool:
             else:
                 purge_workflow(session, item.deletion_id, command, now)
             session.commit()
-            return True
-        except (
-            RecoveryPreviewConflict,
-            ChatRecoveryGraphError,
-            ArtifactReferenceIndexStale,
-            SQLAlchemyError,
-        ):
-            # Each waits for a later pass; an index catching up is ready by then.
+            return None
+        # Each waits for a later try; an index catching up is ready by then. The
+        # reason is a fixed code, never anything the item holds.
+        except RecoveryPreviewConflict as error:
             session.rollback()
-            return False
+            return error.code
+        except ChatRecoveryGraphError:
+            session.rollback()
+            return "chat-recovery-graph-invalid"
+        except ArtifactReferenceIndexStale:
+            session.rollback()
+            return "artifact-reference-index-stale"
+        except SQLAlchemyError as error:
+            session.rollback()
+            if isinstance(error, OperationalError) and database_is_contended(error):
+                return "recovery-database-busy"
+            return "recovery-database-error"
 
 
 async def _finish_thread[Result](operation: asyncio.Task[Result]) -> Result:
@@ -164,38 +189,65 @@ async def expire_recovery_batch(
     *,
     after: ExpiryCursor | None = None,
     limit: int = EXPIRY_BATCH_SIZE,
+    waits: dict[str, ExpiryWait] | None = None,
 ) -> ExpiryBatch:
-    """Purge a bounded seek page; each membership commits or rolls back as one item."""
+    """Purge a bounded seek page; each membership commits or rolls back as one item.
+
+    With `waits`, an item that failed before is passed over until its wait is
+    over, and each failure in a row doubles the wait up to the longest; a purge
+    clears it. The cursor still moves past a passed-over item, so one stuck
+    item never holds up the items after it.
+    """
     if not 1 <= limit <= 20:
         raise ValueError("Recovery expiry batches contain between one and twenty items.")
     candidates = await _finish_thread(
         asyncio.create_task(asyncio.to_thread(_candidates, now, after, limit))
     )
-    purged = 0
+    purged = deferred = waiting = 0
     for candidate in candidates:
+        earlier = waits.get(candidate.deletion_id) if waits is not None else None
+        if earlier is not None and now < earlier.retry_at:
+            waiting += 1
+            continue
 
-        async def perform(current: _Candidate = candidate) -> bool:
+        async def perform(current: _Candidate = candidate) -> str | None:
             return await _finish_thread(
                 asyncio.create_task(asyncio.to_thread(_purge, current, now))
             )
 
         if candidate.kind == RecoveryKind.CHAT.value:
             async with services.orchestrator.chat_guard(candidate.subject_id):
-                changed = await perform()
+                reason = await perform()
         else:
-            changed = await perform()
-        if changed:
-            purged += 1
-            if candidate.kind == RecoveryKind.PROJECT.value:
-                await services.events.publish("project.updated", candidate.subject_id, {})
-            await services.events.publish("recovery.updated", candidate.deletion_id, {})
+            reason = await perform()
+        if reason is not None:
+            deferred += 1
+            if waits is not None:
+                failures = (earlier.failures if earlier is not None else 0) + 1
+                delay = min(
+                    EXPIRY_RETRY_FIRST_SECONDS * 2 ** (failures - 1), EXPIRY_RETRY_LONGEST_SECONDS
+                )
+                waits[candidate.deletion_id] = ExpiryWait(failures, now + timedelta(seconds=delay))
+                logger.info(
+                    "Recovery expiry will try %s again in %.0f s (%s)",
+                    candidate.deletion_id,
+                    delay,
+                    reason,
+                )
+            continue
+        purged += 1
+        if waits is not None:
+            waits.pop(candidate.deletion_id, None)
+        if candidate.kind == RecoveryKind.PROJECT.value:
+            await services.events.publish("project.updated", candidate.subject_id, {})
+        await services.events.publish("recovery.updated", candidate.deletion_id, {})
     last = candidates[-1] if candidates else None
     cursor = (
         ExpiryCursor(last.purge_after, last.deletion_id)
         if last is not None and len(candidates) == limit
         else None
     )
-    return ExpiryBatch(len(candidates), purged, len(candidates) - purged, cursor)
+    return ExpiryBatch(len(candidates) - waiting, purged, deferred, cursor, waiting)
 
 
 async def maintain_recovery_expiry(
@@ -205,9 +257,13 @@ async def maintain_recovery_expiry(
     if interval_seconds <= 0:
         raise ValueError("Recovery expiry checks need a positive interval.")
     cursor: ExpiryCursor | None = None
+    # Kept for the life of the process: a restart tries every due item once more.
+    waits: dict[str, ExpiryWait] = {}
     while True:
         try:
-            result = await expire_recovery_batch(services, datetime.now(UTC), after=cursor)
+            result = await expire_recovery_batch(
+                services, datetime.now(UTC), after=cursor, waits=waits
+            )
             cursor = result.next_cursor
             if result.purged or result.deferred:
                 logger.info(

@@ -158,7 +158,7 @@ async def test_a_failed_workflow_expiry_rolls_back_history_minimization_and_auth
     before = rows()
     original = recovery_maintenance._purge
 
-    def fail_during_purge(candidate: recovery_maintenance._Candidate, now: datetime) -> bool:
+    def fail_during_purge(candidate: recovery_maintenance._Candidate, now: datetime) -> str | None:
         # Raise inside the lifecycle transaction after the real minimization.
         from local_lm.workflow_recovery import purge_workflow
 
