@@ -23,6 +23,7 @@ from .picture_remix import (
     preview_remix,
     read_remix_source,
 )
+from .setting_refusals import setting_error_body
 
 if TYPE_CHECKING:
     from .main import Services
@@ -103,6 +104,7 @@ async def preview_a_remix(
             "remix-choice-invalid",
             "Only settings the chosen workflow takes as they are can be applied, "
             "and a size only whole.",
+            **setting_error_body(exc),
         ) from exc
     return JSONResponse(preview_answer(artifact_id, preview), headers={"Cache-Control": "no-store"})
 

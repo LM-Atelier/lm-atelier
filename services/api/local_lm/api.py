@@ -740,6 +740,7 @@ from .schemas import (
     WorkStepOut,
 )
 from .security import SessionSecurity
+from .setting_refusals import setting_error_body
 from .settings_registry import (
     WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
     SavedSizeUnsupported,
@@ -4644,10 +4645,12 @@ async def queue_prompt_batch(
         raise api_error(409 if exc.conflict else 422, exc.code, str(exc)) from exc
     except SavedSizeUnsupported as exc:
         session.rollback()
-        raise api_error(422, "turn-size-unsupported", str(exc)) from exc
+        raise api_error(422, "turn-size-unsupported", str(exc), **setting_error_body(exc)) from exc
     except ValueError as exc:
         session.rollback()
-        raise api_error(422, "generation-settings-invalid", str(exc)) from exc
+        raise api_error(
+            422, "generation-settings-invalid", str(exc), **setting_error_body(exc)
+        ) from exc
     return _prompt_expansion_out(stored).model_copy(update={"replayed": accepted.replayed})
 
 
@@ -5186,6 +5189,7 @@ async def remix_a_picture(
             "remix-choice-invalid",
             "Only settings the chosen workflow takes as they are can be applied, "
             "and a size only whole.",
+            **setting_error_body(exc),
         ) from exc
     if not preview.ready or preview.text is None:
         raise api_error(
@@ -5245,6 +5249,20 @@ async def remix_a_picture(
         ) from exc
 
 
+def _sent_setting_keys(payload: TurnRequest) -> frozenset[str]:
+    """Every setting key a turn request names, wherever in it the key is."""
+
+    keys = set(payload.settings)
+    for ordered in payload.ordered_settings.values():
+        keys.update(ordered)
+    for override in payload.role_overrides.values():
+        keys.update(override.settings)
+    if isinstance(payload, PriorTurnEditRequest):
+        for step in payload.step_overrides.values():
+            keys.update(step.settings)
+    return frozenset(keys)
+
+
 async def _accept_turn(
     orchestrator: ConversationOrchestrator,
     session: Session,
@@ -5263,7 +5281,16 @@ async def _accept_turn(
     resolve_source: TurnSourceResolver | None = None,
     inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
     freeze_context: bool = False,
+    sent_settings: frozenset[str] | None = None,
 ) -> TurnAccepted:
+    """Queue a turn, or answer why it cannot be.
+
+    A refused setting is named with why. `sent_settings` is every setting key
+    the caller's own request named, for a turn that also carries settings over
+    from an earlier one; a refused key outside it is said to be carried over.
+    Left out, it is every key `payload` names.
+    """
+
     _refuse_comparison_chat(session, chat_id)
     try:
         if edit_source_message_id is not None and isinstance(payload, PriorTurnEditRequest):
@@ -5361,13 +5388,16 @@ async def _accept_turn(
             "before applying this edit.",
         ) from None
     except SavedSizeUnsupported as exc:
-        raise api_error(422, "turn-size-unsupported", str(exc)) from exc
+        raise api_error(422, "turn-size-unsupported", str(exc), **setting_error_body(exc)) from exc
     except ValueError as exc:
         recipe_error = workflow_use_case_error(exc)
         if recipe_error is not None:
             code, message = recipe_error
             raise api_error(422, code, message) from exc
-        raise api_error(422, "turn-invalid", str(exc)) from exc
+        sent = sent_settings if sent_settings is not None else _sent_setting_keys(payload)
+        raise api_error(
+            422, "turn-invalid", str(exc), **setting_error_body(exc, sent=sent)
+        ) from exc
 
 
 @router.get("/messages/{message_id}", response_model=MessageOut)
@@ -5840,6 +5870,8 @@ async def _regenerate_message_locked(
         chat_guard_held=True,
         before_commit=bind_request,
         resolve_source=resolve_regeneration_source if source_context is not None else None,
+        # The turn's other settings are carried over from the response it regenerates.
+        sent_settings=frozenset(payload.settings),
     )
 
     if payload.idempotency_key is not None:
@@ -6004,6 +6036,8 @@ async def edit_and_branch(
         inherited_image_edit_strength=inherited_image_edit_strength,
         inherited_prompt_source=inherited_prompt_source,
         reference_source_message_id=reference_source_message_id,
+        # Settings the branch did not name are carried over from the turn it branches.
+        sent_settings=_sent_setting_keys(payload),
     )
 
 
@@ -15659,7 +15693,7 @@ async def preview_chat_upscale(
             404, "upscale-preview-not-found", "The conversation or source image is unavailable."
         ) from None
     except SavedSizeUnsupported as exc:
-        raise api_error(422, "turn-size-unsupported", str(exc)) from None
+        raise api_error(422, "turn-size-unsupported", str(exc), **setting_error_body(exc)) from None
     except ValueError as exc:
         recipe_error = workflow_use_case_error(exc)
         if recipe_error is not None:
@@ -15670,6 +15704,7 @@ async def preview_chat_upscale(
             "upscale-preview-unavailable",
             "Choose a ready enlargement workflow. Review its dependencies in Workflows "
             "before applying this edit.",
+            **setting_error_body(exc, sent=_sent_setting_keys(payload)),
         ) from None
 
 
@@ -15725,11 +15760,12 @@ async def _preview_context_source_fit(
         raise api_error(
             503, "source-fit-preview-engine-unavailable", "The selected engine is unavailable."
         ) from None
-    except ValueError:
+    except ValueError as exc:
         raise api_error(
             422,
             "source-fit-preview-unavailable",
             "The selected source and workflow cannot use this canvas.",
+            **setting_error_body(exc, sent=_sent_setting_keys(payload)),
         ) from None
 
 

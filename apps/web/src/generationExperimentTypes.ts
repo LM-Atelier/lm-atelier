@@ -1,5 +1,5 @@
 // Browser mirrors of the generation comparison contracts, with the server's field names.
-import type { OutputRatioPresetId, WorkStepStatus } from "./types";
+import type { OutputRatioPresetId, SettingError, WorkStepStatus } from "./types";
 
 export type SeedPolicyKind = "fixed_numeric" | "same_recorded_number" | "independent_deterministic" | "random_per_trial";
 
@@ -81,6 +81,8 @@ export interface ExperimentRefusal {
   setting: string | null;
   alternative: RefusalAlternative | null;
   message: string;
+  /** Every setting of the choice its workflow does not take as it is; absent when none is named. */
+  errors?: SettingError[];
 }
 
 export interface ResourceEvidence {

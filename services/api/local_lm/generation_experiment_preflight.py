@@ -18,7 +18,7 @@ and the session it reads must be as clean when it ends as when it began.
 from __future__ import annotations
 
 import copy
-import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -64,6 +64,12 @@ from .orchestrator import (
 from .outpaint_workflows import OUTPAINT_SETTING_KEY, extends_by_nothing
 from .picture_remix import RemixSource, _changes_the_picture, read_remix_source
 from .schemas import SettingField, TurnRequest
+from .setting_refusals import (
+    SETTING_NAME,
+    SettingRefusal,
+    SettingRefused,
+    setting_error_models,
+)
 from .settings_registry import (
     WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
     SavedSizeUnsupported,
@@ -82,7 +88,6 @@ _ENCODED_SIDE = 8
 COMMON_SETTING_KEYS = frozenset({"negative_prompt", "seed", "width", "height", "batch_size"})
 # Inputs a comparison from words does not take.
 INPUT_SETTING_KEYS = frozenset({MASK_SETTING_KEY, RELIGHT_SETTING_KEY, OUTPAINT_SETTING_KEY})
-_SETTING_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _REASONS: dict[str, GenerationExperimentRefusalCode] = {
     "revision_missing": Code.ARM_WORKFLOW_UNAVAILABLE,
     "engine_mismatch": Code.ARM_WORKFLOW_UNAVAILABLE,
@@ -97,7 +102,7 @@ _REASONS: dict[str, GenerationExperimentRefusalCode] = {
 
 
 class ArmRefused(Exception):
-    """One choice cannot run; carries the refusal it reports."""
+    """One choice cannot run; carries the refusal it reports, and each setting it names."""
 
     def __init__(
         self,
@@ -105,11 +110,13 @@ class ArmRefused(Exception):
         *,
         setting: str | None = None,
         alternative: RefusalAlternativeOut | None = None,
+        errors: Iterable[SettingRefusal] = (),
     ) -> None:
         super().__init__(code.value)
         self.code = code
         self.setting = setting
         self.alternative = alternative
+        self.errors = tuple(errors)
 
 
 @dataclass(frozen=True)
@@ -200,6 +207,7 @@ def _refusal(
     arm_ordinal: int | None = None,
     setting: str | None = None,
     alternative: RefusalAlternativeOut | None = None,
+    errors: Iterable[SettingRefusal] = (),
 ) -> ExperimentRefusalOut:
     return ExperimentRefusalOut(
         code=code,
@@ -207,6 +215,7 @@ def _refusal(
         setting=setting,
         alternative=alternative,
         message=REFUSAL_MESSAGES[code],
+        errors=setting_error_models(errors),
     )
 
 
@@ -217,7 +226,7 @@ def operation_of(request: GenerationExperimentRequest) -> Operation:
 def _setting_name(key: str) -> str | None:
     """A setting is named back only when it looks like one; anything else stays unnamed."""
 
-    return key if _SETTING_NAME.fullmatch(key) else None
+    return key if SETTING_NAME.fullmatch(key) else None
 
 
 def _resolution_chat() -> Chat:
@@ -250,6 +259,25 @@ def _require_profile(session: Session, profile_id: str, role: str) -> ModelProfi
     return profile
 
 
+def _refusals_of(
+    values: Mapping[str, Any], request_fields: list[SettingField]
+) -> tuple[SettingRefusal, ...]:
+    """Every one of these values its workflow does not take as it is, and why.
+
+    A refusal of a choice keeps the code and setting of the first value it
+    refuses, as it always has; these name the rest beside it, so one answer
+    names them all.
+    """
+
+    try:
+        validate_settings(values, request_fields)
+    except SettingRefused as refused:
+        return refused.refusals
+    except (ValueError, TypeError, OverflowError):
+        return ()
+    return ()
+
+
 def _common_settings(
     session: Session,
     request: GenerationExperimentRequest,
@@ -274,11 +302,19 @@ def _common_settings(
             raise ArmRefused(Code.ARM_INPUT_UNSUPPORTED, setting=key)
     for key, value in arm.settings.items():
         if key not in by_key and key != WORKFLOW_LORA_OVERRIDES_SETTING_KEY:
-            raise ArmRefused(Code.ARM_SETTING_UNSUPPORTED, setting=_setting_name(key))
+            raise ArmRefused(
+                Code.ARM_SETTING_UNSUPPORTED,
+                setting=_setting_name(key),
+                errors=_refusals_of(arm.settings, request_fields),
+            )
         try:
             validate_settings({key: value}, request_fields)
         except (ValueError, TypeError, OverflowError):
-            raise ArmRefused(Code.ARM_SETTING_INVALID, setting=_setting_name(key)) from None
+            raise ArmRefused(
+                Code.ARM_SETTING_INVALID,
+                setting=_setting_name(key),
+                errors=_refusals_of(arm.settings, request_fields),
+            ) from None
     settings: dict[str, Any] = copy.deepcopy(dict(arm.settings))
     if "negative_prompt" in by_key:
         # Always set, even when empty, so neither choice inherits a default the
@@ -319,13 +355,24 @@ def _common_settings(
         width, height, derived = size.width, size.height, True
     else:
         width, height, derived = geometry.width, geometry.height, False
-    for key, value in (("width", width), ("height", height)):
+    # A size is one shape: a refusal of either side names every side refused, so
+    # one answer is enough to put it right.
+    sides = {"width": width, "height": height}
+    for key, value in sides.items():
         if key not in by_key:
-            raise ArmRefused(Code.ARM_SETTING_UNSUPPORTED, setting=key)
+            raise ArmRefused(
+                Code.ARM_SETTING_UNSUPPORTED,
+                setting=key,
+                errors=_refusals_of(sides, request_fields),
+            )
         try:
             validate_settings({key: value}, request_fields)
         except (ValueError, TypeError, OverflowError):
-            raise ArmRefused(Code.ARM_SETTING_INVALID, setting=key) from None
+            raise ArmRefused(
+                Code.ARM_SETTING_INVALID,
+                setting=key,
+                errors=_refusals_of(sides, request_fields),
+            ) from None
         settings[key] = value
     shape = {
         "intent": geometry.model_dump(mode="json"),
@@ -420,7 +467,9 @@ async def _resolve_arm(
             workflow_revision=chosen_revision,
         )
     except SavedSizeUnsupported as exc:
-        raise ArmRefused(Code.ARM_SETTING_INVALID, setting=_setting_name(exc.key)) from None
+        raise ArmRefused(
+            Code.ARM_SETTING_INVALID, setting=_setting_name(exc.key), errors=exc.refusals
+        ) from None
     except (ValueError, TypeError, OverflowError):
         raise ArmRefused(Code.ARM_SETTING_INVALID) from None
     if layers.mask is not None or layers.relight is not None:
@@ -648,6 +697,7 @@ async def resolve_generation_experiment(
                         arm_ordinal=ordinal,
                         setting=refused.setting,
                         alternative=refused.alternative,
+                        errors=refused.errors,
                     )
                 )
         _require_clean(session)

@@ -68,6 +68,7 @@ from .outpaint_workflows import OUTPAINT_SETTING_KEY, extends_by_nothing
 from .picture_shape import media_runtime_reads
 from .routing import ModalityRouter
 from .schemas import SettingField, TurnRequest
+from .setting_refusals import SettingRefusal, SettingRefusalCode, SettingRefused
 from .settings_registry import (
     WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
     SavedSizeUnsupported,
@@ -149,10 +150,23 @@ REFUSAL_MESSAGES: Final = {
 }
 #: Where a remixed run keeps which picture and choices it came from.
 REMIX_KEY: Final = "remix"
+#: Why a claim chosen to apply is refused, where its verdict says it plainly.
+#: Every other claim that cannot be applied is refused as not applicable; its
+#: verdict in the preview says why.
+_CHOICE_REFUSALS: Final[dict[str | None, SettingRefusalCode]] = {
+    "not_offered": SettingRefusalCode.NOT_OFFERED,
+    "not_a_choice": SettingRefusalCode.NOT_A_CHOICE,
+}
 
 
-class RemixChoiceInvalid(ValueError):
-    """What to apply names a claim that cannot be applied."""
+class RemixChoiceInvalid(SettingRefused):
+    """What to apply names claims that cannot be applied; each refusal names one, and why."""
+
+    def __init__(self, refusals: Sequence[SettingRefusal]) -> None:
+        # Worded by the first choice refused, as it always was; half a size is "size".
+        first = refusals[0]
+        whole = first.code != SettingRefusalCode.NEEDS_ITS_PAIR
+        super().__init__(str(first.key) if whole else "size", refusals)
 
 
 class RemixDiffers(Exception):
@@ -596,25 +610,36 @@ def applied_settings(
     Only a supported claim can be applied, and a size only whole. The picture's
     shape can be applied only where one is offered, and never with its own size.
     The prompt is always the words a remix is made from, so it is never named here.
+    Every choice that cannot be applied is named before anything is refused.
     """
 
     chosen = tuple(sorted(set(apply)))
     by_key = {verdict.key: verdict for verdict in verdicts}
     settings: dict[str, Any] = {}
+    refusals: list[SettingRefusal] = []
     if "shape" in chosen:
-        if shape is None or any(key in chosen for key in _SIZE):
-            raise RemixChoiceInvalid("shape")
-        settings.update(zip(_SIZE, shape, strict=True))
+        if shape is None:
+            refusals.append(SettingRefusal(SettingRefusalCode.NOT_OFFERED, "shape"))
+        elif any(key in chosen for key in _SIZE):
+            refusals.append(SettingRefusal(SettingRefusalCode.NOT_APPLICABLE, "shape"))
+        else:
+            settings.update(zip(_SIZE, shape, strict=True))
     for key in chosen:
         if key == "shape":
             continue
         verdict = by_key.get(key)
         if verdict is None or verdict.setting is None or verdict.state != "supported":
             # The prompt has no setting: it is always the words, never applied by name.
-            raise RemixChoiceInvalid(key)
+            reason = verdict.reason if verdict is not None else None
+            code = _CHOICE_REFUSALS.get(reason, SettingRefusalCode.NOT_APPLICABLE)
+            refusals.append(SettingRefusal(code, key))
+            continue
         settings[verdict.setting] = verdict.setting_value
-    if any(key in chosen for key in _SIZE) and not all(key in chosen for key in _SIZE):
-        raise RemixChoiceInvalid("size")
+    alone = [key for key in _SIZE if key in chosen]
+    if len(alone) == 1:
+        refusals.append(SettingRefusal(SettingRefusalCode.NEEDS_ITS_PAIR, alone[0]))
+    if refusals:
+        raise RemixChoiceInvalid(refusals)
     return chosen, settings
 
 

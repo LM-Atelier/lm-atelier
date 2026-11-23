@@ -28,6 +28,7 @@ from pydantic import (
 )
 
 from .output_geometry import MAX_DIMENSION, PresetId
+from .setting_refusals import SettingErrorOut
 
 CONTRACT_VERSION: Literal[1] = 1
 # The scope of the one hidden chat a started comparison runs in.
@@ -275,12 +276,24 @@ class RefusalAlternativeOut(BaseModel):
     profile_id: str | None = None
 
 
+def _names_no_setting(errors: list[SettingErrorOut]) -> bool:
+    return not errors
+
+
 class ExperimentRefusalOut(BaseModel):
+    """Why one choice, or the comparison, cannot run.
+
+    A refusal of a choice's settings also names, in `errors`, every setting of
+    that choice its workflow does not take as it is, and why. `errors` is left
+    out of a refusal that names none.
+    """
+
     code: GenerationExperimentRefusalCode
     arm_ordinal: int | None = None
     setting: str | None = None
     alternative: RefusalAlternativeOut | None = None
     message: str
+    errors: list[SettingErrorOut] = Field(default_factory=list, exclude_if=_names_no_setting)
 
 
 class ResourceEvidenceOut(BaseModel):

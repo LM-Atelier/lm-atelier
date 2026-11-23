@@ -205,6 +205,7 @@ CHECKED_CONTRACTS = {
     "EditRecipeDraft": "EditRecipeDraftOut",
     "RefusalAlternative": "RefusalAlternativeOut",
     "ResourceEvidence": "ResourceEvidenceOut",
+    "SettingError": "SettingErrorOut",
     "WorkspaceLockPolicy": "WorkspaceLockPolicyOut",
     "WorkspaceLockPolicyWrite": "WorkspaceLockPolicyWrite",
     "WorkspaceLockStatus": "WorkspaceLockStatusOut",
