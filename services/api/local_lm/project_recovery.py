@@ -19,6 +19,7 @@ from .recovery_previews import (
     RecoveryPreviewConflict,
     RecoverySnapshot,
     issue_recovery_preview,
+    remember_recovery_inspection,
     require_current_recovery_preview,
     reserve_recovery_write,
 )
@@ -59,11 +60,20 @@ def _item(session: Session, deletion_id: str) -> RecoveryItem:
 
 
 def inspect_project_recovery(session: Session, project_id: str, now: datetime) -> RecoverySnapshot:
-    """Compare configuration and filing links, without hashing unrelated chat edits."""
-    try:
-        return _snapshot(session, project_id, now)
-    except ChatRecoveryGraphError:
-        raise RecoveryPreviewConflict("project-recovery-graph-invalid") from None
+    """Compare configuration and filing links, without hashing unrelated chat edits.
+
+    An expiry purge reads this once, before it reserves the writer.
+    """
+
+    def inspect() -> RecoverySnapshot:
+        try:
+            return _snapshot(session, project_id, now)
+        except ChatRecoveryGraphError:
+            raise RecoveryPreviewConflict("project-recovery-graph-invalid") from None
+
+    return remember_recovery_inspection(
+        session, (RecoveryKind.PROJECT.value, project_id, now), inspect
+    )
 
 
 def _snapshot(session: Session, project_id: str, now: datetime) -> RecoverySnapshot:

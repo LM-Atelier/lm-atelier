@@ -34,6 +34,7 @@ from .recovery_previews import (
     RecoverySnapshot,
     _utc,
     issue_recovery_preview,
+    remember_recovery_inspection,
     require_current_recovery_preview,
     reserve_recovery_write,
 )
@@ -75,6 +76,20 @@ def _entry(session: Session, entry_id: str) -> ArtifactLibraryEntry:
     except ArtifactLibraryDataError:
         raise RecoveryPreviewConflict("media-recovery-graph-invalid") from None
     return entry
+
+
+def inspect_media_recovery(session: Session, entry_id: str, now: datetime) -> RecoverySnapshot:
+    """What trashing, restoring or purging this Media Library entry checks.
+
+    An expiry purge reads this once. It takes the writer itself where it proves
+    the entry's references, which a deletion has to do under the writer.
+    """
+
+    return remember_recovery_inspection(
+        session,
+        (_KIND.value, entry_id, now),
+        lambda: _snapshot(session, entry_id, now),
+    )
 
 
 def _snapshot(session: Session, entry_id: str, now: datetime) -> RecoverySnapshot:
@@ -143,7 +158,7 @@ def preview_media_trash(session: Session, entry_id: str, now: datetime) -> Recov
         kind=_KIND,
         subject_id=entry_id,
         deletion_id=None,
-        inspect=lambda current: _snapshot(current, entry_id, now),
+        inspect=lambda current: inspect_media_recovery(current, entry_id, now),
         now=now,
     )
 
@@ -165,7 +180,7 @@ def preview_media_recovery(session: Session, deletion_id: str, now: datetime) ->
         kind=_KIND,
         subject_id=item.subject_id,
         deletion_id=deletion_id,
-        inspect=lambda current: _snapshot(current, item.subject_id, now),
+        inspect=lambda current: inspect_media_recovery(current, item.subject_id, now),
         now=now,
     )
 
@@ -190,7 +205,7 @@ def trash_media(
         subject_id=entry_id,
         deletion_id=None,
         command=command,
-        inspect=lambda current: _snapshot(current, entry_id, now),
+        inspect=lambda current: inspect_media_recovery(current, entry_id, now),
         now=now,
     )
     if RecoveryAction.TRASH not in snapshot.available_actions:
@@ -267,7 +282,7 @@ def _transition(
         subject_id=item.subject_id,
         deletion_id=deletion_id,
         command=command,
-        inspect=lambda current: _snapshot(current, item.subject_id, now),
+        inspect=lambda current: inspect_media_recovery(current, item.subject_id, now),
         now=now,
     )
     entry = _entry(session, item.subject_id)

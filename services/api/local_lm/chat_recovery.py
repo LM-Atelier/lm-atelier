@@ -26,6 +26,7 @@ from .recovery_previews import (
     RecoveryPreviewConflict,
     RecoverySnapshot,
     issue_recovery_preview,
+    remember_recovery_inspection,
     require_current_recovery_preview,
     reserve_recovery_write,
 )
@@ -161,11 +162,26 @@ def _deletion_inspected(
 def _recovery_inspected(
     session: Session, item: RecoveryItem, now: datetime
 ) -> tuple[RecoverySnapshot, ChatRecoveryGraph]:
-    """Check a deleted conversation whole, or from what purge reads when it is too large."""
-    try:
-        return _inspected(session, item.subject_id, now)
-    except ChatRecoveryGraphTooLarge:
-        return _deletion_inspected(session, item)
+    """Check a deleted conversation whole, or from what purge reads when it is too large.
+
+    An expiry purge reads this once, before it reserves the writer.
+    """
+
+    def inspect() -> tuple[RecoverySnapshot, ChatRecoveryGraph]:
+        try:
+            return _inspected(session, item.subject_id, now)
+        except ChatRecoveryGraphTooLarge:
+            return _deletion_inspected(session, item)
+
+    return remember_recovery_inspection(
+        session, (RecoveryKind.CHAT.value, item.deletion_id, now), inspect
+    )
+
+
+def inspect_chat_recovery(session: Session, item: RecoveryItem, now: datetime) -> RecoverySnapshot:
+    """What purging this deleted conversation checks."""
+
+    return _recovery_inspected(session, item, now)[0]
 
 
 def preview_chat_trash(
