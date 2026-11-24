@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -13,15 +14,23 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from .artifact_deletion_authority import ArtifactReferenceIndexStale
-from .chat_recovery import preview_chat_recovery, purge_chat
+from .chat_recovery import inspect_chat_recovery, preview_chat_recovery, purge_chat
 from .chat_recovery_graph import ChatRecoveryGraphError
 from .db import SessionLocal, database_is_contended
-from .media_recovery import preview_media_recovery, purge_media
+from .media_recovery import inspect_media_recovery, preview_media_recovery, purge_media
 from .models import RecoveryItem
-from .project_recovery import preview_project_recovery, purge_project
-from .recovery_previews import RecoveryPreviewConflict, _utc, reserve_recovery_write
+from .project_recovery import inspect_project_recovery, preview_project_recovery, purge_project
+from .recovery_previews import (
+    RecoveryPreviewConflict,
+    _utc,
+    begin_recovery_snapshot,
+    end_recovery_snapshot,
+    reserve_recovery_write,
+    snapshot_moved_on,
+)
 from .recovery_v1 import PurgeRecoveryV1, RecoveryKind
 from .workflow_recovery import preview_workflow_recovery, purge_workflow
+from .workflow_recovery_graph import inspect_workflow_recovery
 
 if TYPE_CHECKING:
     from .main import Services
@@ -30,11 +39,21 @@ logger = logging.getLogger("local_lm")
 EXPIRY_INTERVAL_SECONDS = 60.0
 EXPIRY_BATCH_SIZE = 10
 #: A due item that keeps failing is tried again after a wait that doubles from
-#: the first to the longest. Each try takes SQLite's writer for as long as the
-#: item takes to check, so an item that cannot be purged must not take it every
-#: minute for as long as it stays stuck.
+#: the first to the longest. Each try reads everything the item would delete,
+#: which can take tens of seconds, and a try is refused whenever something was
+#: committed meanwhile, so an item that cannot be purged must not be read again
+#: every minute for as long as it stays stuck.
 EXPIRY_RETRY_FIRST_SECONDS = 120.0
 EXPIRY_RETRY_LONGEST_SECONDS = 6 * 60 * 60.0
+#: A check that took less than this and could not then take the writer is read
+#: again at once holding the writer throughout: no other writer waits long
+#: behind a check this quick. A longer check waits for a try when nothing else
+#: is writing, so that its whole read never holds the writer.
+QUICK_CHECK_SECONDS = 0.5
+#: Why a check read without the writer could not then take it: something was
+#: committed while it read, or another writer held the database at that moment,
+#: which SQLite does not wait out for a transaction that has already read.
+_WRITER_REFUSED_AFTER_READING = frozenset({"recovery-snapshot-stale", "recovery-database-busy"})
 _SUPPORTED = (
     RecoveryKind.CHAT.value,
     RecoveryKind.PROJECT.value,
@@ -108,11 +127,42 @@ def _candidates(now: datetime, after: ExpiryCursor | None, limit: int) -> list[_
 
 
 def _purge(candidate: _Candidate, now: datetime) -> str | None:
-    """Purge one due item: None once it is purged, otherwise the fixed reason it waits."""
+    """Purge one due item: None once it is purged, otherwise the fixed reason it waits.
+
+    Everything the purge checks is read first, from one snapshot, without
+    SQLite's writer: checking a conversation with many renders can take tens of
+    seconds, and every other writer kept waiting that long would fail. The
+    writer is reserved only after the checks, which SQLite refuses if anything
+    was committed since they began reading, and is then held for the deletes.
+    A Media Library entry's check is the exception in part: it proves the
+    entry's references under the writer, so it takes the writer at that proof,
+    after reading the entry and the files it keeps without it.
+
+    SQLite also refuses at once, without waiting, while another writer holds
+    the database, since this transaction has already read. A check refused
+    either way is read again at once under the writer when it took less than
+    `QUICK_CHECK_SECONDS`, and that try waits for the writer as any other does;
+    a longer check waits for a later try.
+    """
+
+    started = time.monotonic()
+    outcome = _purge_once(candidate, now, reserve_first=False)
+    if (
+        outcome in _WRITER_REFUSED_AFTER_READING
+        and time.monotonic() - started < QUICK_CHECK_SECONDS
+    ):
+        outcome = _purge_once(candidate, now, reserve_first=True)
+    return outcome
+
+
+def _purge_once(candidate: _Candidate, now: datetime, *, reserve_first: bool) -> str | None:
+    """One try at purging a due item, reading its checks before or after taking the writer."""
 
     with SessionLocal() as session:
         try:
-            reserve_recovery_write(session)
+            begin_recovery_snapshot(session)
+            if reserve_first:
+                reserve_recovery_write(session)
             item = session.get(RecoveryItem, candidate.deletion_id)
             if item is None or (
                 item.kind != candidate.kind
@@ -124,6 +174,18 @@ def _purge(candidate: _Candidate, now: datetime) -> str | None:
             ):
                 session.rollback()
                 return "recovery-item-changed"
+            if item.kind == RecoveryKind.CHAT.value:
+                inspect_chat_recovery(session, item, now)
+            elif item.kind == RecoveryKind.PROJECT.value:
+                inspect_project_recovery(session, item.subject_id, now)
+            elif item.kind == RecoveryKind.MEDIA_LIBRARY_ENTRY.value:
+                inspect_media_recovery(session, item.subject_id, now)
+            else:
+                inspect_workflow_recovery(session, item.subject_id, now)
+            # The preview and the purge below check the same things again, and
+            # are answered from what was just read: a reservation that succeeds
+            # means nothing has been committed since.
+            reserve_recovery_write(session)
             preview_action = {
                 RecoveryKind.CHAT.value: preview_chat_recovery,
                 RecoveryKind.PROJECT.value: preview_project_recovery,
@@ -163,9 +225,15 @@ def _purge(candidate: _Candidate, now: datetime) -> str | None:
             return "artifact-reference-index-stale"
         except SQLAlchemyError as error:
             session.rollback()
+            if isinstance(error, OperationalError) and snapshot_moved_on(error):
+                # A Media Library check takes the writer part-way, to prove the
+                # entry's references, and SQLite refuses it there just the same.
+                return "recovery-snapshot-stale"
             if isinstance(error, OperationalError) and database_is_contended(error):
                 return "recovery-database-busy"
             return "recovery-database-error"
+        finally:
+            end_recovery_snapshot(session)
 
 
 async def _finish_thread[Result](operation: asyncio.Task[Result]) -> Result:

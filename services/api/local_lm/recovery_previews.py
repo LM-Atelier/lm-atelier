@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
-from collections.abc import Callable
+import sqlite3
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -25,6 +26,8 @@ from .recovery_v1 import (
 )
 
 PREVIEW_LIFETIME = timedelta(minutes=15)
+#: The checks a snapshot purge has read, with the transaction they were read in.
+_SNAPSHOT_INSPECTIONS = "lm_atelier_recovery_snapshot_inspections"
 
 
 class RecoveryPreviewConflict(ValueError):
@@ -71,10 +74,68 @@ def reserve_recovery_write(session: Session) -> None:
                 "UPDATE recovery_previews SET revision = revision WHERE 0"
             )
     except OperationalError as error:
+        if _SNAPSHOT_INSPECTIONS in session.info and snapshot_moved_on(error):
+            # Something was committed after this purge began reading, so what it
+            # read may no longer be what it would delete.
+            raise RecoveryPreviewConflict("recovery-snapshot-stale") from None
         if database_is_contended(error):
             raise RecoveryPreviewConflict("recovery-database-busy") from None
         raise
     session.expire_all()
+
+
+def snapshot_moved_on(error: OperationalError) -> bool:
+    """Whether SQLite refused the writer because a read snapshot is out of date."""
+
+    return getattr(error.orig, "sqlite_errorcode", None) == sqlite3.SQLITE_BUSY_SNAPSHOT
+
+
+def begin_recovery_snapshot(session: Session) -> None:
+    """Read a purge's checks from one snapshot, without holding SQLite's writer.
+
+    Python's sqlite3 begins a transaction only before a write, so on their own
+    the reads of a check would each see the database as it was at that moment.
+    An explicit BEGIN makes every read until the writer is reserved share the
+    snapshot of the first. SQLite refuses to reserve the writer from a snapshot
+    once anything has been committed after it (SQLITE_BUSY_SNAPSHOT), so a
+    reservation that succeeds proves every check read before it is still
+    current, and `remember_recovery_inspection` keeps those checks for the rest
+    of the transaction instead of reading them again under the writer. SQLite
+    does not wait for another writer here either: a transaction that has read
+    is refused at once (SQLITE_BUSY) while another writer holds the database.
+    """
+
+    if session.get_bind().dialect.name != "sqlite":
+        raise RecoveryPreviewConflict("recovery-database-unsupported")
+    if session.new or session.dirty or session.deleted or session.in_transaction():
+        raise RecoveryPreviewConflict("recovery-transaction-not-clean")
+    connection = session.connection()
+    connection.exec_driver_sql("BEGIN")
+    session.info[_SNAPSHOT_INSPECTIONS] = (session.get_transaction(), {})
+
+
+def end_recovery_snapshot(session: Session) -> None:
+    """Forget the checks a snapshot purge read; its transaction is over."""
+
+    session.info.pop(_SNAPSHOT_INSPECTIONS, None)
+
+
+def remember_recovery_inspection[Inspection](
+    session: Session, key: Hashable, inspect: Callable[[], Inspection]
+) -> Inspection:
+    """Check once per snapshot purge, and every time anywhere else.
+
+    A check is kept only for the transaction that read it: once that ends, or
+    outside a snapshot purge, it is read again.
+    """
+
+    held = session.info.get(_SNAPSHOT_INSPECTIONS)
+    if held is None or held[0] is None or held[0] is not session.get_transaction():
+        return inspect()
+    inspections: dict[Hashable, Inspection] = held[1]
+    if key not in inspections:
+        inspections[key] = inspect()
+    return inspections[key]
 
 
 def _impact(

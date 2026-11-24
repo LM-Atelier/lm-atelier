@@ -1,8 +1,8 @@
 """A due item that keeps failing waits longer before each new try.
 
-Each try takes SQLite's writer for as long as the item takes to check, so an
-item that cannot be purged must not take it every minute for as long as it
-stays stuck: other writers that wait past the busy timeout fail.
+Each try reads everything the item would delete, which can take tens of
+seconds, so an item that cannot be purged must not be read again every minute
+for as long as it stays stuck.
 """
 
 from __future__ import annotations

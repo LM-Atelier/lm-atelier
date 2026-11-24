@@ -13,7 +13,12 @@ from sqlalchemy.orm import Session
 from .chat_recovery_graph import ChatRecoveryGraphError, _GraphReader
 from .db import Base
 from .models import RecoveryItem
-from .recovery_previews import RecoveryPreviewConflict, RecoverySnapshot, _utc
+from .recovery_previews import (
+    RecoveryPreviewConflict,
+    RecoverySnapshot,
+    _utc,
+    remember_recovery_inspection,
+)
 from .recovery_v1 import RecoveryAction, RecoveryConflict, RecoveryCountsV1, RecoveryKind
 from .workflow_recovery_history import HISTORICAL_WORKFLOW_CONSUMERS
 from .workflow_recovery_schema import (
@@ -73,11 +78,20 @@ def _references(value: object, identities: frozenset[str]) -> bool:
 
 
 def inspect_workflow_recovery(session: Session, family_id: str, now: datetime) -> RecoverySnapshot:
-    """Bind the preview to canonical identity, authority and bounded consumer rows."""
-    try:
-        return _snapshot(session, family_id, now)
-    except ChatRecoveryGraphError:
-        raise RecoveryPreviewConflict("workflow-recovery-graph-invalid") from None
+    """Bind the preview to canonical identity, authority and bounded consumer rows.
+
+    An expiry purge reads this once, before it reserves the writer.
+    """
+
+    def inspect() -> RecoverySnapshot:
+        try:
+            return _snapshot(session, family_id, now)
+        except ChatRecoveryGraphError:
+            raise RecoveryPreviewConflict("workflow-recovery-graph-invalid") from None
+
+    return remember_recovery_inspection(
+        session, (RecoveryKind.WORKFLOW_FAMILY.value, family_id, now), inspect
+    )
 
 
 def _snapshot(session: Session, family_id: str, now: datetime) -> RecoverySnapshot:
