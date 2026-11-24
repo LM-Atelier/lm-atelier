@@ -41,6 +41,11 @@ def _collaborator_double(**members: object) -> Mock:
 def _session_double(factory: Callable[[], object]) -> MagicMock:
     fixture = factory()
     session = MagicMock(spec=Session, wraps=fixture)
+    if not hasattr(fixture, "connection"):
+        # A stand-in models rows, not the connection under them. A write that
+        # has to land first sets how long its connection waits for another
+        # writer, so it is handed a connection that accepts that.
+        session.connection = MagicMock(return_value=MagicMock())
     enter = getattr(fixture, "__enter__", None)
     if enter is not None:
 

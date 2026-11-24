@@ -14,8 +14,9 @@ from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Sequenc
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
+from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Any, Final, cast
+from typing import Any, Final, NamedTuple, cast
 from urllib.parse import urlparse
 
 from sqlalchemy import delete, func, or_, select, update
@@ -38,7 +39,7 @@ from .adapters.base import ChatRequest, GeneratedAsset, MediaEvent, MediaRequest
 from .adapters.contracts import close_iterator
 from .adapters.message_projection import project_chat_messages
 from .artifact_library import ensure_library_entry
-from .artifacts import ArtifactStore
+from .artifacts import ArtifactStore, StagedArtifactFile
 from .auxiliary_assets import (
     LORA_GRAPH_TRANSFORM_VERSION,
     AutomaticLoraSelection,
@@ -1305,6 +1306,115 @@ def _skip_held_media_write(job_id: str, what: str, error: OperationalError, star
     )
 
 
+#: How long each try of a write that has to land waits for another writer
+#: before it gives up. The wait blocks the event loop, and with it every other
+#: request, stream and worker check this service is serving, so a try waits a
+#: second rather than the five of the busy timeout.
+HELD_DATABASE_TRY_WAIT_MS = 1000
+#: How long such a write pauses before each new try, a wait that blocks
+#: nothing. A finished render's outputs, and the outcome of any run, exist only
+#: in memory until the write lands. Most holds end within a second, so the
+#: first pauses are short; they double from there, so the tries span about
+#: forty seconds in all, eight times the wait of the single try they replace,
+#: and the last pause stops at fifteen seconds so a write still lands soon after
+#: the writer frees.
+HELD_DATABASE_RETRY_DELAYS_SECONDS: tuple[float, ...] = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 15.0)
+#: How long a run's outcome - its failure, its cancellation, or the
+#: interruption of an image edit check - then waits before each further try,
+#: in the background: doubling from five seconds to a minute, about ten minutes
+#: in all. Until it lands, the job reads as the run left it - running, or still
+#: queued for a run that ended before its turn came - and the scheduler leaves
+#: the run's claim alone. An outcome that never lands leaves the job so. The
+#: next start then ends a running job as interrupted, unless the scheduler's
+#: next pass in its group does sooner because the release of the run's claim
+#: could not be written, and it queues a queued job again.
+OUTCOME_RECORD_RETRY_DELAYS_SECONDS: tuple[float, ...] = (5.0, 10.0, 20.0, 40.0) + (60.0,) * 9
+
+
+@dataclass(frozen=True)
+class _StoredOutput:
+    """What a stored output's row says, kept as plain values once its session has closed."""
+
+    artifact_id: str
+    sha256: str
+    kind: str
+    media_type: str
+    size_bytes: int
+
+
+#: How an execution ended: it failed, it was stopped, or - for an image edit
+#: check that gave way to new work - it was interrupted.
+_FAILURE = "failure"
+_CANCELLATION = "cancellation"
+_INTERRUPTION = "interruption"
+
+
+@dataclass(frozen=True)
+class _Outcome:
+    """How one execution of a job ended, decided at the moment it ended.
+
+    Its record can land long after that, while a held database keeps it out,
+    so it carries what it acts on: the claim the execution held or, for a job
+    no claim had touched, the attempt and the moment the job was queued. It is
+    written only while the job is still that, and dropped otherwise, so it
+    never ends a later retry of the same job.
+    """
+
+    job_id: str
+    run_id: str | None
+    kind: str
+    claim: JobClaim | None
+    attempt: int | None
+    enqueued_at: datetime | None
+    at: datetime
+    error: str = ""
+    retryable: bool = False
+
+    @property
+    def key(self) -> tuple[object, ...]:
+        """The execution this records: one record per execution is ever pending."""
+
+        if self.claim is not None:
+            return (self.job_id, self.claim.token)
+        return (self.job_id, None, self.attempt, self.enqueued_at)
+
+
+class _Recorded(NamedTuple):
+    """What writing an execution's outcome did."""
+
+    #: Whether the outcome was written.
+    landed: bool
+    #: The retry a failure queued, when it queued one.
+    retry: dict[str, Any] | None = None
+    #: Why nothing was written, when nothing was, in words for the log.
+    refused: str = ""
+
+
+def _refusal(outcome: _Outcome, status: str, attempt: int) -> str:
+    """Why an outcome was not written over the job as it now reads, in words for the log."""
+
+    if status == JobStatus.CANCELLED.value:
+        return "a stop had already cancelled the job"
+    if attempt != outcome.attempt:
+        return f"a later attempt has taken the job (now {status} at attempt {attempt})"
+    if status == JobStatus.QUEUED.value:
+        return "the job was queued again since"
+    return f"the job has since been marked {status}"
+
+
+def _left_as(outcome: _Outcome, *, closing: bool) -> str:
+    """What becomes of a job whose outcome was never written, in words for the log."""
+
+    if outcome.claim is None:
+        return "if the job is still queued, the next start queues it again"
+    if closing:
+        return "if the job still reads running, the next start marks it interrupted"
+    return (
+        "if the job still reads running, the next start marks it interrupted, unless the "
+        "scheduler does sooner because the release of its claim could not be written"
+    )
+
+
 class ConversationOrchestrator:
     def __init__(
         self,
@@ -1387,6 +1497,19 @@ class ConversationOrchestrator:
         #: one found the database held: trying each event would block the event
         #: loop, and the engine's stream with it, for as long as the hold lasts.
         self._media_quiet_until: dict[str, float] = {}
+        #: Outcomes still being recorded, or finished, in the background after
+        #: their execution ended, one per execution. `close` cancels and awaits
+        #: them.
+        self._pending_outcomes: dict[tuple[object, ...], asyncio.Task[None]] = {}
+        #: Executions a stop request cancelled without managing to record the
+        #: stop. Such a request announces nothing, so the execution's own record
+        #: of the stop announces it, once that lands.
+        self._refused_stops: set[asyncio.Task[None]] = set()
+        #: Outcome records, by `_Outcome.key`, still waiting to land when a stop
+        #: request's own write was refused. Nothing may run again after a stop,
+        #: so such a failure is recorded without the retry it would have
+        #: queued; the record reads this as it writes.
+        self._withdrawn_retries: set[tuple[object, ...]] = set()
         #: The window's expiry, or the settlement a chat load inside it left.
         self._media_warm_task: asyncio.Task[None] | None = None
         self._admission_open = True
@@ -4766,6 +4889,7 @@ class ConversationOrchestrator:
     def _task_done(self, job_id: str, task: asyncio.Task[None]) -> None:
         if self._tasks.get(job_id) is task:
             self._tasks.pop(job_id, None)
+        self._refused_stops.discard(task)
         if task.cancelled():
             return
         exception = task.exception()
@@ -4798,12 +4922,25 @@ class ConversationOrchestrator:
             if task:
                 task.cancel()
                 cancelled_task = task
-            self._mark_cancelled(session, job)
-            # The attempt this cancel is acting on, read inside the transaction
-            # that marks it. Everything below is a teardown of THAT run, and a
-            # retry can put this same job back to work before the teardown ends.
-            cancelled_attempt = job.attempt
-            session.commit()
+            try:
+                self._mark_cancelled(session, job)
+                # The attempt this cancel is acting on, read inside the transaction
+                # that marks it. Everything below is a teardown of THAT run, and a
+                # retry can put this same job back to work before the teardown ends.
+                cancelled_attempt = job.attempt
+                session.commit()
+            except OperationalError:
+                if cancelled_task is not None and not cancelled_task.done():
+                    # Its execution, stopped above, records the stop itself
+                    # once the database lets it, and announces it in place of
+                    # the lines below.
+                    self._refused_stops.add(cancelled_task)
+                # A failure of this job still waiting to land is recorded
+                # without the retry it would have queued.
+                self._withdrawn_retries.update(
+                    key for key in self._pending_outcomes if key[0] == job_id
+                )
+                raise
         if run_id or verification_job:
             try:
                 if verification_job:
@@ -4846,6 +4983,16 @@ class ConversationOrchestrator:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        # After the executions, so none of them can leave one behind. An outcome
+        # given up here leaves its job as its run left it, and the next start
+        # treats it as any job a closing application left: one still running is
+        # marked interrupted, and one still queued is queued again.
+        outcome_writes = tuple(self._pending_outcomes.values())
+        for task in outcome_writes:
+            task.cancel()
+        if outcome_writes:
+            await asyncio.gather(*outcome_writes, return_exceptions=True)
+        self._pending_outcomes.clear()
         if self._media_restart_task:
             self._media_restart_task.cancel()
             await asyncio.gather(self._media_restart_task, return_exceptions=True)
@@ -4913,50 +5060,14 @@ class ConversationOrchestrator:
                     await self._execute_image_edit_verification(job_id, claim)
                     return
                 assert run_id is not None
-                with self.session_factory() as session:
-                    job = session.get(Job, job_id)
-                    run = session.get(Run, run_id)
-                    if (
-                        not job
-                        or not run
-                        or job.status
-                        in {
-                            JobStatus.CANCELLED.value,
-                            JobStatus.FAILED.value,
-                            JobStatus.INTERRUPTED.value,
-                        }
-                    ):
-                        return
-                    self._resolve_step_inputs(session, run)
-                    if retry_is_pending(run.provenance_json):
-                        run.provenance_json = {
-                            **run.provenance_json,
-                            "failure_retries": {
-                                **run.provenance_json["failure_retries"],
-                                "pending": False,
-                            },
-                        }
-                    run.status = RunStatus.RUNNING.value
-                    run.started_at = job.started_at or utcnow()
-                    self._set_work_status(session, run, JobStatus.RUNNING.value)
-                    mark_setup_verification_running(
-                        session,
-                        run.chat_id,
-                        run_id=run.id,
-                        job_id=job.id,
-                    )
-                    if claim is not None:
-                        self._commit_owned(session, job_id, claim)
-                    else:
-                        session.commit()
-                    event_payload = {
-                        "job_id": job_id,
-                        "plan_id": run.work_plan_id,
-                        "step_id": run.work_step_id,
-                    }
-                    operation = run.operation
-                    prompt = run.standalone_prompt
-                    self._arm_step_prewarm(session, run)
+                started = await self._land_write(
+                    job_id,
+                    "start",
+                    partial(self._start_run, job_id=job_id, run_id=run_id, claim=claim),
+                )
+                if started is None:
+                    return
+                event_payload, operation, prompt = started
                 await self.events.publish("run.created", run_id, event_payload)
                 await self.events.publish(
                     "plan.selected",
@@ -5050,47 +5161,32 @@ class ConversationOrchestrator:
         except asyncio.CancelledError:
             if claim_lost:
                 raise
-            with self.session_factory() as session:
-                job = session.get(Job, job_id)
-                owns = job is not None and job.status != JobStatus.CANCELLED.value
-                if owns and claim is not None:
-                    # A cancellation delivered to an execution whose claim
-                    # expired and was re-claimed must not cancel the new
-                    # claimant's attempt; assert ownership at the database.
-                    owns = self._claim_terminal_transition(
-                        session, job_id, claim, attempt=claim.attempt
-                    )
-                elif owns:
-                    # No claim was ever captured, so this execution may
-                    # cancel only a row no claim has touched: still QUEUED
-                    # and unowned. The scheduler's waiter raises on ANY
-                    # terminal observation, and another dispatcher's
-                    # terminal result is not this waiter's to rewrite.
-                    owns = (
-                        cast(
-                            "CursorResult[Any]",
-                            session.execute(
-                                update(Job)
-                                .where(
-                                    Job.id == job_id,
-                                    Job.status == JobStatus.QUEUED.value,
-                                    Job.claim_owner.is_(None),
-                                )
-                                .values(claim_owner=None)
-                            ),
-                        ).rowcount
-                        == 1
-                    )
-                if owns and job is not None:
-                    if verification_job and job_id in self._preempted_image_edit_verifications:
-                        self._finish_image_edit_verification(
-                            session,
-                            job,
-                            VerificationReason.ASSESSMENT_INTERRUPTED,
-                        )
-                    else:
-                        self._mark_cancelled(session, job)
-                    session.commit()
+            # Decided now, while the stop is fresh: an image edit check that
+            # gave way to new work was interrupted rather than cancelled,
+            # however late its record lands.
+            stop = self._observed_outcome(
+                job_id,
+                run_id,
+                _INTERRUPTION
+                if verification_job and job_id in self._preempted_image_edit_verifications
+                else _CANCELLATION,
+                claim,
+            )
+            try:
+                written = await self._record_outcome(stop)
+            finally:
+                # Read once the record is done, so a stop request refused while
+                # it waited counts too.
+                announce = execution in self._refused_stops
+                self._refused_stops.discard(execution)
+            if written is not None and announce:
+                # A stop request announces the stop once its own write lands,
+                # and stopping a chat's work announces each run it ends. A stop
+                # request whose write was refused cannot, so this record, which
+                # landed instead, announces the stop and finishes its setup
+                # check. A record left to the background does both whenever it
+                # lands, since nothing else has recorded the stop by then.
+                self._finish_outcome_later(stop, written)
             raise
         except Exception as exc:
             if claim_lost:
@@ -5149,75 +5245,265 @@ class ConversationOrchestrator:
         *,
         cancelled_attempt: int | None = None,
     ) -> None:
-        finalized = False
-        state: str | None = None
-        role: str | None = None
-        with self.session_factory() as session:
-            job = session.get(Job, job_id)
-            run = session.get(Run, run_id)
-            chat_id = getattr(run, "chat_id", None)
-            if not job or not run or not chat_id:
-                return
-            if claim is not None and (
-                job.attempt != claim.attempt
-                or (
-                    job.claim_owner != claim.token
-                    and job.status
-                    not in {
-                        JobStatus.COMPLETE.value,
-                        JobStatus.FAILED.value,
-                        JobStatus.CANCELLED.value,
-                    }
-                )
-            ):
-                # The row was requeued or reclaimed by a later attempt: its
-                # outcome is that attempt's to finalize, and this execution
-                # deletes nothing on its behalf.
-                return
-            if cancelled_attempt is not None and (
-                job.attempt != cancelled_attempt
-                or job.status
-                not in {
-                    JobStatus.COMPLETE.value,
-                    JobStatus.FAILED.value,
-                    JobStatus.CANCELLED.value,
-                }
-            ):
-                # The same rule for a caller that holds no claim. `cancel` acts
-                # on a job rather than from inside an execution, so there is no
-                # token to compare - but a retry revives this job under the SAME
-                # id: the retry endpoint accepts a cancelled job and puts it back
-                # to queued, and the scheduler's claim then advances the attempt.
-                # Either half of that says these records belong to the later run.
-                return
-            verification = setup_verification_for_chat(session, chat_id)
-            if verification:
-                # The check above read the row; this asserts it at the database
-                # immediately before the write. Between the two, a requeue can
-                # land - the read holds no lock - and finalizing then deletes a
-                # row that already belongs to the successor. A rowcount of one
-                # takes SQLite's writer and holds the fact until this commit.
-                if claim is not None and not self._claim_still_finalizes(session, job_id, claim):
-                    return
-                if cancelled_attempt is not None and not self._attempt_still_finalizes(
-                    session, job_id, cancelled_attempt
-                ):
-                    return
-                role = verification.role
-                finalized = finalize_setup_verification(
-                    session,
-                    self.artifacts,
-                    chat_id,
-                    job,
-                )
-                state = verification.state
-                session.commit()
+        finalized, role, state = await self._land_write(
+            job_id,
+            "setup verification result",
+            partial(
+                self._finish_setup_verification,
+                job_id=job_id,
+                run_id=run_id,
+                claim=claim,
+                cancelled_attempt=cancelled_attempt,
+            ),
+        )
         if finalized:
             await self.events.publish(
                 "setup.verification.completed",
                 role or "setup",
                 {"role": role, "state": state},
             )
+
+    def _finish_setup_verification(
+        self,
+        session: Session,
+        *,
+        job_id: str,
+        run_id: str,
+        claim: JobClaim | None,
+        cancelled_attempt: int | None,
+    ) -> tuple[bool, str | None, str | None]:
+        """Finish the setup verification this run belongs to, if any.
+
+        Whether one was finished, with its role and state. Nothing is finished
+        for a run whose job a later attempt has taken.
+        """
+
+        job = session.get(Job, job_id)
+        run = session.get(Run, run_id)
+        chat_id = getattr(run, "chat_id", None)
+        if not job or not run or not chat_id:
+            return False, None, None
+        if claim is not None and (
+            job.attempt != claim.attempt
+            or (
+                job.claim_owner != claim.token
+                and job.status
+                not in {
+                    JobStatus.COMPLETE.value,
+                    JobStatus.FAILED.value,
+                    JobStatus.CANCELLED.value,
+                }
+            )
+        ):
+            # The row was requeued or reclaimed by a later attempt: its
+            # outcome is that attempt's to finalize, and this execution
+            # deletes nothing on its behalf.
+            return False, None, None
+        if cancelled_attempt is not None and (
+            job.attempt != cancelled_attempt
+            or job.status
+            not in {
+                JobStatus.COMPLETE.value,
+                JobStatus.FAILED.value,
+                JobStatus.CANCELLED.value,
+            }
+        ):
+            # The same rule for a caller that holds no claim. `cancel` acts
+            # on a job rather than from inside an execution, so there is no
+            # token to compare - but a retry revives this job under the SAME
+            # id: the retry endpoint accepts a cancelled job and puts it back
+            # to queued, and the scheduler's claim then advances the attempt.
+            # Either half of that says these records belong to the later run.
+            return False, None, None
+        verification = setup_verification_for_chat(session, chat_id)
+        if not verification:
+            return False, None, None
+        # The check above read the row; this asserts it at the database
+        # immediately before the write. Between the two, a requeue can
+        # land - the read holds no lock - and finalizing then deletes a
+        # row that already belongs to the successor. A rowcount of one
+        # takes SQLite's writer and holds the fact until this commit.
+        if claim is not None and not self._claim_still_finalizes(session, job_id, claim):
+            return False, None, None
+        if cancelled_attempt is not None and not self._attempt_still_finalizes(
+            session, job_id, cancelled_attempt
+        ):
+            return False, None, None
+        role = verification.role
+        finalized = finalize_setup_verification(
+            session,
+            self.artifacts,
+            chat_id,
+            job,
+        )
+        state = verification.state
+        session.commit()
+        return finalized, role, state
+
+    def _start_run(
+        self,
+        session: Session,
+        *,
+        job_id: str,
+        run_id: str,
+        claim: JobClaim | None,
+    ) -> tuple[dict[str, Any], str, str] | None:
+        """Mark a claimed run running: what its start announces, or None when it has already ended.
+
+        Committed only while the claim still owns the job.
+        """
+
+        job = session.get(Job, job_id)
+        run = session.get(Run, run_id)
+        if (
+            not job
+            or not run
+            or job.status
+            in {
+                JobStatus.CANCELLED.value,
+                JobStatus.FAILED.value,
+                JobStatus.INTERRUPTED.value,
+            }
+        ):
+            return None
+        self._resolve_step_inputs(session, run)
+        if retry_is_pending(run.provenance_json):
+            run.provenance_json = {
+                **run.provenance_json,
+                "failure_retries": {
+                    **run.provenance_json["failure_retries"],
+                    "pending": False,
+                },
+            }
+        run.status = RunStatus.RUNNING.value
+        run.started_at = job.started_at or utcnow()
+        self._set_work_status(session, run, JobStatus.RUNNING.value)
+        mark_setup_verification_running(
+            session,
+            run.chat_id,
+            run_id=run.id,
+            job_id=job.id,
+        )
+        if claim is not None:
+            self._commit_owned(session, job_id, claim)
+        else:
+            session.commit()
+        self._arm_step_prewarm(session, run)
+        return (
+            {
+                "job_id": job_id,
+                "plan_id": run.work_plan_id,
+                "step_id": run.work_step_id,
+            },
+            run.operation,
+            run.standalone_prompt,
+        )
+
+    def _observed_outcome(
+        self,
+        job_id: str,
+        run_id: str | None,
+        kind: str,
+        claim: JobClaim | None,
+        *,
+        error: str = "",
+        retryable: bool = False,
+    ) -> _Outcome:
+        """How this execution ended, with what its record may act on, read as it ends.
+
+        A claimed execution acts on its own attempt. One that never claimed
+        acts only on the queued job it saw: a retry queues the same job again,
+        at the same attempt but at a new time, and must be left alone.
+        """
+
+        attempt: int | None = claim.attempt if claim is not None else None
+        enqueued_at: datetime | None = None
+        if claim is None:
+            with self.session_factory() as session:
+                job = session.get(Job, job_id)
+                if job is not None:
+                    attempt, enqueued_at = job.attempt, job.enqueued_at
+        return _Outcome(
+            job_id=job_id,
+            run_id=run_id,
+            kind=kind,
+            claim=claim,
+            attempt=attempt,
+            enqueued_at=enqueued_at,
+            at=utcnow(),
+            error=error,
+            retryable=retryable,
+        )
+
+    @staticmethod
+    def _still_queued_as_seen(outcome: _Outcome) -> list[Any]:
+        """The conditions under which an unclaimed job is still the queued job an outcome saw."""
+
+        queued_at = (
+            Job.enqueued_at.is_(None)
+            if outcome.enqueued_at is None
+            else Job.enqueued_at == outcome.enqueued_at
+        )
+        return [
+            Job.id == outcome.job_id,
+            Job.status == JobStatus.QUEUED.value,
+            Job.claim_owner.is_(None),
+            Job.attempt == outcome.attempt,
+            queued_at,
+        ]
+
+    def _write_stop(self, session: Session, *, outcome: _Outcome) -> _Recorded:
+        """Record a stopped execution's job as stopped, if the job is still what it stopped.
+
+        Whether anything was recorded, and why not when nothing was. A job
+        already cancelled, or no longer the attempt or the queued job the stop
+        acted on, is left as it is.
+        """
+
+        job = session.get(Job, outcome.job_id)
+        if job is None:
+            return _Recorded(False, refused="the job is gone")
+        status, attempt = job.status, job.attempt
+        if status == JobStatus.CANCELLED.value:
+            # The stop's own request, or a later stop, already recorded it.
+            return _Recorded(False, refused=_refusal(outcome, status, attempt))
+        if outcome.claim is not None:
+            # A cancellation delivered to an execution whose claim
+            # expired and was re-claimed must not cancel the new
+            # claimant's attempt; assert ownership at the database.
+            owns = self._claim_terminal_transition(
+                session, outcome.job_id, outcome.claim, attempt=outcome.claim.attempt
+            )
+        else:
+            # No claim was ever captured, so this execution may cancel
+            # only the row it saw queued, which no claim has touched
+            # since. The scheduler's waiter raises on ANY terminal
+            # observation, and another dispatcher's terminal result is
+            # not this waiter's to rewrite.
+            owns = (
+                cast(
+                    "CursorResult[Any]",
+                    session.execute(
+                        update(Job)
+                        .where(*self._still_queued_as_seen(outcome))
+                        .values(claim_owner=None)
+                    ),
+                ).rowcount
+                == 1
+            )
+        if not owns:
+            session.rollback()
+            return _Recorded(False, refused=_refusal(outcome, status, attempt))
+        if outcome.kind == _INTERRUPTION:
+            self._finish_image_edit_verification(
+                session,
+                job,
+                VerificationReason.ASSESSMENT_INTERRUPTED,
+            )
+        else:
+            self._mark_cancelled(session, job)
+        session.commit()
+        return _Recorded(True)
 
     async def _execute_chat(self, job_id: str, run_id: str, claim: JobClaim) -> None:
         await self._require_phase(job_id, run_id, "Preparing chat model", claim)
@@ -5726,6 +6012,61 @@ class ConversationOrchestrator:
             raise ClaimLost(f"job {job_id} is no longer this execution's at a commit")
         session.commit()
 
+    async def _land_write[T](self, job_id: str, what: str, unit: Callable[[Session], T]) -> T:
+        """Run `unit` in a session of its own, trying it again while a held database refuses it.
+
+        For the writes a run cannot do without: a finished render's outputs,
+        its outcome, and the steps that start, show or stop it. `unit` reads
+        what it needs, writes and commits in the session it is given. When
+        another writer holds the database, the try gives up after a second, and
+        the next one starts in a new session after a pause in which this run
+        holds nothing and blocks nothing.
+
+        Trying again is safe because a held database refuses a transaction at
+        its first write, before anything is written or stored: every unit
+        asserts its claim, or makes some other write, before it stores a file.
+        Any other failure is raised at once, and so is the last refused try.
+        """
+
+        delays = HELD_DATABASE_RETRY_DELAYS_SECONDS
+        attempt = 1
+        while True:
+            started = time.monotonic()
+            try:
+                return self._try_write(unit)
+            except OperationalError as error:
+                if not database_is_contended(error):
+                    raise
+                last = attempt > len(delays)
+                logger.log(
+                    logging.WARNING if last else logging.INFO,
+                    "Job %s could not record its %s on try %d of %d: another writer held "
+                    "the database (%s after %.0f ms)",
+                    job_id,
+                    what,
+                    attempt,
+                    len(delays) + 1,
+                    getattr(error.orig, "sqlite_errorname", type(error.orig).__name__),
+                    (time.monotonic() - started) * 1000,
+                )
+                if last:
+                    raise
+            await asyncio.sleep(delays[attempt - 1])
+            attempt += 1
+
+    def _try_write[T](self, unit: Callable[[Session], T]) -> T:
+        """Run `unit` once, in a session of its own whose writes wait at most a second.
+
+        SQLite waits for another writer inside the call that writes, on the
+        event loop, so a try that waited out the full busy timeout would stop
+        every other request and stream for that long. The pool gives the
+        connection back its usual wait when the session ends.
+        """
+
+        with self.session_factory() as session:
+            shorten_busy_timeout(session, HELD_DATABASE_TRY_WAIT_MS)
+            return unit(session)
+
     async def _set_chat_phase(self, job_id: str, run_id: str, label: str, claim: JobClaim) -> bool:
         assistant_id = ""
         with self.session_factory() as session:
@@ -5810,40 +6151,62 @@ class ConversationOrchestrator:
             phase=label,
             data={"indeterminate": True},
         )
-        with self.session_factory() as session:
-            job = session.get(Job, job_id)
-            run = session.get(Run, run_id)
-            if (
-                not job
-                or not run
-                or job.status
-                in {
-                    JobStatus.COMPLETE.value,
-                    JobStatus.FAILED.value,
-                    JobStatus.CANCELLED.value,
-                    JobStatus.INTERRUPTED.value,
-                }
-            ):
-                return False
-            if not self._claim_owns_row(session, job_id, claim):
-                session.rollback()
-                return False
-            message = session.get(Message, run.assistant_message_id)
-            update_job_progress(
-                job,
-                stage=label,
-                queue_resource=job.queue_resource,
-                indeterminate=True,
-            )
-            if message:
-                self._replace_parts(message, self._media_progress_parts(message, event))
-            session.commit()
+        # A phase is the claim check that comes before loading or stopping a
+        # worker, so a held database is waited out rather than skipped.
+        if not await self._land_write(
+            job_id,
+            "phase",
+            partial(
+                self._write_media_phase, job_id=job_id, run_id=run_id, claim=claim, event=event
+            ),
+        ):
+            return False
         await self.scheduler.publish_job(job_id)
         await self.events.publish(
             "generation.progress",
             run_id,
             {"progress": 0, "phase": label, "job_id": job_id},
         )
+        return True
+
+    def _write_media_phase(
+        self,
+        session: Session,
+        *,
+        job_id: str,
+        run_id: str,
+        claim: JobClaim,
+        event: MediaEvent,
+    ) -> bool:
+        """Show a media run's phase; False when its job has ended or is no longer this claim's."""
+
+        job = session.get(Job, job_id)
+        run = session.get(Run, run_id)
+        if (
+            not job
+            or not run
+            or job.status
+            in {
+                JobStatus.COMPLETE.value,
+                JobStatus.FAILED.value,
+                JobStatus.CANCELLED.value,
+                JobStatus.INTERRUPTED.value,
+            }
+        ):
+            return False
+        if not self._claim_owns_row(session, job_id, claim):
+            session.rollback()
+            return False
+        message = session.get(Message, run.assistant_message_id)
+        update_job_progress(
+            job,
+            stage=event.phase,
+            queue_resource=job.queue_resource,
+            indeterminate=True,
+        )
+        if message:
+            self._replace_parts(message, self._media_progress_parts(message, event))
+        session.commit()
         return True
 
     async def _ensure_chat_worker(self, run_id: str) -> WorkerStatus | None:
@@ -8881,316 +9244,204 @@ class ConversationOrchestrator:
         media_capabilities = (
             await self._successful_media_capabilities() if completed_assets else None
         )
-        # Measured here because nothing is open: the session below holds a write
-        # transaction across the artifact writes, and a measurement is pure work
-        # on bytes that has no business inside one.
+        # Measured here because nothing is open: each output below is stored in
+        # a write transaction of its own, and a measurement is pure work on
+        # bytes that has no business inside one.
         measurements = await self._measured_outputs(completed_assets)
         source_agreements = await self._source_fit_agreements(
             source_fit, prepared_source, workflow, media_engine, completed_assets, measurements
         )
-        completed_assistant_id = assistant_id
-        verification_job_id: str | None = None
-        with self.session_factory() as session:
-            message = session.get(Message, assistant_id)
-            run = session.get(Run, run_id)
-            job = session.get(Job, job_id)
-            if not message or not run or not job:
-                return None
-            parts: list[MessagePart] = []
-            artifact_ids: list[str] = []
-            # Kept apart from artifact_ids on purpose: a throwaway is still
-            # shown, still reaches the browser and still has its own provenance,
-            # so the only thing that changes is whether it counts as something
-            # this run produced for you.
-            throwaway_ids: list[str] = []
-            output_provenance: list[dict[str, Any]] = []
-            for generated, measurement, source_agreement in zip(
-                completed_assets, measurements, source_agreements, strict=True
-            ):
-                # Asserted at the transaction that persists this asset,
-                # never across an await: the ingest and commit follow
-                # with no external work in between.
-                if not self._claim_owns_row(session, job_id, claim):
-                    session.rollback()
-                    logger.warning(
-                        "Refusing media persistence: the claim no longer owns job %s",
-                        job_id,
-                    )
-                    return None
-                kind = ArtifactKind(generated.kind)
-                artifact = self.artifacts.ingest_bytes(
-                    session,
-                    generated.content,
-                    kind=kind,
-                    media_type=generated.media_type,
-                    original_name=generated.name,
+        artifact_ids: list[str] = []
+        # Kept apart from artifact_ids on purpose: a throwaway is still
+        # shown, still reaches the browser and still has its own provenance,
+        # so the only thing that changes is whether it counts as something
+        # this run produced for you.
+        throwaway_ids: list[str] = []
+        output_provenance: list[dict[str, Any]] = []
+        # Each output's part as its type, its artifact and its metadata. The
+        # completion builds the rows from these afresh every time it is tried.
+        output_parts: list[tuple[str, str, dict[str, Any]]] = []
+        for generated, measurement, source_agreement in zip(
+            completed_assets, measurements, source_agreements, strict=True
+        ):
+            # Worked out before the library decision because it decides
+            # it. A preview NODE in the graph writes a file the engine marks
+            # as its own throwaway - a different thing from the streaming
+            # previews this module also calls `preview`. The picture is still
+            # shown; a library is a collection somebody curates, and this was
+            # never chosen.
+            origin = record_for(generated.origin, media_engine)
+            throwaway = names_a_preview(origin)
+            # Kept OFF the artifact row, which is the whole point. An
+            # artifact is addressed by its contents, so two runs that make
+            # identical bytes are one row - and whether a picture is the
+            # size somebody asked for is a fact about the ASKING, not about
+            # the bytes. Writing it on the shared row let a later run
+            # replace what an earlier conversation had already been told.
+            # The measurement can live there, because dimensions really are
+            # a property of the bytes; the judgement cannot.
+            agreement = size_agreement(
+                requested_settings=(
+                    {
+                        "width": source_fit.canvas_width,
+                        "height": source_fit.canvas_height,
+                    }
+                    if source_fit is not None
+                    else accepted_inputs.settings
+                    if accepted_inputs is not None
+                    else None
+                ),
+                measurement=measurement,
+                origin=origin,
+                binding_confirmed=(
+                    origin.get("node_id") == source_fit.save_node_id
+                    and origin.get("output_type") == "output"
+                    and origin.get("collection") == "images"
+                    if source_fit is not None
+                    else size_binding_confirmed
+                ),
+            )
+            # The engine has finished, so this output exists only in memory
+            # until it is stored: a held database is waited out, not a reason
+            # to lose the render.
+            stored = await self._land_write(
+                job_id,
+                "output",
+                partial(
+                    self._save_media_output,
+                    job_id=job_id,
+                    run_id=run_id,
+                    assistant_id=assistant_id,
+                    claim=claim,
+                    generated=generated,
                     metadata={
                         **generated.metadata,
-                        "run_id": run.id,
+                        "run_id": run_id,
                         "semantic_description": semantic_prompt,
                         "semantic_description_source": "generation_prompt",
                         "semantic_description_confidence": "intent-only",
                         "visual_contents_inspected": False,
                         "settings": copy.deepcopy(execution_settings),
                     },
+                    measurement=measurement,
+                    throwaway=throwaway,
+                ),
+            )
+            if stored is None:
+                return None
+            poster_artifact_id: str | None = None
+            proxy_artifact_id: str | None = None
+            if generated.kind == "video":
+                playback = await self._store_browser_playback(
+                    job_id, run_id, claim, stored.artifact_id, generated.name
                 )
-                # Recorded against the row the bytes themselves address, so the
-                # measurement cannot be attributed to a file it did not measure -
-                # and for the same reason an earlier run may already have
-                # written here, so the two records are composed rather than
-                # overwritten.
-                artifact.metadata_json = {
-                    **artifact.metadata_json,
-                    "output_measurement": record_to_keep(
-                        artifact.metadata_json.get("output_measurement"), measurement
+                if playback is None:
+                    return None
+                proxy_artifact_id, poster_artifact_id = playback
+            artifact_ids.append(stored.artifact_id)
+            if throwaway:
+                throwaway_ids.append(stored.artifact_id)
+            output_provenance.append(
+                {
+                    "artifact_id": stored.artifact_id,
+                    "sha256": stored.sha256,
+                    "kind": stored.kind,
+                    "media_type": stored.media_type,
+                    "size_bytes": stored.size_bytes,
+                    "poster_artifact_id": poster_artifact_id,
+                    "browser_proxy_artifact_id": proxy_artifact_id,
+                    # Which part of the workflow wrote this file, as the
+                    # engine said it. The engine name is stamped here from
+                    # what this execution selected rather than claimed by
+                    # the adapter that answered.
+                    "output_origin": origin,
+                    # The durable half: this run's own judgement, kept where
+                    # nothing another run does can reach it.
+                    "output_size_agreement": agreement,
+                    # How a selection placed this picture back into its
+                    # source, present only when one did.
+                    **(
+                        {"region_edit": generated.metadata["region_edit"]}
+                        if region_edit is not None and "region_edit" in generated.metadata
+                        else {}
+                    ),
+                    # How an extension was cut back from the canvas it was
+                    # made on, present only when one was.
+                    **(
+                        {"extension_finish": generated.metadata["extension_finish"]}
+                        if extension_finish is not None and "extension_finish" in generated.metadata
+                        else {}
+                    ),
+                    # How a small selection edited on a crop was placed back
+                    # into its source, present only when one was.
+                    **(
+                        {"selection_crop": generated.metadata["selection_crop"]}
+                        if selection_crop is not None and "selection_crop" in generated.metadata
+                        else {}
+                    ),
+                    # How the relit picture was finished against its source,
+                    # present only when it was.
+                    **(
+                        {"relight": generated.metadata["relight"]}
+                        if relight_finish is not None and "relight" in generated.metadata
+                        else {}
+                    ),
+                    # How the accepted source was put back into this picture,
+                    # present only when it was.
+                    **(
+                        {"source_restore": generated.metadata["source_restore"]}
+                        if source_fit is not None and "source_restore" in generated.metadata
+                        else {}
+                    ),
+                    **(
+                        {"source_fit_agreement": source_agreement}
+                        if source_agreement is not None
+                        else {}
                     ),
                 }
-                # Worked out before the library decision because it decides
-                # it. A preview NODE in the graph writes a file the engine marks
-                # as its own throwaway - a different thing from the streaming
-                # previews this module also calls `preview`. The picture is still
-                # shown; a library is a collection somebody curates, and this was
-                # never chosen.
-                origin = record_for(generated.origin, media_engine)
-                throwaway = names_a_preview(origin)
-                # Kept OFF the artifact row, which is the whole point. An
-                # artifact is addressed by its contents, so two runs that make
-                # identical bytes are one row - and whether a picture is the
-                # size somebody asked for is a fact about the ASKING, not about
-                # the bytes. Writing it on the shared row let a later run
-                # replace what an earlier conversation had already been told.
-                # The measurement can live there, because dimensions really are
-                # a property of the bytes; the judgement cannot.
-                agreement = size_agreement(
-                    requested_settings=(
-                        {
-                            "width": source_fit.canvas_width,
-                            "height": source_fit.canvas_height,
-                        }
-                        if source_fit is not None
-                        else accepted_inputs.settings
-                        if accepted_inputs is not None
-                        else None
-                    ),
-                    measurement=measurement,
-                    origin=origin,
-                    binding_confirmed=(
-                        origin.get("node_id") == source_fit.save_node_id
-                        and origin.get("output_type") == "output"
-                        and origin.get("collection") == "images"
-                        if source_fit is not None
-                        else size_binding_confirmed
-                    ),
-                )
-                output_chat = session.get(Chat, run.chat_id)
-                if (
-                    setup_verification_for_chat(session, run.chat_id) is None
-                    and output_chat
-                    and output_chat.scope != PROMPT_HELPER_SCOPE
-                    and not throwaway
-                ):
-                    ensure_library_entry(session, artifact)
-                # Derived-video helpers can spend minutes in ffmpeg. Persist the
-                # content-addressed source before awaiting them so SQLite never
-                # carries a write transaction across external process work.
-                session.commit()
-                poster_artifact_id: str | None = None
-                proxy_artifact_id: str | None = None
-                if generated.kind == "video":
-                    playback_artifact = artifact
-                    proxy_result = await self.artifacts.browser_video_proxy(artifact)
-                    if proxy_result and not self._claim_owns_row(session, job_id, claim):
-                        proxy_result.discard()
-                        session.rollback()
-                        logger.warning(
-                            "Refusing media persistence: the claim no longer owns job %s",
-                            job_id,
-                        )
-                        return None
-                    if proxy_result:
-                        try:
-                            proxy = self.artifacts.ingest_path(
-                                session,
-                                proxy_result.path,
-                                kind=ArtifactKind.OTHER,
-                                media_type=proxy_result.media_type,
-                                original_name=proxy_result.original_name,
-                                metadata={
-                                    "run_id": run.id,
-                                    "browser_proxy": True,
-                                    "proxy_for": artifact.id,
-                                },
-                            )
-                        finally:
-                            proxy_result.discard()
-                        proxy_artifact_id = proxy.id
-                        playback_artifact = proxy
-                        artifact.metadata_json = {
-                            **artifact.metadata_json,
-                            "browser_proxy_artifact_id": proxy.id,
-                        }
-                        # The poster helper awaits ffmpeg too. End the proxy
-                        # transaction first; incomplete derived artifacts remain
-                        # unreferenced and are handled by normal retention.
-                        session.commit()
-                    poster_content = await self.artifacts.video_poster(playback_artifact)
-                    if poster_content and not self._claim_owns_row(session, job_id, claim):
-                        session.rollback()
-                        logger.warning(
-                            "Refusing media persistence: the claim no longer owns job %s",
-                            job_id,
-                        )
-                        return None
-                    if poster_content:
-                        poster = self.artifacts.ingest_bytes(
-                            session,
-                            poster_content,
-                            kind=ArtifactKind.THUMBNAIL,
-                            media_type="image/jpeg",
-                            original_name=f"{generated.name}.poster.jpg",
-                            metadata={"run_id": run.id, "poster_for": artifact.id},
-                        )
-                        poster_artifact_id = poster.id
-                        artifact.metadata_json = {
-                            **artifact.metadata_json,
-                            "poster_artifact_id": poster.id,
-                        }
-                artifact_ids.append(artifact.id)
-                if throwaway:
-                    throwaway_ids.append(artifact.id)
-                output_provenance.append(
+            )
+            output_parts.append(
+                (
+                    PartType.IMAGE.value if generated.kind == "image" else PartType.VIDEO.value,
+                    stored.artifact_id,
                     {
-                        "artifact_id": artifact.id,
-                        "sha256": artifact.sha256,
-                        "kind": artifact.kind,
-                        "media_type": artifact.media_type,
-                        "size_bytes": artifact.size_bytes,
+                        "media_type": stored.media_type,
                         "poster_artifact_id": poster_artifact_id,
                         "browser_proxy_artifact_id": proxy_artifact_id,
-                        # Which part of the workflow wrote this file, as the
-                        # engine said it. The engine name is stamped here from
-                        # what this execution selected rather than claimed by
-                        # the adapter that answered.
-                        "output_origin": origin,
-                        # The durable half: this run's own judgement, kept where
-                        # nothing another run does can reach it.
+                        # The shown half. A part belongs to one message in
+                        # one conversation, so the judgement beside a
+                        # picture stays the judgement that picture's own run
+                        # made.
                         "output_size_agreement": agreement,
-                        # How a selection placed this picture back into its
-                        # source, present only when one did.
-                        **(
-                            {"region_edit": generated.metadata["region_edit"]}
-                            if region_edit is not None and "region_edit" in generated.metadata
-                            else {}
-                        ),
-                        # How an extension was cut back from the canvas it was
-                        # made on, present only when one was.
-                        **(
-                            {"extension_finish": generated.metadata["extension_finish"]}
-                            if extension_finish is not None
-                            and "extension_finish" in generated.metadata
-                            else {}
-                        ),
-                        # How a small selection edited on a crop was placed back
-                        # into its source, present only when one was.
-                        **(
-                            {"selection_crop": generated.metadata["selection_crop"]}
-                            if selection_crop is not None and "selection_crop" in generated.metadata
-                            else {}
-                        ),
-                        # How the relit picture was finished against its source,
-                        # present only when it was.
-                        **(
-                            {"relight": generated.metadata["relight"]}
-                            if relight_finish is not None and "relight" in generated.metadata
-                            else {}
-                        ),
-                        # How the accepted source was put back into this picture,
-                        # present only when it was.
-                        **(
-                            {"source_restore": generated.metadata["source_restore"]}
-                            if source_fit is not None and "source_restore" in generated.metadata
-                            else {}
-                        ),
                         **(
                             {"source_fit_agreement": source_agreement}
                             if source_agreement is not None
                             else {}
                         ),
-                    }
-                )
-                parts.append(
-                    MessagePart(
-                        position=len(parts),
-                        type=PartType.IMAGE.value
-                        if generated.kind == "image"
-                        else PartType.VIDEO.value,
-                        artifact_id=artifact.id,
-                        metadata_json={
-                            "media_type": artifact.media_type,
-                            "poster_artifact_id": poster_artifact_id,
-                            "browser_proxy_artifact_id": proxy_artifact_id,
-                            # The shown half. A part belongs to one message in
-                            # one conversation, so the judgement beside a
-                            # picture stays the judgement that picture's own run
-                            # made.
-                            "output_size_agreement": agreement,
-                            **(
-                                {"source_fit_agreement": source_agreement}
-                                if source_agreement is not None
-                                else {}
-                            ),
-                        },
-                    )
-                )
-            try:
-                evidence_key = self._record_successful_media_evidence(
-                    session,
-                    run,
-                    media_capabilities,
-                    output_count=len(artifact_ids) - len(throwaway_ids),
-                )
-            except Exception:
-                logger.exception("Could not record successful media capability evidence")
-                evidence_key = None
-            if evidence_key:
-                run.provenance_json = {
-                    **run.provenance_json,
-                    "capability_evidence_key": evidence_key,
-                }
-            if not self._complete(session, run, job, {"artifact_ids": artifact_ids}, claim=claim):
-                session.rollback()
-                logger.warning(
-                    "Refusing media completion: the claim no longer owns job %s",
-                    job_id,
-                )
-                return None
-            run.provenance_json = {
-                **run.provenance_json,
-                "outputs": output_provenance,
-                "timings": {"duration_ms": run.duration_ms},
-            }
-            if run.operation == Operation.IMAGE_TO_IMAGE.value:
-                verification_job_id = self._queue_image_edit_verification(
-                    session,
-                    run,
-                    job.id,
-                    artifact_ids,
-                )
-            parts.append(
-                MessagePart(
-                    position=len(parts),
-                    type=PartType.GENERATION_METADATA.value,
-                    metadata_json={"run_id": run.id, "provenance": run.provenance_json},
+                    },
                 )
             )
-            self._replace_parts(message, parts)
-            completed_assistant_id = self._finalize_response_revision(
-                session,
-                run,
-                message,
-                promote=True,
-            )
-            session.commit()
+        # Everything the render made is stored; completing it is one
+        # transaction, and nothing is announced until it lands.
+        completed = await self._land_write(
+            job_id,
+            "completion",
+            partial(
+                self._finish_media_completion,
+                job_id=job_id,
+                run_id=run_id,
+                assistant_id=assistant_id,
+                claim=claim,
+                capabilities=media_capabilities,
+                artifact_ids=artifact_ids,
+                kept_count=len(artifact_ids) - len(throwaway_ids),
+                output_provenance=output_provenance,
+                output_parts=output_parts,
+            ),
+        )
+        if completed is None:
+            return None
+        completed_assistant_id, verification_job_id = completed
         await self.scheduler.publish_job(job_id)
         for artifact_id in artifact_ids:
             await self.events.publish(
@@ -9205,6 +9456,312 @@ class ConversationOrchestrator:
             },
         )
         return verification_job_id
+
+    def _save_media_output(
+        self,
+        session: Session,
+        *,
+        job_id: str,
+        run_id: str,
+        assistant_id: str,
+        claim: JobClaim,
+        generated: GeneratedAsset,
+        metadata: dict[str, Any],
+        measurement: dict[str, Any],
+        throwaway: bool,
+    ) -> _StoredOutput | None:
+        """Store one finished output and its library entry; None when the render must stop.
+
+        None when its job, run or message is gone, or its claim no longer owns
+        the job, and then nothing is stored.
+        """
+
+        message = session.get(Message, assistant_id)
+        run = session.get(Run, run_id)
+        job = session.get(Job, job_id)
+        if not message or not run or not job:
+            return None
+        # Asserted in the transaction that stores this output, never across
+        # an await: the ingest and the commit follow with nothing awaited.
+        if not self._claim_owns_row(session, job_id, claim):
+            session.rollback()
+            logger.warning(
+                "Refusing media persistence: the claim no longer owns job %s",
+                job_id,
+            )
+            return None
+        artifact = self.artifacts.ingest_bytes(
+            session,
+            generated.content,
+            kind=ArtifactKind(generated.kind),
+            media_type=generated.media_type,
+            original_name=generated.name,
+            metadata=copy.deepcopy(metadata),
+        )
+        # Recorded against the row the bytes themselves address, so the
+        # measurement cannot be attributed to a file it did not measure -
+        # and for the same reason an earlier run may already have
+        # written here, so the two records are composed rather than
+        # overwritten.
+        artifact.metadata_json = {
+            **artifact.metadata_json,
+            "output_measurement": record_to_keep(
+                artifact.metadata_json.get("output_measurement"), measurement
+            ),
+        }
+        output_chat = session.get(Chat, run.chat_id)
+        if (
+            setup_verification_for_chat(session, run.chat_id) is None
+            and output_chat
+            and output_chat.scope != PROMPT_HELPER_SCOPE
+            and not throwaway
+        ):
+            ensure_library_entry(session, artifact)
+        stored = _StoredOutput(
+            artifact_id=artifact.id,
+            sha256=artifact.sha256,
+            kind=artifact.kind,
+            media_type=artifact.media_type,
+            size_bytes=artifact.size_bytes,
+        )
+        session.commit()
+        return stored
+
+    async def _store_browser_playback(
+        self,
+        job_id: str,
+        run_id: str,
+        claim: JobClaim,
+        video_id: str,
+        name: str,
+    ) -> tuple[str | None, str | None] | None:
+        """Make and store a video's browser proxy and poster: their ids, or None to stop the render.
+
+        Each can spend minutes in ffmpeg, so each runs once with no session
+        open, and only the write that stores what it made is tried again while
+        another writer holds the database. A derived file that is never
+        referenced is handled by retention like any other.
+        """
+
+        proxy_id: str | None = None
+        video = self._stored_artifact(video_id)
+        proxy = await self.artifacts.browser_video_proxy(video) if video is not None else None
+        if proxy:
+            try:
+                proxy_id = await self._land_write(
+                    job_id,
+                    "video proxy",
+                    partial(
+                        self._save_video_proxy,
+                        job_id=job_id,
+                        run_id=run_id,
+                        claim=claim,
+                        video_id=video_id,
+                        proxy=proxy,
+                    ),
+                )
+            finally:
+                proxy.discard()
+            if proxy_id is None:
+                return None
+        playback = self._stored_artifact(proxy_id or video_id)
+        poster = await self.artifacts.video_poster(playback) if playback is not None else None
+        if not poster:
+            return proxy_id, None
+        poster_id = await self._land_write(
+            job_id,
+            "video poster",
+            partial(
+                self._save_video_poster,
+                job_id=job_id,
+                run_id=run_id,
+                claim=claim,
+                video_id=video_id,
+                poster_name=f"{name}.poster.jpg",
+                poster=poster,
+            ),
+        )
+        if poster_id is None:
+            return None
+        return proxy_id, poster_id
+
+    def _stored_artifact(self, artifact_id: str) -> Artifact | None:
+        """An artifact's row, read in a session that is closed again before it is returned.
+
+        For work that only reads the file the row names, such as ffmpeg, which
+        must never run with a session open.
+        """
+
+        with self.session_factory() as session:
+            return session.get(Artifact, artifact_id)
+
+    def _save_video_proxy(
+        self,
+        session: Session,
+        *,
+        job_id: str,
+        run_id: str,
+        claim: JobClaim,
+        video_id: str,
+        proxy: StagedArtifactFile,
+    ) -> str | None:
+        """Store a video's browser proxy and point the video at it; None once the claim is lost."""
+
+        if not self._claim_owns_row(session, job_id, claim):
+            session.rollback()
+            logger.warning(
+                "Refusing media persistence: the claim no longer owns job %s",
+                job_id,
+            )
+            return None
+        stored = self.artifacts.ingest_path(
+            session,
+            proxy.path,
+            kind=ArtifactKind.OTHER,
+            media_type=proxy.media_type,
+            original_name=proxy.original_name,
+            metadata={
+                "run_id": run_id,
+                "browser_proxy": True,
+                "proxy_for": video_id,
+            },
+        )
+        video = session.get(Artifact, video_id)
+        if video is not None:
+            video.metadata_json = {
+                **video.metadata_json,
+                "browser_proxy_artifact_id": stored.id,
+            }
+        proxy_id = stored.id
+        session.commit()
+        return proxy_id
+
+    def _save_video_poster(
+        self,
+        session: Session,
+        *,
+        job_id: str,
+        run_id: str,
+        claim: JobClaim,
+        video_id: str,
+        poster_name: str,
+        poster: bytes,
+    ) -> str | None:
+        """Store a video's poster frame and point the video at it; None once the claim is lost."""
+
+        if not self._claim_owns_row(session, job_id, claim):
+            session.rollback()
+            logger.warning(
+                "Refusing media persistence: the claim no longer owns job %s",
+                job_id,
+            )
+            return None
+        stored = self.artifacts.ingest_bytes(
+            session,
+            poster,
+            kind=ArtifactKind.THUMBNAIL,
+            media_type="image/jpeg",
+            original_name=poster_name,
+            metadata={"run_id": run_id, "poster_for": video_id},
+        )
+        video = session.get(Artifact, video_id)
+        if video is not None:
+            video.metadata_json = {
+                **video.metadata_json,
+                "poster_artifact_id": stored.id,
+            }
+        poster_id = stored.id
+        session.commit()
+        return poster_id
+
+    def _finish_media_completion(
+        self,
+        session: Session,
+        *,
+        job_id: str,
+        run_id: str,
+        assistant_id: str,
+        claim: JobClaim,
+        capabilities: EngineCapabilities | None,
+        artifact_ids: list[str],
+        kept_count: int,
+        output_provenance: list[dict[str, Any]],
+        output_parts: list[tuple[str, str, dict[str, Any]]],
+    ) -> tuple[str, str | None] | None:
+        """Complete a render whose outputs are stored, in one transaction.
+
+        The message that shows the render and the image edit check it queues,
+        or None when its job, run or message is gone, or its claim no longer
+        owns the job, and then nothing is written. Every row is built afresh
+        from the values given, so a try that met a held database leaves
+        nothing behind for the next.
+        """
+
+        message = session.get(Message, assistant_id)
+        run = session.get(Run, run_id)
+        job = session.get(Job, job_id)
+        if not message or not run or not job:
+            return None
+        try:
+            evidence_key = self._record_successful_media_evidence(
+                session,
+                run,
+                capabilities,
+                output_count=kept_count,
+            )
+        except Exception:
+            logger.exception("Could not record successful media capability evidence")
+            evidence_key = None
+        if evidence_key:
+            run.provenance_json = {
+                **run.provenance_json,
+                "capability_evidence_key": evidence_key,
+            }
+        if not self._complete(session, run, job, {"artifact_ids": list(artifact_ids)}, claim=claim):
+            session.rollback()
+            logger.warning(
+                "Refusing media completion: the claim no longer owns job %s",
+                job_id,
+            )
+            return None
+        run.provenance_json = {
+            **run.provenance_json,
+            "outputs": copy.deepcopy(output_provenance),
+            "timings": {"duration_ms": run.duration_ms},
+        }
+        verification_job_id: str | None = None
+        if run.operation == Operation.IMAGE_TO_IMAGE.value:
+            verification_job_id = self._queue_image_edit_verification(
+                session,
+                run,
+                job.id,
+                list(artifact_ids),
+            )
+        parts = [
+            MessagePart(
+                position=position,
+                type=part_type,
+                artifact_id=artifact_id,
+                metadata_json=copy.deepcopy(metadata),
+            )
+            for position, (part_type, artifact_id, metadata) in enumerate(output_parts)
+        ]
+        parts.append(
+            MessagePart(
+                position=len(parts),
+                type=PartType.GENERATION_METADATA.value,
+                metadata_json={"run_id": run.id, "provenance": run.provenance_json},
+            )
+        )
+        self._replace_parts(message, parts)
+        completed_assistant_id = self._finalize_response_revision(
+            session,
+            run,
+            message,
+            promote=True,
+        )
+        session.commit()
+        return completed_assistant_id, verification_job_id
 
     @staticmethod
     def _makes_new_canvas(run: Run) -> bool:
@@ -10830,105 +11387,137 @@ class ConversationOrchestrator:
         `retryable` is False for a failure another attempt would only meet
         again, or one that should not be repeated unless someone asks, either
         of which spends none of the allowance.
+
+        A failure that another writer keeps out of the database through every
+        try, or that a stop interrupts, is left to a background task that goes
+        on trying, so the job does not go on reading running. A stop that
+        interrupts it also withdraws the retry it would have queued: the
+        failure is recorded with its own error, and nothing runs again.
         """
 
-        with self.session_factory() as session:
-            job = session.get(Job, job_id)
-            run = session.get(Run, run_id)
-            if not job or not run:
-                return
-            now = utcnow()
-            if claim is not None:
-                owned = self._claim_terminal_transition(
-                    session,
-                    job_id,
-                    claim,
-                    status=JobStatus.FAILED.value,
-                    error=error,
-                    completed_at=now,
-                )
-            else:
-                # A failure before any claim exists may only fail a row no
-                # claim has touched: still QUEUED, with no owner.
-                owned = (
-                    cast(
-                        "CursorResult[Any]",
-                        session.execute(
-                            update(Job)
-                            .where(
-                                Job.id == job_id,
-                                Job.status == JobStatus.QUEUED.value,
-                                Job.claim_owner.is_(None),
-                            )
-                            .values(
-                                status=JobStatus.FAILED.value,
-                                error=error,
-                                completed_at=now,
-                            )
-                        ),
-                    ).rowcount
-                    == 1
-                )
-            if not owned:
-                session.rollback()
-                logger.warning(
-                    "Refusing failure write: this execution no longer owns job %s",
-                    job_id,
-                )
-                return
-            retry = (
-                self._reserve_failed_media_retry(session, job, run, claim)
-                if retryable and reserve_retry(run.provenance_json, run.operation) is not None
-                else None
+        failure = self._observed_outcome(
+            job_id, run_id, _FAILURE, claim, error=error, retryable=retryable
+        )
+        written = await self._record_outcome(failure)
+        if written is not None and written.landed:
+            await self._announce_failure(job_id, run_id, error, written.retry)
+
+    def _write_outcome(self, session: Session, *, outcome: _Outcome) -> _Recorded:
+        """Write how an execution ended: whether it was recorded, any retry, and why not if not."""
+
+        if outcome.kind == _FAILURE:
+            return self._write_failure(session, outcome=outcome)
+        return self._write_stop(session, outcome=outcome)
+
+    def _write_failure(self, session: Session, *, outcome: _Outcome) -> _Recorded:
+        """Write a failure, or the retry its allowance covers: whether it landed, and the retry.
+
+        Nothing is written for a job or run that is gone, or a job that is no
+        longer the attempt, or the queued job, the failure ended.
+        """
+
+        job_id, error, claim, now = outcome.job_id, outcome.error, outcome.claim, outcome.at
+        assert outcome.run_id is not None
+        job = session.get(Job, job_id)
+        run = session.get(Run, outcome.run_id)
+        if not job or not run:
+            return _Recorded(False, refused="the job is gone")
+        status, attempt = job.status, job.attempt
+        if claim is not None:
+            owned = self._claim_terminal_transition(
+                session,
+                job_id,
+                claim,
+                status=JobStatus.FAILED.value,
+                error=error,
+                completed_at=now,
             )
-            if retry is None:
-                cancel_pending_search(session, run)
-                run.status = RunStatus.FAILED.value
-                run.error = error
-                run.completed_at = now
-                self._set_work_status(session, run, JobStatus.FAILED.value, error=error)
-                update_job_progress(job, stage="failed", indeterminate=True, now=now)
-                message = session.get(Message, run.assistant_message_id)
-                if message:
-                    preview_ids = self._temporary_preview_ids(message)
-                    message.status = MessageStatus.FAILED.value
-                    if run.operation == Operation.TEXT.value:
-                        self._remove_chat_progress(message)
-                        # Flush removed progress rows before reusing their positions
-                        # for a terminal error part.
-                        session.flush()
-                        error_part = next(
-                            (part for part in message.parts if part.type == PartType.ERROR.value),
-                            None,
+        else:
+            # A failure before any claim exists may only fail the row it
+            # saw queued, which no claim has touched since: a retry queues
+            # the same job again and is not this failure's to end.
+            owned = (
+                cast(
+                    "CursorResult[Any]",
+                    session.execute(
+                        update(Job)
+                        .where(*self._still_queued_as_seen(outcome))
+                        .values(
+                            status=JobStatus.FAILED.value,
+                            error=error,
+                            completed_at=now,
                         )
-                        if error_part:
-                            error_part.text = error
-                        else:
-                            message.parts.append(
-                                MessagePart(
-                                    position=max(
-                                        (part.position for part in message.parts), default=-1
-                                    )
-                                    + 1,
-                                    type=PartType.ERROR.value,
-                                    text=error,
-                                )
-                            )
-                    else:
-                        self._replace_parts(
-                            message,
-                            [MessagePart(position=0, type=PartType.ERROR.value, text=error)],
-                        )
-                    self._finalize_response_revision(
-                        session,
-                        run,
-                        message,
-                        promote=False,
-                    )
+                    ),
+                ).rowcount
+                == 1
+            )
+        if not owned:
+            session.rollback()
+            logger.warning(
+                "Refusing failure write: this execution no longer owns job %s",
+                job_id,
+            )
+            return _Recorded(False, refused=_refusal(outcome, status, attempt))
+        retry = (
+            self._reserve_failed_media_retry(session, job, run, claim)
+            if outcome.retryable
+            and outcome.key not in self._withdrawn_retries
+            and reserve_retry(run.provenance_json, run.operation) is not None
+            else None
+        )
+        if retry is None:
+            cancel_pending_search(session, run)
+            run.status = RunStatus.FAILED.value
+            run.error = error
+            run.completed_at = now
+            self._set_work_status(session, run, JobStatus.FAILED.value, error=error)
+            update_job_progress(job, stage="failed", indeterminate=True, now=now)
+            message = session.get(Message, run.assistant_message_id)
+            if message:
+                preview_ids = self._temporary_preview_ids(message)
+                message.status = MessageStatus.FAILED.value
+                if run.operation == Operation.TEXT.value:
+                    self._remove_chat_progress(message)
+                    # Flush removed progress rows before reusing their positions
+                    # for a terminal error part.
                     session.flush()
-                    for artifact_id in preview_ids:
-                        self.artifacts.delete_temporary_preview(session, artifact_id)
-            session.commit()
+                    error_part = next(
+                        (part for part in message.parts if part.type == PartType.ERROR.value),
+                        None,
+                    )
+                    if error_part:
+                        error_part.text = error
+                    else:
+                        message.parts.append(
+                            MessagePart(
+                                position=max((part.position for part in message.parts), default=-1)
+                                + 1,
+                                type=PartType.ERROR.value,
+                                text=error,
+                            )
+                        )
+                else:
+                    self._replace_parts(
+                        message,
+                        [MessagePart(position=0, type=PartType.ERROR.value, text=error)],
+                    )
+                self._finalize_response_revision(
+                    session,
+                    run,
+                    message,
+                    promote=False,
+                )
+                session.flush()
+                for artifact_id in preview_ids:
+                    self.artifacts.delete_temporary_preview(session, artifact_id)
+        session.commit()
+        return _Recorded(True, retry)
+
+    async def _announce_failure(
+        self, job_id: str, run_id: str, error: str, retry: dict[str, Any] | None
+    ) -> None:
+        """Tell clients about a recorded failure: the run failed, or is queued to try again."""
+
         await self.scheduler.publish_job(job_id)
         if retry is not None:
             await self.events.publish(
@@ -10938,6 +11527,180 @@ class ConversationOrchestrator:
             )
         else:
             await self.events.publish("run.failed", run_id, {"job_id": job_id, "error": error})
+
+    async def _record_outcome(self, outcome: _Outcome) -> _Recorded | None:
+        """Record how an execution ended, waiting out a held database.
+
+        Whether anything was recorded, and any retry a failure queued; None
+        once another writer has held the database through every try and the
+        record is left to a background task. A stop while it waits leaves the
+        record to that task too, then raises: a stop must not leave the job
+        reading running because the record of how it ended was cut short. A
+        failure left there by a stop queues no retry, since nothing should
+        run again after a stop.
+
+        Meanwhile the scheduler leaves the execution's claim alone. Its
+        release may not have been written either, and the next pass would
+        otherwise end the job as interrupted, refusing this record.
+        """
+
+        token = outcome.claim.token if outcome.claim is not None else None
+        if token is not None:
+            self.scheduler.keep_claim(token)
+        try:
+            return await self._land_write(
+                outcome.job_id, outcome.kind, partial(self._write_outcome, outcome=outcome)
+            )
+        except OperationalError as error:
+            if not database_is_contended(error):
+                raise
+            self._record_outcome_later(outcome)
+            return None
+        except asyncio.CancelledError:
+            self._record_outcome_later(replace(outcome, retryable=False))
+            raise
+        finally:
+            if token is not None:
+                self.scheduler.let_claim_go(token)
+
+    def _record_outcome_later(self, outcome: _Outcome) -> None:
+        """Go on trying, in the background, to record an outcome its execution could not.
+
+        Until it lands, the job reads as the run left it: running, or still
+        queued for a run that ended before its turn came. See
+        `OUTCOME_RECORD_RETRY_DELAYS_SECONDS` for one that never lands. One
+        record per execution is ever pending: a second stop leaves the first
+        record trying.
+        """
+
+        if self._closing:
+            logger.warning(
+                "Job %s could not record its %s while the application was closing; %s",
+                outcome.job_id,
+                outcome.kind,
+                _left_as(outcome, closing=True),
+            )
+            return
+        pending = self._pending_outcomes.get(outcome.key)
+        if pending is not None and not pending.done():
+            return
+        logger.warning(
+            "Job %s could not record its %s while another writer held the database; it goes "
+            "on trying in the background",
+            outcome.job_id,
+            outcome.kind,
+        )
+        self._track_outcome(outcome, self._keep_recording_outcome(outcome), keep_claim=True)
+
+    def _finish_outcome_later(self, outcome: _Outcome, written: _Recorded) -> None:
+        """Do what follows an outcome once its record has landed, in a task of its own.
+
+        The failure or stop is announced, a retry a failure queued is started,
+        and the run's setup check is finished; see `_finish_outcome`.
+        """
+
+        if written.landed and not self._closing:
+            self._track_outcome(outcome, self._finish_outcome(outcome, written), keep_claim=False)
+
+    def _track_outcome(
+        self,
+        outcome: _Outcome,
+        work: Coroutine[Any, Any, None],
+        *,
+        keep_claim: bool,
+    ) -> None:
+        """Run `work` for an execution's outcome as a task `close` cancels and awaits.
+
+        With `keep_claim`, the scheduler leaves the execution's claim alone
+        until the task ends, however it ends.
+        """
+
+        token = outcome.claim.token if keep_claim and outcome.claim is not None else None
+        if token is not None:
+            self.scheduler.keep_claim(token)
+        task = asyncio.create_task(work, name=f"local-lm-{outcome.kind}-{outcome.job_id}")
+        self._pending_outcomes[outcome.key] = task
+
+        def done(finished: asyncio.Task[None]) -> None:
+            if self._pending_outcomes.get(outcome.key) is finished:
+                del self._pending_outcomes[outcome.key]
+                # Nothing of this execution's is left to land.
+                self._withdrawn_retries.discard(outcome.key)
+            if token is not None:
+                self.scheduler.let_claim_go(token)
+
+        task.add_done_callback(done)
+
+    async def _keep_recording_outcome(self, outcome: _Outcome) -> None:
+        """Try an outcome again after each pause until it lands, then finish the job."""
+
+        delays = OUTCOME_RECORD_RETRY_DELAYS_SECONDS
+        write = partial(self._write_outcome, outcome=outcome)
+        try:
+            for delay in delays:
+                await asyncio.sleep(delay)
+                try:
+                    written = self._try_write(write)
+                except OperationalError as held:
+                    if not database_is_contended(held):
+                        raise
+                    continue
+                if not written.landed:
+                    logger.info(
+                        "Job %s dropped its %s once the database was free: %s",
+                        outcome.job_id,
+                        outcome.kind,
+                        written.refused,
+                    )
+                    return
+                logger.info(
+                    "Job %s recorded its %s once the database was free",
+                    outcome.job_id,
+                    outcome.kind,
+                )
+                # In a task of its own, so the claim is let go as this one
+                # ends rather than kept while clients are told.
+                self._finish_outcome_later(outcome, written)
+                return
+            logger.error(
+                "Job %s could not record its %s: another writer held the database for %.0f s; %s",
+                outcome.job_id,
+                outcome.kind,
+                sum(delays),
+                _left_as(outcome, closing=False),
+            )
+        except Exception:
+            logger.exception("Job %s could not record its %s", outcome.job_id, outcome.kind)
+
+    async def _finish_outcome(self, outcome: _Outcome, written: _Recorded) -> None:
+        """Do what follows a recorded outcome, as its execution or its stop would have.
+
+        Clients are told, a retry a failure queued is started, since its
+        execution has ended and nothing else would start it, and the setup
+        verification the run belongs to, if any, is finished.
+        """
+
+        if not written.landed:
+            return
+        retry = written.retry
+        if outcome.kind == _FAILURE:
+            assert outcome.run_id is not None
+            await self._announce_failure(outcome.job_id, outcome.run_id, outcome.error, retry)
+            if retry is not None:
+                self.start(outcome.job_id, outcome.run_id)
+        else:
+            await self.scheduler.publish_job(outcome.job_id)
+            if outcome.kind == _CANCELLATION and outcome.run_id is not None:
+                await self.events.publish(
+                    "run.cancelled", outcome.run_id, {"job_id": outcome.job_id}
+                )
+        if outcome.run_id is not None and not self._closing:
+            await self._finalize_setup_verification_run(
+                outcome.job_id,
+                outcome.run_id,
+                outcome.claim,
+                cancelled_attempt=outcome.attempt if outcome.claim is None else None,
+            )
 
     def _failed_media_retry(
         self, session: Session, run: Run, claim: JobClaim | None

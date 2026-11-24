@@ -4,6 +4,7 @@ import asyncio
 import logging
 import secrets
 import time
+from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -129,6 +130,11 @@ class ResourceScheduler:
         self._abandoned_claims: set[str] = (
             resource_pool._abandoned_claims if resource_pool else set()
         )
+        # Claims whose execution is still recording how it ended, counted by
+        # each holder. The expiry below leaves these alone even once abandoned:
+        # it would end the job as interrupted, and the outcome being recorded -
+        # a failure, its retry or a stop - would then be refused.
+        self._kept_claims: Counter[str] = resource_pool._kept_claims if resource_pool else Counter()
         # Jobs an admission check is holding back, by group, with the stage each
         # shows. Shared with the pool like the slots, so no dispatcher waits
         # behind a job that would not start if the slot came free.
@@ -920,11 +926,15 @@ class ResourceScheduler:
         A claim of another dispatcher counts as abandoned once it stops being
         renewed. One of this dispatcher's own counts as abandoned only when its
         lease ended and the release could not be written, because a live claim
-        here is kept current by its heartbeat rather than by its expiry time.
+        here is kept current by its heartbeat rather than by its expiry time -
+        and not while its execution still keeps it to record how it ended.
         """
 
         now = utcnow()
         error = "The dispatcher lease expired before this job completed."
+        abandoned = sorted(
+            claim for claim in self._abandoned_claims if claim not in self._kept_claims
+        )
         with self.session_factory() as session:
             jobs = session.scalars(
                 select(Job).where(
@@ -947,9 +957,7 @@ class ResourceScheduler:
                             Job.claim_expires_at < now,
                             ~Job.claim_owner.like(f"{self._owner}_%"),
                         ),
-                        Job.claim_owner.in_(sorted(self._abandoned_claims))
-                        if self._abandoned_claims
-                        else false(),
+                        Job.claim_owner.in_(abandoned) if abandoned else false(),
                     ),
                 )
             ).all()
@@ -1098,6 +1106,24 @@ class ResourceScheduler:
         """Publish the latest persisted job snapshot to connected clients."""
 
         await self._publish_job(job_id)
+
+    def keep_claim(self, token: str) -> None:
+        """Leave this claim to its execution while that execution records how it ended.
+
+        Once the claim's release could not be written, the next pass would end
+        the job as interrupted, and the outcome the execution is still trying
+        to record - its failure, the retry that failure queues, or its stop -
+        would then be refused. Each call needs its own `let_claim_go`.
+        """
+
+        self._kept_claims[token] += 1
+
+    def let_claim_go(self, token: str) -> None:
+        """End one `keep_claim`; once none is left, an abandoned claim is cleared as usual."""
+
+        self._kept_claims[token] -= 1
+        if self._kept_claims[token] <= 0:
+            del self._kept_claims[token]
 
     def _lock(self, group: str, capacity: int) -> asyncio.Semaphore:
         normalized_capacity = max(1, capacity)

@@ -4,7 +4,7 @@ import asyncio
 from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
@@ -51,7 +51,10 @@ def _orchestrator(*, session_factory=None) -> ConversationOrchestrator:  # type:
         ),
         artifacts=Mock(),
         events=cast(Any, SimpleNamespace(publish=AsyncMock())),
-        scheduler=cast(Any, SimpleNamespace(publish_job=AsyncMock())),
+        scheduler=cast(
+            Any,
+            SimpleNamespace(publish_job=AsyncMock(), keep_claim=Mock(), let_claim_go=Mock()),
+        ),
         processes=cast(
             Any,
             SimpleNamespace(
@@ -234,6 +237,10 @@ async def test_verifier_starts_after_media_handoff_and_inside_primary_lease(
         def execute(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
             return SimpleNamespace(rowcount=1)
 
+        def connection(self) -> MagicMock:
+            # Asked only how long its writes may wait for another writer.
+            return MagicMock()
+
     @asynccontextmanager
     async def lease(*_args, **kwargs):  # type: ignore[no-untyped-def]
         on_claim_lost = kwargs.pop("on_claim_lost")
@@ -309,6 +316,10 @@ async def test_foreground_dispatch_preempts_a_running_image_edit_check(
             # The claim-bound terminal transition is a conditional UPDATE;
             # one owned row answers it.
             return SimpleNamespace(rowcount=1)
+
+        def connection(self) -> MagicMock:
+            # Asked only how long its writes may wait for another writer.
+            return MagicMock()
 
     @asynccontextmanager
     async def lease(*_args, **_kwargs):  # type: ignore[no-untyped-def]
