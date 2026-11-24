@@ -1919,12 +1919,12 @@ async def test_output_collection_enforces_total_byte_limit_and_removes_source(
 async def test_stale_sweep_reclaims_uploaded_conditioning_input(tmp_path: Path) -> None:
     """Uploads are reclaimed on the same terms as outputs, and nothing else is.
 
-    Every conditioning image and studio mask is uploaded under a per-run name,
-    so each one is a distinct new file. The per-run cleanup covers outputs, and
-    the stale sweep walked the output root alone, so these accumulated for the
-    life of the installation. The backend's temp directory also holds files this
-    adapter did not write, which is why only the subfolder uploads are addressed
-    to is swept.
+    Every conditioning image and studio mask is uploaded under a name of the
+    run's or of its own content, and nothing else removes it. The per-run
+    cleanup covers outputs, and the stale sweep walked the output root alone, so
+    these accumulated for the life of the installation. The backend's temp
+    directory also holds files this adapter did not write, which is why only the
+    subfolder uploads are addressed to is swept.
     """
     output_root = tmp_path / "output"
     temp_root = tmp_path / "temp"

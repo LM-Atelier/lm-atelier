@@ -9407,7 +9407,7 @@ async def test_real_adapter_backend_events_reach_the_writer_with_provenance(
         operation: str,
         cancel_event: object = None,
         *,
-        run_id: object = None,
+        own_uploads: object = None,
     ):
         return [
             GeneratedAsset(
