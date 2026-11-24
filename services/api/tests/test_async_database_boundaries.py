@@ -10,8 +10,6 @@ SOURCE_ROOT = Path(__file__).parents[1] / "local_lm"
 # concurrency regression proving another writer can make progress.
 AUDITED_AWAITS = {
     ("orchestrator.py", "_execute_chat", "self._prepare_chat_context"),
-    ("orchestrator.py", "_execute_media", "self.artifacts.browser_video_proxy"),
-    ("orchestrator.py", "_execute_media", "self.artifacts.video_poster"),
     # The preparation lifecycle owns commit/rollback on a session that must
     # span its downloads and assembly. The session opens fresh with no prior
     # writes, so it enters the await holding no SQLite lock; the concurrency

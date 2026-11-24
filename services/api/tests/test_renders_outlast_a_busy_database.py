@@ -413,6 +413,11 @@ async def test_a_run_stopped_by_a_database_held_too_long_says_so_in_plain_words(
         raise contended
 
     monkeypatch.setattr(orchestrator_module.ConversationOrchestrator, "_complete", held)
+    # The completion is tried again after each pause, on every retry of the run.
+    pauses = orchestrator_module.HELD_DATABASE_RETRY_DELAYS_SECONDS
+    monkeypatch.setattr(
+        orchestrator_module, "HELD_DATABASE_RETRY_DELAYS_SECONDS", (0.0,) * len(pauses)
+    )
 
     assistant, run_id = await _render(client, "held-at-completion")
 

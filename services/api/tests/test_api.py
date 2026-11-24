@@ -9745,6 +9745,14 @@ class _TerminalSeam:
     _claim_terminal_transition = ConversationOrchestrator._claim_terminal_transition
     _complete = ConversationOrchestrator._complete
     _fail = ConversationOrchestrator._fail
+    _observed_outcome = ConversationOrchestrator._observed_outcome
+    _record_outcome = ConversationOrchestrator._record_outcome
+    _land_write = ConversationOrchestrator._land_write
+    _try_write = ConversationOrchestrator._try_write
+    _write_outcome = ConversationOrchestrator._write_outcome
+    _write_failure = ConversationOrchestrator._write_failure
+    _still_queued_as_seen = staticmethod(ConversationOrchestrator._still_queued_as_seen)
+    _announce_failure = ConversationOrchestrator._announce_failure
     _persist_streamed_text = ConversationOrchestrator._persist_streamed_text
     _finalize_response_revision = ConversationOrchestrator._finalize_response_revision
     _ensure_response_revision = ConversationOrchestrator._ensure_response_revision
@@ -9757,6 +9765,14 @@ class _TerminalSeam:
     class _Scheduler:
         @staticmethod
         async def publish_job(job_id: str) -> None:
+            return None
+
+        @staticmethod
+        def keep_claim(token: str) -> None:
+            return None
+
+        @staticmethod
+        def let_claim_go(token: str) -> None:
             return None
 
     class _Events:
@@ -9772,6 +9788,7 @@ class _TerminalSeam:
     scheduler = _Scheduler()
     events = _Events()
     artifacts = _Artifacts()
+    _withdrawn_retries: frozenset[tuple[object, ...]] = frozenset()
 
 
 def _terminal_graph(session, job_id: str):  # type: ignore[no-untyped-def]
