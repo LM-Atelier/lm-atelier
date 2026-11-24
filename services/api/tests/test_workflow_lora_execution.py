@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from local_lm.adapters.base import MediaEvent, MediaRequest
 from local_lm.adapters.mock import MockMediaAdapter
@@ -137,7 +138,12 @@ class SeededWorkflow:
 
 @pytest.fixture
 def session_factory() -> Generator[sessionmaker[Session]]:
-    engine = create_engine("sqlite://")
+    # One connection shared by every thread: a media run reads its activation
+    # in a worker thread, and an in-memory database exists only on the
+    # connection that created it.
+    engine = create_engine(
+        "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
     Base.metadata.create_all(engine)
     factory = sessionmaker(engine, expire_on_commit=False)
     yield factory
