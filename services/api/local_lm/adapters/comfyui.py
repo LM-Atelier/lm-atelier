@@ -8,7 +8,7 @@ import math
 import re
 import sys
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Collection, Iterator
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, TypeGuard
@@ -61,6 +61,8 @@ _ERRNO = re.compile(r"\[Errno (?P<number>\d{1,5})\]")
 _NUMBERED_INPUT_IMAGE = re.compile(r"\$\{input_image_(?P<index>\d{1,2})\}\Z")
 #: How much of an input is read to tell a picture from a video.
 _INPUT_HEAD_BYTES = 4096
+#: How much of a video is read at a time to name it by its content.
+_DIGEST_CHUNK_BYTES = 1024 * 1024
 #: MP4-family major brands of video files. The same box also holds HEIF and
 #: AVIF pictures, sound and camera raw files, so any other brand is neither.
 _VIDEO_BRANDS = frozenset(
@@ -89,16 +91,105 @@ _VIDEO_BRANDS = frozenset(
 )
 
 
-def _is_own_upload(item: dict[str, Any], run_id: str) -> bool:
-    """Whether a history entry names a file this adapter uploaded for this run."""
+def _is_own_upload(item: dict[str, Any], uploads: Collection[str]) -> bool:
+    """Whether a history entry names a file this adapter uploaded for this run.
+
+    A content-named upload has the name every other content-named upload of
+    the same bytes has; the file is still this run's own when this run sent it.
+    A file in the upload subfolder that this run did not send is not.
+    """
     subfolder = str(item.get("subfolder") or "").replace("\\", "/").strip("/")
     filename = str(item.get("filename") or "")
-    return subfolder == _UPLOAD_SUBFOLDER and filename.startswith(f"lm-atelier-{run_id}-")
+    return subfolder == _UPLOAD_SUBFOLDER and filename in uploads
+
+
+def _upload_name(digest: str, extension: str) -> str:
+    """The name an input is uploaded under when it is named by its content.
+
+    Every content-named upload of the same bytes has this name. ComfyUI reuses
+    a node's cached outputs only while the node's inputs are unchanged, so a
+    picture uploaded under a new name for each run is loaded, and encoded,
+    again by every regeneration, edit and batch that starts from it.
+    """
+    return f"lm-atelier-{digest}{extension}"
+
+
+def _prefixes_are_literal(graph: dict[str, Any]) -> bool:
+    """Whether each node that takes a prefix, or that nothing reads, takes a non-empty literal one.
+
+    `ComfyUIAdapter._submission_owned_outputs` moves a node's files into a
+    folder of the submission's own only when its `filename_prefix` is a
+    non-empty literal string; a prefix fed from another node, or an empty one,
+    stays where it is. A node that nothing reads runs only as an output, so it
+    must take such a prefix too. The shape of a graph does not say what such a
+    node writes or where: a saver named by other inputs writes files this
+    adapter removes once it has collected them, while a preview's files are
+    temporary and stay, and the two cannot be told apart here, so a preview is
+    held to the rule as well. An empty graph, or a node that is not a set of
+    named inputs, fails it.
+    """
+    inputs_by_node: dict[str, dict[str, Any]] = {}
+    for node_id, node in graph.items():
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict):
+            return False
+        inputs_by_node[str(node_id)] = inputs
+    read = {
+        str(value[0])
+        for inputs in inputs_by_node.values()
+        for value in inputs.values()
+        if isinstance(value, list)
+        and len(value) == 2
+        and str(value[0]) in inputs_by_node
+        and type(value[1]) is int
+    }
+    for node_id, inputs in inputs_by_node.items():
+        if "filename_prefix" in inputs:
+            prefix = inputs["filename_prefix"]
+            if not isinstance(prefix, str) or not prefix:
+                return False
+        elif node_id not in read:
+            return False
+    return bool(inputs_by_node)
+
+
+def _output_nodes_take_literal_prefixes(graph: dict[str, Any], catalogue: dict[str, Any]) -> bool:
+    """Whether the catalogue knows each node's class, and each output node takes a literal prefix.
+
+    The catalogue says which classes ComfyUI runs as outputs, including one
+    whose result another node reads, such as a saver named by other inputs that
+    also passes a value on; the shape of a graph cannot show that. It does not
+    say where an output writes, so a preview is held to the rule like a saver.
+    A prefix is literal here as `_prefixes_are_literal` means it, and a class
+    the catalogue does not know fails the rule.
+    """
+    for node in graph.values():
+        if not isinstance(node, dict):
+            return False
+        class_type = node.get("class_type")
+        info = catalogue.get(class_type) if isinstance(class_type, str) else None
+        if not isinstance(info, dict):
+            return False
+        if info.get("output_node") is True:
+            inputs = node.get("inputs")
+            prefix = inputs.get("filename_prefix") if isinstance(inputs, dict) else None
+            if not isinstance(prefix, str) or not prefix:
+                return False
+    return True
 
 
 def _read_head(path: Path) -> bytes:
     with path.open("rb") as handle:
         return handle.read(_INPUT_HEAD_BYTES)
+
+
+def _file_digest(path: Path) -> str:
+    """The SHA-256 of a file, read a chunk at a time rather than whole."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(_DIGEST_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _numbered_input_image_indices(workflow: dict[str, Any]) -> list[int]:
@@ -229,6 +320,10 @@ class ComfyUIAdapter:
         self._jobs: dict[str, str] = {}
         self._cancelled: set[str] = set()
         self._cancel_events: dict[str, asyncio.Event] = {}
+        # The names each generating run's inputs and masks were uploaded under.
+        # A content-named upload does not say which run sent it: every other
+        # content-named upload of the same bytes has the same name.
+        self._uploads: dict[str, set[str]] = {}
         # Every prompt this adapter submits carries a client id that starts
         # with this prefix, and ComfyUI returns the client id on each queue
         # row, so a prompt LM Atelier left behind is told from other work by
@@ -354,6 +449,25 @@ class ComfyUIAdapter:
     def invalidate_object_info_cache(self) -> None:
         self._latest_object_info_hash = None
         self._object_info_cached_until = 0
+
+    async def _held_catalogue(self) -> dict[str, Any]:
+        """The node catalogue this adapter last read, whatever its age, or a first read of one.
+
+        Naming uploads trusts a held catalogue only to say which classes ComfyUI
+        runs as outputs, and a class's output flag changes only with the node
+        pack that defines it. A class added since the catalogue was read, by a
+        pack activated or a runtime restarted with other nodes, is one it does
+        not know, which keeps the run's own names. `invalidate_object_info_cache`
+        drops the catalogue, and the next upload reads a fresh one.
+
+        Reading it again would cost every run the catalogue's whole round trip,
+        which can take ComfyUI a second or more on a large installation, and
+        parsing and hashing it on the event loop, for an answer already held.
+        """
+        held = self._object_info_by_hash.get(self._latest_object_info_hash or "")
+        if held is not None:
+            return held
+        return await self.object_info()
 
     @staticmethod
     def _compile(value: Any, parameters: dict[str, Any]) -> Any:
@@ -501,24 +615,33 @@ class ComfyUIAdapter:
             raise ValueError(
                 f"This workflow does not read attached video {unread[0] + 1} of {videos}"
             )
+        by_content = bool(paths) and await self._names_uploads_by_content(request)
         uploaded: list[tuple[str, str]] = []
         for index, (path, (kind, extension, media_type)) in enumerate(
             zip(paths, formats, strict=True)
         ):
             filename = f"lm-atelier-{request.run_id}-{index}{extension}"
             if contents is not None:
-                reference = await self._upload_one(filename, contents[index], media_type)
+                content = contents[index]
+                if by_content:
+                    filename = _upload_name(hashlib.sha256(content).hexdigest(), extension)
+                reference = await self._upload_one(request, filename, content, media_type)
             elif kind == "video":
                 # A video can be far larger than a picture, so it is streamed
-                # from disk rather than read whole into memory.
+                # from disk rather than read whole into memory, and the digest
+                # that names it is read the same way, off the event loop.
+                if by_content:
+                    filename = _upload_name(await asyncio.to_thread(_file_digest, path), extension)
                 handle = await asyncio.to_thread(path.open, "rb")
                 try:
-                    reference = await self._upload_one(filename, handle, media_type)
+                    reference = await self._upload_one(request, filename, handle, media_type)
                 finally:
                     handle.close()
             else:
                 content = await asyncio.to_thread(path.read_bytes)
-                reference = await self._upload_one(filename, content, media_type)
+                if by_content:
+                    filename = _upload_name(hashlib.sha256(content).hexdigest(), extension)
+                reference = await self._upload_one(request, filename, content, media_type)
             uploaded.append((kind, reference))
         return uploaded
 
@@ -541,6 +664,7 @@ class ComfyUIAdapter:
     ) -> list[str]:
         """Upload pictures, such as a selection's mask, that may only ever be pictures."""
         self._check_contents(paths, contents)
+        by_content = await self._names_uploads_by_content(request)
         uploaded: list[str] = []
         for index, path in enumerate(paths):
             content = (
@@ -551,11 +675,58 @@ class ComfyUIAdapter:
             extension, media_type = self._image_format(content)
             suffix = f"{label}-{index}" if label else str(index)
             filename = f"lm-atelier-{request.run_id}-{suffix}{extension}"
-            uploaded.append(await self._upload_one(filename, content, media_type))
+            if by_content:
+                filename = _upload_name(hashlib.sha256(content).hexdigest(), extension)
+            uploaded.append(await self._upload_one(request, filename, content, media_type))
         return uploaded
 
-    async def _upload_one(self, filename: str, content: bytes | BinaryIO, media_type: str) -> str:
-        """Send one file to ComfyUI's temporary uploads and return the name a graph loads it by."""
+    async def _names_uploads_by_content(self, request: MediaRequest) -> bool:
+        """Whether this request's uploads are named by their content rather than by the run.
+
+        A per-run name changes the loader's input on every run, so the loader
+        and every node downstream of it run again. Named by content, a repeated
+        source leaves the loader unchanged, and with it every node that reads
+        nothing else, such as an encoder fed only from it, which ComfyUI then
+        answers from its cache. A repeat usually draws a new seed, so the nodes
+        that read one run again either way.
+
+        A node that writes files must run again as well, or ComfyUI answers it
+        from its cache with the files an earlier submission wrote, which this
+        adapter may already have removed. `generate` moves a node's files into a
+        folder of the submission's own only for a backend whose outputs this
+        adapter manages, and only by a literal prefix, so content names are used
+        only for a submission whose every such node is moved. Which nodes are outputs
+        is the catalogue's to say, as `_held_catalogue` keeps it; a catalogue
+        that cannot be read, or that does not know a class in the graph, keeps
+        the run's own names.
+
+        Judged on the graph `generate` compiles, before the names this decides
+        are bound into it: no upload's name changes which nodes write files or
+        whether their prefixes are moved.
+        """
+        if self.managed_output_root is None:
+            return False
+        graph = self._compile(request.workflow, self._base_parameters(request))
+        if not isinstance(graph, dict) or not _prefixes_are_literal(graph):
+            return False
+        try:
+            catalogue = await self._held_catalogue()
+        except (httpx.HTTPError, ValueError, RecursionError):
+            return False
+        return _output_nodes_take_literal_prefixes(graph, catalogue)
+
+    async def _upload_one(
+        self,
+        request: MediaRequest,
+        filename: str,
+        content: bytes | BinaryIO,
+        media_type: str,
+    ) -> str:
+        """Send one file to ComfyUI's temporary uploads and return the name a graph loads it by.
+
+        The name the file was stored under is kept as one of the generating
+        run's own uploads, so the run's history can tell the file from a result.
+        """
         response = await self._client.post(
             "/upload/image",
             data={
@@ -593,7 +764,23 @@ class ComfyUIAdapter:
         reference = f"{response_subfolder}/{uploaded_name}" if response_subfolder else uploaded_name
         if upload_type == "temp":
             reference = f"{reference} [temp]"
+        if (own := self._uploads.get(request.run_id)) is not None:
+            own.add(uploaded_name)
         return reference
+
+    @staticmethod
+    def _base_parameters(request: MediaRequest) -> dict[str, Any]:
+        """The values a workflow is compiled with, other than the names of uploaded inputs.
+
+        For a selection edit, `mask` here is still the selection as the turn
+        gave it, not a value any workflow is sent: `_request_parameters`
+        replaces it with the name the mask is uploaded under.
+        """
+        return {
+            "prompt": request.prompt,
+            "negative_prompt": request.negative_prompt or "",
+            **request.parameters,
+        }
 
     async def _request_parameters(self, request: MediaRequest) -> dict[str, Any]:
         if (
@@ -605,11 +792,7 @@ class ComfyUIAdapter:
             and not request.input_paths
         ):
             raise ValueError(f"{request.operation} requires a conditioning image")
-        parameters = {
-            "prompt": request.prompt,
-            "negative_prompt": request.negative_prompt or "",
-            **request.parameters,
-        }
+        parameters = self._base_parameters(request)
         mask_reference = await self._upload_mask(request)
         if mask_reference:
             # The workflow's declared mask input receives the uploaded name;
@@ -670,7 +853,9 @@ class ComfyUIAdapter:
             yield MediaEvent(type="cancelled")
             return
         cancel_event = asyncio.Event()
+        uploads: set[str] = set()
         self._cancel_events[request.run_id] = cancel_event
+        self._uploads[request.run_id] = uploads
         self._jobs.pop(request.run_id, None)
         prompt_id: str | None = None
         outputs_collected = False
@@ -891,7 +1076,7 @@ class ComfyUIAdapter:
                 yield MediaEvent(type="cancelled")
                 return
             assets = await self._collect_outputs(
-                prompt_id, request.operation, cancel_event, run_id=request.run_id
+                prompt_id, request.operation, cancel_event, own_uploads=uploads
             )
             # Collected outputs were removed from the backend as they were read.
             # Nothing collected means a stop ended the wait for the run's record,
@@ -991,6 +1176,7 @@ class ComfyUIAdapter:
                 if self._cancel_events.get(request.run_id) is cancel_event:
                     self._jobs.pop(request.run_id, None)
                     self._cancel_events.pop(request.run_id, None)
+                    self._uploads.pop(request.run_id, None)
                     self._cancelled.discard(request.run_id)
 
     async def _next_message(
@@ -1097,7 +1283,7 @@ class ComfyUIAdapter:
         operation: str,
         cancel_event: asyncio.Event | None = None,
         *,
-        run_id: str | None = None,
+        own_uploads: Collection[str] = (),
     ) -> list[GeneratedAsset]:
         history = await self._finished_history(prompt_id, cancel_event)
         if history is None:
@@ -1128,7 +1314,7 @@ class ComfyUIAdapter:
                     if not isinstance(raw_item, dict):
                         continue
                     item = dict(raw_item)
-                    if run_id is not None and _is_own_upload(item, run_id):
+                    if _is_own_upload(item, own_uploads):
                         # ComfyUI's LoadVideo shows the clip it loaded as a
                         # preview. That is this run's own input, not a result.
                         continue
@@ -1287,10 +1473,11 @@ class ComfyUIAdapter:
 
     async def _sweep_stale_outputs(self) -> None:
         # Uploaded conditioning input is reclaimed on the same terms as output.
-        # Each upload is a distinct file under a per-run name, and nothing else
-        # removed them: the per-run cleanup covers outputs, and this sweep
-        # walked the output root alone, so they accumulated for the life of the
-        # installation.
+        # Nothing else removed uploads: the per-run cleanup covers outputs, and
+        # this sweep walked the output root alone, so they accumulated for the
+        # life of the installation. A content-named upload is rewritten by every
+        # content-named upload of the same bytes, renewing its age, so one that
+        # is still being reused is kept.
         roots = [
             root
             for root in (self._managed_output_sweep_root, self._managed_upload_root())
