@@ -8,7 +8,13 @@ from typing import Any, Literal
 from .adapters.base import ChatAdapter, ChatRequest
 from .domain import RoutingMode, new_id
 from .routing import DISCUSSION_OPENING
-from .schemas import OrderedStepInput, OrderedStepIntent, OrderedWorkIntent
+from .schemas import (
+    MAX_ORDERED_STEP_PROMPT_CHARS,
+    OrderedStepInput,
+    OrderedStepIntent,
+    OrderedWorkIntent,
+)
+from .setting_refusals import SettingRefusalCode, SettingRefused, plan_refusal
 
 MAX_ORDERED_PLAN_STEPS = 8
 MAX_ORDERED_PLAN_PROMPT_CHARS = 50_000
@@ -174,7 +180,23 @@ class OrderedPlanCompiler:
         # first rejected any message that merely happened to contain enough
         # separators, such as a semicolon-separated list.
         if len(clauses) > MAX_ORDERED_PLAN_STEPS:
-            raise ValueError(f"Ordered plans can contain at most {MAX_ORDERED_PLAN_STEPS} steps.")
+            raise SettingRefused(
+                f"Ordered plans can contain at most {MAX_ORDERED_PLAN_STEPS} steps.",
+                [
+                    plan_refusal(
+                        SettingRefusalCode.PLAN_TOO_MANY_STEPS, limit=MAX_ORDERED_PLAN_STEPS
+                    )
+                ],
+            )
+        # A step refuses more words than it may hold with a message that quotes
+        # them, and a refusal never says the request's words back. A clause too
+        # long for its step is refused here instead, where the step would be
+        # made from it, naming every clause that is too long by its place.
+        too_long = [
+            step
+            for step, clause in enumerate(clauses, start=1)
+            if len(clause) > MAX_ORDERED_STEP_PROMPT_CHARS
+        ]
 
         steps: list[OrderedStepIntent] = []
         for index, (clause, step_mode) in enumerate(
@@ -195,6 +217,19 @@ class OrderedPlanCompiler:
                         source_step_id=source_id,
                         kind="text_context" if source_mode == "text" else "artifact",
                     )
+                )
+            if index in too_long:
+                raise SettingRefused(
+                    "Each step of an ordered plan can be at most "
+                    f"{MAX_ORDERED_STEP_PROMPT_CHARS:,} characters.",
+                    [
+                        plan_refusal(
+                            SettingRefusalCode.PLAN_STEP_PROMPT_TOO_LONG,
+                            limit=MAX_ORDERED_STEP_PROMPT_CHARS,
+                            step=step,
+                        )
+                        for step in too_long
+                    ],
                 )
             steps.append(
                 OrderedStepIntent(
@@ -312,9 +347,22 @@ class OrderedPlanCompiler:
     @classmethod
     def validate(cls, intent: OrderedWorkIntent) -> OrderedWorkIntent:
         if not 2 <= len(intent.steps) <= MAX_ORDERED_PLAN_STEPS:
-            raise ValueError(f"Ordered plans must contain 2 to {MAX_ORDERED_PLAN_STEPS} steps.")
+            raise SettingRefused(
+                f"Ordered plans must contain 2 to {MAX_ORDERED_PLAN_STEPS} steps.",
+                [plan_refusal(SettingRefusalCode.PLAN_TOO_MANY_STEPS, limit=MAX_ORDERED_PLAN_STEPS)]
+                if len(intent.steps) > MAX_ORDERED_PLAN_STEPS
+                else [],
+            )
         if sum(len(step.prompt) for step in intent.steps) > MAX_ORDERED_PLAN_PROMPT_CHARS:
-            raise ValueError("The ordered plan prompt budget is too large.")
+            raise SettingRefused(
+                "The ordered plan prompt budget is too large.",
+                [
+                    plan_refusal(
+                        SettingRefusalCode.PLAN_PROMPT_TOO_LONG,
+                        limit=MAX_ORDERED_PLAN_PROMPT_CHARS,
+                    )
+                ],
+            )
         by_id = {step.id: step for step in intent.steps}
         if len(by_id) != len(intent.steps):
             raise ValueError("Ordered plan step identifiers must be unique.")

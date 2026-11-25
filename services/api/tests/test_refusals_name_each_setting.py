@@ -582,7 +582,11 @@ async def test_a_comparison_refusal_that_names_no_setting_carries_no_errors(
 
 
 def test_every_reason_in_the_vocabulary_is_one_a_request_can_meet() -> None:
-    """Each code is reached above through a real route, and none is left unreached."""
+    """Each code is reached through a real route, and none is left unreached.
+
+    The reasons a plan is refused for as a whole, and those an ordered plan or
+    a batch refuses a setting for, are reached in the plan refusal tests.
+    """
 
     from local_lm.setting_refusals import SETTING_REFUSAL_MESSAGES, SettingRefusalCode
 
@@ -590,6 +594,20 @@ def test_every_reason_in_the_vocabulary_is_one_a_request_can_meet() -> None:
         "setting-not-offered",
         "setting-not-applicable",
         "setting-needs-its-pair",
+        "setting-needs-a-role",
+        "setting-role-unknown",
+        "setting-not-taken-by-every-workflow",
+        "plan-too-many-outputs",
+        "plan-too-few-outputs",
+        "plan-too-many-pending",
+        "plan-too-much-work",
+        "plan-storage-too-large",
+        "plan-storage-unavailable",
+        "plan-video-too-long",
+        "plan-too-many-steps",
+        "plan-prompt-too-long",
+        "plan-step-prompt-too-long",
+        "plan-one-output-per-step",
     }
     assert reached == {code.value for code in SettingRefusalCode}
     assert set(SETTING_REFUSAL_MESSAGES) == set(SettingRefusalCode)

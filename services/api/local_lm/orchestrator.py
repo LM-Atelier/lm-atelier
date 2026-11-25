@@ -248,6 +248,7 @@ from .prompt_helpers import PROMPT_HELPER_SCOPE, prompt_helper_system_message
 from .recovery_previews import RecoveryPreviewConflict
 from .references import parse_reference_requests
 from .routing import ModalityRouter, RouteConfirmationRequired
+from .saved_settings import MAX_SETTING_FIELDS
 from .scheduler import AdmissionCheck, JobClaim, ResourceScheduler
 from .schemas import (
     EngineCapabilities,
@@ -264,12 +265,21 @@ from .schemas import (
     TurnWorkflowSelectionIn,
     WorkerStatus,
 )
+from .setting_refusals import (
+    SettingRefusal,
+    SettingRefusalCode,
+    SettingRefused,
+    SettingSource,
+    plan_refusal,
+    saved_setting_source,
+)
 from .settings_registry import (
     WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
     SavedSizeUnsupported,
     builtin_settings_for_role,
     compatible_stored_settings,
     resolve_generation_settings,
+    saved_size_refusals,
     validate_settings,
     workflow_settings,
 )
@@ -673,9 +683,10 @@ def _default_size_for_turn(
 
 
 #: Where a turn's size can come from, from the one that wins down, and how a
-#: refusal names each saved one. A turn's preset outranks its recipe, and the
-#: recipe every other saved layer. None marks a layer checked strictly where
-#: it is read: the turn's own settings and the recipe's.
+#: refusal names each saved one; a batch size comes from the same layers. A
+#: turn's preset outranks its recipe, and the recipe every other saved layer.
+#: None marks a layer checked strictly where it is read: the turn's own
+#: settings and the recipe's.
 _SIZE_SOURCES: Final[tuple[tuple[str, str | None], ...]] = (
     ("turn", None),
     ("turn_preset", "in the preset chosen for this turn"),
@@ -688,6 +699,32 @@ _SIZE_SOURCES: Final[tuple[tuple[str, str | None], ...]] = (
     ("profile_request", "in the model profile"),
     ("profile_load", "in the model profile"),
 )
+
+
+def _layers_naming(
+    key: str,
+    layers: WorkflowLoraAdmissionLayers,
+    *,
+    turn: Mapping[str, Any],
+    recipe: Mapping[str, Any],
+    profile: ModelProfile | None,
+) -> tuple[tuple[str, str | None, Any], ...]:
+    """Each layer that names a setting, from the one that wins down.
+
+    Each is given by its place in `_SIZE_SOURCES`, how a refusal words it,
+    and the value it holds.
+    """
+    named = {
+        "turn": turn,
+        "recipe": recipe,
+        "profile_load": profile.load_settings_json if profile is not None else {},
+    }
+    found: list[tuple[str, str | None, Any]] = []
+    for origin, where in _SIZE_SOURCES:
+        layer = named[origin] if origin in named else layers.ordinary(origin)
+        if key in layer:
+            found.append((origin, where, layer[key]))
+    return tuple(found)
 
 
 def _offers_a_choice_of(field: SettingField | None) -> bool:
@@ -715,28 +752,156 @@ def _refuse_a_saved_size_the_workflow_cannot_make(
     order; the turn's own value and the recipe's are checked strictly where
     they are read, so meeting one ends the search. A workflow that fixes its
     size, or takes none, offers no size to choose, so it keeps its own, as it
-    always has.
+    always has. Both sides are checked before anything is refused, so one
+    refusal names each side the workflow cannot make, in its words for the
+    first.
     """
-    named = {
-        "turn": turn,
-        "recipe": recipe,
-        "profile_load": profile.load_settings_json if profile is not None else {},
-    }
     definitions = {field.key: field for field in fields}
+    refused: list[tuple[str, Any, SettingField, str]] = []
     for key in SIZE_SETTINGS:
         field = definitions.get(key)
         if field is None or not _offers_a_choice_of(field):
             continue
-        for origin, where in _SIZE_SOURCES:
-            layer = named[origin] if origin in named else layers.ordinary(origin)
-            if key not in layer:
-                continue
+        for _origin, where, value in _layers_naming(
+            key, layers, turn=turn, recipe=recipe, profile=profile
+        ):
             if where is not None:
                 try:
-                    validate_settings({key: layer[key]}, [field])
+                    validate_settings({key: value}, [field])
                 except ValueError:
-                    raise SavedSizeUnsupported(key, layer[key], field, where) from None
+                    refused.append((key, value, field, where))
             break
+    if refused:
+        first, *others = refused
+        raise SavedSizeUnsupported(
+            *first, also=[refusal for other in others for refusal in saved_size_refusals(*other)]
+        )
+
+
+def _batch_size_source(
+    layers: _TurnSettingLayers,
+    profile: ModelProfile | None,
+    fields: Sequence[SettingField],
+) -> tuple[bool, SettingSource | None]:
+    """Whether a layer chose the turn's batch size, and the source a refusal names it by.
+
+    A saved layer is read leniently, so the one that chose it is the highest
+    whose value the workflow takes. The turn's own value has no source of its
+    own: it is the request's, or carried over from the turn it starts from.
+    A recipe is saved, but has no source of its own to be named by.
+    """
+    field = next((field for field in fields if field.key == "batch_size"), None)
+    for origin, where, value in _layers_naming(
+        "batch_size",
+        layers.workflow_lora_layers,
+        turn=layers.workflow_lora_layers.ordinary("turn"),
+        recipe=layers.use_case_settings,
+        profile=profile,
+    ):
+        if where is None:
+            return True, (None if origin == "turn" else SettingSource.SAVED)
+        if field is not None and compatible_stored_settings({"batch_size": value}, [field]):
+            return True, saved_setting_source(where)
+    return False, None
+
+
+def _output_count_origin(
+    output_count: int,
+    *,
+    batch: bool,
+    requested: int | None,
+    planned: int,
+    batch_size: int,
+    layers: _TurnSettingLayers,
+    profile: ModelProfile | None,
+    fields: Sequence[SettingField],
+) -> tuple[str, SettingSource | None] | None:
+    """What asked a turn for this many outputs: the key a refusal names, and its source.
+
+    A Prompt Library batch makes one output for each draft it selected. Past
+    that, the request's own count wins a tie, then the count its words asked
+    for, then the batch size, from the layer that chose it. None when nothing
+    anyone chose asked for this many: the one output a turn makes when nothing
+    asks for more, or a batch size that is the workflow's own default, which a
+    refusal names as the whole plan's rather than as anyone's.
+    """
+    if batch or requested == output_count:
+        return "output_count", None
+    if planned == output_count and planned > 1:
+        return "output_count", SettingSource.PLANNED
+    if batch_size == output_count and batch_size > 1:
+        chosen, source = _batch_size_source(layers, profile, fields)
+        if chosen:
+            return "batch_size", source
+    return None
+
+
+#: The saved layers a batch checks against each of its workflows, by the words
+#: a refusal uses for each, with the source each is named by.
+_SHARED_SETTING_SOURCES: Final[Mapping[str, SettingSource]] = {
+    "project preset": SettingSource.PROJECT_PRESET,
+    "project": SettingSource.PROJECT,
+    "chat preset": SettingSource.CHAT_PRESET,
+    "chat": SettingSource.CHAT,
+    "turn preset": SettingSource.TURN_PRESET,
+}
+
+
+def _refuse_a_shared_setting_only_some_workflows_take(
+    contexts: Sequence[_PromptBatchExecutionContext],
+) -> None:
+    """Refuse a batch with a saved setting some of its workflows take and others do not.
+
+    Every such setting is named, each with the layer it is saved in; the
+    detail names the first of them, as it always has.
+    """
+    if not contexts:
+        return
+    accepted = [context.shared_setting_acceptance for context in contexts]
+    partially_accepted = accepted[0].union(*accepted[1:]) - accepted[0].intersection(*accepted[1:])
+    if not partially_accepted:
+        return
+    pairs = [pair.split("\0", 1) for pair in sorted(partially_accepted)]
+    scope, key = pairs[0]
+    raise SettingRefused(
+        f"The saved {scope} setting {key} is not compatible with every "
+        "workflow selected for this prompt batch.",
+        [
+            SettingRefusal(
+                SettingRefusalCode.NOT_TAKEN_BY_EVERY_WORKFLOW,
+                name,
+                source=_SHARED_SETTING_SOURCES[where],
+            )
+            for where, name in pairs
+        ],
+    )
+
+
+#: What a turn has always been told when it passes a limit of one plan, by
+#: the first limit it passes.
+_TURN_PLAN_LIMIT_WORDS: Final[Mapping[SettingRefusalCode, str]] = {
+    SettingRefusalCode.PLAN_TOO_MUCH_WORK: (
+        "This media request is too large to queue safely. "
+        "Reduce the output count, resolution, frames, or steps."
+    ),
+    SettingRefusalCode.PLAN_STORAGE_TOO_LARGE: (
+        "This media request has an unsafe storage estimate. "
+        "Reduce the output count, resolution, or duration."
+    ),
+}
+#: The same for an ordered plan, which also has a limit on all its video.
+_ORDERED_PLAN_LIMIT_WORDS: Final[Mapping[SettingRefusalCode, str]] = {
+    SettingRefusalCode.PLAN_TOO_MUCH_WORK: (
+        "This ordered plan is too large to queue safely. "
+        "Reduce its media steps, resolution, frames, or generation steps."
+    ),
+    SettingRefusalCode.PLAN_STORAGE_TOO_LARGE: "This ordered plan has an unsafe storage estimate.",
+    SettingRefusalCode.PLAN_VIDEO_TOO_LONG: (
+        "This ordered plan requests too much total video duration."
+    ),
+}
+#: The roles an ordered plan takes settings for.
+_ORDERED_SETTING_ROLES: Final = ("chat", "image", "video")
 
 
 def _fresh_media_seed(excluding: object = None) -> int:
@@ -1814,9 +1979,14 @@ class ConversationOrchestrator:
             )
         )
         if (pending_count or 0) >= MAX_PENDING_WORK_PER_CHAT:
-            raise ValueError(
+            raise SettingRefused(
                 f"This chat already has {MAX_PENDING_WORK_PER_CHAT} pending items. "
-                "Cancel one or wait for work to finish before sending another."
+                "Cancel one or wait for work to finish before sending another.",
+                [
+                    plan_refusal(
+                        SettingRefusalCode.PLAN_TOO_MANY_PENDING, limit=MAX_PENDING_WORK_PER_CHAT
+                    )
+                ],
             )
 
         if key is None:
@@ -2683,22 +2853,7 @@ class ConversationOrchestrator:
                     )
                 )
             prompt_batch_execution_contexts = tuple(contexts)
-            accepted_shared_settings = iter(
-                context.shared_setting_acceptance for context in prompt_batch_execution_contexts
-            )
-            first_accepted = set(next(accepted_shared_settings))
-            accepted_by_any = set(first_accepted)
-            accepted_by_all = set(first_accepted)
-            for accepted_keys in accepted_shared_settings:
-                accepted_by_any.update(accepted_keys)
-                accepted_by_all.intersection_update(accepted_keys)
-            partially_accepted = accepted_by_any - accepted_by_all
-            if partially_accepted:
-                scope, key = min(partially_accepted).split("\0", 1)
-                raise ValueError(
-                    f"The saved {scope} setting {key} is not compatible with every "
-                    "workflow selected for this prompt batch."
-                )
+            _refuse_a_shared_setting_only_some_workflows_take(prompt_batch_execution_contexts)
         source_preview = self._source_fit_preview_for_turn(
             session,
             request,
@@ -2780,16 +2935,21 @@ class ConversationOrchestrator:
             )
             * output_count
         )
-        if output_count > self.engines.settings.max_media_outputs_per_plan:
-            raise ValueError(
-                f"A media request can create at most "
-                f"{self.engines.settings.max_media_outputs_per_plan} outputs."
-            )
-        if (pending_count or 0) + output_count > MAX_PENDING_WORK_PER_CHAT:
-            raise ValueError(
-                f"This request would exceed the limit of "
-                f"{MAX_PENDING_WORK_PER_CHAT} pending items in one chat."
-            )
+        self._refuse_more_outputs_than_a_turn_may_queue(
+            output_count,
+            pending_count or 0,
+            partial(
+                _output_count_origin,
+                output_count,
+                batch=prompt_batch_selection is not None,
+                requested=request.output_count,
+                planned=plan.output_count,
+                batch_size=configured_output_count,
+                layers=setting_layers,
+                profile=profile,
+                fields=fields,
+            ),
+        )
         if output_count > 1 and "batch_size" in effective_settings:
             # Each planned output owns its own lifecycle. Prevent an engine-native
             # batch from multiplying the visible output slots a second time.
@@ -2834,25 +2994,15 @@ class ConversationOrchestrator:
                 else None
             )
         if media_plan_estimate:
-            if media_plan_estimate["work_units"] > self.engines.settings.max_media_plan_work_units:
-                raise ValueError(
-                    "This media request is too large to queue safely. "
-                    "Reduce the output count, resolution, frames, or steps."
-                )
-            if (
-                media_plan_estimate["estimated_bytes"]
-                > self.engines.settings.max_media_plan_estimated_bytes
-            ):
-                raise ValueError(
-                    "This media request has an unsafe storage estimate. "
-                    "Reduce the output count, resolution, or duration."
-                )
-            artifact_root = self.artifacts.root
-            artifact_root.mkdir(parents=True, exist_ok=True)
-            available_bytes = shutil.disk_usage(artifact_root).free
-            if media_plan_estimate["estimated_bytes"] > available_bytes:
-                raise ValueError("There is not enough free storage to queue this media request.")
-            media_plan_estimate["available_bytes_at_admission"] = available_bytes
+            self._refuse_a_plan_past_its_limits(
+                _TURN_PLAN_LIMIT_WORDS,
+                work_units=media_plan_estimate["work_units"],
+                estimated_bytes=media_plan_estimate["estimated_bytes"],
+            )
+            media_plan_estimate["available_bytes_at_admission"] = self._free_storage_for(
+                media_plan_estimate["estimated_bytes"],
+                "There is not enough free storage to queue this media request.",
+            )
             plan.media_plan_estimate = media_plan_estimate
         if generation_estimate:
             plan.generation_estimate = generation_estimate
@@ -3744,24 +3894,9 @@ class ConversationOrchestrator:
             not in {"chat" if step.mode == "text" else step.mode for step in intent.steps}
         ):
             raise ValueError("The selected turn preset cannot apply to an operation in this plan.")
-        if pending_count + len(intent.steps) > MAX_PENDING_WORK_PER_CHAT:
-            raise ValueError(
-                f"This ordered request would exceed the limit of "
-                f"{MAX_PENDING_WORK_PER_CHAT} pending items in one chat."
-            )
-        if request.output_count not in {None, 1}:
-            raise ValueError(
-                "A heterogeneous ordered plan cannot multiply all steps. "
-                "Request variations in a separate media turn."
-            )
-        allowed_setting_roles = {"chat", "image", "video"}
-        unknown_setting_roles = set(request.ordered_settings) - allowed_setting_roles
-        if unknown_setting_roles:
-            raise ValueError("Ordered settings contain an unsupported role.")
-        if request.settings:
-            raise ValueError(
-                "Ordered plans accept role-specific ordered_settings, not shared settings."
-            )
+        self._refuse_what_an_ordered_turn_asks_of_every_step(
+            request, pending_count, len(intent.steps)
+        )
 
         explicit_ids = set(explicit_artifacts)
         first_step = intent.steps[0]
@@ -3930,17 +4065,22 @@ class ConversationOrchestrator:
             use_case_admission = turn_workflow.use_case_admission
             use_case_receipt = turn_workflow.use_case_receipt
             fields = turn_workflow.fields
-            setting_layers = self.resolve_turn_setting_layers(
-                session,
-                chat,
-                operation,
-                profile,
-                step_request,
-                fields,
-                ordered=True,
-                use_case_preset=use_case_admission,
-                workflow_revision=workflow_revision,
-            )
+            try:
+                setting_layers = self.resolve_turn_setting_layers(
+                    session,
+                    chat,
+                    operation,
+                    profile,
+                    step_request,
+                    fields,
+                    ordered=True,
+                    use_case_preset=use_case_admission,
+                    workflow_revision=workflow_revision,
+                )
+            except SettingRefused as refused:
+                # The same setting can be refused for one step and not another.
+                refused.at_step(index + 1)
+                raise
             default_preset, project_preset, chat_preset, turn_preset = setting_layers.presets
             step_overrides = setting_layers.request_settings
             workflow_lora_layers = setting_layers.workflow_lora_layers
@@ -4042,15 +4182,12 @@ class ConversationOrchestrator:
                 }
             )
 
-        if total_work_units > self.engines.settings.max_media_plan_work_units:
-            raise ValueError(
-                "This ordered plan is too large to queue safely. "
-                "Reduce its media steps, resolution, frames, or generation steps."
-            )
-        if total_estimated_bytes > self.engines.settings.max_media_plan_estimated_bytes:
-            raise ValueError("This ordered plan has an unsafe storage estimate.")
-        if total_video_duration_seconds > self.engines.settings.max_media_plan_duration_seconds:
-            raise ValueError("This ordered plan requests too much total video duration.")
+        self._refuse_a_plan_past_its_limits(
+            _ORDERED_PLAN_LIMIT_WORDS,
+            work_units=total_work_units,
+            estimated_bytes=total_estimated_bytes,
+            video_seconds=total_video_duration_seconds,
+        )
         plan_estimate: dict[str, int | float] = {
             "step_count": len(intent.steps),
             "work_units": total_work_units,
@@ -4063,12 +4200,9 @@ class ConversationOrchestrator:
             and not request.confirm_media
         ):
             raise OrderedPlanConfirmationRequired(intent, estimate=plan_estimate)
-        artifact_root = self.artifacts.root
-        artifact_root.mkdir(parents=True, exist_ok=True)
-        available_bytes = shutil.disk_usage(artifact_root).free
-        if total_estimated_bytes > available_bytes:
-            raise ValueError("There is not enough free storage for this ordered plan.")
-        plan_estimate["available_bytes_at_admission"] = available_bytes
+        plan_estimate["available_bytes_at_admission"] = self._free_storage_for(
+            total_estimated_bytes, "There is not enough free storage for this ordered plan."
+        )
 
         input_parts: list[MessagePart] = [
             MessagePart(position=0, type=PartType.TEXT.value, text=request.text)
@@ -12666,6 +12800,172 @@ class ConversationOrchestrator:
             raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
         if ordered_intent and request.source_fit is not None:
             raise ValueError("Choose a single image edit to fit its source canvas.")
+
+    @staticmethod
+    def _refuse_what_an_ordered_turn_asks_of_every_step(
+        request: TurnRequest, pending_count: int, step_count: int
+    ) -> None:
+        """Refuse an ordered turn whose request a plan of steps cannot take as it is.
+
+        Each check refuses on its own, in the order it always has. A role that
+        an ordered setting names and no step can take is never named back,
+        since the request chose its name.
+        """
+
+        if pending_count + step_count > MAX_PENDING_WORK_PER_CHAT:
+            raise SettingRefused(
+                f"This ordered request would exceed the limit of "
+                f"{MAX_PENDING_WORK_PER_CHAT} pending items in one chat.",
+                [
+                    plan_refusal(
+                        SettingRefusalCode.PLAN_TOO_MANY_PENDING, limit=MAX_PENDING_WORK_PER_CHAT
+                    )
+                ],
+            )
+        if request.output_count not in {None, 1}:
+            raise SettingRefused(
+                "A heterogeneous ordered plan cannot multiply all steps. "
+                "Request variations in a separate media turn.",
+                [SettingRefusal(SettingRefusalCode.PLAN_ONE_OUTPUT_PER_STEP, "output_count")],
+            )
+        if set(request.ordered_settings) - set(_ORDERED_SETTING_ROLES):
+            raise SettingRefused(
+                "Ordered settings contain an unsupported role.",
+                [
+                    SettingRefusal(
+                        SettingRefusalCode.ROLE_UNKNOWN,
+                        None,
+                        allowed=_ORDERED_SETTING_ROLES,
+                        part="ordered_settings",
+                    )
+                ],
+            )
+        if request.settings:
+            # One item for each key, up to as many as one request may name.
+            raise SettingRefused(
+                "Ordered plans accept role-specific ordered_settings, not shared settings.",
+                [
+                    SettingRefusal(SettingRefusalCode.NEEDS_A_ROLE, key)
+                    for key in list(request.settings)[:MAX_SETTING_FIELDS]
+                ],
+            )
+
+    def _refuse_more_outputs_than_a_turn_may_queue(
+        self,
+        output_count: int,
+        pending_count: int,
+        origin: Callable[[], tuple[str, SettingSource | None] | None],
+    ) -> None:
+        """Refuse a turn making more outputs than one may, or than its chat may wait on.
+
+        Both limits are checked together, so one refusal names each that is
+        passed, with the detail of the first, as it always was. `origin` says
+        what asked for that many outputs, and is read only for a refusal. Too
+        many outputs are named by the count that asked for them, sent, carried
+        over or asked for in words, or by the batch size a layer chose; a count
+        nobody chose, such as a workflow's own default batch size, is named as
+        the whole plan's. Too much waiting work is named by the count only when
+        that count is what takes the chat past its limit; a chat that is
+        already full takes no count at all, so it is named as the whole plan's.
+        """
+
+        most = self.engines.settings.max_media_outputs_per_plan
+        too_many = output_count > most
+        too_much_waiting = pending_count + output_count > MAX_PENDING_WORK_PER_CHAT
+        if not (too_many or too_much_waiting):
+            return
+        named = origin()
+        refusals: list[SettingRefusal] = []
+        if too_many and named is None:
+            refusals.append(plan_refusal(SettingRefusalCode.PLAN_TOO_MANY_OUTPUTS, limit=most))
+        elif too_many and named is not None:
+            key, source = named
+            refusals.append(
+                SettingRefusal(
+                    SettingRefusalCode.ABOVE_MAXIMUM
+                    if key == "batch_size"
+                    else SettingRefusalCode.PLAN_TOO_MANY_OUTPUTS,
+                    key,
+                    limit=most,
+                    source=source,
+                )
+            )
+        if too_much_waiting and named is not None and pending_count < MAX_PENDING_WORK_PER_CHAT:
+            key, source = named
+            refusals.append(
+                SettingRefusal(
+                    SettingRefusalCode.PLAN_TOO_MANY_PENDING,
+                    key,
+                    limit=MAX_PENDING_WORK_PER_CHAT,
+                    source=source,
+                )
+            )
+        elif too_much_waiting:
+            refusals.append(
+                plan_refusal(
+                    SettingRefusalCode.PLAN_TOO_MANY_PENDING, limit=MAX_PENDING_WORK_PER_CHAT
+                )
+            )
+        message = (
+            f"A media request can create at most {most} outputs."
+            if too_many
+            else f"This request would exceed the limit of {MAX_PENDING_WORK_PER_CHAT} "
+            "pending items in one chat."
+        )
+        raise SettingRefused(message, refusals)
+
+    def _refuse_a_plan_past_its_limits(
+        self,
+        words: Mapping[SettingRefusalCode, str],
+        *,
+        work_units: int,
+        estimated_bytes: int,
+        video_seconds: float | None = None,
+    ) -> None:
+        """Refuse a plan past a limit one plan has, naming each limit it passes.
+
+        Each is read from the plan's own estimate, so every one passed is named
+        at once; the detail is `words` for the first, as it always was. The
+        work is an estimate of the engine's own effort that a client cannot
+        compute, so it names no limit.
+        """
+
+        settings = self.engines.settings
+        refusals: list[SettingRefusal] = []
+        if work_units > settings.max_media_plan_work_units:
+            refusals.append(plan_refusal(SettingRefusalCode.PLAN_TOO_MUCH_WORK))
+        if estimated_bytes > settings.max_media_plan_estimated_bytes:
+            refusals.append(
+                plan_refusal(
+                    SettingRefusalCode.PLAN_STORAGE_TOO_LARGE,
+                    limit=settings.max_media_plan_estimated_bytes,
+                )
+            )
+        if video_seconds is not None and video_seconds > settings.max_media_plan_duration_seconds:
+            refusals.append(
+                plan_refusal(
+                    SettingRefusalCode.PLAN_VIDEO_TOO_LONG,
+                    limit=settings.max_media_plan_duration_seconds,
+                )
+            )
+        if refusals:
+            raise SettingRefused(words[refusals[0].code], refusals)
+
+    def _free_storage_for(self, estimated_bytes: int, refusal: str) -> int:
+        """The free bytes a plan is admitted with, refusing one they cannot hold.
+
+        Read only once every other limit of the plan has passed, since reading
+        it makes the folder the plan would write to.
+        """
+
+        artifact_root = self.artifacts.root
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        available_bytes = shutil.disk_usage(artifact_root).free
+        if estimated_bytes > available_bytes:
+            raise SettingRefused(
+                refusal, [plan_refusal(SettingRefusalCode.PLAN_STORAGE_UNAVAILABLE)]
+            )
+        return available_bytes
 
     async def _turn_routing_plan(
         self,
