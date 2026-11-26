@@ -6,8 +6,10 @@ and start ComfyUI once more, so the next media run paid a cold start of both
 workers even when the failure was the workflow's own and ComfyUI was healthy: a
 graph ComfyUI refused, a node that raised its own error, a finished run whose
 result could not be used. Such a failure now keeps the worker as a finished run
-does, under the same rules: a text turn queued next still has ComfyUI stopped
-before its model loads, and so does keeping ComfyUI warm turned off.
+does, under the same rules: a text turn queued next still gets the device
+before its model loads, and so does keeping ComfyUI warm turned off. ComfyUI
+is then emptied in place when the chat model fits beside it, and stopped when
+it does not.
 
 Only a failure the adapter knows to be the workflow's own keeps the worker.
 Running out of memory or of room in ComfyUI's allocator, a fault of the device,
@@ -65,6 +67,10 @@ REFUSED_GRAPH = {
 }
 SUCCEEDED = {"type": "execution_success", "data": {"prompt_id": PROMPT_ID}}
 OUT_OF_MEMORY = "Allocation on device\nThis error means you ran out of memory on your GPU."
+#: The device memory ComfyUI counts as free with a prompt's models loaded, and
+#: with none.
+LOADED_FREE = 4 << 30
+EMPTIED_FREE = 14 << 30
 
 
 def _accepted() -> httpx.Response:
@@ -154,7 +160,9 @@ class _ComfyUI:
     `answer` replies to the prompt and `upload` to each input sent. `record` is
     the prompt's record once it has finished, None while it has none, and
     `files` what each download of a result sends, in order. It reports itself
-    healthy, and its queue is always empty: nobody else is using it. With
+    healthy, and its queue is always empty: nobody else is using it. A prompt
+    it takes loads models, which its statistics count, and asked to free its
+    memory it unloads them at once; `frees` is how often it was asked. With
     `gate`, the reply to the prompt waits for it, and `submitted` is set once
     the prompt has arrived.
     """
@@ -173,18 +181,34 @@ class _ComfyUI:
         self.files = list(files)
         self.gate: asyncio.Event | None = None
         self.submitted = asyncio.Event()
+        self.frees = 0
+        self.loaded = False
 
     async def __call__(self, request: httpx.Request) -> httpx.Response:
         route = (request.method, request.url.path)
         if route == ("GET", "/system_stats"):
-            return httpx.Response(200, json={"system": {"comfyui_version": "constructed"}})
+            device = {
+                "name": "cuda:0",
+                "type": "cuda",
+                "index": 0,
+                "vram_free": LOADED_FREE if self.loaded else EMPTIED_FREE,
+            }
+            return httpx.Response(
+                200, json={"system": {"comfyui_version": "constructed"}, "devices": [device]}
+            )
+        if route == ("POST", "/free"):
+            self.frees += 1
+            self.loaded = False
+            return httpx.Response(200, json={})
         if route == ("GET", "/prompt"):
             return httpx.Response(200, json={"exec_info": {"queue_remaining": 0}})
         if route == ("POST", "/prompt"):
             self.submitted.set()
             if self.gate is not None:
                 await self.gate.wait()
-            return self.answer()
+            answer = self.answer()
+            self.loaded = self.loaded or answer.status_code == 200
+            return answer
         if route == ("POST", "/upload/image"):
             return self.upload()
         if route == ("POST", f"/api/jobs/{PROMPT_ID}/cancel"):
@@ -764,23 +788,36 @@ def _ready_world(
     return world
 
 
-async def _handed_back(world: ReplacementWorld) -> list[str]:
-    """What the workers did once the device went back to chat and ComfyUI came back empty.
+async def _handed_back(world: ReplacementWorld, effects: int = 4) -> list[str]:
+    """What the workers did once the device went back to chat, with nothing left owed.
 
-    The run stopped chat, and its handoff stopped ComfyUI, loaded a chat model
-    and started ComfyUI again: four effects, with nothing left owed.
+    The run stopped chat, and its handoff either stopped ComfyUI, loaded a chat
+    model and started ComfyUI again, four effects, or emptied ComfyUI in place
+    and loaded the chat model beside it, two.
     """
 
     async def settled() -> tuple[list[str], str | None]:
         return list(world.order), world.orchestrator._displaced_chat_profile_id
 
-    order, owed = await wait_until(
+    _order, owed = await wait_until(
         settled,
-        lambda seen: len(seen[0]) >= 4 and seen[1] is None,
+        lambda seen: len(seen[0]) >= effects and seen[1] is None,
         what="the device to go back to chat",
     )
+    # Anything the handoff starts afterwards has had its moment.
+    await asyncio.sleep(0.3)
+    assert owed is None
     assert world.orchestrator._media_warm_window is None
-    return order
+    return list(world.order)
+
+
+def _chat_fits(world: ReplacementWorld, monkeypatch: pytest.MonkeyPatch, fits: bool) -> None:
+    """Say whether the chat model owed back fits beside an emptied ComfyUI."""
+
+    async def chat_fits(_profile_id: str) -> bool:
+        return fits
+
+    monkeypatch.setattr(world.orchestrator, "_chat_fits_beside_media", chat_fits)
 
 
 @pytest.mark.parametrize(
@@ -907,31 +944,60 @@ async def test_any_other_failure_still_recycles_comfyui_as_before(
     ]
 
 
-async def test_a_workflow_failure_still_recycles_comfyui_when_keeping_it_warm_is_off(
-    app: FastAPI, client: AsyncClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "fits", [pytest.param(True, id="fits"), pytest.param(False, id="does-not-fit")]
+)
+async def test_a_workflow_failure_hands_comfyui_back_when_keeping_it_warm_is_off(
+    app: FastAPI,
+    client: AsyncClient,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    fits: bool,
 ) -> None:
+    """Emptied in place when the chat model fits beside it, and stopped when it does not."""
+
     world = _ready_world(app, settings, monkeypatch)
+    _chat_fits(world, monkeypatch, fits)
     monkeypatch.setattr(settings, "media_keep_warm_seconds", 0)
     await choose_retries(client, 0)
     comfy = _ComfyUI(answer=lambda: httpx.Response(400, json=REFUSED_GRAPH))
     adapter = await _comfyui_engine(app, monkeypatch, comfy)
+    handed_back = (
+        ["stop chat", "resume profile-chat"]
+        if fits
+        else ["stop chat", "stop media", "resume profile-chat", "start media"]
+    )
     try:
         _chat_id, run_id = await _image_turn(client)
         run = await finished(client, run_id, "failed")
-        order = await _handed_back(world)
+        order = await _handed_back(world, len(handed_back))
     finally:
         await adapter.close()
 
     assert run["error"] == "ComfyUI rejected a generation request (HTTP 400)"
-    assert order == ["stop chat", "stop media", "resume profile-chat", "start media"]
+    assert order == handed_back
+    # Emptied first either way: whether the chat model fits is measured after.
+    assert comfy.frees == 1
 
 
-async def test_a_text_turn_queued_behind_a_workflow_failure_still_has_comfyui_recycled_first(
-    app: FastAPI, client: AsyncClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "fits", [pytest.param(True, id="fits"), pytest.param(False, id="does-not-fit")]
+)
+async def test_a_text_turn_queued_behind_a_workflow_failure_still_gets_the_device_first(
+    app: FastAPI,
+    client: AsyncClient,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    fits: bool,
 ) -> None:
-    """The text turn's model loads at once, and ComfyUI comes back once the turn is done."""
+    """The text turn's model loads at once, beside ComfyUI emptied in place when it fits.
+
+    When it does not fit, ComfyUI is stopped instead, and comes back once the
+    turn is done.
+    """
 
     world = _ready_world(app, settings, monkeypatch)
+    _chat_fits(world, monkeypatch, fits)
     await choose_retries(client, 0)
     comfy = _ComfyUI(answer=lambda: httpx.Response(400, json=REFUSED_GRAPH))
     comfy.gate = asyncio.Event()
@@ -948,10 +1014,14 @@ async def test_a_text_turn_queued_behind_a_workflow_failure_still_has_comfyui_re
         comfy.gate.set()
         run = await finished(client, run_id, "failed")
         answered = await finished(client, question.json()["run"]["id"])
-        order = await _handed_back(world)
+        order = await _handed_back(world, 2 if fits else 4)
     finally:
         await adapter.close()
 
     assert run["error"] == "ComfyUI rejected a generation request (HTTP 400)"
     assert isinstance(answered["profile_id"], str)
-    assert order == ["stop chat", "stop media", f"resume {answered['profile_id']}", "start media"]
+    resumed = f"resume {answered['profile_id']}"
+    assert order == (
+        ["stop chat", resumed] if fits else ["stop chat", "stop media", resumed, "start media"]
+    )
+    assert comfy.frees == 1

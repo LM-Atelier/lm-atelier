@@ -109,6 +109,7 @@ from .generation_offers import (
     should_extract_generation_offer,
 )
 from .generation_retry import capture_retry_budget, reserve_retry, retry_is_pending
+from .hardware import first_device_free_memory
 from .image_edit_difference import (
     INCOMPARABLE,
     ChangedArea,
@@ -1812,6 +1813,19 @@ class MediaStoppedByEngine(RuntimeError):
 #: a retry follows.
 MEDIA_FAILURES_NOT_RETRIED = (MediaWorkerBusy, MediaStoppedByEngine)
 
+#: The stops made of the managed ComfyUI worker only to give the device to
+#: chat. Emptying its memory in place can stand in for one after a run that
+#: finished or failed on its own workflow, or when a window that kept it warm
+#: ends: the process stays, so the next render loads its models in seconds
+#: instead of first waiting for ComfyUI to start. Any other stop, a failed
+#: run's handoff above all, may follow a fault only a new process clears.
+MEDIA_STOPS_EMPTIED_INSTEAD: Final = frozenset(
+    {WorkerStopReason.RUN_HANDOFF, WorkerStopReason.KEEP_WARM_EXPIRY}
+)
+#: The device memory left over, beyond a chat model's own estimate, before it
+#: is loaded beside an emptied ComfyUI worker rather than in its place.
+CHAT_BESIDE_MEDIA_MARGIN_BYTES: Final = 512 * 1024 * 1024
+
 
 class ResponseRevisionConflict(ValueError):
     """A stable response cannot accept the requested revision transition."""
@@ -2170,6 +2184,9 @@ class ConversationOrchestrator:
         self._media_warm_scoped = False
         #: What recycling the worker is counted as when the open window ends.
         self._media_warm_stop_reason: WorkerStopReason | None = None
+        #: Whether the worker the open window keeps may be emptied in place when
+        #: the window ends, as the handoff that opened it allowed.
+        self._media_warm_emptiable = True
         #: Whether something outside this class's runs relies on the live media
         #: worker, such as an open native editor session; set by the application.
         self.media_worker_in_use: Callable[[], bool] = lambda: False
@@ -5801,6 +5818,7 @@ class ConversationOrchestrator:
             self._media_restart_task = None
         self._media_warm_window = None
         self._media_warm_stop_reason = None
+        self._media_warm_emptiable = True
         self._media_warm_generation += 1
         if self._media_warm_task:
             self._media_warm_task.cancel()
@@ -5960,13 +5978,13 @@ class ConversationOrchestrator:
                                 # fault, recycling is the clean start, and after
                                 # a stop ComfyUI may still be finishing the
                                 # interrupted prompt.
+                                ended_well = (
+                                    isinstance(media_failure, MediaWorkflowFailure)
+                                    if media_failure is not None
+                                    else self._run_completed(run_id)
+                                )
                                 await self._complete_media_handoff(
-                                    pending,
-                                    keep_warm=(
-                                        isinstance(media_failure, MediaWorkflowFailure)
-                                        if media_failure is not None
-                                        else self._run_completed(run_id)
-                                    ),
+                                    pending, keep_warm=ended_well, emptiable=ended_well
                                 )
                 if queued_verification_job_id and not claim_lost:
                     self.start(queued_verification_job_id, None)
@@ -7951,8 +7969,14 @@ class ConversationOrchestrator:
         *,
         keep_warm: bool = True,
         reason: WorkerStopReason | None = None,
+        emptiable: bool = False,
     ) -> None:
         """Release retained Comfy state before restoring a managed chat model.
+
+        `emptiable` is True only after a run that finished or failed on its own
+        workflow, and when a warm window ends: then a worker launched for no
+        single activation may be emptied in place instead of stopped, if the
+        chat model fits beside it.
 
         `keep_warm` is False after a run that was stopped, or that failed other
         than on its own workflow, and when a warm window's expiry calls this, so
@@ -8008,7 +8032,7 @@ class ConversationOrchestrator:
             # `_chat_planner_available` already checks.
             self._chat_planner_ready.set()
             return
-        if keep_warm and not queued_text_next and self._open_media_warm_window():
+        if keep_warm and not queued_text_next and self._open_media_warm_window(emptiable=emptiable):
             # Nothing is queued yet, but a media turn often follows one: the next
             # clip of a sequence that is sent as each one finishes. Recycling now
             # made that turn pay a chat model load, a ComfyUI start and a cold
@@ -8031,6 +8055,9 @@ class ConversationOrchestrator:
                 # stalled before sampling. A managed worker recycle releases
                 # both VRAM and host allocations while preserving the automatic
                 # Ready media service expected by the desktop application.
+                # Emptying the worker in place releases its device memory too,
+                # and stands in for the recycle only where the chat model then
+                # fits beside it.
                 recycle_wanted = True
                 launch_scope = getattr(self.processes, "launch_scope_sha256", None)
                 recycled_activation_scope = bool(launch_scope and launch_scope("media") is not None)
@@ -8052,7 +8079,7 @@ class ConversationOrchestrator:
         if (
             recycle_wanted
             and await self._media_runtime_busy()
-            and self._open_media_warm_window(hold=True, reason=reason)
+            and self._open_media_warm_window(hold=True, reason=reason, emptiable=emptiable)
         ):
             # Someone else is using ComfyUI, from its own page or a workflow
             # editor, and the recycle would end their work. The worker is held
@@ -8061,6 +8088,17 @@ class ConversationOrchestrator:
             # stays displaced and owed, as behind a queued image, and a chat
             # model that something needs meanwhile loads beside ComfyUI.
             self._chat_planner_ready.set()
+            return
+        if (
+            recycle_wanted
+            and emptiable
+            and not recycled_activation_scope
+            and await self._empty_media_worker(reason)
+            and await self._chat_fits_beside_media(selected_chat_profile_id)
+        ):
+            await self._resume_chat_beside_emptied_media(
+                selected_chat_profile_id, queued_text_next=queued_text_next
+            )
             return
         if recycle_wanted:
             try:
@@ -8105,11 +8143,99 @@ class ConversationOrchestrator:
         else:
             self._schedule_media_restart()
 
+    async def _empty_media_worker(self, reason: WorkerStopReason) -> bool:
+        """Empty the managed media worker's memory for chat, where that can stand in for a stop.
+
+        Only a stop in `MEDIA_STOPS_EMPTIED_INSTEAD` is replaced, only by an
+        engine that can empty itself, and only once it shows the memory came
+        back. False means the worker was not emptied, and the caller stops it
+        as it always has.
+        """
+
+        if reason not in MEDIA_STOPS_EMPTIED_INSTEAD:
+            return False
+        release = getattr(getattr(self.engines, "media", None), "release_memory", None)
+        if release is None:
+            return False
+        try:
+            emptied = await release()
+        except Exception as error:
+            logger.info("Could not empty the media worker's memory: %s", type(error).__name__)
+            return False
+        if emptied is not True:
+            return False
+        logger.info("Emptied the media worker's memory to give the device to chat")
+        return True
+
+    async def _chat_fits_beside_media(self, profile_id: str) -> bool:
+        """Whether the chat model owed back fits in the device memory now free.
+
+        Measured across every process, after ComfyUI emptied its memory, and
+        compared with the memory the model's load records for itself plus a
+        margin. A model that does not fit beside the emptied worker would run
+        from shared system memory, slowly, so it gets the device as before.
+        Anything that cannot be read counts as not fitting.
+        """
+
+        estimate_for = getattr(self.processes, "chat_memory_estimate", None)
+        if estimate_for is None:
+            return False
+        try:
+            with self.session_factory() as session:
+                profile = session.get(ModelProfile, profile_id)
+                install = (
+                    session.get(ModelInstall, profile.model_install_id)
+                    if profile and profile.model_install_id
+                    else None
+                )
+                if not profile or not install:
+                    return False
+                session.expunge(profile)
+                session.expunge(install)
+            estimate = estimate_for(profile, install)
+            free = await asyncio.to_thread(first_device_free_memory)
+        except Exception as error:
+            logger.info(
+                "Could not tell whether chat fits beside the media worker: %s",
+                type(error).__name__,
+            )
+            return False
+        if not isinstance(estimate, int) or not isinstance(free, int):
+            return False
+        return free >= estimate + CHAT_BESIDE_MEDIA_MARGIN_BYTES
+
+    async def _resume_chat_beside_emptied_media(
+        self, profile_id: str, *, queued_text_next: bool
+    ) -> None:
+        """Load the chat model owed back beside the emptied media worker.
+
+        A chat model that does not come up beside it gets the device as the
+        handoff otherwise gives it: the worker is stopped, the model loaded
+        again, and an empty worker started once chat is back. If that stop
+        fails, chat stays owed for a later handoff.
+        """
+
+        await self._resume_chat_worker(profile_id)
+        if not self._chat_worker_running():
+            try:
+                await self.processes.stop("media", reason=WorkerStopReason.CHAT_LOAD)
+            except Exception:
+                logger.exception("Could not stop the emptied media worker for a chat model")
+                self._chat_planner_ready.set()
+                return
+            await self._resume_chat_worker(profile_id)
+            if queued_text_next:
+                self._media_restart_after_chat_activity = True
+            else:
+                self._schedule_media_restart()
+        self._discharge_displaced_chat_profile(profile_id)
+
     def _open_media_warm_window(
         self,
         *,
         hold: bool = False,
         reason: WorkerStopReason = WorkerStopReason.KEEP_WARM_EXPIRY,
+        emptiable: bool = True,
     ) -> bool:
         """Keep the managed ComfyUI worker for a following media turn, if it can be.
 
@@ -8128,7 +8254,9 @@ class ConversationOrchestrator:
         `reason` is what recycling the worker is counted as when the window
         ends. A hold opened by a run's handoff carries that handoff's reason. A
         window kept for a following media run, including one held while that
-        run waits, ends as its expiry.
+        run waits, ends as its expiry. `emptiable` is whether the worker may be
+        emptied in place when the window ends, as its handoff allowed: a
+        failed attempt's worker is stopped then, however long it was held.
         """
 
         seconds = (
@@ -8154,6 +8282,7 @@ class ConversationOrchestrator:
         self._media_warm_launch = media_worker.pid
         self._media_warm_scoped = scoped
         self._media_warm_stop_reason = reason
+        self._media_warm_emptiable = emptiable
         self._media_warm_task = asyncio.create_task(
             self._expire_media_warm_window(generation, seconds),
             name="media-warm-window",
@@ -8175,6 +8304,7 @@ class ConversationOrchestrator:
         generation = self._media_warm_window
         self._media_warm_window = None
         self._media_warm_stop_reason = None
+        self._media_warm_emptiable = True
         task = self._media_warm_task
         # Never the running task itself: cancelling it would abandon the
         # handoff it is in the middle of at its next await.
@@ -8601,6 +8731,7 @@ class ConversationOrchestrator:
         """Close the open window and give back what it held, under the device lease."""
 
         reason = self._media_warm_stop_reason or WorkerStopReason.KEEP_WARM_EXPIRY
+        emptiable = self._media_warm_emptiable
         self._close_media_warm_window()
         owed = self._displaced_chat_profile_id
         try:
@@ -8610,15 +8741,26 @@ class ConversationOrchestrator:
                 # decides its fate. Only the chat model it displaced is owed.
                 await self._give_back_displaced_chat(owed)
             elif owed is not None:
-                await self._complete_media_handoff(owed, keep_warm=False, reason=reason)
+                await self._complete_media_handoff(
+                    owed, keep_warm=False, reason=reason, emptiable=emptiable
+                )
             else:
                 # Nothing is owed, because a chat model was loaded beside a
                 # worker someone was using. The models are still resident, and
-                # with the window gone nothing would recycle them. A worker
-                # launched for one activation is not replaced by the broad one.
-                await self.processes.stop("media", reason=reason)
-                if not self._media_warm_scoped:
-                    self._schedule_media_restart()
+                # with the window gone nothing would recycle them. Emptying
+                # them is enough, except in a worker launched for one
+                # activation: nothing else may run on it, so it is stopped and
+                # the broad one does not replace it. A broad worker that may
+                # not or could not be emptied is stopped and replaced by an
+                # empty one.
+                if (
+                    self._media_warm_scoped
+                    or not emptiable
+                    or not await self._empty_media_worker(reason)
+                ):
+                    await self.processes.stop("media", reason=reason)
+                    if not self._media_warm_scoped:
+                        self._schedule_media_restart()
         except Exception:
             logger.exception("Could not hand the device back to chat after the warm window")
 
