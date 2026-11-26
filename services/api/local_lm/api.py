@@ -89,6 +89,7 @@ from .backup_archives import (
 from .backups import BackupFromNewerVersion
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
+from .carried_edit_inputs import carried_edit_inputs
 from .catalog_file_identity import hash_selected_catalog_files
 from .catalog_sources import CatalogSource, CatalogSourceNotFound, WorkflowCatalogSource
 from .chat_activity_history import chat_activity_history
@@ -5796,6 +5797,13 @@ async def _regenerate_message_locked(
     if source_fit is not None:
         prior_settings.pop("width", None)
         prior_settings.pop("height", None)
+    # A regeneration edits the same pictures, so it keeps the selection and the
+    # relight request made for them. A setting the request names still wins.
+    prior_settings.update(
+        carried_edit_inputs(
+            source_context.settings if source_context is not None else prior_run.settings_json
+        )
+    )
     turn = TurnRequest(
         source_fit=source_fit,
         upscale=upscale,
@@ -6041,6 +6049,10 @@ async def edit_and_branch(
                 raise api_error(409, exc.code, str(exc)) from exc
             except ValueError as exc:
                 raise api_error(422, "generation-settings-invalid", str(exc)) from exc
+            if inherit_inputs:
+                # Branched on the same pictures, it keeps the selection and the
+                # relight request made for them; new pictures take neither.
+                updates["settings"].update(carried_edit_inputs(prior_run.settings_json))
     turn = payload.model_copy(update=updates)
     inherited_prompt_source = (
         _message_prompt_source(source)

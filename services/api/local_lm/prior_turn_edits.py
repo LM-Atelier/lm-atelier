@@ -19,6 +19,7 @@ from .accepted_turn_context import (
     settings_workflow,
 )
 from .auxiliary_assets import revision_accepts_added_loras
+from .carried_edit_inputs import carried_edit_inputs
 from .chat_recovery_visibility import chat_is_deleted
 from .domain import MessageRole, Operation, RoutingMode
 from .models import (
@@ -547,6 +548,10 @@ async def prepare_prior_turn_edit(
             # Legacy resolved dimensions are not a second explicit canvas choice.
             values["settings"].pop("width", None)
             values["settings"].pop("height", None)
+        if "input_artifact_ids" not in payload.model_fields_set:
+            # Edited on the same pictures, it keeps the selection and the relight
+            # request made for them; new pictures take neither.
+            values["settings"].update(carried_edit_inputs(settings))
         values["settings"] = {**values["settings"], **payload.settings}
     if same_role and "output_count" not in payload.model_fields_set:
         output = prior.provenance_json.get("media_output") or {}
