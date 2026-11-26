@@ -46,8 +46,8 @@ DRAFTED_USE_CASES: Final = {
 #: Seeds that belong to one request rather than to a setup, whatever workflow
 #: binds them; a workflow can also bind its own under generated names.
 _SEEDS: Final = frozenset({"seed", "noise_seed"})
-#: A run records a batch size of one whenever its request made several pictures,
-#: one run each, so the value it holds never says how many the setup makes.
+#: A picture or video run records a batch size of one, each output its own run,
+#: so the value it holds never says how many the setup makes.
 _OUTPUT_COUNT: Final = "batch_size"
 _NAME_LIMIT: Final = 200
 #: The longest instruction an edit recipe holds, as the recipe route accepts it.

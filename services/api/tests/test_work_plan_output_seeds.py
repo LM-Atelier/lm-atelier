@@ -25,12 +25,16 @@ from local_lm.output_recipe_v1 import open_output_recipe
 FOUR = "Create four variations of a blue ceramic apple"
 
 
-def _seeded_engine(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> list[MediaRequest]:
+def _seeded_engine(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch, *, per_call: int | None = None
+) -> list[MediaRequest]:
     """Make the mock engine's files depend on the seed and on their place in a call.
 
     The mock draws a picture from the prompt alone, so every output of one
     turn would be the same file. Marking the seed into the bytes gives each
     output its own file, and a call asking for a batch of N returns N files.
+    With `per_call`, every call returns that many whatever it asked for, as a
+    workflow whose graph sets its own count does.
     """
 
     seen: list[MediaRequest] = []
@@ -38,7 +42,7 @@ def _seeded_engine(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> list[MediaR
 
     async def generate(request: MediaRequest) -> AsyncIterator[MediaEvent]:
         seen.append(request)
-        size = request.parameters.get("batch_size")
+        size = request.parameters.get("batch_size") if per_call is None else per_call
         count = size if isinstance(size, int) and not isinstance(size, bool) and size > 1 else 1
         seed = request.parameters.get("seed")
         async for event in original(request):
@@ -234,8 +238,26 @@ async def test_resubmitting_one_outputs_seed_makes_that_picture_again(
 async def test_pictures_one_engine_call_made_share_its_seed_and_say_their_place(
     app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A workflow whose graph sets its own count makes several pictures in one call."""
+
     monkeypatch.setattr("local_lm.orchestrator.secrets.randbelow", lambda _upper: 77)
-    _seeded_engine(app, monkeypatch)
+    seen = _seeded_engine(app, monkeypatch, per_call=3)
+    accepted = await _turn(client, "Create an image of a blue ceramic apple")
+    plan = await _finished_plan(client, accepted["run"]["work_plan_id"])
+    [output] = await _outputs(client, plan["id"])
+
+    assert [request.parameters.get("batch_size", 1) for request in seen] == [1]
+    assert [item["batch_index"] for item in output["artifacts"]] == [0, 1, 2]
+    assert len({item["sha256"] for item in output["artifacts"]}) == 3
+    assert isinstance(output["seed"], int)
+
+
+async def test_a_regenerate_given_a_batch_size_asks_the_engine_for_one_picture(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A regenerate makes one output, so the engine is asked for one picture and makes one."""
+
+    seen = _seeded_engine(app, monkeypatch)
     first = await _turn(client, "Create an image of a blue ceramic apple")
     await _finished_plan(client, first["run"]["work_plan_id"])
 
@@ -247,10 +269,9 @@ async def test_pictures_one_engine_call_made_share_its_seed_and_say_their_place(
     plan = await _finished_plan(client, regenerated.json()["run"]["work_plan_id"])
     [output] = await _outputs(client, plan["id"])
 
-    assert output["batch_size"] == 3
-    assert [item["batch_index"] for item in output["artifacts"]] == [0, 1, 2]
-    assert len({item["sha256"] for item in output["artifacts"]}) == 3
-    assert isinstance(output["seed"], int)
+    assert seen[-1].parameters["batch_size"] == 1
+    assert output["batch_size"] == 1
+    assert [item["batch_index"] for item in output["artifacts"]] == [0]
 
 
 async def test_a_missing_plan_or_one_in_a_comparison_is_not_found(
