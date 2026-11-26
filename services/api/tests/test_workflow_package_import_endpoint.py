@@ -11,6 +11,7 @@ from httpx2 import AsyncClient
 from local_lm import workflow_package_drafts
 from local_lm.db import SessionLocal
 from local_lm.models import WorkflowRevision
+from local_lm.schemas import WorkerStartReason
 
 pytestmark = pytest.mark.asyncio
 
@@ -234,7 +235,8 @@ async def test_import_restarts_unscoped_for_a_verified_registry_package(
     async def launchable_packages() -> dict[tuple[str, str], frozenset[str]]:
         return {(package_id, "1.2.3"): frozenset({node_type})}
 
-    async def start_media() -> None:
+    async def start_media(*, reason: WorkerStartReason) -> None:
+        assert reason is WorkerStartReason.PACKAGE_PREPARATION
         nonlocal starts
         starts += 1
 
@@ -296,7 +298,8 @@ async def test_import_restarts_unscoped_for_a_reviewed_manual_package(
     async def manual_packages() -> dict[tuple[str, str], frozenset[str]]:
         return {(package_id, revision): frozenset({node_type})}
 
-    async def start_media() -> None:
+    async def start_media(*, reason: WorkerStartReason) -> None:
+        assert reason is WorkerStartReason.PACKAGE_PREPARATION
         nonlocal starts
         starts += 1
 
@@ -350,7 +353,8 @@ async def test_import_fails_closed_when_verified_registry_nodes_cannot_load(
     async def launchable_packages() -> dict[tuple[str, str], frozenset[str]]:
         return {(package_id, "1.2.3"): frozenset({node_type})}
 
-    async def start_media() -> None:
+    async def start_media(*, reason: WorkerStartReason) -> None:
+        assert reason is WorkerStartReason.PACKAGE_PREPARATION
         raise RuntimeError(r"C:\private\managed-runtime\failure")
 
     monkeypatch.setattr(
@@ -886,7 +890,8 @@ async def test_an_unrelated_out_of_scope_package_is_not_blamed(
             ("comfyui-unrelated", "d" * 40): frozenset({"UnrelatedNode"}),
         }
 
-    async def start_media() -> None:
+    async def start_media(*, reason: WorkerStartReason) -> None:
+        assert reason is WorkerStartReason.PACKAGE_PREPARATION
         return None
 
     services = app.state.services

@@ -404,9 +404,9 @@ async def test_source_extensions_finish_or_pause_without_partial_workflow_activa
                     stops: list[str] = []
                     original_stop_unlocked = services.processes._stop_unlocked
 
-                    async def stop_unlocked(name: str) -> None:
+                    async def stop_unlocked(name: str, **options: Any) -> None:
                         if name != "media":
-                            await original_stop_unlocked(name)
+                            await original_stop_unlocked(name, **options)
                             return
                         stops.append(name)
                         if mode.endswith("stop-refused"):
@@ -509,7 +509,7 @@ async def test_source_extensions_finish_or_pause_without_partial_workflow_activa
                     await services.processes.stop("media")
                 if mode == "trust-stop-failure":
 
-                    async def refuse_stop(_name: str) -> Any:
+                    async def refuse_stop(_name: str, **_options: object) -> Any:
                         return next(
                             worker
                             for worker in services.processes.statuses()

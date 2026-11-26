@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import Literal
 
 from sqlalchemy.orm import Session
@@ -21,6 +22,7 @@ from .comfy_registry_paths import registry_wheel_environment_root
 from .models import ComfyRegistryInstall
 from .processes import ProcessSupervisor
 from .registry_trust_policy import decide_registry_trust
+from .schemas import WorkerStartReason
 from .workflow_package_preparation import PreparationContext, WorkflowPackagePreparationError
 
 
@@ -77,14 +79,16 @@ def _claimed_media_starter(
     guard: Callable[[Session], None] | None,
 ) -> MediaStarter:
     if guard is None:
-        return processes.start_media
+        return partial(processes.start_media, reason=WorkerStartReason.PACKAGE_PREPARATION)
 
     async def start() -> object:
         def require_claim() -> None:
             with session_factory() as session:
                 guard(session)
 
-        return await processes.start_media(before_replace=require_claim)
+        return await processes.start_media(
+            before_replace=require_claim, reason=WorkerStartReason.PACKAGE_PREPARATION
+        )
 
     return start
 

@@ -13,7 +13,7 @@ from local_lm.db import SessionLocal
 from local_lm.domain import utcnow
 from local_lm.main import Services
 from local_lm.models import ModelAssetInstall, ModelInstall, ModelProfile
-from local_lm.schemas import WorkerStatus
+from local_lm.schemas import WorkerStartReason, WorkerStatus, WorkerStopReason
 
 
 def _report_cleanup(
@@ -121,6 +121,13 @@ async def test_auxiliary_model_changes_finish_worker_cleanup_first(
             await client.delete(f"/api/model-assets/{identifier}")
 
     assert pending.await_count >= 1
+    # Every call, so a change pins its own start as well as the restore after it.
+    reason = (
+        WorkerStartReason.MODEL_CHANGE if operation == "change" else WorkerStopReason.MODEL_CHANGE
+    )
+    assert [call.kwargs for call in pending.await_args_list] == [
+        {"reason": reason}
+    ] * pending.await_count
     assert marker.read_bytes() == b"neutral asset marker"
     with SessionLocal() as session:
         retained = session.get(ModelAssetInstall, identifier)

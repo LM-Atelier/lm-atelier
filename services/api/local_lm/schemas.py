@@ -3822,6 +3822,63 @@ class CustomNodeContainmentStatus(ApiModel):
     offline_badge: bool
 
 
+class WorkerStartReason(StrEnum):
+    """Why a worker process was started.
+
+    A closed set, so a count by reason means the same thing from one release to
+    the next. A start whose caller names no reason is counted as `unattributed`.
+    """
+
+    #: Restoring the configured workers as the service starts.
+    APP_START = "app_start"
+    #: A media run needed the worker, for any workflow or for one activation.
+    RUN = "run"
+    #: Brought back after a chat model borrowed the device.
+    HANDOFF_RESTART = "handoff_restart"
+    #: Started or restarted from the worker controls.
+    MANUAL = "manual"
+    #: Importing, activating, verifying, deactivating or restoring workflow
+    #: packages and their extensions.
+    PACKAGE_PREPARATION = "package_preparation"
+    #: Verifying a model install, or enabling, disabling or deleting a model asset.
+    MODEL_CHANGE = "model_change"
+    UNATTRIBUTED = "unattributed"
+
+
+class WorkerStopReason(StrEnum):
+    """Why a running worker process was stopped.
+
+    A process that ends while nothing is stopping it is not a stop: it is
+    counted separately, as an exit without a stop.
+    """
+
+    #: Recycled at a run's own handoff to give the device back to chat, other
+    #: than a failed run's.
+    RUN_HANDOFF = "run_handoff"
+    #: Recycled after a run that did not finish with its result and was not
+    #: allowed to keep its worker.
+    FAILED_RUN_HANDOFF = "failed_run_handoff"
+    #: The window that kept the worker for a following media run ended.
+    KEEP_WARM_EXPIRY = "keep_warm_expiry"
+    #: A chat, vision or other model load needed the device.
+    CHAT_LOAD = "chat_load"
+    #: A launch for a different activation scope replaced it.
+    REPLACED_SCOPE = "replaced_scope"
+    #: A launch for the same scope with a different command replaced it.
+    REPLACED_COMMAND = "replaced_command"
+    #: Stopped, reset or restarted from the worker controls.
+    MANUAL = "manual"
+    # These two have the causes of the start reasons of the same names.
+    PACKAGE_PREPARATION = "package_preparation"
+    MODEL_CHANGE = "model_change"
+    #: Ended by the supervisor because it did not answer its health checks, or
+    #: never became ready after it was started.
+    UNHEALTHY = "unhealthy"
+    #: The service was shutting down.
+    SHUTDOWN = "shutdown"
+    UNATTRIBUTED = "unattributed"
+
+
 class WorkerStatus(ApiModel):
     name: Literal["chat", "media"]
     state: Literal["stopped", "starting", "ready", "stopping", "exited"] = "stopped"
@@ -3868,6 +3925,17 @@ class WorkerStatus(ApiModel):
     # On the media worker this is the host capability. It is not a canary run,
     # and a ready worker does not make it stronger.
     custom_node_containment: CustomNodeContainmentStatus | None = None
+    # Why this worker was started and stopped since `counted_since`, when the
+    # service started. Only what happened is counted: a start is a process
+    # spawned, a stop is a running process the application ended, and a process
+    # that ended while nothing was stopping it - a crash or an outside kill - is
+    # an exit without a stop rather than a stop of any kind.
+    starts_by_reason: dict[WorkerStartReason, int] = Field(default_factory=dict)
+    stops_by_reason: dict[WorkerStopReason, int] = Field(default_factory=dict)
+    exits_without_stop: int = Field(default=0, ge=0)
+    last_start_reason: WorkerStartReason | None = None
+    last_stop_reason: WorkerStopReason | None = None
+    counted_since: datetime | None = None
 
 
 class WorkerSettings(ApiModel):

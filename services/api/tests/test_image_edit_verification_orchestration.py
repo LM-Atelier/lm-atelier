@@ -33,7 +33,7 @@ from local_lm.models import (
 )
 from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.scheduler import JobClaim
-from local_lm.schemas import WorkerStatus
+from local_lm.schemas import WorkerStatus, WorkerStopReason
 from local_lm.vision import VisionInputError
 from local_lm.workflow_use_case_execution import InheritedWorkflowUseCasePreset
 
@@ -1078,7 +1078,7 @@ async def test_a_verification_that_loses_its_claim_mid_assessment_stops_and_rest
     with pytest.raises(ClaimLost, match="mid-assessment"):
         await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
 
-    orchestrator.processes.stop.assert_awaited_once_with("media")
+    orchestrator.processes.stop.assert_awaited_once_with("media", reason=WorkerStopReason.CHAT_LOAD)
     assert orchestrator.processes.load_chat.await_count == 1, "the teardown restored chat"
     assert world["consumed"] == ["first", "second"]
     orchestrator._schedule_media_restart.assert_not_called()

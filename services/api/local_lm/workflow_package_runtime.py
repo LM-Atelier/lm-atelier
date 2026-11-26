@@ -14,6 +14,7 @@ from .comfy_registry_paths import registry_wheel_environment_root
 from .db import SessionLocal
 from .models import WorkflowActivation, WorkflowRevision
 from .processes import ProcessSupervisor
+from .schemas import WorkerStartReason, WorkerStopReason
 from .workflow_activation_requests import activation_subject
 from .workflow_activations import (
     WorkflowActivationLaunchScope,
@@ -99,9 +100,11 @@ async def _stop(
 ) -> None:
     if require_claim is not None:
         require_claim()
-        await processes.stop("media", before_stop=require_claim)
+        await processes.stop(
+            "media", reason=WorkerStopReason.PACKAGE_PREPARATION, before_stop=require_claim
+        )
     else:
-        await processes.stop("media")
+        await processes.stop("media", reason=WorkerStopReason.PACKAGE_PREPARATION)
     if require_claim is not None:
         require_claim()
     if not media_worker_stopped(processes):
@@ -122,22 +125,23 @@ async def _restore(
         await _stop(processes, require_claim)
         if not was_running:
             return
+        reason = WorkerStartReason.PACKAGE_PREPARATION
         try:
             if activation_id is not None and launch_sha256 is not None:
                 scope = _restore_scope(activation_id, launch_sha256, context, processes)
                 if require_claim is not None:
                     require_claim()
                     await processes.start_media(
-                        activation_scope=scope, before_replace=require_claim
+                        activation_scope=scope, before_replace=require_claim, reason=reason
                     )
                 else:
-                    await processes.start_media(activation_scope=scope)
+                    await processes.start_media(activation_scope=scope, reason=reason)
             else:
                 if require_claim is not None:
                     require_claim()
-                    await processes.start_media(before_replace=require_claim)
+                    await processes.start_media(before_replace=require_claim, reason=reason)
                 else:
-                    await processes.start_media()
+                    await processes.start_media(reason=reason)
             if require_claim is not None:
                 require_claim()
         except Exception as exc:

@@ -259,7 +259,7 @@ async def test_closing_waits_for_every_stop_before_reporting_one_that_failed(
     release = asyncio.Event()
     finished = asyncio.Event()
 
-    async def stop(name: str) -> None:
+    async def stop(name: str, **_options: object) -> None:
         if name == "media":
             await waiting.wait()
             failed.set()

@@ -16,6 +16,7 @@ import time
 import zipfile
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlparse
@@ -32,6 +33,7 @@ from .comfy_editor_bridge import (
 from .comfy_registry_paths import registry_wheel_environment_root
 from .config import Settings
 from .custom_node_containment import host_containment_capability
+from .domain import utcnow
 from .events import EventBroker
 from .filesystem_links import (
     AnchoredDirectory,
@@ -48,7 +50,12 @@ from .gguf import GGUFSelectionError, automatic_mmproj_selection, validate_gguf_
 from .model_manifests import COMFY_MODEL_FOLDERS, comfy_folder_for_kind
 from .models import ModelAssetInstall, ModelInstall, ModelProfile
 from .network import shared_tls_context
-from .schemas import CustomNodeContainmentStatus, WorkerStatus
+from .schemas import (
+    CustomNodeContainmentStatus,
+    WorkerStartReason,
+    WorkerStatus,
+    WorkerStopReason,
+)
 from .security import trusted_browser_origins
 from .subprocess_env import python_subprocess_environment
 from .worker_failures import (
@@ -486,6 +493,41 @@ class WorkerRecord:
     editor_bridge_support: ComfyEditorBridgeSupport | None = None
     stopping: bool = False
     shutdown_incomplete: bool = False
+    #: Whether how this process ended has been counted, so it is counted once
+    #: however many paths go on to notice it.
+    end_counted: bool = False
+    #: The reason of the first stop that found this process running. An end
+    #: seen after that stop was cancelled or could not finish is its stop.
+    end_reason: WorkerStopReason | None = None
+
+
+@dataclass
+class _WorkerLifecycle:
+    """How often one worker was started and stopped, and why."""
+
+    starts: dict[WorkerStartReason, int] = field(
+        default_factory=lambda: dict.fromkeys(WorkerStartReason, 0)
+    )
+    stops: dict[WorkerStopReason, int] = field(
+        default_factory=lambda: dict.fromkeys(WorkerStopReason, 0)
+    )
+    exits_without_stop: int = 0
+    last_start_reason: WorkerStartReason | None = None
+    last_stop_reason: WorkerStopReason | None = None
+
+
+#: The stop a start's own caller causes without naming one: the same launch
+#: started again over a live worker, or a start abandoned before it was ready.
+#: A start reason with no stop of the same cause is counted as unattributed.
+_STOP_CAUSED_BY_START = {
+    WorkerStartReason.MANUAL: WorkerStopReason.MANUAL,
+    WorkerStartReason.PACKAGE_PREPARATION: WorkerStopReason.PACKAGE_PREPARATION,
+    WorkerStartReason.MODEL_CHANGE: WorkerStopReason.MODEL_CHANGE,
+}
+
+
+def _stop_caused_by(reason: WorkerStartReason) -> WorkerStopReason:
+    return _STOP_CAUSED_BY_START.get(reason, WorkerStopReason.UNATTRIBUTED)
 
 
 def _is_live(record: WorkerRecord | None) -> bool:
@@ -542,6 +584,12 @@ class ProcessSupervisor:
         self._liveness_failure_threshold = liveness_failure_threshold
         self._workers: dict[str, WorkerRecord] = {}
         self._locks = {"chat": asyncio.Lock(), "media": asyncio.Lock()}
+        # Kept per worker name rather than on a record, because every start
+        # replaces the record and the counts describe the whole service run.
+        self._lifecycle = {name: _WorkerLifecycle() for name in self._locks}
+        self._counted_since: datetime = utcnow()
+        # The stop about to end each worker, named before what it cancels runs.
+        self._expected_stops: dict[str, WorkerStopReason] = {}
         #: Awaited before any chat model loads. Whoever keeps a media worker's
         #: models loaded past a run sets this, so the device is freed for chat
         #: no matter which path asks for it.
@@ -555,7 +603,18 @@ class ProcessSupervisor:
         result: list[WorkerStatus] = []
         for name in ("chat", "media"):
             record = self._workers.get(name)
+            lifecycle = self._lifecycle[name]
             running = record is not None and record.process.returncode is None
+            if (
+                record is not None
+                and not running
+                and (record.end_reason is not None or not record.stopping)
+            ):
+                # The process has ended: under a stop that found it running, or
+                # with nothing stopping it. The stop and supervision paths count
+                # this too, and whichever sees it first counts it, so a stop that
+                # was cancelled or could not finish is not left for the next one.
+                self._count_end(record)
             current_memory = (
                 self._process_tree_rss(record.process.pid) if running and record else None
             )
@@ -630,6 +689,12 @@ class ProcessSupervisor:
                     stderr_tail=stderr_tail,
                     log_path=self._public_log_path(name),
                     custom_node_containment=_media_containment_status(name),
+                    starts_by_reason=dict(lifecycle.starts),
+                    stops_by_reason=dict(lifecycle.stops),
+                    exits_without_stop=lifecycle.exits_without_stop,
+                    last_start_reason=lifecycle.last_start_reason,
+                    last_stop_reason=lifecycle.last_stop_reason,
+                    counted_since=self._counted_since,
                 )
             )
         return result
@@ -689,7 +754,10 @@ class ProcessSupervisor:
         launch_scope_sha256: str | None = None,
         vision_max_images: int | None = None,
         before_replace: Callable[[], None] | None = None,
+        reason: WorkerStartReason = WorkerStartReason.UNATTRIBUTED,
     ) -> WorkerStatus:
+        """Load this profile into the chat worker, counting the start under `reason`."""
+
         if self.before_chat_load is not None:
             await self.before_chat_load()
         if profile.engine == "vllm":
@@ -699,6 +767,7 @@ class ProcessSupervisor:
                 launch_scope_sha256=launch_scope_sha256,
                 vision_max_images=vision_max_images,
                 before_replace=before_replace,
+                reason=reason,
             )
         if profile.engine != "llama.cpp":
             raise ValueError("the selected profile is not a managed chat profile")
@@ -757,6 +826,7 @@ class ProcessSupervisor:
                 profile.id,
                 estimated_memory_bytes=estimate,
                 launch_scope_sha256=launch_scope_sha256,
+                reason=reason,
                 **replacement_checks,
             )
         except (Exception, asyncio.CancelledError):
@@ -773,6 +843,7 @@ class ProcessSupervisor:
         launch_scope_sha256: str | None = None,
         vision_max_images: int | None = None,
         before_replace: Callable[[], None] | None = None,
+        reason: WorkerStartReason = WorkerStartReason.UNATTRIBUTED,
     ) -> WorkerStatus:
         if (
             vision_max_images is not None
@@ -862,6 +933,7 @@ class ProcessSupervisor:
                 profile.id,
                 estimated_memory_bytes=estimate,
                 launch_scope_sha256=launch_scope_sha256,
+                reason=reason,
                 **replacement_checks,
             )
         except (Exception, asyncio.CancelledError):
@@ -878,7 +950,15 @@ class ProcessSupervisor:
         activation_scope: WorkflowMediaLaunchScope | None = None,
         before_replace: Callable[[], None] | None = None,
         replacement_guard: Callable[[], Awaitable[None]] | None = None,
+        reason: WorkerStartReason = WorkerStartReason.UNATTRIBUTED,
     ) -> WorkerStatus:
+        """Start the media worker for this launch, counting the start under `reason`.
+
+        The start is counted only when a process is spawned: not when a ready
+        worker with exactly this scoped launch is kept, and not when the start
+        is refused before its process exists.
+        """
+
         from .workflow_activations import WorkflowSourceLaunchScope
 
         def check_start() -> None:
@@ -1060,6 +1140,7 @@ class ProcessSupervisor:
                 ),
                 launch_scope_sha256=activation_scope.launch_sha256,
                 editor_bridge_support=editor_bridge_support,
+                reason=reason,
                 **source_checks,
             )
         elif registry_contract.site_packages:
@@ -1070,6 +1151,7 @@ class ProcessSupervisor:
                 environment_overrides=environment_overrides,
                 ready_check=lambda: self._verify_comfy_node_types(registry_contract.node_types),
                 editor_bridge_support=editor_bridge_support,
+                reason=reason,
                 **source_checks,
             )
         else:
@@ -1079,6 +1161,7 @@ class ProcessSupervisor:
                 self.worker_health_url("media"),
                 environment_overrides=environment_overrides,
                 editor_bridge_support=editor_bridge_support,
+                reason=reason,
                 **source_checks,
             )
         return self.statuses()[1]
@@ -1123,7 +1206,7 @@ class ProcessSupervisor:
                 before_stop()
             if replacement_guard is not None and _is_live(self._workers.get("media")):
                 await replacement_guard()
-            await self._stop_unlocked("media")
+            await self._stop_unlocked("media", reason=WorkerStopReason.PACKAGE_PREPARATION)
             remaining = await asyncio.to_thread(self._matching_worker_processes, "media")
             if not media_worker_stopped(self) or remaining:
                 raise RuntimeError(
@@ -1660,19 +1743,54 @@ class ProcessSupervisor:
         return result
 
     async def stop(
-        self, name: str, *, before_stop: Callable[[], None] | None = None
+        self,
+        name: str,
+        *,
+        reason: WorkerStopReason = WorkerStopReason.UNATTRIBUTED,
+        before_stop: Callable[[], None] | None = None,
     ) -> WorkerStatus:
+        """Stop the named worker, counting `reason` if a running process ends.
+
+        Stopping a worker that is already stopped counts nothing. A stop that
+        finds the process running gives its end this reason even when the stop
+        is cancelled or cannot confirm the end: the end is counted under it
+        once it is seen, here, by a later stop or by a status read. Any stop
+        named in advance for this worker is used by now, and is cleared.
+        """
+
         if name not in self._locks:
             raise ValueError("worker must be chat or media")
-        async with self._locks[name]:
-            if before_stop is not None:
-                before_stop()
-            await self._stop_unlocked(name)
+        try:
+            async with self._locks[name]:
+                if before_stop is not None:
+                    before_stop()
+                await self._stop_unlocked(name, reason=reason)
+        finally:
+            self.forget_expected_stop(name)
         return next(item for item in self.statuses() if item.name == name)
+
+    def expect_stop(self, name: str, reason: WorkerStopReason) -> None:
+        """Name the stop about to end this worker, before what it cancels runs.
+
+        A start still under way that is cancelled for that stop ends its own
+        process in its cleanup, before the stop itself runs, and is counted
+        under this reason rather than the one its caller's reason causes. The
+        next stop of this worker clears it.
+        """
+
+        if name not in self._locks:
+            raise ValueError("worker must be chat or media")
+        self._expected_stops[name] = reason
+
+    def forget_expected_stop(self, name: str) -> None:
+        """Drop the stop named in advance for this worker, when it is not coming."""
+
+        self._expected_stops.pop(name, None)
 
     async def close(self) -> None:
         results = await asyncio.gather(
-            *(self.stop(name) for name in tuple(self._locks)), return_exceptions=True
+            *(self.stop(name, reason=WorkerStopReason.SHUTDOWN) for name in tuple(self._locks)),
+            return_exceptions=True,
         )
         for result in results:
             if isinstance(result, BaseException):
@@ -1692,6 +1810,7 @@ class ProcessSupervisor:
         prestart_check: Callable[[], Awaitable[None]] | None = None,
         before_replace: Callable[[], None] | None = None,
         replacement_guard: Callable[[], Awaitable[None]] | None = None,
+        reason: WorkerStartReason = WorkerStartReason.UNATTRIBUTED,
     ) -> None:
         """Start the named worker with this launch, stopping any that is running first.
 
@@ -1700,6 +1819,12 @@ class ProcessSupervisor:
         worker is about to be stopped, so no other start or stop comes between its
         answer and this stop, and the guard must not wait for that lock itself. A
         raise leaves that worker running and reaches the caller.
+
+        The new process is counted under `reason` once it is spawned. A running
+        worker stopped to make way for it is a manual stop when the start is
+        manual, and otherwise is counted as replaced by another scope, or by
+        another command for the same scope; one replaced by this same launch is
+        counted under the stop its caller's reason causes.
         """
 
         if launch_scope_sha256 is not None and not re.fullmatch(
@@ -1727,7 +1852,17 @@ class ProcessSupervisor:
                 return
             if replacement_guard is not None and _is_live(current):
                 await replacement_guard()
-            await self._stop_unlocked(name)
+            if reason is WorkerStartReason.MANUAL:
+                # Starting from the worker controls is what stops the live
+                # worker, whatever launch it had.
+                replaced = WorkerStopReason.MANUAL
+            elif current is not None and current.launch_scope_sha256 != launch_scope_sha256:
+                replaced = WorkerStopReason.REPLACED_SCOPE
+            elif current is not None and current.command != command:
+                replaced = WorkerStopReason.REPLACED_COMMAND
+            else:
+                replaced = _stop_caused_by(reason)
+            await self._stop_unlocked(name, reason=replaced)
             await self._reclaim_port_from_our_own_children(name, health_url)
             await self._ensure_port_available(name, health_url)
             if prestart_check is not None:
@@ -1781,6 +1916,7 @@ class ProcessSupervisor:
             )
             record.output_task = asyncio.create_task(self._capture_process_output(record))
             self._workers[name] = record
+            self._count_start(name, reason)
             try:
                 if process.returncode is None:
                     self._record_worker_process_tree(name, process.pid)
@@ -1797,7 +1933,17 @@ class ProcessSupervisor:
                 )
                 await self._publish_worker_event("worker.ready", record, state="ready")
             except asyncio.CancelledError:
-                cleanup = asyncio.create_task(self._terminate_record(record))
+                # Whoever wanted this start has gone. The stop is the one named
+                # for this worker in advance, when something is about to stop
+                # it, or else the one their reason causes. The cleanup counts it
+                # itself, and runs on through a second cancellation of this
+                # task. A third cancels the cleanup too, and the end is then
+                # counted when it is next seen, under the reason it recorded.
+                cleanup = asyncio.create_task(
+                    self._terminate_and_count(
+                        record, self._expected_stops.get(name) or _stop_caused_by(reason)
+                    )
+                )
                 try:
                     await asyncio.shield(cleanup)
                 except asyncio.CancelledError:
@@ -1819,7 +1965,11 @@ class ProcessSupervisor:
                     (time.perf_counter() - startup_started_at) * 1_000
                 )
                 record.failure_detail = self._sanitize_diagnostic(str(exc)).rstrip(".") + "."
-                await self._terminate_record(record)
+                # A process that died during startup exited by itself. One still
+                # running never became healthy or ready, and the supervisor ends
+                # it for that reason.
+                with self._counting_end(record, WorkerStopReason.UNHEALTHY):
+                    await self._terminate_record(record)
                 message = record.failure_detail
                 stderr_tail = self._stderr_tail(record)
                 if stderr_tail:
@@ -1931,7 +2081,8 @@ class ProcessSupervisor:
                         record.failure_detail = (
                             f"{record.name} worker stopped responding to health checks."
                         )
-                        await self._terminate_record(record, cancel_monitor=False)
+                        with self._counting_end(record, WorkerStopReason.UNHEALTHY):
+                            await self._terminate_record(record, cancel_monitor=False)
                         await self._publish_worker_event(
                             "worker.unhealthy",
                             record,
@@ -1956,7 +2107,8 @@ class ProcessSupervisor:
             detail = self._sanitize_diagnostic(str(exc)).rstrip(".")
             suffix = f": {detail}" if detail else ""
             record.failure_detail = f"{record.name} worker supervision failed{suffix}."
-            await self._terminate_record(record, cancel_monitor=False)
+            with self._counting_end(record, WorkerStopReason.UNHEALTHY):
+                await self._terminate_record(record, cancel_monitor=False)
             await self._publish_worker_event(
                 "worker.unhealthy",
                 record,
@@ -1973,6 +2125,7 @@ class ProcessSupervisor:
             if self._workers.get(record.name) is not record:
                 return
             record.failure_detail = f"{record.name} worker exited with code {exit_code}."
+            self._count_end(record)
             await self._terminate_record(record, cancel_monitor=False)
             await self._publish_worker_event(
                 "worker.exited",
@@ -2693,10 +2846,70 @@ class ProcessSupervisor:
         if remaining:
             psutil.wait_procs(remaining, timeout=timeout_seconds)
 
-    async def _stop_unlocked(self, name: str) -> None:
+    def _count_start(self, name: str, reason: WorkerStartReason) -> None:
+        lifecycle = self._lifecycle[name]
+        lifecycle.starts[reason] += 1
+        lifecycle.last_start_reason = reason
+        logger.info("%s worker started (reason: %s)", name.capitalize(), reason.value)
+
+    def _count_exit(self, record: WorkerRecord) -> None:
+        """Count a process that ended while nothing was stopping it, once."""
+
+        if record.end_counted:
+            return
+        record.end_counted = True
+        self._lifecycle[record.name].exits_without_stop += 1
+        logger.info("%s worker exited without a stop", record.name.capitalize())
+
+    def _count_stop(self, record: WorkerRecord, reason: WorkerStopReason) -> None:
+        if record.end_counted:
+            return
+        record.end_counted = True
+        lifecycle = self._lifecycle[record.name]
+        lifecycle.stops[reason] += 1
+        lifecycle.last_stop_reason = reason
+        logger.info("%s worker stopped (reason: %s)", record.name.capitalize(), reason.value)
+
+    def _count_end(self, record: WorkerRecord) -> None:
+        """Count a process that has ended, once, as the stop that found it running if any."""
+
+        if record.end_reason is not None:
+            self._count_stop(record, record.end_reason)
+        else:
+            self._count_exit(record)
+
+    @contextlib.contextmanager
+    def _counting_end(self, record: WorkerRecord, reason: WorkerStopReason) -> Iterator[None]:
+        """Count how the record's process ended once the enclosed termination is over.
+
+        The first termination that finds the process running names the stop,
+        and the record keeps that reason. The end is counted under it whenever
+        it is seen: when this termination is over, even if it raises, or later,
+        by another stop or a status read, when this one is cancelled or cannot
+        confirm the end. Nothing is counted while the process still runs. A
+        process that had already ended with nothing stopping it exited by
+        itself, however it is cleaned up now.
+        """
+
+        if record.process.returncode is None and record.end_reason is None:
+            record.end_reason = reason
+        try:
+            yield
+        finally:
+            if record.process.returncode is not None:
+                self._count_end(record)
+
+    async def _terminate_and_count(self, record: WorkerRecord, reason: WorkerStopReason) -> None:
+        with self._counting_end(record, reason):
+            await self._terminate_record(record)
+
+    async def _stop_unlocked(
+        self, name: str, *, reason: WorkerStopReason = WorkerStopReason.UNATTRIBUTED
+    ) -> None:
         record = self._workers.get(name)
         if record:
-            await self._terminate_record(record)
+            with self._counting_end(record, reason):
+                await self._terminate_record(record)
             if self._workers.get(name) is record:
                 self._workers.pop(name)
             return

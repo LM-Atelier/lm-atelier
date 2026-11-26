@@ -93,7 +93,7 @@ def _warm_orchestrator(
             pid=pid,
         )
 
-    async def stop(name: str) -> None:
+    async def stop(name: str, **_options: object) -> None:
         record["order"].append(f"stop {name}")
         gate = record["stop_gate"]
         if name == "media" and gate is not None:
@@ -709,7 +709,7 @@ async def test_an_explicit_chat_load_owes_no_displaced_profile_back(
         session.commit()
         profile_id = profile.id
 
-    async def load_chat(chosen: Any, _install: Any) -> WorkerStatus:
+    async def load_chat(chosen: Any, _install: Any, **_options: object) -> WorkerStatus:
         return WorkerStatus(
             name="chat", state="ready", managed=True, running=True, profile_id=chosen.id
         )

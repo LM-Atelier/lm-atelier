@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock
@@ -28,7 +28,7 @@ from local_lm.models import (
 )
 from local_lm.orchestrator import ClaimLost, ConversationOrchestrator, _queued_workflow_activation
 from local_lm.scheduler import JobClaim
-from local_lm.schemas import EngineCapabilities, WorkerStatus
+from local_lm.schemas import EngineCapabilities, WorkerStartReason, WorkerStatus, WorkerStopReason
 from local_lm.workflow_activations import WorkflowActivationLaunchScope
 
 _TEST_CLAIM = JobClaim(token="attempt-token-a", attempt=1)
@@ -443,11 +443,11 @@ async def test_media_handoff_recycles_managed_comfy_before_chat_resume() -> None
         pid=22,
     )
 
-    async def stop(name: str) -> None:
+    async def stop(name: str, **_options: object) -> None:
         assert name == "media"
         order.append("stop media")
 
-    async def start_media() -> None:
+    async def start_media(**_options: object) -> None:
         order.append("start media")
 
     processes = _collaborator_double(
@@ -503,7 +503,7 @@ async def test_media_handoff_preloads_the_next_queued_text_profile() -> None:
 
     live = [media]
 
-    async def stop(name: str) -> None:
+    async def stop(name: str, **_options: object) -> None:
         # The recycle really stops it, as the supervisor does.
         if name == "media":
             live[0] = media.model_copy(update={"state": "stopped", "running": False, "pid": None})
@@ -632,7 +632,9 @@ async def test_media_worker_startup_forwards_truthful_phases() -> None:
         running=False,
     )
 
-    async def start_media(*, phase_callback) -> None:  # type: ignore[no-untyped-def]
+    async def start_media(
+        *, phase_callback: Callable[[str], Awaitable[None]], **_options: object
+    ) -> None:
         for phase in (
             "Provisioning media runtime",
             "Validating media dependencies",
@@ -703,7 +705,9 @@ async def test_ready_media_worker_still_receives_an_exact_activation_scope() -> 
 
     # The running worker is replaced only past the check that nobody else is using it.
     start_media.assert_awaited_once_with(
-        activation_scope=scope, replacement_guard=orchestrator._refuse_busy_replacement
+        activation_scope=scope,
+        replacement_guard=orchestrator._refuse_busy_replacement,
+        reason=WorkerStartReason.RUN,
     )
 
 
@@ -811,7 +815,7 @@ async def test_scoped_media_handoff_does_not_restart_a_broad_worker() -> None:
     # than on its own workflow, hands the device back at once.
     await orchestrator._complete_media_handoff("profile-chat", keep_warm=False)
 
-    processes.stop.assert_awaited_once_with("media")
+    processes.stop.assert_awaited_once_with("media", reason=WorkerStopReason.FAILED_RUN_HANDOFF)
     orchestrator._resume_chat_worker.assert_awaited_once_with("profile-chat")
     processes.start_media.assert_not_awaited()
     assert orchestrator._media_restart_task is None
@@ -822,7 +826,7 @@ async def test_media_execution_awaits_inflight_handoff_restart() -> None:
     restart_entered = asyncio.Event()
     start_calls = 0
 
-    async def start_media() -> None:
+    async def start_media(**_options: object) -> None:
         nonlocal start_calls
         start_calls += 1
         restart_entered.set()
@@ -1022,7 +1026,7 @@ async def test_unsuccessful_step_stops_the_inflight_prewarm(job_status: str) -> 
     start_release = asyncio.Event()
     start_finished = False
 
-    async def start_media() -> None:
+    async def start_media(**_options: object) -> None:
         nonlocal start_finished
         start_entered.set()
         await start_release.wait()
@@ -1064,7 +1068,7 @@ async def test_a_failing_step_leaves_the_give_back_released_beside_the_prewarm()
     start_release = asyncio.Event()
     start_finished = False
 
-    async def start_media() -> None:
+    async def start_media(**_options: object) -> None:
         nonlocal start_finished
         start_entered.set()
         await start_release.wait()
@@ -1839,7 +1843,7 @@ async def test_a_recycle_whose_stop_fails_leaves_chat_down_and_the_profile_owed(
 
     await orchestrator._complete_media_handoff("profile-chat")
 
-    processes.stop.assert_awaited_once_with("media")
+    processes.stop.assert_awaited_once_with("media", reason=WorkerStopReason.RUN_HANDOFF)
     resume.assert_not_awaited()
     processes.start_media.assert_not_awaited()
     assert orchestrator._displaced_chat_profile_id == "profile-chat"
@@ -1927,7 +1931,7 @@ async def test_a_handoff_that_restores_chat_owes_nothing_afterwards() -> None:
 
     await orchestrator._complete_media_handoff("profile-chat")
 
-    processes.stop.assert_awaited_once_with("media")
+    processes.stop.assert_awaited_once_with("media", reason=WorkerStopReason.RUN_HANDOFF)
     resume.assert_awaited_once_with("profile-chat")
     assert orchestrator._displaced_chat_profile_id is None
 
@@ -1961,7 +1965,7 @@ async def test_a_later_image_in_the_run_still_reaches_the_terminal_handoff() -> 
     if orchestrator._media_restart_task:
         await orchestrator._media_restart_task
 
-    processes.stop.assert_awaited_once_with("media")
+    processes.stop.assert_awaited_once_with("media", reason=WorkerStopReason.RUN_HANDOFF)
     resume.assert_awaited_once_with("profile-chat")
     assert orchestrator._pending_chat_restore(None) is None
 
@@ -1990,7 +1994,7 @@ async def test_a_queued_text_job_still_recycles_before_its_model_loads() -> None
 
     await orchestrator._complete_media_handoff("profile-previous")
 
-    processes.stop.assert_awaited_once_with("media")
+    processes.stop.assert_awaited_once_with("media", reason=WorkerStopReason.RUN_HANDOFF)
     resume.assert_awaited_once_with("profile-next")
 
 

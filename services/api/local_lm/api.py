@@ -14,6 +14,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, nullcontext, suppress
 from datetime import UTC, datetime
+from functools import partial
 from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
@@ -677,7 +678,9 @@ from .schemas import (
     WorkerLogTail,
     WorkerResetResult,
     WorkerSettings,
+    WorkerStartReason,
     WorkerStatus,
+    WorkerStopReason,
     WorkflowAssetQueueRequest,
     WorkflowAssetReferenceOut,
     WorkflowAssetReviewOut,
@@ -2282,10 +2285,18 @@ async def load_chat_worker(profile_id: str, request: Request, session: SessionDe
     async with services.scheduler.lease("primary"):
         session.expire_all()
         _ensure_worker_idle(session, "chat")
-        return await _load_chat_profile(services, session, profile_id)
+        return await _load_chat_profile(
+            services, session, profile_id, reason=WorkerStartReason.MANUAL
+        )
 
 
-async def _load_chat_profile(services: Services, session: Session, profile_id: str) -> WorkerStatus:
+async def _load_chat_profile(
+    services: Services,
+    session: Session,
+    profile_id: str,
+    *,
+    reason: WorkerStartReason = WorkerStartReason.UNATTRIBUTED,
+) -> WorkerStatus:
     profile = session.get(ModelProfile, profile_id)
     if not profile or not profile.model_install_id:
         raise api_error(404, "profile-install-missing", "profile with a model install not found")
@@ -2300,7 +2311,7 @@ async def _load_chat_profile(services: Services, session: Session, profile_id: s
     if not install:
         raise api_error(404, "profile-install-missing", "profile with a model install not found")
     try:
-        status = await services.processes.load_chat(profile, install)
+        status = await services.processes.load_chat(profile, install, reason=reason)
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
         raise api_error(422, "chat-worker-start-failed", str(exc)) from exc
     services.orchestrator.forget_displaced_chat_profile()
@@ -2323,7 +2334,7 @@ async def start_media_worker(request: Request, session: SessionDep) -> WorkerSta
         if services.settings.media_engine != "comfyui":
             raise api_error(422, "media-engine-inactive", "The ComfyUI media engine is not active.")
         try:
-            return await services.processes.start_media()
+            return await services.processes.start_media(reason=WorkerStartReason.MANUAL)
         except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
             raise api_error(422, "media-worker-start-failed", str(exc)) from exc
 
@@ -2338,7 +2349,7 @@ async def stop_worker(name: str, request: Request, session: SessionDep) -> Worke
         session.expire_all()
         _ensure_worker_idle(session, name)
         try:
-            return await services.processes.stop(name)
+            return await services.processes.stop(name, reason=WorkerStopReason.MANUAL)
         except ValueError as exc:
             raise api_error(422, "worker-stop-failed", str(exc)) from exc
 
@@ -2358,8 +2369,8 @@ async def restart_worker(name: str, request: Request, session: SessionDep) -> Wo
                     422, "media-engine-inactive", "The ComfyUI media engine is not active."
                 )
             try:
-                await services.processes.stop("media")
-                return await services.processes.start_media()
+                await services.processes.stop("media", reason=WorkerStopReason.MANUAL)
+                return await services.processes.start_media(reason=WorkerStartReason.MANUAL)
             except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
                 raise api_error(422, "media-worker-restart-failed", str(exc)) from exc
         # The chat worker restarts with the model it ran last, whether or not it
@@ -2375,7 +2386,9 @@ async def restart_worker(name: str, request: Request, session: SessionDep) -> Wo
                 "chat-model-not-loaded",
                 "no chat model has been loaded yet; load a profile first",
             )
-        return await _load_chat_profile(services, session, profile_id)
+        return await _load_chat_profile(
+            services, session, profile_id, reason=WorkerStartReason.MANUAL
+        )
 
 
 @router.post("/workers/{name}/reset", response_model=WorkerResetResult)
@@ -2399,12 +2412,20 @@ async def reset_worker(name: str, request: Request, session: SessionDep) -> Work
             )
         )
     )
+    # Named first: a job cancelled here may be starting this worker, and its
+    # start is ended by its own cleanup before the stop below runs.
+    services.processes.expect_stop(name, WorkerStopReason.MANUAL)
     cancelled = 0
-    for job_id in job_ids:
-        if await services.orchestrator.cancel(job_id):
-            cancelled += 1
     try:
-        worker = await services.processes.stop(name)
+        for job_id in job_ids:
+            if await services.orchestrator.cancel(job_id):
+                cancelled += 1
+    except BaseException:
+        # The stop named above is not coming, so nothing may be counted under it.
+        services.processes.forget_expected_stop(name)
+        raise
+    try:
+        worker = await services.processes.stop(name, reason=WorkerStopReason.MANUAL)
     except ValueError as exc:
         raise api_error(422, "worker-stop-failed", str(exc)) from exc
     session.expire_all()
@@ -4341,7 +4362,7 @@ async def _prepare_chat_worker_for_model_slots(
             and media.managed
             and media.running
         ):
-            await services.processes.stop("media")
+            await services.processes.stop("media", reason=WorkerStopReason.CHAT_LOAD)
             borrowed.append("media")
         await _load_chat_profile(services, session, profile_id)
     return _chat_worker_status(services)
@@ -9768,14 +9789,16 @@ async def update_model_asset(
             )
             apply_values()
             if was_running:
+                # Enabling or disabling an asset changes the models the worker
+                # can see, which only a new worker picks up.
                 try:
-                    await services.processes.start_media()
+                    await services.processes.start_media(reason=WorkerStartReason.MODEL_CHANGE)
                 except Exception:
                     for field, value in previous_values.items():
                         setattr(asset, field, value)
                     session.commit()
                     with suppress(Exception):
-                        await services.processes.start_media()
+                        await services.processes.start_media(reason=WorkerStartReason.MODEL_CHANGE)
                     raise
     else:
         apply_values()
@@ -9802,7 +9825,7 @@ async def delete_model_asset(
         deletion_error: BaseException | None = None
         try:
             if was_running:
-                await services.processes.stop("media")
+                await services.processes.stop("media", reason=WorkerStopReason.MODEL_CHANGE)
             quarantine = _delete_model_asset_locked(asset, services.settings.model_dir, session)
             try:
                 await asyncio.to_thread(_finalize_model_quarantine, quarantine)
@@ -9818,7 +9841,7 @@ async def delete_model_asset(
         finally:
             if was_running and _media_worker_truly_stopped(services):
                 try:
-                    await services.processes.start_media()
+                    await services.processes.start_media(reason=WorkerStartReason.MODEL_CHANGE)
                 except Exception:
                     if deletion_error is None:
                         raise
@@ -14669,7 +14692,9 @@ async def activate_registry_install(
                 custom_node_root=context.custom_node_root,
                 environment_root=registry_wheel_environment_root(context.state_root),
                 media_worker_stopped=_media_worker_truly_stopped(services),
-                start_media=services.processes.start_media,
+                start_media=partial(
+                    services.processes.start_media, reason=WorkerStartReason.PACKAGE_PREPARATION
+                ),
                 # The same read startup verifies against, so a proof cannot be
                 # made about an inventory nobody else saw.
                 read_node_inventory=services.processes.comfy_node_inventory,
@@ -14697,7 +14722,9 @@ async def deactivate_registry_install(
                 session,
                 install_id=install_id,
                 media_worker_stopped=_media_worker_truly_stopped(services),
-                start_media=services.processes.start_media,
+                start_media=partial(
+                    services.processes.start_media, reason=WorkerStartReason.PACKAGE_PREPARATION
+                ),
             )
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
@@ -15256,7 +15283,7 @@ async def import_workflow_package(
             session.expire_all()
             _ensure_worker_idle(session, "media")
             try:
-                await services.processes.start_media()
+                await services.processes.start_media(reason=WorkerStartReason.PACKAGE_PREPARATION)
                 object_info = await describe_nodes()
             except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
                 raise api_error(

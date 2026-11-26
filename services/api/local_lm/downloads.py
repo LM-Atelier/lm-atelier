@@ -125,7 +125,7 @@ from .progress import completed_progress, update_job_progress
 from .provider_descriptions import installed_provider_description
 from .revision_dependency_contract import persist_dependency_contract
 from .scheduler import JobClaim, ResourceScheduler
-from .schemas import DownloadRequest
+from .schemas import DownloadRequest, WorkerStartReason, WorkerStopReason
 from .subprocess_env import subprocess_environment
 from .upscale_workflows import (
     UPSCALE_SETTING_KEY,
@@ -2691,9 +2691,11 @@ class DownloadManager:
             self._require_install_claim(job_id, claim)
             checks["before_replace"] = partial(self._require_install_claim, job_id, claim)
         if provisional_model_paths is None:
-            await self.processes.start_media(**checks)
+            await self.processes.start_media(reason=WorkerStartReason.MODEL_CHANGE, **checks)
         else:
-            await self.processes.start_media(provisional_model_paths, **checks)
+            await self.processes.start_media(
+                provisional_model_paths, reason=WorkerStartReason.MODEL_CHANGE, **checks
+            )
 
     async def _stop_install_worker(
         self, name: str, *, job_id: str | None, claim: JobClaim | None
@@ -2701,11 +2703,13 @@ class DownloadManager:
         if self.processes is None:
             return
         if job_id is None or claim is None:
-            await self.processes.stop(name)
+            await self.processes.stop(name, reason=WorkerStopReason.MODEL_CHANGE)
             return
         self._require_install_claim(job_id, claim)
         await self.processes.stop(
-            name, before_stop=partial(self._require_install_claim, job_id, claim)
+            name,
+            reason=WorkerStopReason.MODEL_CHANGE,
+            before_stop=partial(self._require_install_claim, job_id, claim),
         )
 
     async def _load_install_chat(
