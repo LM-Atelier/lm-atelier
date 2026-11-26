@@ -30,6 +30,7 @@ from test_plan_refusals_name_their_limit import (
     _queue,
 )
 from test_project_portability import _manifest, _rewrite_archive
+from test_prompt_library_api import _composer_source
 from test_saved_sizes_a_workflow_cannot_make import _save
 from test_upscale_preview_api import _selection
 from test_workflow_recipe_request_cases import _picture, _workflow
@@ -1368,6 +1369,32 @@ async def test_a_batch_of_one_draft_makes_its_saved_batch_size_one_and_names_it(
 
     assert _changes(queued) == [BATCH_SIZE_SET_ASIDE]
     assert [run.settings_json["batch_size"] for run in _runs(queued.json()["work_plan_id"])] == [1]
+
+
+async def test_a_prompt_library_draft_sent_as_a_turn_sets_its_saved_batch_size_aside(
+    client: AsyncClient,
+) -> None:
+    """One draft makes one output whatever batch size the chat saves; several are refused."""
+
+    chat_id = await _chat(client)
+    await _save_for_chat(client, chat_id, "image", {"batch_size": 3})
+    batch = await _batch(client, chat_id, ["gray square"])
+    item = batch["items"][0]
+    turn = {
+        "text": item["reviewed_prompt"],
+        "mode": "image",
+        "prompt_source": _composer_source(batch, item),
+    }
+
+    several = await client.post(f"/api/chats/{chat_id}/turns", json={**turn, "output_count": 2})
+    assert several.status_code == 422, several.text
+    assert several.json()["code"] == "prompt-source-invalid"
+    sent = await client.post(f"/api/chats/{chat_id}/turns", json=turn)
+
+    assert _changes(sent) == [BATCH_SIZE_SET_ASIDE]
+    assert [
+        run.settings_json["batch_size"] for run in _runs(sent.json()["run"]["work_plan_id"])
+    ] == [1]
 
 
 # Plans of steps, and the routes that carry values over.
