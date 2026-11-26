@@ -12,7 +12,9 @@ A failed render's handoff still stops it, since only a new process clears some
 faults, and so does a worker launched for one activation, which nothing else
 may run on. A chat model that does not come up beside the emptied worker gets
 the device as before: the worker is stopped, the model loaded again and an
-empty worker started.
+empty worker started. Someone who begins using ComfyUI while it is emptied, or
+while a chat model fails to load beside it, keeps it until they are done, as
+anyone using it when the handoff begins does; it is stopped for chat then.
 
 The supervisor's worker effects are recorded rather than made, and ComfyUI is a
 constructed backend for the adapter's own part.
@@ -63,12 +65,21 @@ MIB = 1 << 20
 
 
 def _empties(
-    world: ReplacementWorld, monkeypatch: pytest.MonkeyPatch, answer: bool | Exception = True
+    world: ReplacementWorld,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: bool | Exception = True,
+    *,
+    queued_meanwhile: int = 0,
 ) -> None:
-    """Give the media engine a way to empty itself, answering `answer`."""
+    """Give the media engine a way to empty itself, answering `answer`.
+
+    `queued_meanwhile` is how many prompts someone queues from ComfyUI's own
+    page while it empties.
+    """
 
     async def release_memory() -> bool:
         world.order.append("empty media")
+        world.foreign += queued_meanwhile
         if isinstance(answer, Exception):
             raise answer
         return answer
@@ -425,6 +436,134 @@ async def test_a_chat_model_that_does_not_come_up_with_text_queued_restarts_comf
         "resume profile-chat",
     ]
     assert orchestrator._media_restart_after_chat_activity is True
+
+
+@pytest.mark.parametrize(
+    ("answer", "fits"),
+    [
+        pytest.param(False, True, id="did-not-empty"),
+        pytest.param(RuntimeError("ComfyUI did not answer"), True, id="could-not-ask"),
+        pytest.param(True, False, id="chat-does-not-fit"),
+    ],
+)
+async def test_a_worker_someone_begins_using_while_it_is_emptied_is_held_for_them(
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: bool | Exception,
+    fits: bool,
+) -> None:
+    """Once they are done, it is stopped for chat rather than emptied again."""
+
+    world = _ready_world(app, settings, monkeypatch)
+    monkeypatch.setattr(settings, "media_keep_warm_seconds", 0)
+    _empties(world, monkeypatch, answer, queued_meanwhile=1)
+    _fits(world, monkeypatch, fits=fits)
+    orchestrator = world.orchestrator
+
+    await orchestrator._complete_media_handoff(
+        "profile-chat", reason=WorkerStopReason.RUN_HANDOFF, emptiable=True
+    )
+
+    assert world.order == ["empty media"], "their prompt was ended by a stop"
+    assert orchestrator._media_warm_window is not None
+    assert orchestrator._displaced_chat_profile_id == "profile-chat"
+    world.foreign = 0
+
+    await orchestrator._end_media_warm_window()
+
+    assert await _settled(world, 4) == ["empty media", *STOPPED[1:]]
+
+
+async def test_a_worker_someone_begins_using_while_chat_fails_to_load_beside_it_is_held(
+    app: FastAPI, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once they are done, it is stopped for chat, the model loaded and an empty worker started."""
+
+    world = _ready_world(app, settings, monkeypatch)
+    monkeypatch.setattr(settings, "media_keep_warm_seconds", 0)
+    _empties(world, monkeypatch)
+    _fits(world, monkeypatch)
+    world.chat_running = False
+    orchestrator = world.orchestrator
+
+    async def load_once_the_device_is_free(profile_id: str) -> None:
+        if world.media_running:
+            world.order.append(f"resume {profile_id} failed")
+            # Someone queues a prompt from ComfyUI's own page meanwhile.
+            world.foreign = 1
+            return
+        await world.resume(profile_id)
+
+    monkeypatch.setattr(orchestrator, "_resume_chat_worker", load_once_the_device_is_free)
+
+    await orchestrator._complete_media_handoff(
+        "profile-chat", reason=WorkerStopReason.RUN_HANDOFF, emptiable=True
+    )
+
+    assert world.order == ["empty media", "resume profile-chat failed"]
+    assert orchestrator._media_warm_window is not None
+    assert orchestrator._media_warm_stop_reason == WorkerStopReason.CHAT_LOAD
+    assert orchestrator._displaced_chat_profile_id == "profile-chat"
+    world.foreign = 0
+
+    await orchestrator._end_media_warm_window()
+
+    assert await _settled(world, 5) == [
+        "empty media",
+        "resume profile-chat failed",
+        "stop media",
+        "resume profile-chat",
+        "start media",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("queued_meanwhile", "held"),
+    [pytest.param(1, True, id="someone-begins-meanwhile"), pytest.param(0, False, id="nobody")],
+)
+async def test_a_window_owing_nothing_whose_worker_is_not_emptied_is_held_only_for_someone(
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    queued_meanwhile: int,
+    held: bool,
+) -> None:
+    """A chat model was loaded beside the worker; the window ends and the emptying fails."""
+
+    world = _ready_world(app, settings, monkeypatch)
+    _empties(world, monkeypatch, False, queued_meanwhile=queued_meanwhile)
+    orchestrator = world.orchestrator
+    assert orchestrator._open_media_warm_window()
+    orchestrator._displaced_chat_profile_id = None
+
+    await orchestrator._end_media_warm_window()
+
+    if held:
+        assert world.order == ["empty media"], "their prompt was ended by a stop"
+        assert orchestrator._media_warm_window is not None
+        world.foreign = 0
+        await orchestrator._end_media_warm_window()
+    assert await _settled(world, 3) == ["empty media", "stop media", "start media"]
+
+
+async def test_a_window_owing_nothing_whose_worker_is_emptied_holds_it_for_nobody(
+    app: FastAPI, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Someone begins using it as it empties, and there is nothing left to stop."""
+
+    world = _ready_world(app, settings, monkeypatch)
+    _empties(world, monkeypatch, queued_meanwhile=1)
+    orchestrator = world.orchestrator
+    assert orchestrator._open_media_warm_window()
+    orchestrator._displaced_chat_profile_id = None
+
+    await orchestrator._end_media_warm_window()
+    await asyncio.sleep(0.3)
+
+    assert world.order == ["empty media"]
+    assert orchestrator._media_warm_window is None
+    assert world.media_pid == 31
 
 
 @pytest.mark.parametrize(

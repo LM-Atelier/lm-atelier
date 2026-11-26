@@ -8177,30 +8177,28 @@ class ConversationOrchestrator:
             reason = (
                 WorkerStopReason.RUN_HANDOFF if keep_warm else WorkerStopReason.FAILED_RUN_HANDOFF
             )
-        if (
-            recycle_wanted
-            and await self._media_runtime_busy()
-            and self._open_media_warm_window(hold=True, reason=reason, emptiable=emptiable)
-        ):
+        if recycle_wanted and await self._hold_media_for_another_use(reason, emptiable=emptiable):
             # Someone else is using ComfyUI, from its own page or a workflow
             # editor, and the recycle would end their work. The worker is held
             # for them instead, even when keeping it warm is turned off, and the
             # window's expiry recycles it once they are done. Until then chat
             # stays displaced and owed, as behind a queued image, and a chat
             # model that something needs meanwhile loads beside ComfyUI.
-            self._chat_planner_ready.set()
             return
-        if (
-            recycle_wanted
-            and emptiable
-            and not recycled_activation_scope
-            and await self._empty_media_worker(reason)
-            and await self._chat_fits_beside_media(selected_chat_profile_id)
-        ):
-            await self._resume_chat_beside_emptied_media(
-                selected_chat_profile_id, queued_text_next=queued_text_next
-            )
-            return
+        if recycle_wanted and emptiable and not recycled_activation_scope:
+            if await self._empty_media_worker(reason) and await self._chat_fits_beside_media(
+                selected_chat_profile_id
+            ):
+                await self._resume_chat_beside_emptied_media(
+                    selected_chat_profile_id, queued_text_next=queued_text_next
+                )
+                return
+            # The emptying can take seconds, long enough for someone to begin
+            # using ComfyUI, and the stop below would end their work. Emptying
+            # it again once they are done would not stand in for the stop
+            # either: it was not emptied, or chat does not fit beside it.
+            if await self._hold_media_for_another_use(reason, emptiable=False):
+                return
         if recycle_wanted:
             try:
                 await self.processes.stop("media", reason=reason)
@@ -8244,13 +8242,31 @@ class ConversationOrchestrator:
         else:
             self._schedule_media_restart()
 
+    async def _hold_media_for_another_use(
+        self, reason: WorkerStopReason, *, emptiable: bool
+    ) -> bool:
+        """Hold the managed media worker for someone else using ComfyUI, instead of stopping it.
+
+        Whether it is now held. The hold ends once they are done, and gives the
+        device back then as `reason` and `emptiable` say, as any window does;
+        whatever chat is owed stays owed until then. Chat's readiness latch is
+        released, since nothing is handing the device back meanwhile.
+        """
+
+        if not await self._media_runtime_busy():
+            return False
+        if not self._open_media_warm_window(hold=True, reason=reason, emptiable=emptiable):
+            return False
+        self._chat_planner_ready.set()
+        return True
+
     async def _empty_media_worker(self, reason: WorkerStopReason) -> bool:
         """Empty the managed media worker's memory for chat, where that can stand in for a stop.
 
         Only a stop in `MEDIA_STOPS_EMPTIED_INSTEAD` is replaced, only by an
         engine that can empty itself, and only once it shows the memory came
-        back. False means the worker was not emptied, and the caller stops it
-        as it always has.
+        back. False means the worker was not emptied, and the caller stops it,
+        unless someone has begun using ComfyUI meanwhile.
         """
 
         if reason not in MEDIA_STOPS_EMPTIED_INSTEAD:
@@ -8313,11 +8329,17 @@ class ConversationOrchestrator:
         A chat model that does not come up beside it gets the device as the
         handoff otherwise gives it: the worker is stopped, the model loaded
         again, and an empty worker started once chat is back. If that stop
-        fails, chat stays owed for a later handoff.
+        fails, chat stays owed for a later handoff. Someone who has begun using
+        ComfyUI meanwhile keeps it until they are done, and the hold then stops
+        it for chat.
         """
 
         await self._resume_chat_worker(profile_id)
         if not self._chat_worker_running():
+            # The load took seconds too. Someone using ComfyUI by now keeps it
+            # until they are done, and the hold's expiry then stops it for chat.
+            if await self._hold_media_for_another_use(WorkerStopReason.CHAT_LOAD, emptiable=False):
+                return
             try:
                 await self.processes.stop("media", reason=WorkerStopReason.CHAT_LOAD)
             except Exception:
@@ -8854,11 +8876,22 @@ class ConversationOrchestrator:
                 # the broad one does not replace it. A broad worker that may
                 # not or could not be emptied is stopped and replaced by an
                 # empty one.
+                emptied = (
+                    not self._media_warm_scoped
+                    and emptiable
+                    and await self._empty_media_worker(reason)
+                )
                 if (
-                    self._media_warm_scoped
-                    or not emptiable
-                    or not await self._empty_media_worker(reason)
+                    not emptied
+                    and not self._media_warm_scoped
+                    and emptiable
+                    and await self._hold_media_for_another_use(reason, emptiable=False)
                 ):
+                    # Someone may have begun using it while it was being
+                    # emptied. It is held for them, and stopped once they are
+                    # done, rather than emptied again.
+                    return
+                if not emptied:
                     await self.processes.stop("media", reason=reason)
                     if not self._media_warm_scoped:
                         self._schedule_media_restart()
