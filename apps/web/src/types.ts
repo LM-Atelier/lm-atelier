@@ -21,6 +21,8 @@ export type * from "./recipeDraftTypes";
 export type * from "./workspaceLockTypes";
 export type * from "./backupArchiveTypes";
 export type * from "./settingRefusalTypes";
+export type * from "./settingChangeTypes";
+import type { SettingChange } from "./settingChangeTypes";
 import type { PriorTurnEditConfiguration } from "./priorTurnEditTypes";
 
 import type { ComposerPromptSource } from "./composerPromptSource";
@@ -2386,6 +2388,7 @@ export interface PromptBatch {
   queued_at: string | null;
   items: PromptBatchItem[];
   replayed: boolean;
+  setting_changes?: SettingChange[];
 }
 
 /** An image already held that closely resembles one just added. */

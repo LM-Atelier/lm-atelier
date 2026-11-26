@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import replace
 from typing import Any, Final, Literal, cast
 
 from .auxiliary_assets import lora_setting_property
 from .saved_settings import MAX_SETTING_FIELDS, unusable_as_a_number
 from .schemas import EngineCapabilities, SettingField
+from .setting_changes import SettingChangeCode
 from .setting_refusals import (
     SettingRefusal,
     SettingRefusalCode,
@@ -1383,6 +1384,52 @@ def compatible_stored_settings(
         except ValueError:
             continue
     return compatible
+
+
+def stored_setting_successor(key: str, taken: Collection[str]) -> str:
+    """The setting a saved key is read as, where `taken` are the settings the workflow takes.
+
+    A retired key is read as the key that replaced it only where the workflow
+    takes no setting by the retired name and does take its successor, as
+    `compatible_stored_settings` reads it; any other key is read as itself.
+    """
+
+    alias = _STORED_SETTING_ALIASES.get(key)
+    if alias is None or key in taken or alias not in taken:
+        return key
+    return alias
+
+
+def stored_setting_set_aside(
+    key: str, value: object, fields: Iterable[SettingField]
+) -> tuple[SettingChangeCode, SettingField | None] | None:
+    """Why `compatible_stored_settings` sets one saved value aside, or None when it keeps it.
+
+    A value is set aside when no field takes its key, when the field that would
+    is one the workflow does not offer, when that field takes one value only,
+    or when the value is not one the field takes. The field it was checked
+    against comes with why, so its choices and its one value can be named. A
+    retired key is checked against the key that replaced it.
+    """
+
+    definitions = {field.key: field for field in fields}
+    field = definitions.get(key)
+    if field is None:
+        alias = _STORED_SETTING_ALIASES.get(key)
+        field = definitions.get(alias) if alias is not None else None
+    if field is None:
+        return SettingChangeCode.NOT_TAKEN, None
+    try:
+        validate_settings({field.key: value}, [field])
+    except ValueError:
+        pass
+    else:
+        return None
+    if not field.available:
+        return SettingChangeCode.NOT_OFFERED, field
+    if len(field.choices) == 1 or (field.minimum is not None and field.minimum == field.maximum):
+        return SettingChangeCode.FIXED, field
+    return SettingChangeCode.NOT_USABLE, field
 
 
 def _whole(value: object) -> str:

@@ -10,7 +10,7 @@ import re
 import secrets
 import shutil
 import time
-from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Collection, Coroutine, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -114,6 +114,7 @@ from .image_edit_difference import (
 from .image_edit_eligibility import automatic_image_edit_eligibility
 from .image_edit_kind import image_edit_kind
 from .image_edit_strength import (
+    STRENGTH_MODE_PARAMETER,
     EditScope,
     EditSettingSource,
     ImageEditStrengthResolution,
@@ -265,6 +266,13 @@ from .schemas import (
     TurnWorkflowSelectionIn,
     WorkerStatus,
 )
+from .setting_changes import (
+    SETTING_CHANGES_KEY,
+    SettingChange,
+    SettingChangeCode,
+    setting_changes_provenance,
+    turn_setting_changes,
+)
 from .setting_refusals import (
     SettingRefusal,
     SettingRefusalCode,
@@ -280,6 +288,8 @@ from .settings_registry import (
     compatible_stored_settings,
     resolve_generation_settings,
     saved_size_refusals,
+    stored_setting_set_aside,
+    stored_setting_successor,
     validate_settings,
     workflow_settings,
 )
@@ -459,11 +469,14 @@ from .workflow_selection import (
     resolve_exact_workflow_revision,
     resolve_workflow_family,
 )
+from .workflow_size_contract import SIZED_OPERATIONS
 from .workflow_source_geometry import (
+    FULL_STRENGTH,
     SelectionRoute,
     blended_outpaint_saves,
     trace_outpaint_route,
     trace_selection_route,
+    trace_source_fit_route,
 )
 from .workflow_use_case_execution import (
     InheritedWorkflowUseCasePreset,
@@ -552,6 +565,25 @@ def _show_queued_phase(progress: MessagePart, label: str | None) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class _SetAside:
+    """A value a turn's workflow sets aside, and the setting whose value is used instead.
+
+    What is used is known only once the turn's settings are final, so it is
+    read then. `used` is None where nothing is used in its place, or nothing
+    that can be named.
+    """
+
+    change: SettingChange
+    used: str | None = None
+
+    def settled(self, settings: Mapping[str, Any]) -> SettingChange:
+        """The change, naming the value the turn's final settings use instead."""
+        if self.used is None or self.used not in settings:
+            return self.change
+        return replace(self.change, after=settings[self.used])
+
+
+@dataclass(frozen=True, slots=True)
 class _TurnSettingLayers:
     project: Project | None
     presets: tuple[
@@ -568,6 +600,9 @@ class _TurnSettingLayers:
     workflow_lora_layers: WorkflowLoraAdmissionLayers
     use_case_settings: dict[str, Any]
     default_size: DefaultOutputSize | None
+    #: The values the turn names, or its saved layers do, that its workflow
+    #: sets aside.
+    set_aside: tuple[_SetAside, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -594,6 +629,8 @@ class _PromptBatchExecutionContext:
     model_provenance: dict[str, Any] | None
     workflow_provenance: dict[str, Any]
     use_case_receipt: dict[str, Any] | None
+    #: What this draft's own settings changed on purpose.
+    setting_changes: tuple[SettingChange, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -642,6 +679,12 @@ class _TurnOutputs:
     prompt_batch_lora_selections: tuple[AutomaticLoraSelection | None, ...]
     prompt_batch_lora_resolutions: tuple[ResolvedLoraStack | None, ...]
     prompt_batch_workflow_lora_outcomes: tuple[_WorkflowLoraOutcome | None, ...]
+    #: What the turn changed on purpose, which every output keeps; a draft run
+    #: on a workflow of its own keeps its own as well.
+    setting_changes: tuple[SettingChange, ...]
+    #: Every setting key and request field the request itself named, or None
+    #: when every value the turn names is its own.
+    sent_settings: frozenset[str] | None
 
 
 # The layers a person or a recipe saves below the turn itself, each of which
@@ -778,31 +821,63 @@ def _refuse_a_saved_size_the_workflow_cannot_make(
         )
 
 
-def _batch_size_source(
-    layers: _TurnSettingLayers,
+def _chosen_value_source(
+    key: str,
+    layers: WorkflowLoraAdmissionLayers,
+    *,
+    turn: Mapping[str, Any],
+    recipe: Mapping[str, Any],
     profile: ModelProfile | None,
     fields: Sequence[SettingField],
 ) -> tuple[bool, SettingSource | None]:
-    """Whether a layer chose the turn's batch size, and the source a refusal names it by.
+    """Whether a layer chose the value a turn has for a setting, and the source it is named by.
 
     A saved layer is read leniently, so the one that chose it is the highest
     whose value the workflow takes. The turn's own value has no source of its
     own: it is the request's, or carried over from the turn it starts from.
     A recipe is saved, but has no source of its own to be named by.
     """
-    field = next((field for field in fields if field.key == "batch_size"), None)
+    field = next((field for field in fields if field.key == key), None)
     for origin, where, value in _layers_naming(
-        "batch_size",
-        layers.workflow_lora_layers,
-        turn=layers.workflow_lora_layers.ordinary("turn"),
-        recipe=layers.use_case_settings,
-        profile=profile,
+        key, layers, turn=turn, recipe=recipe, profile=profile
     ):
         if where is None:
             return True, (None if origin == "turn" else SettingSource.SAVED)
-        if field is not None and compatible_stored_settings({"batch_size": value}, [field]):
+        if field is not None and compatible_stored_settings({key: value}, [field]):
             return True, saved_setting_source(where)
     return False, None
+
+
+#: Which layer chose the value a turn has for a setting, given the setting.
+_WhoChose = Callable[[str], tuple[bool, SettingSource | None]]
+
+
+def _who_chose(
+    layers: WorkflowLoraAdmissionLayers,
+    recipe: Mapping[str, Any],
+    profile: ModelProfile | None,
+    fields: Sequence[SettingField],
+) -> _WhoChose:
+    """Read which layer chose each value of one resolution, the turn's own first."""
+    return partial(
+        _chosen_value_source,
+        layers=layers,
+        turn=layers.ordinary("turn"),
+        recipe=recipe,
+        profile=profile,
+        fields=fields,
+    )
+
+
+def _batch_size_source(
+    layers: _TurnSettingLayers,
+    profile: ModelProfile | None,
+    fields: Sequence[SettingField],
+) -> tuple[bool, SettingSource | None]:
+    """Whether a layer chose the turn's batch size, and the source a refusal names it by."""
+    return _who_chose(layers.workflow_lora_layers, layers.use_case_settings, profile, fields)(
+        "batch_size"
+    )
 
 
 def _output_count_origin(
@@ -834,6 +909,425 @@ def _output_count_origin(
         if chosen:
             return "batch_size", source
     return None
+
+
+#: The layers a person saves settings in, each of which can name a value a
+#: turn's workflow sets aside. A model profile's load settings configure the
+#: model rather than the render, so a change to them is not named.
+_SAVED_SETTING_ORIGINS: Final = (
+    "turn_preset",
+    "chat",
+    "chat_preset",
+    "project",
+    "project_preset",
+    "default_preset",
+    "profile_request",
+)
+
+
+def _saved_values_set_aside(
+    operation: Operation,
+    layers: WorkflowLoraAdmissionLayers,
+    *,
+    turn: Mapping[str, Any],
+    recipe: Mapping[str, Any],
+    profile: ModelProfile | None,
+    fields: Sequence[SettingField],
+    source_fit: bool = False,
+) -> tuple[_SetAside, ...]:
+    """Each saved value a media turn's workflow does not take as it is, and why.
+
+    Each setting is followed down the layers that name it, from the one that
+    wins. A retired key names the key that replaced it where the workflow reads
+    it so: where the workflow takes the newer key and nothing by the retired
+    name. A saved value the workflow does not take is set aside for the next
+    one down, so each is named until a layer whose value is kept. The turn's
+    own values and its recipe are read strictly, so a setting either names is
+    used or refused from there down; a model profile's load settings configure
+    the model, not the render, and are not followed. A retired key saved beside
+    the key that replaced it is read only through that key, so it is set aside
+    too. A saved size that no setting takes is set aside on work made from a
+    picture because the picture decides the size, unless a source canvas does.
+    The edit strength's mode is read from the saved layers by the strength
+    itself, so it is never set aside, and a chat reply is not a media turn.
+    """
+    if operation == Operation.TEXT:
+        return ()
+    request_fields = [field for field in fields if field.scope != "load"]
+    strict = {
+        "turn": turn,
+        "recipe": recipe,
+        "profile_load": profile.load_settings_json if profile is not None else {},
+    }
+    ordered = [
+        (origin, where, strict[origin] if origin in strict else layers.ordinary(origin))
+        for origin, where in _SIZE_SOURCES
+    ]
+    # A model profile's layers are read against every field, the rest against
+    # the fields a turn may set, so each names a setting as it is read.
+    taken = {
+        origin: {
+            field.key for field in (fields if origin.startswith("profile") else request_fields)
+        }
+        for origin, _where in _SIZE_SOURCES
+    }
+    settings = dict.fromkeys(
+        stored_setting_successor(key, taken[origin])
+        for origin in _SAVED_SETTING_ORIGINS
+        for key in layers.ordinary(origin)
+        if key != STRENGTH_MODE_PARAMETER
+    )
+    found: list[_SetAside] = []
+    for setting in settings:
+        for origin, where, layer in ordered:
+            names = [
+                key for key in layer if stored_setting_successor(key, taken[origin]) == setting
+            ]
+            if not names:
+                continue
+            if where is None or origin == "profile_load":
+                break
+            layer_fields = fields if origin == "profile_request" else request_fields
+            kept = compatible_stored_settings({key: layer[key] for key in names}, layer_fields)
+            for key in names:
+                if key != setting and setting in names:
+                    reason: tuple[SettingChangeCode, SettingField | None] | None = (
+                        SettingChangeCode.NOT_TAKEN,
+                        None,
+                    )
+                else:
+                    reason = (
+                        None
+                        if setting in kept
+                        else stored_setting_set_aside(key, layer[key], layer_fields)
+                    )
+                if reason is not None:
+                    found.append(
+                        _set_aside(operation, key, layer[key], reason, where, source_fit=source_fit)
+                    )
+            if setting in kept:
+                break
+    return tuple(found)
+
+
+def _set_aside(
+    operation: Operation,
+    key: str,
+    value: object,
+    reason: tuple[SettingChangeCode, SettingField | None],
+    where: str,
+    *,
+    source_fit: bool,
+) -> _SetAside:
+    """One saved value set aside, with the setting whose value is used instead, if any."""
+    code, field = reason
+    if (
+        code in {SettingChangeCode.NOT_TAKEN, SettingChangeCode.NOT_OFFERED}
+        and operation not in SIZED_OPERATIONS
+        and key in SIZE_SETTINGS
+        and not source_fit
+    ):
+        code = SettingChangeCode.SIZE_FOLLOWS_SOURCE
+    replaced = code in {SettingChangeCode.FIXED, SettingChangeCode.NOT_USABLE}
+    return _SetAside(
+        SettingChange(
+            code,
+            key,
+            source=saved_setting_source(where),
+            before=value,
+            choices=tuple(field.choices) if field is not None else None,
+        ),
+        used=field.key if field is not None and replaced else None,
+    )
+
+
+def _enlargement_set_aside(
+    turn: Mapping[str, Any], kept: Mapping[str, Any]
+) -> tuple[_SetAside, ...]:
+    """An enlargement factor the turn named for a workflow that fixes its own."""
+    if UPSCALE_SETTING_KEY not in turn or UPSCALE_SETTING_KEY in kept:
+        return ()
+    return (
+        _SetAside(
+            SettingChange(
+                SettingChangeCode.FIXED, UPSCALE_SETTING_KEY, before=turn[UPSCALE_SETTING_KEY]
+            )
+        ),
+    )
+
+
+def _settled(set_aside: Sequence[_SetAside], settings: Mapping[str, Any]) -> list[SettingChange]:
+    """What a turn set aside, each naming the value its final settings use instead."""
+    return [entry.settled(settings) for entry in set_aside]
+
+
+def _settled_for_outputs(
+    set_aside: Sequence[_SetAside],
+    settings: Mapping[str, Any],
+    *,
+    own_seeds: bool,
+    outputs: int,
+) -> list[SettingChange]:
+    """What a turn set aside, each naming the value every one of its outputs runs with instead.
+
+    Each draft of a Prompt Library batch runs with a seed of its own, which
+    names the seed it was given as replaced, so a seed set aside is not named
+    for a batch at all. Several outputs step their seed, one from the next, so
+    no one seed is named as the one used.
+    """
+    shared = (
+        settings
+        if outputs == 1 and not own_seeds
+        else {key: value for key, value in settings.items() if key != "seed"}
+    )
+    return [
+        entry.settled(shared)
+        for entry in set_aside
+        if not (own_seeds and entry.change.key == "seed")
+    ]
+
+
+def _overridden(request: TurnRequest, operation: Operation) -> frozenset[str]:
+    """The settings a role override for this operation's role names, which apply as given."""
+    override = request.role_overrides.get(operation_model_role(operation))
+    return frozenset(override.settings) if override is not None else frozenset()
+
+
+def _set_aside_for_an_offer(request: TurnRequest) -> list[SettingChange]:
+    """What a reply accepting an offer sent with it that the offered work sets aside.
+
+    The offer is made as it was offered, so the reply's shared and ordered
+    settings and its count do not apply. A role override for the offered role
+    still does; what it names is left out once the role is known. A reply that
+    sent more settings than one request may name has them named once, as `*`.
+    """
+    sent = [
+        *request.settings.items(),
+        *(item for settings in request.ordered_settings.values() for item in settings.items()),
+    ]
+    changes = (
+        [SettingChange(SettingChangeCode.FOR_OFFER, None)]
+        if len(sent) > MAX_SETTING_FIELDS
+        else [SettingChange(SettingChangeCode.FOR_OFFER, key, before=value) for key, value in sent]
+    )
+    if request.output_count is not None:
+        changes.append(
+            SettingChange(SettingChangeCode.FOR_OFFER, "output_count", before=request.output_count)
+        )
+    return changes
+
+
+#: Stands for a setting the settings of a turn do not hold.
+_NOT_HELD: Final = object()
+
+
+def _what_an_offer_still_sets_aside(
+    changes: Sequence[SettingChange],
+    *,
+    overridden: Collection[str],
+    settings: Mapping[str, Any],
+    made: int,
+) -> list[SettingChange]:
+    """What a reply accepting an offer sent that the offered work does not run with.
+
+    A setting a role override of the offered role names still applies, so it
+    is not set aside. Nor is a value the work runs with as the reply gave it, as
+    a branch of such a reply carries over every setting its turn ran with; the
+    count is the number of outputs the turn makes.
+    """
+    kept: list[SettingChange] = []
+    for change in changes:
+        if change.key is None:
+            kept.append(change)
+            continue
+        held = made if change.key == "output_count" else settings.get(change.key, _NOT_HELD)
+        if change.key not in overridden and held != change.before:
+            kept.append(change)
+    return kept
+
+
+def _count_changes(
+    operation: Operation, requested: int | None, made: int, *, batch: bool
+) -> list[SettingChange]:
+    """A count a turn was given and does not make: a reply makes one, a media turn may make more.
+
+    A Prompt Library batch makes one output for each draft it selected, which
+    is the count it gives itself.
+    """
+    if batch or requested is None or requested == made:
+        return []
+    if operation == Operation.TEXT:
+        code = SettingChangeCode.ONE_OUTPUT
+    elif made > requested:
+        code = SettingChangeCode.OUTPUT_COUNT_RAISED
+    else:
+        return []
+    return [SettingChange(code, "output_count", before=requested, after=made)]
+
+
+def _batch_made_one_at_a_time(given: object, who_chose: _WhoChose) -> list[SettingChange]:
+    """A batch size someone chose, which a turn making each output on its own sets to one."""
+    if given == 1:
+        return []
+    chosen, source = who_chose("batch_size")
+    if not chosen:
+        return []
+    return [
+        SettingChange(
+            SettingChangeCode.OUTPUTS_FROM_BATCH_SIZE,
+            "batch_size",
+            source=source,
+            before=given,
+            after=1,
+        )
+    ]
+
+
+def _length_aligned_to_frames(
+    given: object, resolution: Mapping[str, int | float] | None, who_chose: _WhoChose
+) -> list[SettingChange]:
+    """A length someone chose that the workflow's whole frames cannot make exactly."""
+    if resolution is None or resolution["requested_seconds"] == resolution["delivered_seconds"]:
+        return []
+    chosen, source = who_chose(VIDEO_DURATION_SETTING_KEY)
+    if not chosen:
+        return []
+    return [
+        SettingChange(
+            SettingChangeCode.LENGTH_ALIGNED_TO_FRAMES,
+            VIDEO_DURATION_SETTING_KEY,
+            source=source,
+            before=given,
+            after=resolution["delivered_seconds"],
+        )
+    ]
+
+
+def _strength_set_aside_for_a_new_picture(
+    operation: Operation,
+    given: Mapping[str, Any],
+    used: Mapping[str, Any],
+    who_chose: _WhoChose,
+) -> list[SettingChange]:
+    """A change strength the request or its own preset gave a picture made from words.
+
+    Such a picture takes its strength's default. A strength saved for every
+    turn is not named, or it would be named on every new picture made where it
+    is saved.
+    """
+    if operation != Operation.TEXT_TO_IMAGE:
+        return []
+    changes: list[SettingChange] = []
+    for key, value in given.items():
+        if key not in used or used[key] == value:
+            continue
+        chosen, source = who_chose(key)
+        if chosen and source in {None, SettingSource.TURN_PRESET}:
+            changes.append(
+                SettingChange(
+                    SettingChangeCode.STRENGTH_DEFAULT_FOR_NEW_PICTURE,
+                    key,
+                    source=source,
+                    before=value,
+                    after=used[key],
+                )
+            )
+    return changes
+
+
+def _strength_pinned_for_an_extension(
+    request: TurnRequest,
+    revision: WorkflowRevision | None,
+    carried: SourceFitRecipe | None,
+    settings: Mapping[str, Any],
+    who_chose: _WhoChose,
+) -> list[SettingChange]:
+    """A change strength someone chose for an extension, which samples at full strength.
+
+    The strength is the setting the workflow maps to its sampler, traced from
+    the picture it saves the way the accepted canvas is: its one SaveImage
+    step, or the one a canvas carried over names.
+    """
+    if request.source_fit is None or request.source_fit.mode != "extend" or revision is None:
+        return []
+    graph = revision.api_graph_json
+    saves = [
+        key
+        for key, node in (graph.items() if isinstance(graph, dict) else ())
+        if isinstance(node, dict) and node.get("class_type") == "SaveImage"
+    ]
+    save = saves[0] if len(saves) == 1 else carried.save_node_id if carried is not None else None
+    route = trace_source_fit_route(graph, save) if save is not None else None
+    parameter = route.strength_parameter if route is not None else None
+    if parameter is None or parameter not in settings or settings[parameter] == FULL_STRENGTH:
+        return []
+    chosen, source = who_chose(parameter)
+    if not chosen:
+        return []
+    return [
+        SettingChange(
+            SettingChangeCode.STRENGTH_FULL_FOR_EXTENSION,
+            parameter,
+            source=source,
+            before=settings[parameter],
+            after=FULL_STRENGTH,
+        )
+    ]
+
+
+def _fixed_seed(value: object) -> bool:
+    """Whether a seed is one fixed value; -1 asks for one to be drawn."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _seed_changes(
+    given: object,
+    who_chose: _WhoChose,
+    *,
+    regenerate: bool = False,
+    output_count: int = 1,
+) -> list[SettingChange]:
+    """What a media turn does with a fixed seed someone chose, where it does not run it as it is.
+
+    A regenerate draws a new seed, even for one the request sent, and each
+    output after the first takes the next seed.
+    """
+    if not _fixed_seed(given) or not (regenerate or output_count > 1):
+        return []
+    chosen, source = who_chose("seed")
+    if not chosen:
+        return []
+    if regenerate:
+        return [
+            SettingChange(SettingChangeCode.SEED_DRAWN_AGAIN, "seed", source=source, before=given)
+        ]
+    return [SettingChange(SettingChangeCode.SEED_PER_OUTPUT, "seed", source=source)]
+
+
+def _seed_each_draft_replaces(
+    layers: WorkflowLoraAdmissionLayers,
+    *,
+    turn: Mapping[str, Any],
+    recipe: Mapping[str, Any],
+    profile: ModelProfile | None,
+) -> list[SettingChange]:
+    """The fixed seed the winning layer gave a Prompt Library batch, which each draft replaces.
+
+    It is named whether or not the workflow takes it, since no draft runs with
+    it either way.
+    """
+    named = _layers_naming("seed", layers, turn=turn, recipe=recipe, profile=profile)
+    if not named or not _fixed_seed(named[0][2]):
+        return []
+    origin, where, value = named[0]
+    source = (
+        None
+        if origin == "turn"
+        else SettingSource.SAVED
+        if where is None
+        else saved_setting_source(where)
+    )
+    return [SettingChange(SettingChangeCode.SEED_PER_DRAFT, "seed", source=source, before=value)]
 
 
 #: The saved layers a batch checks against each of its workflows, by the words
@@ -1840,7 +2334,14 @@ class ConversationOrchestrator:
         before_commit: Callable[[Session, Run], None] | None = None,
         inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
         resolve_source: TurnSourceResolver | None = None,
+        sent_settings: frozenset[str] | None = None,
     ) -> TurnAccepted:
+        """Queue a turn in its chat, holding the chat for as long as the turn is being made.
+
+        `sent_settings` is every setting key and request field the caller's own
+        request named; a value the turn changed on purpose outside it is said to
+        be carried over. None says every value the turn names is its own.
+        """
         if not self._admission_open:
             raise RuntimeError(
                 "This conversation service is shutting down and cannot accept new work."
@@ -1861,6 +2362,7 @@ class ConversationOrchestrator:
                 before_commit=before_commit,
                 inherited_use_case_preset=inherited_use_case_preset,
                 resolve_source=resolve_source,
+                sent_settings=sent_settings,
             )
 
     async def create_prompt_batch_turn(
@@ -1953,6 +2455,7 @@ class ConversationOrchestrator:
         before_commit: Callable[[Session, Run], None] | None = None,
         inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
         resolve_source: TurnSourceResolver | None = None,
+        sent_settings: frozenset[str] | None = None,
     ) -> TurnAccepted:
         # Never resolve an idempotency key until its URL-scoped chat has been
         # validated. Otherwise a key from one chat could disclose another
@@ -2007,6 +2510,7 @@ class ConversationOrchestrator:
                 before_commit=before_commit,
                 inherited_use_case_preset=inherited_use_case_preset,
                 resolve_source=resolve_source,
+                sent_settings=sent_settings,
             )
 
         owner_token, replay = await self._claim_or_replay_turn(
@@ -2044,6 +2548,7 @@ class ConversationOrchestrator:
                 before_commit=before_commit,
                 inherited_use_case_preset=inherited_use_case_preset,
                 resolve_source=resolve_source,
+                sent_settings=sent_settings,
             )
         finally:
             self._release_turn_claim(session, chat_id, key, owner_token)
@@ -2189,6 +2694,7 @@ class ConversationOrchestrator:
         before_commit: Callable[[Session, Run], None] | None = None,
         inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
         resolve_source: TurnSourceResolver | None = None,
+        sent_settings: frozenset[str] | None = None,
     ) -> TurnAccepted:
         result = await self._prepare_or_admit_turn(
             session,
@@ -2208,6 +2714,7 @@ class ConversationOrchestrator:
             before_commit=before_commit,
             inherited_use_case_preset=inherited_use_case_preset,
             resolve_source=resolve_source,
+            sent_settings=sent_settings,
         )
         if not isinstance(result, TurnAccepted):
             raise RuntimeError("Turn preparation did not return accepted work.")
@@ -2345,6 +2852,7 @@ class ConversationOrchestrator:
         before_commit: Callable[[Session, Run], None] | None = None,
         inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
         resolve_source: TurnSourceResolver | None = None,
+        sent_settings: frozenset[str] | None = None,
     ) -> TurnAccepted | SourceFitPreviewOut:
         if preview_only and request.source_fit is None:
             raise ValueError("Choose a source canvas to preview.")
@@ -2450,6 +2958,7 @@ class ConversationOrchestrator:
         ):
             parent_message = session.get(Message, parent_message_id) if parent_message_id else None
             accepted_offer = self._generation_offer_for_message(parent_message)
+        offer_changes = _set_aside_for_an_offer(request) if accepted_offer else []
         if accepted_offer:
             request = request.model_copy(
                 update={"settings": {}, "ordered_settings": {}, "output_count": None}
@@ -2494,6 +3003,8 @@ class ConversationOrchestrator:
                 before_commit=before_commit,
                 inherited_use_case_preset=inherited_use_case_preset,
                 resolve_source=resolve_source,
+                sent_settings=sent_settings,
+                turn_changes=offer_changes,
             )
         prior_image, prior_image_prompt = self._latest_image_context(
             session,
@@ -2693,10 +3204,15 @@ class ConversationOrchestrator:
         effective_settings = setting_layers.effective_settings
         relight = setting_layers.relight
         workflow_lora_layers = setting_layers.workflow_lora_layers
+        who_chose = _who_chose(
+            workflow_lora_layers, setting_layers.use_case_settings, profile, fields
+        )
+        given_length = effective_settings.get(VIDEO_DURATION_SETTING_KEY)
         effective_settings, video_length_resolution = resolve_video_length_settings(
             effective_settings,
             workflow_revision.input_schema_json if workflow_revision else None,
         )
+        changes = _length_aligned_to_frames(given_length, video_length_resolution, who_chose)
         if (
             prompt_source_resources is not None
             and prompt_source_resources.lora_settings is not None
@@ -2742,6 +3258,7 @@ class ConversationOrchestrator:
             )
             if lora_selection.settings:
                 effective_settings["loras"] = lora_selection.settings
+        strength_given = dict(effective_settings)
         image_edit_strength = resolve_image_edit_strength(
             plan.operation,
             plan.standalone_prompt if accepted_offer else request.text,
@@ -2753,6 +3270,9 @@ class ConversationOrchestrator:
             # A crop is an ordinary edit of the picture it uploads; only an
             # extension paints new canvas at full strength.
             extension=request.source_fit is not None and request.source_fit.mode == "extend",
+        )
+        changes += _strength_set_aside_for_a_new_picture(
+            plan.operation, strength_given, effective_settings, who_chose
         )
         self._refuse_settings_the_workflow_cannot_take(
             session,
@@ -2868,6 +3388,9 @@ class ConversationOrchestrator:
             if source_preview is None:
                 raise ValueError("The selected turn does not provide a source canvas.")
             return source_preview
+        changes += _strength_pinned_for_an_extension(
+            request, workflow_revision, inherited_source_fit, effective_settings, who_chose
+        )
         if replacement_message:
             # The baseline revision is written HERE, not beside its conflict checks
             # above, because its flush takes SQLite's single writer lock and every
@@ -2919,6 +3442,27 @@ class ConversationOrchestrator:
                 )
             )
         )
+        changes += (
+            _seed_each_draft_replaces(
+                workflow_lora_layers,
+                turn=workflow_lora_layers.ordinary("turn"),
+                recipe=setting_layers.use_case_settings,
+                profile=profile,
+            )
+            if prompt_batch_selection is not None
+            else _seed_changes(
+                current_seed,
+                who_chose,
+                regenerate=source_action == "regenerate" and plan.operation != Operation.TEXT,
+                output_count=output_count,
+            )
+        )
+        changes += _count_changes(
+            plan.operation,
+            request.output_count,
+            output_count,
+            batch=prompt_batch_selection is not None,
+        )
         if has_prompt_source and (
             plan.operation != Operation.TEXT_TO_IMAGE or resolved_input_ids or output_count != 1
         ):
@@ -2953,7 +3497,29 @@ class ConversationOrchestrator:
         if output_count > 1 and "batch_size" in effective_settings:
             # Each planned output owns its own lifecycle. Prevent an engine-native
             # batch from multiplying the visible output slots a second time.
+            changes += _batch_made_one_at_a_time(effective_settings["batch_size"], who_chose)
             effective_settings["batch_size"] = 1
+        # What the turn changed on purpose, which every output keeps. A batch run
+        # on more than one workflow keeps each draft's own instead.
+        setting_changes = (
+            ()
+            if prompt_batch_execution_contexts
+            else (
+                *_what_an_offer_still_sets_aside(
+                    offer_changes,
+                    overridden=_overridden(request, plan.operation),
+                    settings=effective_settings,
+                    made=output_count,
+                ),
+                *_settled_for_outputs(
+                    setting_layers.set_aside,
+                    effective_settings,
+                    own_seeds=prompt_batch_selection is not None,
+                    outputs=output_count,
+                ),
+                *changes,
+            )
+        )
         estimate_settings = effective_settings
         if request.source_fit is not None:
             estimate_settings = {
@@ -3246,6 +3812,8 @@ class ConversationOrchestrator:
             prompt_batch_lora_selections=prompt_batch_lora_selections,
             prompt_batch_lora_resolutions=prompt_batch_lora_resolutions,
             prompt_batch_workflow_lora_outcomes=prompt_batch_workflow_lora_outcomes,
+            setting_changes=setting_changes,
+            sent_settings=sent_settings,
         )
         for ordinal, output_message in enumerate(assistant_messages, start=1):
             work_step, run, job = self._materialize_turn_output(
@@ -3508,7 +4076,8 @@ class ConversationOrchestrator:
 
         Each output takes the turn's settings, or its own prompt batch entry's,
         with its own seed and slot, and is written in the order the outputs are
-        numbered.
+        numbered. It keeps what the turn changed on purpose, and what its own
+        batch entry's settings did.
         """
 
         per_output_prompt = turn.per_output_prompts[ordinal - 1]
@@ -3695,6 +4264,13 @@ class ConversationOrchestrator:
                 else {}
             ),
             "resolved_settings": output_settings,
+            **setting_changes_provenance(
+                [
+                    *turn.setting_changes,
+                    *(output_context.setting_changes if output_context is not None else ()),
+                ],
+                sent=turn.sent_settings,
+            ),
             "generation_estimate": turn.generation_estimate,
             "video_length": turn.video_length_resolution,
             "source_fit_request": (
@@ -3844,7 +4420,17 @@ class ConversationOrchestrator:
         before_commit: Callable[[Session, Run], None] | None = None,
         inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
         resolve_source: TurnSourceResolver | None = None,
+        sent_settings: frozenset[str] | None = None,
+        turn_changes: Sequence[SettingChange] = (),
     ) -> TurnAccepted:
+        """Queue a plan of steps, each resolved on its own.
+
+        Each step keeps what it changed on purpose, and of `turn_changes`, what
+        the turn changed for every step, such as the settings an accepted offer
+        sets aside, what still applies to that step: not a setting a role
+        override for its role names, nor one it runs with as the reply gave it.
+        `sent_settings` is every setting key the request itself named.
+        """
         intent = OrderedPlanCompiler.validate(intent)
         selected_roles = {"chat" if step.mode == "text" else step.mode for step in intent.steps}
         workflow_choice = request.workflow_selection
@@ -4086,9 +4672,16 @@ class ConversationOrchestrator:
             workflow_lora_layers = setting_layers.workflow_lora_layers
             preset_layers = setting_layers.preset_layers
             effective_settings = setting_layers.effective_settings
+            who_chose = _who_chose(
+                workflow_lora_layers, setting_layers.use_case_settings, profile, fields
+            )
+            given_length = effective_settings.get(VIDEO_DURATION_SETTING_KEY)
             effective_settings, video_length_resolution = resolve_video_length_settings(
                 effective_settings,
                 workflow_revision.input_schema_json if workflow_revision else None,
+            )
+            step_changes = _length_aligned_to_frames(
+                given_length, video_length_resolution, who_chose
             )
             lora_selection = None
             chosen_layers = _chosen_setting_layers(
@@ -4112,6 +4705,7 @@ class ConversationOrchestrator:
                 )
                 if lora_selection.settings:
                     effective_settings["loras"] = lora_selection.settings
+            strength_given = dict(effective_settings)
             image_edit_strength = resolve_image_edit_strength(
                 operation,
                 step_intent.prompt,
@@ -4122,6 +4716,9 @@ class ConversationOrchestrator:
                 workflow_schema=(
                     workflow_revision.input_schema_json if workflow_revision else None
                 ),
+            )
+            step_changes += _strength_set_aside_for_a_new_picture(
+                operation, strength_given, effective_settings, who_chose
             )
             lora_resolution: ResolvedLoraStack | None = None
             workflow_lora_outcome: _WorkflowLoraOutcome | None = None
@@ -4179,6 +4776,16 @@ class ConversationOrchestrator:
                     "lora_resolution": lora_resolution,
                     "lora_selection": lora_selection,
                     "workflow_lora_outcome": workflow_lora_outcome,
+                    "setting_changes": [
+                        *_what_an_offer_still_sets_aside(
+                            turn_changes,
+                            overridden=_overridden(request, operation),
+                            settings=effective_settings,
+                            made=len(intent.steps),
+                        ),
+                        *_settled(setting_layers.set_aside, effective_settings),
+                        *step_changes,
+                    ],
                 }
             )
 
@@ -4429,6 +5036,7 @@ class ConversationOrchestrator:
                         else {}
                     ),
                     "resolved_settings": resolved["settings"],
+                    **setting_changes_provenance(resolved["setting_changes"], sent=sent_settings),
                     "generation_estimate": resolved["generation_estimate"],
                     "video_length": resolved["video_length"],
                     "plan_step_estimate": resolved["estimate"],
@@ -13976,8 +14584,37 @@ class ConversationOrchestrator:
             effective_settings["loras"] = lora_resolution.settings
         if workflow_lora_outcome is not None:
             effective_settings[WORKFLOW_LORA_OVERRIDES_SETTING_KEY] = workflow_lora_outcome.setting
+        recipe = use_case_admission.preset.settings_json if use_case_admission else {}
+        who_chose = _who_chose(workflow_lora_layers, recipe, profile, fields)
+        batch_size: list[SettingChange] = []
         if "batch_size" in effective_settings:
+            batch_size = _batch_made_one_at_a_time(effective_settings["batch_size"], who_chose)
             effective_settings["batch_size"] = 1
+        # What this draft's own settings changed on purpose: what its workflow
+        # sets aside, a batch size it makes one at a time, and a saved seed it
+        # replaces with its own.
+        changes = (
+            *_settled_for_outputs(
+                _saved_values_set_aside(
+                    Operation.TEXT_TO_IMAGE,
+                    workflow_lora_layers,
+                    turn=workflow_lora_layers.ordinary("turn"),
+                    recipe=recipe,
+                    profile=profile,
+                    fields=fields,
+                ),
+                effective_settings,
+                own_seeds=True,
+                outputs=1,
+            ),
+            *batch_size,
+            *_seed_each_draft_replaces(
+                workflow_lora_layers,
+                turn=workflow_lora_layers.ordinary("turn"),
+                recipe=recipe,
+                profile=profile,
+            ),
+        )
         workflow_provenance = _workflow_execution_witness(
             session,
             revision,
@@ -14000,6 +14637,7 @@ class ConversationOrchestrator:
             model_provenance=self._model_provenance(session, profile),
             workflow_provenance=workflow_provenance,
             use_case_receipt=use_case_receipt,
+            setting_changes=changes,
         )
 
     def _workflow_family_for_operation(
@@ -14542,6 +15180,9 @@ class ConversationOrchestrator:
         its values stay separate so their source remains available to consumers.
         A default shape the turn asks for sits under every saved layer, just
         above the workflow's own size, and only when none of them names a size.
+        What the workflow sets aside of a media turn's own values and its saved
+        ones is kept with the layers, for the turn to say so once its settings
+        are final.
         """
         role = self._role_for_operation(operation)
         request_fields = [field for field in fields if field.scope != "load"]
@@ -14646,6 +15287,18 @@ class ConversationOrchestrator:
             workflow_lora_layers=workflow_lora_layers,
             use_case_settings=use_case_settings,
             default_size=default_size,
+            set_aside=(
+                *_enlargement_set_aside(workflow_lora_layers.ordinary("turn"), tunables),
+                *_saved_values_set_aside(
+                    operation,
+                    workflow_lora_layers,
+                    turn=workflow_lora_layers.ordinary("turn"),
+                    recipe=use_case_settings,
+                    profile=profile,
+                    fields=fields,
+                    source_fit=request.source_fit is not None,
+                ),
+            ),
         )
 
     @staticmethod
@@ -15937,6 +16590,8 @@ class ConversationOrchestrator:
         `replayed` says whether an earlier submission created the run under the
         same idempotency key. A replay answers with that earlier run, which need
         not be what the new request asked for, so the answer says which it is.
+        Each answer names what the turn changed on purpose from what its runs
+        keep, so a replay names the same changes the first answer did.
         """
         refreshed = session.scalar(select(Run).where(Run.id == run.id))
         if not refreshed:
@@ -15964,7 +16619,26 @@ class ConversationOrchestrator:
         if not user_message or not assistant_message:
             raise LookupError("run messages not found")
         outputs = [assistant_message]
+        held = [refreshed.provenance_json]
         if refreshed.work_plan_id is not None:
+            # What each step of the plan keeps, in step order, so the answer
+            # names what the whole turn changed on purpose.
+            held = (
+                list(
+                    session.scalars(
+                        select(Run.provenance_json)
+                        .join(WorkStep, WorkStep.id == Run.work_step_id)
+                        .where(
+                            Run.work_plan_id == refreshed.work_plan_id,
+                            WorkStep.plan_id == refreshed.work_plan_id,
+                            Run.user_message_id == refreshed.user_message_id,
+                            Run.chat_id == refreshed.chat_id,
+                        )
+                        .order_by(WorkStep.ordinal)
+                    )
+                )
+                or held
+            )
             outputs = (
                 list(
                     session.scalars(
@@ -15995,4 +16669,10 @@ class ConversationOrchestrator:
             assistant_message=MessageOut.model_validate(assistant_message),
             assistant_messages=[MessageOut.model_validate(message) for message in outputs],
             replayed=replayed,
+            setting_changes=turn_setting_changes(
+                [
+                    provenance.get(SETTING_CHANGES_KEY) if isinstance(provenance, dict) else None
+                    for provenance in held
+                ]
+            ),
         )

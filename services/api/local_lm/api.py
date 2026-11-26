@@ -4651,7 +4651,9 @@ async def queue_prompt_batch(
         raise api_error(
             422, "generation-settings-invalid", str(exc), **setting_error_body(exc)
         ) from exc
-    return _prompt_expansion_out(stored).model_copy(update={"replayed": accepted.replayed})
+    return _prompt_expansion_out(stored).model_copy(
+        update={"replayed": accepted.replayed, "setting_changes": accepted.setting_changes}
+    )
 
 
 @router.post("/prompt-helpers", response_model=PromptHelperDetail, status_code=201)
@@ -5293,17 +5295,19 @@ async def _accept_turn(
 ) -> TurnAccepted:
     """Queue a turn, or answer why it cannot be.
 
-    A refused setting is named with why. `sent_settings` is every setting key
-    the caller's own request named, for a turn that also carries settings over
-    from an earlier one; a refused key outside it is said to be carried over.
-    Left out, it is every key `payload` names.
+    A refused setting is named with why, and an accepted turn names each value
+    it changed on purpose. `sent_settings` is every setting key the caller's
+    own request named, for a turn that also carries settings over from an
+    earlier one; a refused or changed key outside it is said to be carried
+    over. Left out, it is every key `payload` names.
     """
 
     _refuse_comparison_chat(session, chat_id)
+    sent = sent_settings if sent_settings is not None else _sent_setting_keys(payload)
     try:
         if edit_source_message_id is not None and isinstance(payload, PriorTurnEditRequest):
             return await queue_prior_turn_edit(
-                orchestrator, session, edit_source_message_id, payload
+                orchestrator, session, edit_source_message_id, payload, sent_settings=sent
             )
         if not orchestrator._admission_open:
             raise RuntimeError(
@@ -5324,6 +5328,7 @@ async def _accept_turn(
             resolve_source=resolve_source,
             inherited_use_case_preset=inherited_use_case_preset,
             freeze_context=freeze_context,
+            sent_settings=sent,
         )
     except EditRequestConflict as exc:
         raise api_error(409, "edit-request-conflict", str(exc)) from exc
@@ -5402,7 +5407,6 @@ async def _accept_turn(
         if recipe_error is not None:
             code, message = recipe_error
             raise api_error(422, code, message) from exc
-        sent = sent_settings if sent_settings is not None else _sent_setting_keys(payload)
         raise api_error(
             422, "turn-invalid", str(exc), **setting_error_body(exc, sent=sent)
         ) from exc
