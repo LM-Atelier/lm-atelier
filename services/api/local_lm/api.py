@@ -1112,7 +1112,10 @@ async def health(request: Request, session: SessionDep) -> HealthOut:
         ),
         version=__version__,
         database=database_healthy,
-        engines=capabilities,
+        # Anyone may read this, without a session and while the workspace is
+        # locked, so each engine's own reply is left out: ComfyUI's names the
+        # folders it was started with. Behind the session, /api/engines has it.
+        engines=[item.model_copy(update={"details": {}}) for item in capabilities],
     )
 
 
