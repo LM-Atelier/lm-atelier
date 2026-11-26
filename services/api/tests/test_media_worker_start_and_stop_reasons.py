@@ -4,8 +4,10 @@ Telling why ComfyUI restarted used to mean reading gaps between its health
 probes. The supervisor now counts each process it spawns under the reason its
 caller names, each running process it ends under the reason for the stop, and
 a process that ended while nothing was stopping it as an exit without a stop.
-The worker status reports the counts since the service started, and each
-counted event writes one log line made of the worker and the code alone.
+An emptying of the running worker's memory in place is counted apart, under
+the reason of the stop it stood in for. The worker status reports the counts
+since the service started, and each counted event writes one log line made of
+the worker and the code alone.
 
 Only what happened is counted. A ready launch that is kept, a start refused
 before its process exists and a stop of a stopped worker count nothing, and
@@ -61,6 +63,7 @@ SERVICE_WIDE_FIELDS = frozenset(
     {
         "starts_by_reason",
         "stops_by_reason",
+        "emptied_by_reason",
         "exits_without_stop",
         "last_start_reason",
         "last_stop_reason",
@@ -640,6 +643,7 @@ async def test_the_worker_routes_count_their_stops_and_starts_as_manual(
     for worker in listed.json():
         assert worker["starts_by_reason"] == {reason.value: 0 for reason in WorkerStartReason}
         assert worker["stops_by_reason"] == {reason.value: 0 for reason in WorkerStopReason}
+        assert worker["emptied_by_reason"] == {reason.value: 0 for reason in WorkerStopReason}
         assert worker["exits_without_stop"] == 0
         assert worker["last_start_reason"] is None
         assert worker["last_stop_reason"] is None
@@ -1086,6 +1090,7 @@ async def test_a_project_bundle_carries_no_service_wide_counts(
     counted = {
         "starts_by_reason": {"manual": 1},
         "stops_by_reason": {"manual": 0},
+        "emptied_by_reason": {"run_handoff": 1},
         "exits_without_stop": 0,
         "last_start_reason": "manual",
         "last_stop_reason": None,
