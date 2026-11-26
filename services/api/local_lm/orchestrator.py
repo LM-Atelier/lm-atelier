@@ -3506,7 +3506,10 @@ class ConversationOrchestrator:
                 else max(
                     request.output_count or 1,
                     plan.output_count,
-                    configured_output_count,
+                    # A Prompt Library source is one draft and makes one output,
+                    # so a saved batch size is set aside below rather than
+                    # refused as a request for several.
+                    1 if has_prompt_source else configured_output_count,
                 )
             )
         )
