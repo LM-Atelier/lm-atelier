@@ -5250,9 +5250,17 @@ async def remix_a_picture(
 
 
 def _sent_setting_keys(payload: TurnRequest) -> frozenset[str]:
-    """Every setting key a turn request names, wherever in it the key is."""
+    """Every setting key a turn request names, wherever in it the key is.
+
+    The output count, when the request gives one, and each role it gives
+    ordered settings for are named too: neither is a setting, and a refusal of
+    either is the request's own unless the turn carried it over.
+    """
 
     keys = set(payload.settings)
+    if payload.output_count is not None:
+        keys.add("output_count")
+    keys.update(payload.ordered_settings)
     for ordered in payload.ordered_settings.values():
         keys.update(ordered)
     for override in payload.role_overrides.values():

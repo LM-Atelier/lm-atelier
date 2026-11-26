@@ -1495,6 +1495,10 @@ class RoutingReasonCode(StrEnum):
     GENERATION_OFFER_ACCEPTED = "generation_offer_accepted"
 
 
+#: The most outputs a request's words can ask for: a count is one or two digits.
+MAX_WORDS_OUTPUT_COUNT = 99
+
+
 class RoutingPlan(ApiModel):
     operation: Operation
     standalone_prompt: str
@@ -1512,7 +1516,10 @@ class RoutingPlan(ApiModel):
     # they are named fields like the sibling ordered-plan 409 already used.
     generation_estimate: dict[str, Any] | None = None
     media_plan_estimate: dict[str, Any] | None = None
-    output_count: int = Field(default=1, ge=1, le=16)
+    # As many as the words can ask for: a count past what one request may make
+    # is refused by name where that limit is checked, not by failing to make
+    # the plan.
+    output_count: int = Field(default=1, ge=1, le=MAX_WORDS_OUTPUT_COUNT)
     confidence: float = Field(ge=0, le=1)
     reason_code: RoutingReasonCode
     reason: str
@@ -1541,10 +1548,14 @@ class OrderedStepInput(ApiModel):
     kind: Literal["text_context", "artifact"]
 
 
+#: The most characters one step of an ordered plan may ask with.
+MAX_ORDERED_STEP_PROMPT_CHARS = 20_000
+
+
 class OrderedStepIntent(ApiModel):
     id: str = Field(min_length=1, max_length=40, pattern=r"^[a-z][a-z0-9_]*$")
     mode: Literal["text", "image", "video"]
-    prompt: str = Field(min_length=1, max_length=20_000)
+    prompt: str = Field(min_length=1, max_length=MAX_ORDERED_STEP_PROMPT_CHARS)
     depends_on: list[str] = Field(default_factory=list, max_length=8)
     inputs: list[OrderedStepInput] = Field(default_factory=list, max_length=8)
 

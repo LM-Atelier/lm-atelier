@@ -8,6 +8,7 @@ from typing import Any
 from .adapters.base import ChatAdapter, ChatRequest
 from .domain import Operation, RoutingMode, new_id
 from .schemas import RoutingPlan, RoutingReasonCode
+from .setting_refusals import SettingRefusal, SettingRefusalCode, SettingRefused, SettingSource
 
 _IMAGE_CREATE = re.compile(
     r"\b(?:create|draw|generate|make|paint|render|design|illustrate|visuali[sz]e)\b.*"
@@ -1131,11 +1132,30 @@ class ModalityRouter:
         reason: str,
         confidence: float,
     ) -> RoutingPlan:
+        """A media plan making as many outputs as its words ask for.
+
+        A count past what one request may make is carried as it is, so the
+        limit that refuses it names it. A request for no outputs at all is
+        refused here, where its count is read.
+        """
+        output_count = ModalityRouter.requested_output_count(prompt)
+        if output_count < 1:
+            raise SettingRefused(
+                "A media request makes at least one output.",
+                [
+                    SettingRefusal(
+                        SettingRefusalCode.PLAN_TOO_FEW_OUTPUTS,
+                        "output_count",
+                        limit=1,
+                        source=SettingSource.PLANNED,
+                    )
+                ],
+            )
         return RoutingPlan(
             operation=operation,
             standalone_prompt=prompt,
             input_artifact_ids=input_artifact_ids,
-            output_count=ModalityRouter.requested_output_count(prompt),
+            output_count=output_count,
             confidence=confidence,
             reason_code=reason_code,
             reason=reason,

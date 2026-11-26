@@ -1391,6 +1391,19 @@ def _whole(value: object) -> str:
     return str(value)
 
 
+def saved_size_refusals(
+    key: str, value: object, field: SettingField, where: str
+) -> tuple[SettingRefusal, ...]:
+    """Why a saved side of a size is not one its field takes, each naming the layer it is in."""
+
+    source = saved_setting_source(where)
+    try:
+        found = _value_refusals(key, value, field)
+    except ValueError:
+        found = []
+    return tuple(replace(refusal, source=source) for refusal, _ in found)
+
+
 class SavedSizeUnsupported(SettingRefused):
     """A size saved on a profile, preset, project or chat that the turn's workflow cannot make.
 
@@ -1399,10 +1412,18 @@ class SavedSizeUnsupported(SettingRefused):
     workflow's own width beside a saved height is a picture nobody asked for,
     and nothing would say so. The message names where the size is saved and
     the sizes the workflow makes; its refusals say the same with the limit the
-    size passed and the saved layer it came from.
+    size passed and the saved layer it came from. `also` holds the refusals of
+    the other side when it cannot be made either, so both sides are named.
     """
 
-    def __init__(self, key: str, value: object, field: SettingField, where: str) -> None:
+    def __init__(
+        self,
+        key: str,
+        value: object,
+        field: SettingField,
+        where: str,
+        also: Iterable[SettingRefusal] = (),
+    ) -> None:
         if field.choices:
             span = f"{', '.join(_whole(choice) for choice in field.choices)} px"
         elif field.minimum is not None and field.maximum is not None:
@@ -1415,15 +1436,10 @@ class SavedSizeUnsupported(SettingRefused):
             span = "only the sizes it offers"
         if field.multiple_of is not None and not field.choices:
             span += f", in steps of {_whole(field.multiple_of)}"
-        source = saved_setting_source(where)
-        try:
-            found = _value_refusals(key, value, field)
-        except ValueError:
-            found = []
         super().__init__(
             f"The {key} of {_whole(value)} px saved {where} is not one this workflow makes "
             f"({span}). Change it there, or choose another workflow.",
-            [replace(refusal, source=source) for refusal, _ in found],
+            [*saved_size_refusals(key, value, field, where), *also],
         )
         self.key = key
         self.where = where

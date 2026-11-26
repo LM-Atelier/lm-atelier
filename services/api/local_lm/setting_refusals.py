@@ -1,7 +1,10 @@
 """Why a setting was refused, said so a client can act on it without reading prose.
 
-A refused render request keeps the `detail` and `code` it always answered
-with, and gains `errors`: one item per refusal, each naming the setting, a code
+A refused render request keeps the status and `code` it always answered with,
+and the `detail` too, except where that detail used to quote the request: a
+step of an ordered plan with more words than a step may hold, and words asking
+for no outputs or for more than a plan may carry, are now refused in fixed
+words. It gains `errors`: one item per refusal, each naming the setting, a code
 from one closed vocabulary and that code's one fixed sentence, and, where they
 apply, the limit the value passed, the choices it may take, and where a value
 the request did not send came from.
@@ -11,6 +14,13 @@ sent. A setting's key is named back only when it reads as a plain setting
 name; any other key is given as `*`. Choices are named back only when every
 one shown is a number, true or false, or a plain word, since a choice can be a
 file name or free text.
+
+A request can also be refused for what it asks of a plan as a whole: more
+outputs, waiting work, storage or steps than one plan may have. Such an item
+names the request field that asked for it, such as `output_count`, or `plan`
+for a limit of the whole plan, and gives the fixed limit, never the room that
+was left. An item about one step of an ordered plan names that step, counting
+from 1.
 """
 
 from __future__ import annotations
@@ -18,7 +28,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Collection, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Final
 
@@ -28,6 +38,8 @@ from pydantic import BaseModel, Field
 SETTING_NAME: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
 #: Stands for a setting an answer does not name.
 UNNAMED_SETTING: Final = "*"
+#: Names a limit of the whole plan, which belongs to no one setting.
+PLAN_FIELD: Final = "plan"
 #: A choice that is text is named back only when it has this shape.
 _PLAIN_CHOICE: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_:+-]{0,63}")
 #: The most choices an item names. A longer menu is cut to its first ones.
@@ -57,6 +69,20 @@ class SettingRefusalCode(StrEnum):
     TOO_MANY_SETTINGS = "settings-too-many"
     NOT_APPLICABLE = "setting-not-applicable"
     NEEDS_ITS_PAIR = "setting-needs-its-pair"
+    NEEDS_A_ROLE = "setting-needs-a-role"
+    ROLE_UNKNOWN = "setting-role-unknown"
+    NOT_TAKEN_BY_EVERY_WORKFLOW = "setting-not-taken-by-every-workflow"
+    PLAN_TOO_MANY_OUTPUTS = "plan-too-many-outputs"
+    PLAN_TOO_FEW_OUTPUTS = "plan-too-few-outputs"
+    PLAN_TOO_MANY_PENDING = "plan-too-many-pending"
+    PLAN_TOO_MUCH_WORK = "plan-too-much-work"
+    PLAN_STORAGE_TOO_LARGE = "plan-storage-too-large"
+    PLAN_STORAGE_UNAVAILABLE = "plan-storage-unavailable"
+    PLAN_VIDEO_TOO_LONG = "plan-video-too-long"
+    PLAN_TOO_MANY_STEPS = "plan-too-many-steps"
+    PLAN_PROMPT_TOO_LONG = "plan-prompt-too-long"
+    PLAN_STEP_PROMPT_TOO_LONG = "plan-step-prompt-too-long"
+    PLAN_ONE_OUTPUT_PER_STEP = "plan-one-output-per-step"
 
 
 #: The one sentence said about each reason. None of them names a value.
@@ -91,6 +117,48 @@ SETTING_REFUSAL_MESSAGES: Final[Mapping[SettingRefusalCode, str]] = {
         "This setting cannot be applied with the chosen workflow and the other choices."
     ),
     SettingRefusalCode.NEEDS_ITS_PAIR: "A size is applied whole: width and height together.",
+    SettingRefusalCode.NEEDS_A_ROLE: (
+        "An ordered plan takes settings for each role on its own, in ordered_settings."
+    ),
+    SettingRefusalCode.ROLE_UNKNOWN: "Settings are given only for the chat, image and video roles.",
+    SettingRefusalCode.NOT_TAKEN_BY_EVERY_WORKFLOW: (
+        "This saved setting is taken by some of the workflows this batch uses and not by the "
+        "others."
+    ),
+    SettingRefusalCode.PLAN_TOO_MANY_OUTPUTS: (
+        "This request asks for more outputs than one request may make, given as the limit."
+    ),
+    SettingRefusalCode.PLAN_TOO_FEW_OUTPUTS: (
+        "This request asks for fewer outputs than one request makes, given as the limit."
+    ),
+    SettingRefusalCode.PLAN_TOO_MANY_PENDING: (
+        "This would leave more items waiting in this conversation than the limit allows."
+    ),
+    SettingRefusalCode.PLAN_TOO_MUCH_WORK: (
+        "This request is larger than one request may queue; ask for fewer, smaller or shorter "
+        "outputs."
+    ),
+    SettingRefusalCode.PLAN_STORAGE_TOO_LARGE: (
+        "This request would write more than one request may, in bytes, given as the limit."
+    ),
+    SettingRefusalCode.PLAN_STORAGE_UNAVAILABLE: (
+        "There is not enough free storage to queue this request."
+    ),
+    SettingRefusalCode.PLAN_VIDEO_TOO_LONG: (
+        "This plan asks for more video than one plan may make, in seconds, given as the limit."
+    ),
+    SettingRefusalCode.PLAN_TOO_MANY_STEPS: (
+        "This plan has more steps than one plan may hold, given as the limit."
+    ),
+    SettingRefusalCode.PLAN_PROMPT_TOO_LONG: (
+        "This plan's steps hold more text than one plan may, in characters, given as the limit."
+    ),
+    SettingRefusalCode.PLAN_STEP_PROMPT_TOO_LONG: (
+        "This step holds more text than one step of a plan may, in characters, given as the limit."
+    ),
+    SettingRefusalCode.PLAN_ONE_OUTPUT_PER_STEP: (
+        "An ordered plan makes one output for each step; ask for more in a separate turn."
+    ),
 }
 
 
@@ -108,6 +176,8 @@ class SettingSource(StrEnum):
     PROFILE = "profile"
     #: A saved layer this answer cannot name.
     SAVED = "saved"
+    #: The count the turn's own words asked for, as in "three pictures of".
+    PLANNED = "planned"
 
 
 #: How a refusal of a saved size words each layer, and the source it names.
@@ -180,7 +250,11 @@ class SettingRefusal:
 
     `key` is the key as the request or the saved layer held it; it is passed
     through `setting_field_name` before it is ever said. It is None only for a
-    refusal of the settings as a whole.
+    refusal of the settings as a whole, or of a part of the request that is no
+    setting at all: `part` then names that part, as `PLAN_FIELD` names the
+    whole plan. A part is always the request's own, so it is never said to be
+    carried over. `step` is the step of an ordered plan the refusal is about,
+    counting from 1.
     """
 
     code: SettingRefusalCode
@@ -188,18 +262,21 @@ class SettingRefusal:
     limit: float | None = None
     allowed: tuple[Any, ...] | None = None
     source: SettingSource | None = None
+    step: int | None = None
+    part: str | None = None
 
     def item(self, sent: Collection[str] | None = None) -> dict[str, Any]:
         """This refusal as an error item, without the value that was refused.
 
-        `sent` is every setting key the request itself named. A refused key
-        outside it was carried over from the turn the request starts from. With
-        no `sent`, every value without a saved source is the request's own.
+        `sent` is every setting key the request itself named, with the request
+        fields it gave, such as `output_count`. A refused key outside it was
+        carried over from the turn the request starts from. With no `sent`,
+        every value without a saved source is the request's own.
         """
 
         item: dict[str, Any] = {
             "code": self.code.value,
-            "field": setting_field_name(self.key),
+            "field": self.part if self.part is not None else setting_field_name(self.key),
             "message": SETTING_REFUSAL_MESSAGES[self.code],
         }
         if self.limit is not None:
@@ -208,24 +285,48 @@ class SettingRefusal:
         if allowed is not None:
             item["allowed"] = allowed
         source = self.source
-        if source is None and sent is not None and self.key is not None and self.key not in sent:
+        if (
+            source is None
+            and sent is not None
+            and self.part is None
+            and self.key is not None
+            and self.key not in sent
+        ):
             source = SettingSource.INHERITED
         if source is not None:
             item["source"] = source.value
+        if self.step is not None:
+            item["step"] = self.step
         return item
+
+
+def plan_refusal(
+    code: SettingRefusalCode, *, limit: float | None = None, step: int | None = None
+) -> SettingRefusal:
+    """A refusal of the whole plan rather than of one setting, named as `PLAN_FIELD`."""
+
+    return SettingRefusal(code, None, limit=limit, step=step, part=PLAN_FIELD)
 
 
 class SettingRefused(ValueError):
     """A request refused for the value of one or more settings, each with why.
 
     The message is the one the first refusal has always been worded with, so
-    a reader of the message alone sees what it always saw. `refusals` holds
-    every refusal that was found, not only the first.
+    a reader of the message alone sees what it always saw, except where those
+    words used to quote the request: an ordered step with more words than a
+    step may hold, and words asking for no outputs or for more than a plan may
+    carry, are now refused with a fixed sentence that quotes nothing.
+    `refusals` holds every refusal that was found, not only the first.
     """
 
     def __init__(self, message: str, refusals: Iterable[SettingRefusal] = ()) -> None:
         super().__init__(message)
         self.refusals = tuple(refusals)
+
+    def at_step(self, step: int) -> None:
+        """Name every refusal as one about this step of an ordered plan, counting from 1."""
+
+        self.refusals = tuple(replace(refusal, step=step) for refusal in self.refusals)
 
 
 def setting_errors(
@@ -260,6 +361,7 @@ class SettingErrorOut(BaseModel):
     limit: int | float | None = Field(default=None, exclude_if=_absent)
     allowed: list[str | int | float | bool] | None = Field(default=None, exclude_if=_absent)
     source: SettingSource | None = Field(default=None, exclude_if=_absent)
+    step: int | None = Field(default=None, ge=1, exclude_if=_absent)
 
 
 def setting_error_models(refusals: Iterable[SettingRefusal]) -> list[SettingErrorOut]:
