@@ -25,7 +25,7 @@ def _installed(session: Session) -> dict[str, str]:
                 "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
                 "AND name LIKE 'workflow_recovery_%'"
             )
-        ).tuples()
+        )
     }
 
 

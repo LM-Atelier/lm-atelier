@@ -621,9 +621,7 @@ def audit_sample(
     disagreed: dict[int, list[Key]] = {}
     if not stamp_state(connection).matches:
         return AuditResult(0, 0, 0), disagreed
-    pending = set(
-        connection.exec_driver_sql(f"SELECT source, source_key FROM {CHANGES_TABLE}").tuples()
-    )
+    pending = set(connection.exec_driver_sql(f"SELECT source, source_key FROM {CHANGES_TABLE}"))
     for source in SOURCE_COLUMNS:
         sampled = _sample_keys(connection, source, cursor.get(source), per_source)
         if len(sampled) == per_source:

@@ -239,7 +239,7 @@ def _snapshot(session: Session, lane: QueueLane, now: datetime) -> _Snapshot:
     ).all()
     if len(rows) > _MAX_JOBS:
         raise QueueOrderLimit(_MAX_JOBS)
-    jobs = [_Job(*row) for row in rows]
+    jobs = [_Job(*tuple(row)) for row in rows]
     controls = job_controls(session, [job.id for job in jobs])
     plan_ids = {job.work_plan_id for job in jobs if job.work_plan_id}
     visible_plans: dict[str, str] = (
@@ -252,9 +252,7 @@ def _snapshot(session: Session, lane: QueueLane, now: datetime) -> _Snapshot:
                     WorkPlan.persistence_scope == "durable",
                     Chat.scope == "standard",
                 )
-            )
-            .tuples()
-            .all()
+            ).all()
         )
         if plan_ids
         else {}

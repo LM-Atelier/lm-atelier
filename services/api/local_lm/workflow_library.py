@@ -319,7 +319,7 @@ def _project_revision_pin_count(session: Session, revision_ids: set[str]) -> int
     return len(project_ids)
 
 
-def _count(session: Session, statement: Select[tuple[int]]) -> int:
+def _count(session: Session, statement: Select[int]) -> int:
     return int(session.scalar(statement) or 0)
 
 

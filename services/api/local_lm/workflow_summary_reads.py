@@ -133,7 +133,7 @@ def list_workflow_definitions(
     return list(session.scalars(statement).all())
 
 
-def _visible_workflow_ids() -> Select[tuple[str]]:
+def _visible_workflow_ids() -> Select[str]:
     current = aliased(WorkflowRevision)
     draft_type = func.json_type(current.dependencies_json, "$." + WORKFLOW_PACKAGE_DRAFT_MARKER)
     return (
@@ -263,7 +263,7 @@ def load_workflow_revision_schemas(
         )
         # Pairs, not the result itself: a result has keys(), so update would
         # read it as a mapping of column names.
-        graphs.update((revision_id, graph) for revision_id, graph in result.tuples())
+        graphs.update((revision_id, graph) for revision_id, graph in result)
     schemas: dict[str, WorkflowRevisionSchemaOut] = {}
     for revision_id, row in rows.items():
         schema = row["input_schema_json"]

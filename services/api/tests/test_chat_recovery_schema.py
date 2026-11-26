@@ -250,7 +250,7 @@ def test_the_installed_guards_have_the_canonical_bodies(recovery_session: Sessio
                 "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
                 "AND name LIKE 'chat_recovery_%'"
             )
-        ).tuples()
+        )
     }
     expected = {statement.split()[2]: statement for statement in CREATE_CHAT_RECOVERY_TRIGGER_SQL}
     assert installed == expected

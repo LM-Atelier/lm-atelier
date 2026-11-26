@@ -1109,7 +1109,7 @@ async def test_a_stop_recorded_late_finishes_its_setup_check_and_announces_it(
 
             async def verification_state() -> str:
                 with SessionLocal() as session:
-                    current = session.scalar(select(SetupVerification))
+                    current: SetupVerification | None = session.scalar(select(SetupVerification))
                     assert current is not None
                     return current.state
 
@@ -1219,7 +1219,7 @@ async def test_a_failure_recorded_later_finishes_its_setup_check(
 
         async def state() -> str:
             with SessionLocal() as session:
-                current = session.scalar(select(SetupVerification))
+                current: SetupVerification | None = session.scalar(select(SetupVerification))
                 assert current is not None
                 return current.state
 

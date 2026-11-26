@@ -439,7 +439,7 @@ def list_library_entries(
                 normalized_query, autoescape=True
             )
         )
-    statement: Select[Any] = select(ArtifactLibraryEntry, Artifact).join(
+    statement: Select[*tuple[Any, ...]] = select(ArtifactLibraryEntry, Artifact).join(
         Artifact, Artifact.id == ArtifactLibraryEntry.artifact_id
     )
     if collection is not None:

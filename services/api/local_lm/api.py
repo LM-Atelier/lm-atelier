@@ -3440,7 +3440,7 @@ async def set_response_feedback(
     )
 
 
-def _prompt_helper_query(helper_id: str) -> Select[tuple[Chat]]:
+def _prompt_helper_query(helper_id: str) -> Select[Chat]:
     return (
         select(Chat)
         .options(
@@ -3725,7 +3725,7 @@ async def apply_studio_local_edit(
     return session.scalar(_studio_session_query(session_id)) or studio
 
 
-def _studio_session_query(session_id: str) -> Select[tuple[Chat]]:
+def _studio_session_query(session_id: str) -> Select[Chat]:
     return (
         select(Chat)
         .options(
@@ -7307,6 +7307,9 @@ async def list_artifacts(
             .where(MessagePart.artifact_id.in_(batch), visible_chat(Chat.id))
         ).all()
         for artifact_id, referenced_chat_id, referenced_project_id in reference_rows:
+            if artifact_id is None:
+                # The filter above names an artifact for every row.
+                continue
             references.setdefault(artifact_id, []).append(
                 (referenced_chat_id, referenced_project_id)
             )

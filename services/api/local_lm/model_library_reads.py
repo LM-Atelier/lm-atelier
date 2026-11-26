@@ -14,7 +14,7 @@ from .schemas import CatalogInstallMatches
 
 def read_library_page[LibraryRow](
     session: Session,
-    statement: Select[tuple[LibraryRow]],
+    statement: Select[LibraryRow],
     identity: InstrumentedAttribute[str],
     name: InstrumentedAttribute[str],
     *,
@@ -42,7 +42,7 @@ def read_library_page[LibraryRow](
 
 def read_library_matches[LibraryRow, Match](
     session: Session,
-    statement: Select[tuple[LibraryRow]],
+    statement: Select[LibraryRow],
     identity: InstrumentedAttribute[str],
     name: InstrumentedAttribute[str],
     *,
