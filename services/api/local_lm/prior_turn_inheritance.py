@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from .accepted_turn_context import AcceptedContext, accepted_context, settings_workflow
 from .auxiliary_assets import revision_accepts_added_loras
+from .carried_edit_inputs import carried_edit_inputs
 from .domain import Operation
 from .models import GenerationPreset, ModelProfile, Run
 from .schemas import (
@@ -212,6 +213,15 @@ class PriorTurnInheritance:
             if source_fit is not None:
                 baseline.pop("width", None)
                 baseline.pop("height", None)
+            if (
+                ordinal is None
+                and source.values.operation == operation.value
+                and "input_artifact_ids" not in self.payload.model_fields_set
+            ):
+                # Routed again to the same edit of the same pictures, a single
+                # turn keeps the selection and the relight request made for
+                # them. A step of an ordered plan takes neither.
+                baseline.update(carried_edit_inputs(source.values.resolved_settings))
             values["settings"] = {**baseline, **request.settings}
         self.bound[ordinal] = inherited
         context = source.snapshot
