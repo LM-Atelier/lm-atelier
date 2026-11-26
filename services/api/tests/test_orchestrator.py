@@ -371,12 +371,12 @@ async def test_engine_cancel_runs_after_the_database_session_closes() -> None:
         def commit(self) -> None:
             return None
 
-    calls: list[str] = []
+    calls: list[tuple[str, bool]] = []
 
     async def cancel(run_id: str) -> None:
-        calls.append(run_id)
-        assert run_id == "run-cancel"
-        assert session_closed is True
+        # Recorded, not asserted: the stop catches and logs whatever the engine
+        # raises, so an assertion failing here would not fail the test.
+        calls.append((run_id, session_closed))
 
     engines = _collaborator_double(
         settings=SimpleNamespace(),
@@ -397,7 +397,7 @@ async def test_engine_cancel_runs_after_the_database_session_closes() -> None:
 
     assert await orchestrator.cancel("job-cancel") is True
     orchestrator._mark_cancelled.assert_called_once()
-    assert calls == ["run-cancel"]
+    assert calls == [("run-cancel", True)], "the engine was not told once, after the session"
 
 
 async def test_chat_worker_resume_runs_after_the_database_session_closes() -> None:
@@ -422,10 +422,12 @@ async def test_chat_worker_resume_runs_after_the_database_session_closes() -> No
         def expunge(self, _value) -> None:  # type: ignore[no-untyped-def]
             return None
 
+    loads: list[tuple[object, object, bool]] = []
+
     async def load_chat(selected_profile, selected_install):  # type: ignore[no-untyped-def]
-        assert session_closed is True
-        assert selected_profile is profile
-        assert selected_install is install
+        # Recorded, not asserted: the resume catches and logs whatever the load
+        # raises, so an assertion failing here would not fail the test.
+        loads.append((selected_profile, selected_install, session_closed))
 
     orchestrator = ConversationOrchestrator(
         engines=_collaborator_double(settings=SimpleNamespace()),
@@ -437,6 +439,8 @@ async def test_chat_worker_resume_runs_after_the_database_session_closes() -> No
     )
 
     await orchestrator._resume_chat_worker("profile-resume")
+
+    assert loads == [(profile, install, True)], "the model was not loaded once, after the session"
 
 
 async def test_media_handoff_recycles_managed_comfy_before_chat_resume() -> None:
