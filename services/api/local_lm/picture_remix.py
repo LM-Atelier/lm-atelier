@@ -174,9 +174,10 @@ class RemixDiffers(Exception):
 
 
 class _Refused(Exception):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, errors: Iterable[SettingRefusal] = ()) -> None:
         super().__init__(code)
         self.code = code
+        self.errors = tuple(errors)
 
 
 @dataclass(frozen=True)
@@ -238,6 +239,9 @@ class RemixPreview:
     shape: tuple[int, int] | None
     applied: tuple[str, ...]
     refusals: tuple[str, ...]
+    #: Each setting the refusal names, with why: each side of a size saved on the
+    #: model that this workflow cannot make, with its limit and where it is saved.
+    errors: tuple[SettingRefusal, ...]
     text: str | None
     request_settings: dict[str, Any]
     settings: dict[str, Any]
@@ -758,9 +762,11 @@ async def preview_remix(
     """Resolve a remix with this workflow and model exactly as a turn would, writing nothing.
 
     A choice that cannot run is an answer, not an error: the preview names why
-    with one fixed code. Applying a claim that cannot be applied raises
-    RemixChoiceInvalid, since that is a request no preview could honour. A
-    remix starting from the picture needs its source, read by read_remix_source.
+    with one fixed code, and any setting that code is about, such as each side
+    of a size saved on the model that this workflow cannot make. Applying a
+    claim that cannot be applied raises RemixChoiceInvalid, since that is a
+    request no preview could honour. A remix starting from the picture needs
+    its source, read by read_remix_source.
     """
 
     _require_clean(session)
@@ -797,6 +803,7 @@ async def preview_remix(
             shape=None,
             applied=(),
             refusals=(refused.code,),
+            errors=refused.errors,
             text=None,
             request_settings={},
             settings={},
@@ -914,8 +921,8 @@ async def _resolve(
             fields,
             workflow_revision=chosen_revision,
         )
-    except SavedSizeUnsupported:
-        raise _Refused("remix-size-unsupported") from None
+    except SavedSizeUnsupported as exc:
+        raise _Refused("remix-size-unsupported", exc.refusals) from None
     except (ValueError, TypeError, OverflowError):
         raise _Refused(unusable) from None
     if layers.mask is not None or layers.relight is not None:
@@ -987,6 +994,7 @@ async def _resolve(
         shape=shape,
         applied=applied,
         refusals=(),
+        errors=(),
         text=prompt,
         request_settings=copy.deepcopy(request_settings),
         settings=effective,
@@ -1057,6 +1065,24 @@ def _engine_prompt(operation: Operation, prompt: str, trigger_words: Sequence[st
         },
     )
     return ConversationOrchestrator._media_prompt(probe)
+
+
+def remix_refusals(preview: RemixPreview) -> list[dict[str, Any]]:
+    """Why a remix cannot run, as its preview and the remix itself both answer it.
+
+    Each refusal is its code and that code's one sentence. A refusal that names
+    settings adds `errors`, in the items a turn is refused with: for a size
+    saved on the model that this workflow cannot make, each side, the limit it
+    passed and where it is saved. A refusal that names none has no `errors`.
+    """
+
+    items: list[dict[str, Any]] = []
+    for code in preview.refusals:
+        item: dict[str, Any] = {"code": code, "message": REFUSAL_MESSAGES[code]}
+        if preview.errors:
+            item["errors"] = [refusal.item() for refusal in preview.errors]
+        items.append(item)
+    return items
 
 
 def remix_receipt(artifact_id: str, preview: RemixPreview) -> dict[str, Any]:
