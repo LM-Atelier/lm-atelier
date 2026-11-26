@@ -2140,6 +2140,9 @@ class ConversationOrchestrator:
         self.router = ModalityRouter()
         self.vision = VisionContextService(engines.settings, artifacts)
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        # Jobs queued again while their last execution was still ending, to
+        # start once it has ended.
+        self._starts_after_current: set[str] = set()
         self._preempted_image_edit_verifications: set[str] = set()
         self._media_restart_task: asyncio.Task[None] | None = None
         self._media_restart_after_chat_activity = False
@@ -5339,7 +5342,17 @@ class ConversationOrchestrator:
                 self._freeze_turn_context(session, accepted_run)
 
     def start(self, job_id: str, run_id: str | None) -> None:
-        if job_id in self._tasks and not self._tasks[job_id].done():
+        current = self._tasks.get(job_id)
+        if current is not None and not current.done():
+            # A job can be queued again while its last execution is still
+            # ending, as when Retry is pressed while a stopped run hands the
+            # device back: the stop is committed before that execution ends.
+            # Starting it at once would leave a second execution nothing keeps
+            # track of, and not starting it at all left it queued with nothing
+            # to run it, so it starts once the execution has ended.
+            if job_id not in self._starts_after_current:
+                self._starts_after_current.add(job_id)
+                current.add_done_callback(lambda _ended: self._start_after_current(job_id))
             return
         task = asyncio.create_task(
             self._execute_after_preempting_verification(job_id, run_id),
@@ -5347,6 +5360,35 @@ class ConversationOrchestrator:
         )
         self._tasks[job_id] = task
         task.add_done_callback(lambda finished: self._task_done(job_id, finished))
+
+    def _start_after_current(self, job_id: str) -> None:
+        """Start a job queued again while its last execution was ending, if it still waits.
+
+        A job that ran, was stopped, was claimed or had its chat's work
+        cancelled meanwhile is left as it is: only one still queued and
+        unclaimed starts, on its run.
+        """
+
+        if job_id not in self._starts_after_current:
+            # Cancelling the chat's work withdrew this start.
+            return
+        self._starts_after_current.discard(job_id)
+        if self._closing:
+            return
+        try:
+            with self.session_factory() as session:
+                job = session.get(Job, job_id)
+                if (
+                    job is None
+                    or job.status != JobStatus.QUEUED.value
+                    or job.claim_owner is not None
+                    or not job.run_id
+                ):
+                    return
+                run_id = job.run_id
+            self.start(job_id, run_id)
+        except Exception:
+            logger.exception("Could not start job %s once its last execution had ended", job_id)
 
     def resume_search(self, job_id: str) -> None:
         """Resume committed consent after the pausing task releases its scope."""
@@ -5646,6 +5688,10 @@ class ConversationOrchestrator:
             for job_id, _run_id, _operation in cancellable_rows
             if (task := self._tasks.get(job_id)) is not None and not task.done()
         }
+        # A retry waiting for one of these executions to end would otherwise
+        # start its job as the execution ends, before the job is marked
+        # cancelled below, and leave it running in a chat being emptied.
+        self._starts_after_current.difference_update(job_id for job_id, *_rest in rows)
         for task in tasks.values():
             task.cancel()
         if tasks:
