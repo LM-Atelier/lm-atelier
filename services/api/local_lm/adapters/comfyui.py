@@ -40,7 +40,7 @@ from ..network import shared_tls_context
 from ..output_origin import stated_origin
 from ..schemas import EngineCapabilities
 from ..settings_registry import IMAGE_SETTINGS, VIDEO_SETTINGS
-from .base import GeneratedAsset, MediaEvent, MediaRequest
+from .base import GeneratedAsset, MediaEvent, MediaRequest, MediaWorkflowFailure
 from .contracts import MAX_ADAPTER_EVENT_BYTES, MAX_ADAPTER_PREVIEW_BYTES
 
 logger = logging.getLogger(__name__)
@@ -225,6 +225,66 @@ def _usable_prompt_id(value: object) -> TypeGuard[str]:
     )
 
 
+class _WorkflowFailed(MediaWorkflowFailure, RuntimeError):
+    """ComfyUI refused the submitted workflow, or ran it to a node's error or an unusable result."""
+
+
+class _InputRefused(MediaWorkflowFailure, ValueError):
+    """The request's own inputs were refused before its workflow was sent."""
+
+
+#: Words that, in the exception type or message of an execution error, name a
+#: fault of memory or of the device rather than one of the workflow. ComfyUI
+#: unloads every model once it runs out of memory, and a device fault can leave
+#: the device unusable until the process ends, so neither leaves ComfyUI as the
+#: run found it. The allocator ComfyUI manages models with by default reports
+#: running out of room in its own words, naming itself, its VRAM, its VBAR or
+#: its host buffers, or saying that a fault failed.
+_DEVICE_FAULT_WORDS = (
+    "memory",
+    "cuda",
+    "cublas",
+    "cudnn",
+    "accelerator",
+    "device-side",
+    "paging file",
+    "vram",
+    "vbar",
+    "hostbuf",
+    "aimdo",
+    "fault failed",
+)
+
+#: The only plain RuntimeErrors taken as the workflow's own: the words torch and
+#: ComfyUI use when the parts a graph joins do not fit together. Torch reports
+#: many faults of the device, and ComfyUI's allocator most shortages of room, as
+#: a plain RuntimeError too, so any other one may be the engine's.
+_WORKFLOW_RUNTIME_ERRORS = (
+    # "mat1 and mat2 shapes cannot be multiplied (77x768 and 1024x320)"
+    "shapes cannot be multiplied",
+    # "The size of tensor a (64) must match the size of tensor b (32) at
+    # non-singleton dimension 3"
+    "must match the size of tensor",
+    # "shape '[1, 4, 64, 64]' is invalid for input of size 32768"
+    "is invalid for input of size",
+    # "Sizes of tensors must match except in dimension 1. ..."
+    "sizes of tensors must match",
+    # "Given groups=1, weight of size [320, 4, 3, 3], expected input[1, 16, 64, 64]
+    # to have 4 channels, but got 16 channels instead"
+    "channels, but got",
+    # A checkpoint that does not fit the model it is loaded into: "Error(s) in
+    # loading state_dict for UNetModel: ...", "size mismatch for ...: copying a
+    # param with shape ... from checkpoint, ..."
+    "error(s) in loading state_dict",
+    "size mismatch",
+    # ComfyUI's own: "ERROR: Could not detect model type of: ...", and a model
+    # file that "does not contain a valid" VAE, text encoder, controlnet or
+    # vision model.
+    "could not detect model type",
+    "does not contain a valid",
+)
+
+
 def _execution_error_message(data: dict[str, Any]) -> str:
     node_type = str(data.get("node_type") or "")
     exception_type = str(data.get("exception_type") or "")
@@ -235,6 +295,36 @@ def _execution_error_message(data: dict[str, Any]) -> str:
     if errno:
         detail = f"{detail}, errno {errno.group('number')}"
     return f"ComfyUI {node_type} failed ({detail})"
+
+
+def _workflow_failed(data: dict[str, Any]) -> bool:
+    """Whether an execution error is the workflow's own, leaving ComfyUI usable.
+
+    Only an error ComfyUI describes in full can be: one whose labels are
+    unusable, or that comes without its message, could be anything. One whose
+    type or message names a fault of memory or of the device is not, nor is a
+    plain RuntimeError in any words but `_WORKFLOW_RUNTIME_ERRORS`. Nor is a
+    blocked node: ComfyUI reports it as an execution error and goes on running
+    the prompt's other branches, so the prompt may still be running. The
+    message is read only to decide this, and is never kept, logged or repeated:
+    it can quote what a node was given.
+    """
+    node_type = str(data.get("node_type") or "")
+    exception_type = str(data.get("exception_type") or "")
+    message = data.get("exception_message")
+    if (
+        not _ERROR_LABEL.fullmatch(node_type)
+        or not _ERROR_LABEL.fullmatch(exception_type)
+        or not isinstance(message, str)
+        or exception_type == "ExecutionBlocked"
+    ):
+        return False
+    words = message.casefold()
+    if any(word in f"{exception_type.casefold()}\n{words}" for word in _DEVICE_FAULT_WORDS):
+        return False
+    if exception_type == "RuntimeError":
+        return any(phrase in words for phrase in _WORKFLOW_RUNTIME_ERRORS)
+    return True
 
 
 def _is_preview_image(content: bytes) -> bool:
@@ -541,7 +631,7 @@ class ComfyUIAdapter:
             return ".bmp", "image/bmp"
         if content.startswith((b"II*\x00", b"MM\x00*")):
             return ".tiff", "image/tiff"
-        raise ValueError("ComfyUI conditioning inputs must be supported raster images")
+        raise _InputRefused("ComfyUI conditioning inputs must be supported raster images")
 
     @classmethod
     def _input_format(cls, head: bytes) -> tuple[str, str, str]:
@@ -568,7 +658,7 @@ class ComfyUIAdapter:
             return "video", ".mkv", "video/x-matroska"
         if head.startswith(b"RIFF") and head[8:12] == b"AVI ":
             return "video", ".avi", "video/x-msvideo"
-        raise ValueError("ComfyUI conditioning inputs must be supported pictures or videos")
+        raise _InputRefused("ComfyUI conditioning inputs must be supported pictures or videos")
 
     async def _upload_mask(self, request: MediaRequest) -> str | None:
         """Upload the studio selection, if this turn carries one.
@@ -582,7 +672,7 @@ class ComfyUIAdapter:
             return None
         raw_path = setting.get("path")
         if not isinstance(raw_path, str) or not raw_path:
-            raise ValueError("The selection for this edit has no resolved file")
+            raise _InputRefused("The selection for this edit has no resolved file")
         contents = (request.mask_content,) if request.mask_content is not None else None
         return (
             await self._upload_files(request, [Path(raw_path)], label="mask", contents=contents)
@@ -607,12 +697,12 @@ class ComfyUIAdapter:
             Operation.IMAGE_TO_IMAGE.value,
             Operation.IMAGE_TO_VIDEO.value,
         } and not any(kind == "image" for kind, _, _ in formats):
-            raise ValueError(f"{request.operation} requires a conditioning image")
+            raise _InputRefused(f"{request.operation} requires a conditioning image")
         videos = sum(kind == "video" for kind, _, _ in formats)
         if unread := unread_videos(request.workflow, videos):
             # No slot repeats a video, so one the graph does not name would be
             # attached and silently left out.
-            raise ValueError(
+            raise _InputRefused(
                 f"This workflow does not read attached video {unread[0] + 1} of {videos}"
             )
         by_content = bool(paths) and await self._names_uploads_by_content(request)
@@ -652,7 +742,7 @@ class ComfyUIAdapter:
             or len(contents) != len(paths)
             or any(type(content) is not bytes for content in contents)
         ):
-            raise ValueError("The input bytes do not match the conditioning images")
+            raise _InputRefused("The input bytes do not match the conditioning images")
 
     async def _upload_files(
         self,
@@ -738,7 +828,7 @@ class ComfyUIAdapter:
             timeout=120 if isinstance(content, bytes) else 600,
         )
         if response.status_code == 413:
-            raise ValueError("ComfyUI refused an input larger than its upload limit")
+            raise _InputRefused("ComfyUI refused an input larger than its upload limit")
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
@@ -791,7 +881,7 @@ class ComfyUIAdapter:
             }
             and not request.input_paths
         ):
-            raise ValueError(f"{request.operation} requires a conditioning image")
+            raise _InputRefused(f"{request.operation} requires a conditioning image")
         parameters = self._base_parameters(request)
         mask_reference = await self._upload_mask(request)
         if mask_reference:
@@ -888,7 +978,7 @@ class ComfyUIAdapter:
                 yield MediaEvent(type="cancelled")
                 return
             if self._leaves_unfilled(request.workflow, parameters):
-                raise ValueError(
+                raise _InputRefused(
                     "This workflow has an input this request leaves empty, so it was not sent "
                     "to ComfyUI. Choose a workflow made for this kind of request."
                 )
@@ -941,7 +1031,17 @@ class ComfyUIAdapter:
                             self._jobs[request.run_id] = prompt_id
                         bound_after_submission_failure = True
                     raise
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as refused:
+                    if refused.response.status_code != 400:
+                        raise
+                    # ComfyUI answers a graph that fails its validation this way,
+                    # with the nodes at fault, and queues nothing: the refusal
+                    # is the workflow's own. Any other status is answered below.
+                    raise _WorkflowFailed(
+                        "ComfyUI rejected a generation request (HTTP 400)"
+                    ) from None
                 payload = response.json()
                 if not isinstance(payload, dict):
                     raise RuntimeError("ComfyUI returned an invalid prompt response")
@@ -960,7 +1060,10 @@ class ComfyUIAdapter:
                 if payload.get("node_errors"):
                     # Refusing a prompt the backend has ALREADY taken. The
                     # caller is told the generation failed, so the teardown has
-                    # to stop it rather than only forget it.
+                    # to stop it rather than only forget it. That stop is only
+                    # asked for, so ComfyUI may still be running the part of
+                    # the graph it took, and this failure is not marked as the
+                    # workflow's own: it is handed off as any other failure is.
                     refused_after_acceptance = prompt_id is not None
                     raise RuntimeError("ComfyUI rejected the selected workflow")
                 if prompt_id is None:
@@ -1062,7 +1165,8 @@ class ComfyUIAdapter:
                         yield MediaEvent(type="cancelled")
                         return
                     elif message_type == "execution_error":
-                        raise RuntimeError(_execution_error_message(data))
+                        failure = _WorkflowFailed if _workflow_failed(data) else RuntimeError
+                        raise failure(_execution_error_message(data))
 
             if cancel_event.is_set():
                 yield MediaEvent(type="cancelled")
@@ -1326,7 +1430,7 @@ class ComfyUIAdapter:
                         managed_paths.add(managed_path)
         try:
             if too_many_outputs:
-                raise RuntimeError(f"ComfyUI returned more than {_MAX_COMFY_OUTPUTS} outputs")
+                raise _WorkflowFailed(f"ComfyUI returned more than {_MAX_COMFY_OUTPUTS} outputs")
             total_bytes = 0
             for item, default_kind, collection, node_id in output_items:
                 filename = str(item.get("filename") or "")
@@ -1355,7 +1459,7 @@ class ComfyUIAdapter:
                 }
                 remaining = self.max_output_bytes - total_bytes
                 if remaining <= 0:
-                    raise RuntimeError(
+                    raise _WorkflowFailed(
                         f"ComfyUI outputs exceed the {self.max_output_bytes}-byte limit"
                     )
                 async with self._client.stream(
@@ -1388,7 +1492,11 @@ class ComfyUIAdapter:
                     )
                 )
             if not assets:
-                raise RuntimeError("ComfyUI completed without collectible image or video outputs")
+                # The run's record says it left nothing to collect. ComfyUI never
+                # writes an empty record, so an empty one is a record that never
+                # appeared, and that says nothing about how the run ended.
+                failure = _WorkflowFailed if history else RuntimeError
+                raise failure("ComfyUI completed without collectible image or video outputs")
             return assets
         finally:
             await self._remove_managed_outputs(managed_paths)
@@ -1402,7 +1510,7 @@ class ComfyUIAdapter:
         if content_length:
             try:
                 if int(content_length) > remaining_bytes:
-                    raise RuntimeError(
+                    raise _WorkflowFailed(
                         f"ComfyUI outputs exceed the {self.max_output_bytes}-byte limit"
                     )
             except ValueError:
@@ -1411,7 +1519,9 @@ class ComfyUIAdapter:
         async for chunk in response.aiter_bytes():
             content.extend(chunk)
             if len(content) > remaining_bytes:
-                raise RuntimeError(f"ComfyUI outputs exceed the {self.max_output_bytes}-byte limit")
+                raise _WorkflowFailed(
+                    f"ComfyUI outputs exceed the {self.max_output_bytes}-byte limit"
+                )
         return bytes(content)
 
     @staticmethod

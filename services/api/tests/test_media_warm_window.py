@@ -586,7 +586,7 @@ async def test_a_window_needs_a_ready_managed_worker_and_a_positive_length() -> 
     await orchestrator.close()
 
 
-async def test_a_failed_run_hands_the_device_back_at_once() -> None:
+async def test_a_run_that_may_not_keep_its_worker_hands_the_device_back_at_once() -> None:
     orchestrator, record, _ = _warm_orchestrator(60)
 
     await orchestrator._complete_media_handoff("profile-chat", keep_warm=False)
@@ -623,7 +623,7 @@ async def test_a_stopped_or_failed_run_leaves_comfyui_running_for_its_other_user
     await orchestrator.close()
 
 
-async def test_only_a_run_that_succeeded_may_keep_its_worker_warm(
+async def test_an_engine_failure_may_not_keep_its_worker_and_a_finished_run_may(
     app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     await choose_retries(client, 0)

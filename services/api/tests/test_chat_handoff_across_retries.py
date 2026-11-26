@@ -98,7 +98,7 @@ async def test_retries_that_all_fail_give_chat_back_once_after_the_last(
     assert chat.running
 
 
-async def test_a_failure_that_is_not_retried_gives_chat_back_at_once(
+async def test_an_engine_failure_that_is_not_retried_gives_chat_back_at_once(
     app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     await choose_retries(client, 0)
