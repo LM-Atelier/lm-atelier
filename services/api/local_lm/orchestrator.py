@@ -520,6 +520,9 @@ MEDIA_SEED_SPACE = 2_147_483_648
 MEDIA_STOPPED_BY_ENGINE = (
     "The media engine stopped this generation before it finished. Retry to run it again."
 )
+CHAT_STOPPED_BY_ENGINE = (
+    "The chat model stopped this reply before it finished. Retry to run it again."
+)
 WORKFLOW_LORA_REPLAY_FAILURE = "The queued workflow LoRA configuration could not be verified."
 PENDING_OUTPUT_REFERENCE = re.compile(
     r"\b(?:"
@@ -2202,6 +2205,12 @@ class ConversationOrchestrator:
         #: nothing in the engine to stop, and an engine that remembers a stop
         #: for a run it is not generating applies it to that run's next attempt.
         self._media_generating: set[str] = set()
+        # Text runs whose reply the chat engine is writing, and those of them a
+        # stop was sent to the engine for. A reply still waiting has nothing in
+        # the engine to stop, and an engine that keeps a stop for a reply it is
+        # not writing applies it to that reply's next start: a retry.
+        self._chat_streaming: set[str] = set()
+        self._chat_stopping: set[str] = set()
         #: The generating media runs this process has told the media engine to
         #: stop. Each one stays here until its generation ends. A producer that
         #: reports one of these cancelled was stopped from here; one that
@@ -5695,7 +5704,11 @@ class ConversationOrchestrator:
                 continue
             try:
                 if operation == Operation.TEXT.value:
-                    await self.engines.chat.cancel(run_id)
+                    if run_id in self._chat_streaming:
+                        # A reply still waiting is ended by cancelling its task
+                        # below, as a media run that has not begun generating is.
+                        self._chat_stopping.add(run_id)
+                        await self.engines.chat.cancel(run_id)
                 elif run_id in self._media_generating:
                     # A run that has not begun generating is ended by cancelling
                     # its task below, which stops one that begins meanwhile too.
@@ -5807,7 +5820,11 @@ class ConversationOrchestrator:
                     await self.engines.chat.cancel(job_id)
                 elif operation == Operation.TEXT.value:
                     assert run_id is not None
-                    await self.engines.chat.cancel(run_id)
+                    if run_id in self._chat_streaming:
+                        # Read before this method's first await, as below. A
+                        # reply still waiting is ended by its cancelled task.
+                        self._chat_stopping.add(run_id)
+                        await self.engines.chat.cancel(run_id)
                 elif run_id in self._media_generating:
                     # Read before this method's first await, so the run's task,
                     # cancelled above, has not yet run on to change it. A run
@@ -6484,6 +6501,7 @@ class ConversationOrchestrator:
         completion_metadata: dict[str, Any] = {}
         last_persisted_length = 0
         last_persisted_at = time.monotonic()
+        self._chat_streaming.add(run_id)
         try:
             async for event in self.engines.chat.stream(request):
                 if event.type == "delta":
@@ -6537,6 +6555,12 @@ class ConversationOrchestrator:
                         last_persisted_at = now
 
                 elif event.type == "cancelled":
+                    if run_id not in self._chat_stopping:
+                        # Nothing here asked for this stop, so nothing marked
+                        # the run stopped either: it fails with its reason
+                        # rather than reading as running with no owner. The
+                        # handler below keeps what was written.
+                        raise RuntimeError(CHAT_STOPPED_BY_ENGINE)
                     if accumulated:
                         self._persist_streamed_text(
                             assistant_id, accumulated.rstrip(), job_id=job_id, claim=claim
@@ -6559,6 +6583,9 @@ class ConversationOrchestrator:
                     assistant_id, accumulated.rstrip(), job_id=job_id, claim=claim
                 )
             raise
+        finally:
+            self._chat_streaming.discard(run_id)
+            self._chat_stopping.discard(run_id)
 
         text_output = accumulated.rstrip()
         offer_relevant = should_extract_generation_offer(text_output) or any(

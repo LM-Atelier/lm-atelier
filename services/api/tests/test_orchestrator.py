@@ -371,7 +371,10 @@ async def test_engine_cancel_runs_after_the_database_session_closes() -> None:
         def commit(self) -> None:
             return None
 
+    calls: list[str] = []
+
     async def cancel(run_id: str) -> None:
+        calls.append(run_id)
         assert run_id == "run-cancel"
         assert session_closed is True
 
@@ -389,9 +392,12 @@ async def test_engine_cancel_runs_after_the_database_session_closes() -> None:
         session_factory=lambda: _session_double(FakeSession),
     )
     orchestrator._mark_cancelled = Mock()  # type: ignore[method-assign]
+    # The reply is being written, so its stop goes to the engine.
+    orchestrator._chat_streaming.add("run-cancel")
 
     assert await orchestrator.cancel("job-cancel") is True
     orchestrator._mark_cancelled.assert_called_once()
+    assert calls == ["run-cancel"]
 
 
 async def test_chat_worker_resume_runs_after_the_database_session_closes() -> None:
