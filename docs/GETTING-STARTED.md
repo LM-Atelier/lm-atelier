@@ -225,7 +225,9 @@ resent automatically.
 ### Watch accepted work
 
 Choose **Accepted work** at the foot of the sidebar to see active generation, transfers,
-and installs. Plans keep their jobs grouped. Use **Work category** to narrow the
+installs and video utilities. If the sidebar is hidden, select the narrow strip at the
+window's left edge (its tooltip reads **Show sidebar**) to bring it back; in a narrow
+window, open the navigation menu at the top first. Plans keep their jobs grouped. Use **Work category** to narrow the
 list and **Load more accepted work** to browse additional items. The count shows
 how many active items you have loaded out of the total.
 
@@ -264,7 +266,7 @@ updated action. Holds survive an app restart.
 ### Pause a work category
 
 In **Accepted work**, choose **Pause after current** under **Generation**,
-**Transfers**, or **Installations**. Current work in that category can finish,
+**Transfers**, **Installations** or **Video utilities**. Current work in that category can finish,
 while new work waits. You can keep submitting work; its
 accepted settings stay intact. The status shows when current work has finished
 and the category is paused. Choose **Resume** to allow it to start work again.

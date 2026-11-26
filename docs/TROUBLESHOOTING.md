@@ -274,7 +274,9 @@ The two paused messages are not a fault, and nothing is retrying behind them.
 Generation dispatch is paused, so the test is sitting in the queue and will stay
 there until generation is resumed - which is deliberate, and setup will not
 finish on its own meanwhile. Open **Accepted work** in the sidebar and resume generation
-there; the test starts by itself once the queue is open again.
+there; the test starts by itself once the queue is open again. If setup fills the window,
+choose **Not now** until it closes to reach the sidebar, and if the sidebar is hidden,
+select the strip at the window's left edge (**Show sidebar**).
 
 ### The worker
 
