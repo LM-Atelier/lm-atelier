@@ -2249,11 +2249,17 @@ class ConversationOrchestrator:
         #: stop. Such a request announces nothing, so the execution's own record
         #: of the stop announces it, once that lands.
         self._refused_stops: set[asyncio.Task[None]] = set()
-        #: Outcome records, by `_Outcome.key`, still waiting to land when a stop
-        #: request's own write was refused. Nothing may run again after a stop,
-        #: so such a failure is recorded without the retry it would have
-        #: queued; the record reads this as it writes.
+        #: Outcome records, by `_Outcome.key`, still waiting to land when their
+        #: job was stopped. Nothing may run again after a stop, so such a
+        #: failure is recorded without the retry it would have queued; the
+        #: record reads this as it writes. A stop of one job adds its records
+        #: when the stop's own write is refused; cancelling a chat's work adds
+        #: those of every job of the chat still waiting when it ends.
         self._withdrawn_retries: set[tuple[object, ...]] = set()
+        #: The jobs of a chat whose work is being cancelled, while that runs.
+        #: A failure of one of them is recorded without the retry it would
+        #: queue, however its landing falls among the cancel's own steps.
+        self._jobs_being_cancelled: set[str] = set()
         #: The window's expiry, or the settlement a chat load inside it left.
         self._media_warm_task: asyncio.Task[None] | None = None
         self._admission_open = True
@@ -5706,74 +5712,89 @@ class ConversationOrchestrator:
                 if job.payload_json.get("chat_id") == chat_id
             )
 
-        cancellable_rows = [
-            (job_id, run_id, operation)
-            for job_id, run_id, status, operation in rows
-            if status in active_statuses or self._task_is_active(job_id)
-        ]
-        for job_id, run_id, operation in cancellable_rows:
-            if not run_id:
-                try:
-                    await self.engines.chat.cancel(job_id)
-                except Exception:
-                    logger.warning(
-                        "Could not signal verification cancellation for job %s",
-                        job_id,
-                        exc_info=True,
-                    )
-                continue
-            try:
-                if operation == Operation.TEXT.value:
-                    if run_id in self._chat_streaming:
-                        # A reply still waiting is ended by cancelling its task
-                        # below, as a media run that has not begun generating is.
-                        self._chat_stopping.add(run_id)
-                        await self.engines.chat.cancel(run_id)
-                elif run_id in self._media_generating:
-                    # A run that has not begun generating is ended by cancelling
-                    # its task below, which stops one that begins meanwhile too.
-                    self._media_stopping.add(run_id)
-                    await self.engines.media.cancel(run_id)
-            except Exception:
-                logger.exception(
-                    "Engine cancellation failed while deleting chat %s (job %s)",
-                    chat_id,
-                    job_id,
-                )
-
-        tasks = {
-            job_id: task
-            for job_id, _run_id, _operation in cancellable_rows
-            if (task := self._tasks.get(job_id)) is not None and not task.done()
-        }
-        # A retry waiting for one of these executions to end would otherwise
-        # start its job as the execution ends, before the job is marked
-        # cancelled below, and leave it running in a chat being emptied.
-        self._starts_after_current.difference_update(job_id for job_id, *_rest in rows)
-        for task in tasks.values():
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks.values(), return_exceptions=True)
-            for job_id, task in tasks.items():
-                if self._tasks.get(job_id) is task:
-                    self._tasks.pop(job_id, None)
-
-        cancelled: list[tuple[str, str | None]] = []
-        with self.session_factory() as session:
-            for job_id, run_id, _status, _operation in rows:
-                job = session.get(Job, job_id)
-                if not job:
+        job_ids = {job_id for job_id, *_rest in rows}
+        # Nothing of this chat may start again once its work is being
+        # cancelled. A retry waiting for one of its executions to end would
+        # start its job as the execution ends, so it is withdrawn at once. A
+        # failure of one of its jobs that lands while this runs, which the
+        # engine stops below can make seconds, is recorded without its retry,
+        # and one still waiting to land when this ends is withdrawn then,
+        # whether the marking below landed or was refused.
+        self._starts_after_current.difference_update(job_ids)
+        self._jobs_being_cancelled.update(job_ids)
+        try:
+            cancellable_rows = [
+                (job_id, run_id, operation)
+                for job_id, run_id, status, operation in rows
+                if status in active_statuses or self._task_is_active(job_id)
+            ]
+            for job_id, run_id, operation in cancellable_rows:
+                if not run_id:
+                    try:
+                        await self.engines.chat.cancel(job_id)
+                    except Exception:
+                        logger.warning(
+                            "Could not signal verification cancellation for job %s",
+                            job_id,
+                            exc_info=True,
+                        )
                     continue
-                if job.status in active_statuses:
-                    self._mark_cancelled(session, job)
-                if job.status == JobStatus.CANCELLED.value:
-                    cancelled.append((job.id, run_id))
-            session.commit()
+                try:
+                    if operation == Operation.TEXT.value:
+                        if run_id in self._chat_streaming:
+                            # A reply still waiting is ended by cancelling its task
+                            # below, as a media run that has not begun generating is.
+                            self._chat_stopping.add(run_id)
+                            await self.engines.chat.cancel(run_id)
+                    elif run_id in self._media_generating:
+                        # A run that has not begun generating is ended by cancelling
+                        # its task below, which stops one that begins meanwhile too.
+                        self._media_stopping.add(run_id)
+                        await self.engines.media.cancel(run_id)
+                except Exception:
+                    logger.exception(
+                        "Engine cancellation failed while deleting chat %s (job %s)",
+                        chat_id,
+                        job_id,
+                    )
+
+            tasks = {
+                job_id: task
+                for job_id, _run_id, _operation in cancellable_rows
+                if (task := self._tasks.get(job_id)) is not None and not task.done()
+            }
+            for task in tasks.values():
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks.values(), return_exceptions=True)
+                for job_id, task in tasks.items():
+                    if self._tasks.get(job_id) is task:
+                        self._tasks.pop(job_id, None)
+
+            cancelled: list[tuple[str, str | None]] = []
+            with self.session_factory() as session:
+                for job_id, run_id, _status, _operation in rows:
+                    job = session.get(Job, job_id)
+                    if not job:
+                        continue
+                    if job.status in active_statuses:
+                        self._mark_cancelled(session, job)
+                    if job.status == JobStatus.CANCELLED.value:
+                        cancelled.append((job.id, run_id))
+                session.commit()
+        finally:
+            self._jobs_being_cancelled.difference_update(job_ids)
+            self._withdraw_pending_retries(job_ids)
 
         for job_id, run_id in cancelled:
             await self.scheduler.publish_job(job_id)
             if run_id:
                 await self.events.publish("run.cancelled", run_id, {"job_id": job_id})
+
+    def _withdraw_pending_retries(self, job_ids: Collection[str]) -> None:
+        """Have a failure of these jobs still waiting to land recorded without its retry."""
+
+        self._withdrawn_retries.update(key for key in self._pending_outcomes if key[0] in job_ids)
 
     def _task_is_active(self, job_id: str) -> bool:
         task = self._tasks.get(job_id)
@@ -5830,9 +5851,7 @@ class ConversationOrchestrator:
                     self._refused_stops.add(cancelled_task)
                 # A failure of this job still waiting to land is recorded
                 # without the retry it would have queued.
-                self._withdrawn_retries.update(
-                    key for key in self._pending_outcomes if key[0] == job_id
-                )
+                self._withdraw_pending_retries({job_id})
                 raise
         if run_id or verification_job:
             try:
@@ -12683,6 +12702,7 @@ class ConversationOrchestrator:
             self._reserve_failed_media_retry(session, job, run, claim)
             if outcome.retryable
             and outcome.key not in self._withdrawn_retries
+            and outcome.job_id not in self._jobs_being_cancelled
             and reserve_retry(run.provenance_json, run.operation) is not None
             else None
         )
