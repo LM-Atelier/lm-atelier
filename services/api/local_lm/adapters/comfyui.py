@@ -1147,8 +1147,11 @@ class ComfyUIAdapter:
                         break
                     except TimeoutError as exc:
                         if not execution_started and not await self._prompt_still_held(prompt_id):
-                            # A removal whose broadcast went unchecked: someone's
-                            # choice, so it is neither waited out nor sent again.
+                            # Removed before it ran, with nothing on the socket
+                            # saying so: someone's choice. The run fails as
+                            # stopped in ComfyUI, not as if ComfyUI had gone
+                            # silent, so it is not tried again, and no stop
+                            # follows.
                             removed = True
                             yield MediaEvent(type="cancelled")
                             return
@@ -2008,10 +2011,12 @@ class ComfyUIAdapter:
     async def _prompt_still_held(self, prompt_id: str) -> bool:
         """Whether ComfyUI still holds the prompt: waiting, running or with a record.
 
-        ComfyUI's job endpoint answers for this prompt alone. A ComfyUI without
-        it is asked its queue and then the prompt's history: a prompt moves from
-        one to the other in one step, so one in neither was removed before it
-        ran, or ran and had its record cleared since. The queue carries every
+        ComfyUI's job endpoint answers for this prompt alone: found, or no
+        such job. On any other answer, such as the plain not-found page a
+        ComfyUI without the endpoint gives, the queue is asked and then the
+        prompt's history: a prompt moves from one to the other in one step, so
+        one in neither was removed before it ran, or ran and had its record
+        cleared since. The queue carries every
         client's prompts and graphs; only prompt ids are compared, and nothing
         read is logged or kept. No answer within the deadline, an error, a body
         over the JSON bound or a row of another shape counts as held, so a slow

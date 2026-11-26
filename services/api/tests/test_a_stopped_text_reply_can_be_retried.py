@@ -1,15 +1,14 @@
 """A text reply stopped while it waits its turn, then retried, runs to its answer.
 
-The llama.cpp engine keeps a stop for a reply it is not writing yet and applies
-it to that reply's next start, as ComfyUI does for a prompt. Stopping a reply
-that was still queued told the engine all the same, so the retry, which is the
-same reply, began by ending at once with nothing written about it: its job
-stayed running with no owner and the turn never answered. Only a reply the
-engine is writing is stopped in the engine now; one still waiting ends when its
+The llama.cpp adapter keeps a stop for a reply it is not writing yet and
+applies it to that reply's next start, as the ComfyUI adapter does for a run.
+A retry is the same reply, so a stop the engine kept for a reply still waiting
+would end its retry at once, with nothing written about it. Only a reply the
+engine is writing is stopped in the engine; one still waiting ends when its
 execution is cancelled.
 
-The engine here is the mock chat engine, keeping and applying stops the way
-the llama.cpp engine does.
+The engine here is the mock chat engine, patched where a test needs it to keep
+and apply stops the way the llama.cpp adapter does.
 """
 
 from __future__ import annotations
@@ -167,7 +166,7 @@ async def test_a_reply_its_engine_ends_once_asked_to_stop_reads_as_stopped(
         yield ChatEvent(type="cancelled")
 
     async def cancel(run_id: str) -> None:
-        # As a stop sent over HTTP does, it ends the reply and then takes a moment.
+        # It ends the reply, then takes a moment to return.
         told.append(run_id)
         ends.setdefault(run_id, asyncio.Event()).set()
         await asyncio.sleep(0.05)

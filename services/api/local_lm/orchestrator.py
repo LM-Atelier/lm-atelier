@@ -2222,11 +2222,13 @@ class ConversationOrchestrator:
         #: nothing in the engine to stop, and an engine that remembers a stop
         #: for a run it is not generating applies it to that run's next attempt.
         self._media_generating: set[str] = set()
-        # Text runs whose reply the chat engine is writing, and those of them a
-        # stop was sent to the engine for. A reply still waiting has nothing in
-        # the engine to stop, and an engine that keeps a stop for a reply it is
-        # not writing applies it to that reply's next start: a retry.
+        #: Text runs whose reply the chat engine is writing. Only these are
+        #: told to the chat engine when they are stopped: a reply still waiting
+        #: has nothing in the engine to stop, and an engine that keeps a stop
+        #: for a reply it is not writing applies it to that reply's next start,
+        #: which is its retry.
         self._chat_streaming: set[str] = set()
+        #: The replies being written that a stop was sent to the chat engine for.
         self._chat_stopping: set[str] = set()
         #: The generating media runs this process has told the media engine to
         #: stop. Each one stays here until its generation ends. A producer that
