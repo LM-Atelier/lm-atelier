@@ -3336,6 +3336,27 @@ class ProcessSupervisor:
             arguments.append("--mlock")
         return arguments
 
+    def chat_memory_estimate(self, profile: ModelProfile, install: ModelInstall) -> int | None:
+        """The memory a llama.cpp chat profile needs, as its load records it, or None.
+
+        Read from the sizes of the files its load would use, without starting
+        anything. None for another engine or when those files cannot be read.
+        """
+
+        if profile.engine != "llama.cpp":
+            return None
+        try:
+            model_paths = self._gguf_paths(Path(install.local_path), install.manifest_json)
+            projection_path = self._llama_mmproj_path(
+                Path(install.local_path), install.manifest_json, model_paths
+            )
+            size = sum(item.stat().st_size for item in model_paths)
+            if projection_path is not None:
+                size += projection_path.stat().st_size
+        except (OSError, ValueError, RuntimeError):
+            return None
+        return self._estimate_chat_memory(size, profile.load_settings_json)
+
     @staticmethod
     def _estimate_chat_memory(model_bytes: int, settings: dict[str, Any]) -> int:
         context_length = int(settings.get("context_length", DEFAULT_CHAT_CONTEXT))

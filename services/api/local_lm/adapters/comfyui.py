@@ -398,6 +398,20 @@ ABANDONED_INTERRUPT_SECONDS = 2.0
 #: delete-then-interrupt protocol.
 STOP_SECONDS = 10.0
 RECONCILE_SECONDS = 5.0
+#: Emptying ComfyUI's memory: how long it is waited for in all, how often its
+#: count of free device memory is read meanwhile, how long each request may
+#: take, how far the count must rise to show a release, how close two readings
+#: must be to show it has settled, after how long a request that changed
+#: nothing is sent again, and after how long a count that has not risen at
+#: all is given up on. Measured on a 16 GB card, about 10 GB came back within
+#: half a second.
+RELEASE_SECONDS = 10.0
+RELEASE_POLL_SECONDS = 0.5
+RELEASE_REQUEST_SECONDS = 3.0
+RELEASE_RISE_BYTES = 256 * 1024 * 1024
+RELEASE_SETTLED_BYTES = 64 * 1024 * 1024
+RELEASE_ASK_AGAIN_SECONDS = 2.0
+RELEASE_GIVE_UP_SECONDS = 4.0
 
 
 class ComfyUIAdapter:
@@ -462,6 +476,10 @@ class ComfyUIAdapter:
         # known to have left, because ComfyUI was later seen holding none of
         # these prompts.
         self._in_flight = 0
+        #: Prompts handed to ComfyUI since this adapter started or last saw it
+        #: emptied. With none, nothing this adapter sent is loaded there, and
+        #: emptying it has no release to wait for.
+        self._prompts_since_emptied = 0
         self._unsettled = 0
         self._settled_through = 0
         self._last_output_sweep = 0.0
@@ -1044,6 +1062,7 @@ class ComfyUIAdapter:
                 # reply turns out to be, until its outputs are collected.
                 submitted = True
                 self._in_flight += 1
+                self._prompts_since_emptied += 1
                 try:
                     response = await self._client.post(
                         "/prompt",
@@ -1071,8 +1090,10 @@ class ComfyUIAdapter:
                     if refused.response.status_code != 400:
                         raise
                     # ComfyUI answers a graph that fails its validation this way,
-                    # with the nodes at fault, and queues nothing: the refusal
-                    # is the workflow's own. Any other status is answered below.
+                    # with the nodes at fault, and queues nothing, so it loads
+                    # nothing either: the refusal is the workflow's own. Any
+                    # other status is answered below.
+                    self._prompts_since_emptied -= 1
                     raise _WorkflowFailed(
                         "ComfyUI rejected a generation request (HTTP 400)"
                     ) from None
@@ -1762,6 +1783,89 @@ class ComfyUIAdapter:
             self._cancelled.add(run_id)
         if prompt_id := self._jobs.get(run_id):
             await self._abandon_prompt(prompt_id, seconds=STOP_SECONDS)
+
+    async def release_memory(self) -> bool:
+        """Have ComfyUI unload its models and free its cache, and wait until it has.
+
+        ComfyUI's `/free` only sets flags its worker reads between prompts, so it
+        answers before anything is freed, and a request that arrives while the
+        worker finishes a prompt can wait for the next one; it is sent once more
+        if nothing has changed after a while. True when ComfyUI's count of free
+        device memory on its first device rose by `RELEASE_RISE_BYTES` and then
+        held still, or at once when ComfyUI took no prompt of this adapter's
+        since it started or was last emptied: nothing of this adapter's is
+        loaded and no rise would come, so anything someone else left there is
+        asked to go without waiting. False when ComfyUI refused, did not
+        answer, the count could not be read, it had not risen
+        `RELEASE_GIVE_UP_SECONDS` after the first request, or it never settled
+        within `RELEASE_SECONDS`; the caller then stops the worker as it
+        otherwise would. Nothing read is logged or kept beyond the counts.
+        """
+
+        try:
+            if not self._prompts_since_emptied:
+                return await self._ask_to_free()
+            async with asyncio.timeout(RELEASE_SECONDS):
+                before = await self._free_device_memory()
+                if before is None or not await self._ask_to_free():
+                    return False
+                asked = time.monotonic()
+                asked_again = False
+                previous = before
+                while True:
+                    await asyncio.sleep(RELEASE_POLL_SECONDS)
+                    current = await self._free_device_memory()
+                    if current is None:
+                        return False
+                    risen = current >= before + RELEASE_RISE_BYTES
+                    if (
+                        risen
+                        and previous >= before + RELEASE_RISE_BYTES
+                        and abs(current - previous) <= RELEASE_SETTLED_BYTES
+                    ):
+                        self._prompts_since_emptied = 0
+                        return True
+                    waited = time.monotonic() - asked
+                    if not risen and waited >= RELEASE_GIVE_UP_SECONDS:
+                        return False
+                    if not risen and not asked_again and waited >= RELEASE_ASK_AGAIN_SECONDS:
+                        asked_again = True
+                        if not await self._ask_to_free():
+                            return False
+                    previous = current
+        except (httpx.HTTPError, ValueError, TimeoutError) as error:
+            logger.info("ComfyUI's memory was not emptied: %s", type(error).__name__)
+            return False
+
+    async def _ask_to_free(self) -> bool:
+        """Ask ComfyUI to unload its models and free its cache; whether it accepted."""
+
+        response = await self._client.post(
+            "/free",
+            json={"unload_models": True, "free_memory": True},
+            timeout=RELEASE_REQUEST_SECONDS,
+        )
+        if response.status_code != 200:
+            logger.info("ComfyUI refused to empty its memory: HTTP %s", response.status_code)
+            return False
+        return True
+
+    async def _free_device_memory(self) -> int | None:
+        """The free device memory ComfyUI counts on its first device, or None if it cannot say.
+
+        ComfyUI frees every device, and its first one is where it loads models.
+        """
+
+        response = await self._client.get("/system_stats", timeout=RELEASE_REQUEST_SECONDS)
+        if response.status_code != 200 or len(response.content) > _MAX_COMFY_JSON_BYTES:
+            return None
+        body = response.json()
+        devices = body.get("devices") if isinstance(body, dict) else None
+        first = devices[0] if isinstance(devices, list) and devices else None
+        free = first.get("vram_free") if isinstance(first, dict) else None
+        if isinstance(free, bool) or not isinstance(free, int | float) or not 0 <= free < 2**62:
+            return None
+        return int(free)
 
     async def queue_remaining(self) -> int | None:
         """How many prompts ComfyUI holds, running or waiting, or None if it cannot say."""

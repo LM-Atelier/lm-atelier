@@ -78,6 +78,17 @@ def _run_json(command: list[str], timeout: float = 5) -> Any | None:
         return None
 
 
+def first_device_free_memory() -> int | None:
+    """The free memory of the first NVIDIA device, or None when it cannot be read.
+
+    It counts every process's use of the device, which a single process's own
+    count does not.
+    """
+
+    devices = _nvidia_devices()
+    return devices[0].available_memory_bytes if devices else None
+
+
 def _nvidia_devices() -> list[DeviceInfo]:
     executable = shutil.which("nvidia-smi")
     if not executable:

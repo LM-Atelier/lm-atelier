@@ -633,9 +633,11 @@ async def test_an_engine_failure_may_not_keep_its_worker_and_a_finished_run_may(
     original = orchestrator._complete_media_handoff
     handoffs: list[bool] = []
 
-    async def complete(chat_profile_id: str, *, keep_warm: bool = True) -> None:
+    async def complete(
+        chat_profile_id: str, *, keep_warm: bool = True, emptiable: bool = False
+    ) -> None:
         handoffs.append(keep_warm)
-        await original(chat_profile_id, keep_warm=keep_warm)
+        await original(chat_profile_id, keep_warm=keep_warm, emptiable=emptiable)
 
     monkeypatch.setattr(orchestrator, "_complete_media_handoff", complete)
 
@@ -957,9 +959,11 @@ async def test_a_stopped_run_does_not_keep_its_worker_warm(
     original = orchestrator._complete_media_handoff
     handoffs: list[bool] = []
 
-    async def complete(chat_profile_id: str, *, keep_warm: bool = True) -> None:
+    async def complete(
+        chat_profile_id: str, *, keep_warm: bool = True, emptiable: bool = False
+    ) -> None:
         handoffs.append(keep_warm)
-        await original(chat_profile_id, keep_warm=keep_warm)
+        await original(chat_profile_id, keep_warm=keep_warm, emptiable=emptiable)
 
     monkeypatch.setattr(orchestrator, "_complete_media_handoff", complete)
 
