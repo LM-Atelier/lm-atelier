@@ -9789,6 +9789,7 @@ class _TerminalSeam:
     events = _Events()
     artifacts = _Artifacts()
     _withdrawn_retries: frozenset[tuple[object, ...]] = frozenset()
+    _jobs_being_cancelled: frozenset[str] = frozenset()
 
 
 def _terminal_graph(session, job_id: str):  # type: ignore[no-untyped-def]
