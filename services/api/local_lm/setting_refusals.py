@@ -244,6 +244,27 @@ def _named_choices(choices: Iterable[Any] | None) -> list[str | int | float | bo
     return named or None
 
 
+def nameable_value(value: object, choices: Iterable[Any] | None = None) -> bool:
+    """Whether an answer may name a value back: true or false, a finite number, or a choice.
+
+    Text is named only when it is one of `choices`, the choices its setting
+    offers, and those choices would be named back themselves; any other text
+    could be a file name or words someone typed. A list, a set of named values
+    or nothing at all is never named.
+    """
+
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, int | float):
+        return _plain_number(value)
+    if not isinstance(value, str):
+        return False
+    named = _named_choices(choices)
+    return named is not None and any(
+        isinstance(choice, str) and choice == value for choice in named
+    )
+
+
 @dataclass(frozen=True)
 class SettingRefusal:
     """One reason one setting was refused, before it is said to a client.

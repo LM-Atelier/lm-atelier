@@ -657,7 +657,15 @@ async def queue_prior_turn_edit(
     session: Session,
     message_id: str,
     payload: PriorTurnEditRequest,
+    *,
+    sent_settings: frozenset[str] | None = None,
 ) -> PriorTurnEditAccepted:
+    """Queue an edit of an earlier turn as a new branch beside it.
+
+    `sent_settings` is every setting key the edit itself named; a value the
+    edit changed on purpose outside it is said to be carried over from the
+    turn it edits.
+    """
     if not orchestrator._admission_open:
         raise RuntimeError("This conversation service cannot accept new work while shutting down.")
     source, _ = _source(session, message_id, payload.source_run_id)
@@ -828,5 +836,6 @@ async def queue_prior_turn_edit(
                 else None
             ),
             resolve_source=source_inheritance.resolve if source_inheritance else None,
+            sent_settings=sent_settings,
         )
         return _edit_result(session, accepted, fingerprint)

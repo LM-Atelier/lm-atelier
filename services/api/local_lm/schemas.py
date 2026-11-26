@@ -42,6 +42,7 @@ from .references import (
     ValidationState,
 )
 from .saved_settings import GenerationSettingsByRole, SavedRoleSettings
+from .setting_changes import SettingChangeOut
 from .studio_capabilities import StudioToolKind
 from .worker_failures import WorkerFailureCode
 from .workflow_install_offer_error_types import WorkflowInstallOfferInvalidationCode
@@ -1130,6 +1131,10 @@ class PromptExpansionItemOut(ApiModel):
     media_seed: int | None = Field(default=None, ge=0, lt=2_147_483_648)
 
 
+def _changed_nothing(changes: list[SettingChangeOut]) -> bool:
+    return not changes
+
+
 class PromptExpansionBatchOut(ApiModel):
     id: str = Field(min_length=1, max_length=40)
     chat_id: str = Field(min_length=1, max_length=40)
@@ -1151,6 +1156,10 @@ class PromptExpansionBatchOut(ApiModel):
     queued_at: datetime | None = None
     items: list[PromptExpansionItemOut] = Field(min_length=1, max_length=16)
     replayed: bool
+    # What queueing the batch changed on purpose; left out when it changed nothing.
+    setting_changes: list[SettingChangeOut] = Field(
+        default_factory=list, exclude_if=_changed_nothing
+    )
 
 
 class TurnReferenceIn(ApiModel):
@@ -1602,6 +1611,11 @@ class TurnAccepted(ApiModel):
     # request created the run. A sent turn is matched by its key alone, so a
     # changed turn sent with a reused key is answered with the earlier run.
     replayed: bool = False
+    # Each value the turn was given or carried over that it changed on purpose,
+    # and why; left out when it changed nothing.
+    setting_changes: list[SettingChangeOut] = Field(
+        default_factory=list, exclude_if=_changed_nothing
+    )
 
 
 class PriorTurnEditAccepted(TurnAccepted):

@@ -206,6 +206,7 @@ CHECKED_CONTRACTS = {
     "RefusalAlternative": "RefusalAlternativeOut",
     "ResourceEvidence": "ResourceEvidenceOut",
     "SettingError": "SettingErrorOut",
+    "SettingChange": "SettingChangeOut",
     "WorkspaceLockPolicy": "WorkspaceLockPolicyOut",
     "WorkspaceLockPolicyWrite": "WorkspaceLockPolicyWrite",
     "WorkspaceLockStatus": "WorkspaceLockStatusOut",
