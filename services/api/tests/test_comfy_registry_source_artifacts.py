@@ -278,7 +278,7 @@ def test_late_artifact_uniqueness_race_is_coded_without_poisoning_session(
     scalar_calls = 0
 
     def hide_artifact_preflight(
-        statement: Select[tuple[ComfyRegistrySourceArtifactReview]],
+        statement: Select[ComfyRegistrySourceArtifactReview],
     ) -> ComfyRegistrySourceArtifactReview | None:
         nonlocal scalar_calls
         scalar_calls += 1
@@ -322,7 +322,7 @@ def test_exact_retry_race_returns_the_existing_review(
     scalar_calls = 0
 
     def hide_declaration_preflight(
-        statement: Select[tuple[ComfyRegistrySourceArtifactReview]],
+        statement: Select[ComfyRegistrySourceArtifactReview],
     ) -> ComfyRegistrySourceArtifactReview | None:
         nonlocal scalar_calls
         scalar_calls += 1
@@ -355,7 +355,7 @@ def test_exact_retry_after_uniqueness_conflict_returns_the_existing_review(
     scalar_calls = 0
 
     def hide_both_preflights(
-        statement: Select[tuple[ComfyRegistrySourceArtifactReview]],
+        statement: Select[ComfyRegistrySourceArtifactReview],
     ) -> ComfyRegistrySourceArtifactReview | None:
         nonlocal scalar_calls
         scalar_calls += 1

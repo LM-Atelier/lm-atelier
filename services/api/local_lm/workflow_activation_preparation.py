@@ -78,27 +78,23 @@ def _installed_candidates(
         return (("comfyui", "ComfyUI"),)
     if kind == "model_install":
         return tuple(
-            session.execute(
-                select(ModelInstall.id, ModelInstall.name).order_by(ModelInstall.id)
-            ).tuples()
+            session.execute(select(ModelInstall.id, ModelInstall.name).order_by(ModelInstall.id))
         )
     if kind == "model_profile":
         return tuple(
-            session.execute(
-                select(ModelProfile.id, ModelProfile.name).order_by(ModelProfile.id)
-            ).tuples()
+            session.execute(select(ModelProfile.id, ModelProfile.name).order_by(ModelProfile.id))
         )
     if kind == "model_asset":
         return tuple(
             session.execute(
                 select(ModelAssetInstall.id, ModelAssetInstall.name).order_by(ModelAssetInstall.id)
-            ).tuples()
+            )
         )
     if kind == "custom_node":
         return tuple(
             session.execute(
                 select(CustomNodeInstall.id, CustomNodeInstall.name).order_by(CustomNodeInstall.id)
-            ).tuples()
+            )
         )
     return tuple(
         (row.id, f"{row.package_id} {row.package_version}")

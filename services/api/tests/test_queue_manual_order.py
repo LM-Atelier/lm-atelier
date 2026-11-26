@@ -461,16 +461,14 @@ async def test_plan_order_keeps_descendants_grouped_and_dependencies_intact(
             "image-0-0",
         ]
         assert list(
-            session.execute(
-                select(WorkStep.plan_id, WorkStep.ordinal).order_by(WorkStep.id)
-            ).tuples()
+            session.execute(select(WorkStep.plan_id, WorkStep.ordinal).order_by(WorkStep.id))
         ) == [("plan-0", 0), ("plan-0", 1), ("plan-1", 0), ("plan-1", 1)]
         assert list(
             session.execute(
                 select(WorkStepDependency.step_id, WorkStepDependency.depends_on_step_id).order_by(
                     WorkStepDependency.step_id
                 )
-            ).tuples()
+            )
         ) == [("step-0-1", "step-0-0"), ("step-1-1", "step-1-0")]
 
 

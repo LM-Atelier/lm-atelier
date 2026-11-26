@@ -63,10 +63,10 @@ def test_upgrade_keeps_history_and_installs_the_canonical_bulk_write_guards(tmp_
     with Session(engine) as session:
         assert tuple(session.execute(text("SELECT * FROM message_parts")).all()) == before
         assert session.scalar(select(Chat.title)) == "Garden notes"
-        triggers = dict(
-            session.execute(text("SELECT name, sql FROM sqlite_master WHERE type = 'trigger'"))
-            .tuples()
-            .all()
+        triggers: dict[str, str] = dict(
+            session.execute(
+                text("SELECT name, sql FROM sqlite_master WHERE type = 'trigger'")
+            ).all()
         )
         for statement in CREATE_CHAT_RECOVERY_TRIGGER_SQL:
             assert triggers[statement.split()[2]].strip() == statement.strip()

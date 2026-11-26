@@ -45,7 +45,7 @@ SELECTOR_OPERATIONS: dict[WorkflowSelectorCapability, tuple[str, ...]] = {
 }
 
 
-def _visible_definitions() -> Select[tuple[WorkflowDefinition]]:
+def _visible_definitions() -> Select[WorkflowDefinition]:
     current = aliased(WorkflowRevision)
     draft_type = func.json_type(current.dependencies_json, "$." + WORKFLOW_PACKAGE_DRAFT_MARKER)
     return (

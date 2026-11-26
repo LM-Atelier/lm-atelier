@@ -288,13 +288,9 @@ async def test_hold_wins_at_the_real_final_claim_write(
             assert rowcounts == [0]
             assert not entered.is_set()
             with sessions() as session:
-                remaining = (
-                    session.execute(
-                        select(Job.status, Job.claim_owner).where(Job.id.in_(["first", "second"]))
-                    )
-                    .tuples()
-                    .all()
-                )
+                remaining = session.execute(
+                    select(Job.status, Job.claim_owner).where(Job.id.in_(["first", "second"]))
+                ).all()
             assert remaining == [("queued", None), ("queued", None)]
             response = await queue_client.post(
                 "/api/queue/items/plan-a/release",

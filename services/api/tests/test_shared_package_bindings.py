@@ -72,10 +72,10 @@ def test_binding_migration_preserves_existing_model_and_lora_installs(tmp_path: 
     with db.engine.connect() as connection:
         assert connection.execute(
             text("SELECT local_path,active,shared_package_binding_id FROM model_installs")
-        ).tuples().all() == [("models/existing.gguf", 1, None)]
+        ).all() == [("models/existing.gguf", 1, None)]
         assert connection.execute(
             text("SELECT local_path,active,shared_package_binding_id FROM model_asset_installs")
-        ).tuples().all() == [("models/existing.safetensors", 1, None)]
+        ).all() == [("models/existing.safetensors", 1, None)]
         assert (
             connection.execute(text("SELECT COUNT(*) FROM shared_package_bindings")).scalar() == 0
         )
@@ -288,6 +288,6 @@ def test_downgrade_refuses_live_bindings_and_keeps_legacy_installs(
     command.downgrade(config, "f5c2a8d91e40")
     assert "shared_package_bindings" not in inspect(db.engine).get_table_names()
     with db.engine.connect() as connection:
-        assert connection.execute(
-            text("SELECT local_path,active FROM model_installs")
-        ).tuples().all() == [("models/legacy.gguf", 1)]
+        assert connection.execute(text("SELECT local_path,active FROM model_installs")).all() == [
+            ("models/legacy.gguf", 1)
+        ]
