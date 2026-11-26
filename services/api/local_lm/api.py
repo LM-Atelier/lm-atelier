@@ -348,13 +348,11 @@ from .picture_export import (
     export_stored_picture,
 )
 from .picture_remix import (
-    REFUSAL_MESSAGES as REMIX_REFUSAL_MESSAGES,
-)
-from .picture_remix import (
     RemixChoiceInvalid,
     RemixDiffers,
     preview_remix,
     remix_check,
+    remix_refusals,
 )
 from .picture_remix_api import RemixQueueRequest, remix_source
 from .picture_remix_api import router as picture_remix_router
@@ -5218,9 +5216,7 @@ async def remix_a_picture(
             409,
             "remix-unavailable",
             "This picture cannot be remixed with these choices.",
-            refusals=[
-                {"code": code, "message": REMIX_REFUSAL_MESSAGES[code]} for code in preview.refusals
-            ],
+            refusals=remix_refusals(preview),
         )
     if preview.review_digest != payload.review_digest:
         raise api_error(

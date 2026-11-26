@@ -15,13 +15,13 @@ from .db import get_session
 from .output_recipe import OutputRecipeUnavailable
 from .output_recipe_api import exact_in_json, read_picture_generation_settings
 from .picture_remix import (
-    REFUSAL_MESSAGES,
     RemixChoiceInvalid,
     RemixPreview,
     RemixRole,
     RemixSource,
     preview_remix,
     read_remix_source,
+    remix_refusals,
 )
 from .setting_refusals import setting_error_body
 
@@ -187,9 +187,7 @@ def preview_answer(artifact_id: str, preview: RemixPreview) -> dict[str, Any]:
             if preview.ready
             else None
         ),
-        "refusals": [
-            {"code": code, "message": REFUSAL_MESSAGES[code]} for code in preview.refusals
-        ],
+        "refusals": remix_refusals(preview),
         "ready": preview.ready,
         "review_digest": preview.review_digest,
     }
