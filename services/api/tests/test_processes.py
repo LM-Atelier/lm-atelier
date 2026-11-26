@@ -60,7 +60,7 @@ from local_lm.processes import (
     _with_comfy_registry_overlays,
 )
 from local_lm.runtime_provisioning import RuntimeProvisioner
-from local_lm.schemas import CustomNodeContainmentStatus
+from local_lm.schemas import CustomNodeContainmentStatus, WorkerStartReason, WorkerStopReason
 from local_lm.security import trusted_browser_origins
 from local_lm.worker_failures import WorkerFailureCode
 from local_lm.workflow_activations import (
@@ -1556,6 +1556,7 @@ async def test_chat_first_use_provisions_missing_runtime(
         *,
         estimated_memory_bytes: int | None = None,
         launch_scope_sha256: str | None = None,
+        reason: WorkerStartReason = WorkerStartReason.UNATTRIBUTED,
     ) -> None:
         assert launch_scope_sha256 == scope
         assert name == "chat"
@@ -1855,6 +1856,7 @@ async def test_media_first_use_provisions_missing_runtime(
         estimated_memory_bytes: int | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
         environment_overrides: dict[str, str] | None = None,
+        reason: WorkerStartReason = WorkerStartReason.UNATTRIBUTED,
     ) -> None:
         assert environment_overrides is None
         del estimated_memory_bytes
@@ -2038,6 +2040,7 @@ async def test_vllm_chat_launches_complete_modelopt_snapshot(
         *,
         estimated_memory_bytes: int | None = None,
         launch_scope_sha256: str | None = None,
+        reason: WorkerStartReason = WorkerStartReason.UNATTRIBUTED,
     ) -> None:
         assert launch_scope_sha256 == scope
         captured.update(
@@ -2175,6 +2178,7 @@ async def test_chat_launches_split_gguf_from_first_shard(
         *,
         estimated_memory_bytes: int | None = None,
         launch_scope_sha256: str | None = None,
+        reason: WorkerStartReason = WorkerStartReason.UNATTRIBUTED,
     ) -> None:
         captured["command"] = command
         captured["estimated_memory_bytes"] = estimated_memory_bytes
@@ -2234,6 +2238,7 @@ async def test_chat_launches_multimodal_projector_and_includes_its_memory(
         *,
         estimated_memory_bytes: int | None = None,
         launch_scope_sha256: str | None = None,
+        reason: WorkerStartReason = WorkerStartReason.UNATTRIBUTED,
     ) -> None:
         captured["command"] = command
         captured["estimated_memory_bytes"] = estimated_memory_bytes
@@ -2297,6 +2302,7 @@ async def test_media_start_disables_unapproved_custom_nodes(
         estimated_memory_bytes: int | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
         environment_overrides: dict[str, str] | None = None,
+        reason: WorkerStartReason = WorkerStartReason.UNATTRIBUTED,
     ) -> None:
         assert environment_overrides is None
         assert name == "media"
@@ -2566,6 +2572,7 @@ async def test_media_start_retains_a_bridge_staging_refusal_without_blocking_med
         estimated_memory_bytes: int | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
         environment_overrides: dict[str, str] | None = None,
+        reason: WorkerStartReason = WorkerStartReason.UNATTRIBUTED,
     ) -> None:
         assert environment_overrides is None
         assert name == "media"
@@ -2635,6 +2642,7 @@ async def test_media_start_whitelists_only_the_verified_first_party_editor_bridg
         estimated_memory_bytes: int | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
         environment_overrides: dict[str, str] | None = None,
+        reason: WorkerStartReason = WorkerStartReason.UNATTRIBUTED,
     ) -> None:
         assert estimated_memory_bytes is None
         assert editor_bridge_support is not None
@@ -2720,6 +2728,7 @@ async def test_media_start_retains_the_exact_unsupported_runtime_fact(
         estimated_memory_bytes: int | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
         environment_overrides: dict[str, str] | None = None,
+        reason: WorkerStartReason = WorkerStartReason.UNATTRIBUTED,
     ) -> None:
         assert environment_overrides is None
         assert estimated_memory_bytes is None
@@ -2818,6 +2827,7 @@ async def test_media_start_uses_only_the_exact_activation_scope(
         ready_check: Callable[[], Awaitable[None]] | None = None,
         launch_scope_sha256: str | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
+        reason: WorkerStartReason = WorkerStartReason.UNATTRIBUTED,
     ) -> None:
         assert editor_bridge_support is not None
         assert not editor_bridge_support.supported
@@ -2936,7 +2946,7 @@ async def test_activation_scoped_worker_is_reused_only_for_the_same_ready_launch
             launch_scope_sha256="a" * 64,
             editor_bridge_support=changed_support,
         )
-    stopped.assert_awaited_once_with("media")
+    stopped.assert_awaited_once_with("media", reason=WorkerStopReason.UNATTRIBUTED)
     log.close()
 
 
@@ -2999,6 +3009,7 @@ async def test_media_start_uses_only_verified_registry_overlay_contract(
         environment_overrides: dict[str, str] | None = None,
         ready_check: Callable[[], Awaitable[None]] | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
+        reason: WorkerStartReason = WorkerStartReason.UNATTRIBUTED,
     ) -> None:
         assert editor_bridge_support is not None
         assert not editor_bridge_support.supported
@@ -3896,7 +3907,9 @@ async def test_replace_reclaims_the_port_before_it_judges_the_port(
     supervisor = ProcessSupervisor(settings)
     order: list[str] = []
 
-    async def record_stop(name: str) -> None:
+    async def record_stop(
+        name: str, *, reason: WorkerStopReason = WorkerStopReason.UNATTRIBUTED
+    ) -> None:
         order.append("stop")
 
     async def record_reclaim(name: str, url: str) -> None:

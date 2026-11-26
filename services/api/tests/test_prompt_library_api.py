@@ -47,7 +47,7 @@ from local_lm.prompt_model_values import (
     parse_prompt_model_values,
     prompt_model_values_sha256,
 )
-from local_lm.schemas import WorkerStatus
+from local_lm.schemas import WorkerStatus, WorkerStopReason
 
 
 def _contract(
@@ -2364,6 +2364,7 @@ def _stopped_workers(
     state: dict[str, Any] = {
         "loaded": [],
         "stopped": [],
+        "stop_reasons": [],
         "restarts": 0,
         "chat": WorkerStatus(
             name="chat", state="stopped", managed=True, running=False, profile_id=None
@@ -2379,15 +2380,16 @@ def _stopped_workers(
 
     monkeypatch.setattr(processes, "statuses", lambda: [state["chat"], state["media"]])
 
-    async def load_chat(profile: Any, install: Any) -> WorkerStatus:
+    async def load_chat(profile: Any, install: Any, **_options: object) -> WorkerStatus:
         state["loaded"].append(profile.id)
         state["chat"] = WorkerStatus(
             name="chat", state="ready", managed=True, running=True, profile_id=profile.id
         )
         return cast(WorkerStatus, state["chat"])
 
-    async def stop(name: str) -> None:
+    async def stop(name: str, **options: object) -> None:
         state["stopped"].append(name)
+        state["stop_reasons"].append(options.get("reason"))
         if name == "media":
             state["media"] = WorkerStatus(
                 name="media", state="stopped", managed=True, running=False, profile_id=None
@@ -2507,6 +2509,7 @@ async def test_preparing_the_chat_model_returns_the_device_to_the_media_worker(
 
     assert created.status_code == 201, created.text
     assert state["stopped"] == ["media"]
+    assert state["stop_reasons"] == [WorkerStopReason.CHAT_LOAD]
     assert state["restarts"] == 1, "the media worker was stopped and never restarted"
 
 
@@ -2578,7 +2581,7 @@ async def test_a_failed_chat_model_load_still_returns_the_device(
     profile_id = _installed_chat_profile(app)
     state = _stopped_workers(app, monkeypatch, media_running=True)
 
-    async def refuse_to_load(profile: Any, install: Any) -> WorkerStatus:
+    async def refuse_to_load(profile: Any, install: Any, **_options: object) -> WorkerStatus:
         state["loaded"].append(profile.id)
         raise RuntimeError("the runtime is not installed")
 

@@ -176,8 +176,8 @@ async def test_activation_endpoint_restores_after_startup_invalidates_the_trial(
     entered = asyncio.Event()
     task = None
 
-    async def start() -> Any:
-        result = await original()
+    async def start(**options: Any) -> Any:
+        result = await original(**options)
         if len(package["starts"]) == 1:
             if change == "source-review":
                 with SessionLocal() as session:

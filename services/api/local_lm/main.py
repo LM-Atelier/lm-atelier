@@ -70,6 +70,7 @@ from .recovery_maintenance import maintain_recovery_expiry
 from .retention_policy import windows_for
 from .runtime_provisioning import RuntimeProvisioner
 from .scheduler import ResourceScheduler
+from .schemas import WorkerStopReason
 from .security import (
     JsonBodyLimitMiddleware,
     SecurityHeadersMiddleware,
@@ -960,6 +961,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 yield
             finally:
+                # Shutting down is why a worker still starting is about to be
+                # cancelled, so that is named before anything is.
+                for name in ("chat", "media"):
+                    services.processes.expect_stop(name, WorkerStopReason.SHUTDOWN)
                 for task in background:
                     if not task.done():
                         task.cancel()

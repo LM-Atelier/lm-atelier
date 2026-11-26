@@ -11,6 +11,7 @@ from local_lm.db import SessionLocal
 from local_lm.models import AppSetting, ModelInstall, ModelProfile
 from local_lm.profile_service import LAST_CHAT_PROFILE_KEY
 from local_lm.scheduler import ResourceScheduler
+from local_lm.schemas import WorkerStartReason
 from local_lm.worker_startup import (
     chat_profile_to_restore,
     restore_configured_workers,
@@ -78,12 +79,13 @@ async def test_configured_workers_provision_and_restore_with_last_chat_profile(
 
     await restore_configured_workers(services)
 
-    processes.start_media.assert_awaited_once_with()
+    processes.start_media.assert_awaited_once_with(reason=WorkerStartReason.APP_START)
     services.downloads.refresh_installed_media_workflows.assert_awaited_once_with()
     services.downloads.reconcile_workflow_install_offers.assert_awaited_once_with()
     restored_profile, restored_install = processes.load_chat.await_args.args
     assert restored_profile.id == profile.id
     assert restored_install.id == install.id
+    assert processes.load_chat.await_args.kwargs == {"reason": WorkerStartReason.APP_START}
 
 
 async def test_fresh_workspace_does_not_download_unused_worker_runtimes(
@@ -122,7 +124,7 @@ async def test_worker_restore_failure_does_not_prevent_other_worker(
 
     await restore_configured_workers(worker_services(settings, processes))
 
-    processes.start_media.assert_awaited_once_with()
+    processes.start_media.assert_awaited_once_with(reason=WorkerStartReason.APP_START)
     processes.load_chat.assert_not_awaited()
 
 

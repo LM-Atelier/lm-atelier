@@ -8,6 +8,7 @@ from sqlalchemy import select
 from .db import SessionLocal
 from .models import AppSetting, ModelInstall, ModelProfile
 from .profile_service import LAST_CHAT_PROFILE_KEY, validate_profile_binding
+from .schemas import WorkerStartReason
 
 if TYPE_CHECKING:
     from .main import Services
@@ -94,7 +95,7 @@ async def restore_configured_workers(services: Services) -> None:
     if settings.media_engine == "comfyui" and _media_worker_should_restore(services):
         try:
             async with services.scheduler.lease("primary"):
-                await services.processes.start_media()
+                await services.processes.start_media(reason=WorkerStartReason.APP_START)
                 refreshed = await services.downloads.refresh_installed_media_workflows()
             logger.info("Restored the configured media worker")
             if refreshed:
@@ -111,7 +112,9 @@ async def restore_configured_workers(services: Services) -> None:
         profile, install = selected
         try:
             async with services.scheduler.lease("primary"):
-                await services.processes.load_chat(profile, install)
+                await services.processes.load_chat(
+                    profile, install, reason=WorkerStartReason.APP_START
+                )
             remember_chat_profile(profile.id)
             logger.info("Restored chat worker profile %s", profile.id)
         except Exception:

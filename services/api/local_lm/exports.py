@@ -782,10 +782,16 @@ class ProjectExporter:
         if isinstance(worker, dict):
             for local_only_key in (
                 "command",
+                "counted_since",
+                "exits_without_stop",
                 "failure_detail",
+                "last_start_reason",
+                "last_stop_reason",
                 "log_path",
                 "pid",
+                "starts_by_reason",
                 "stderr_tail",
+                "stops_by_reason",
             ):
                 worker.pop(local_only_key, None)
 
@@ -902,10 +908,16 @@ class ProjectExporter:
         if isinstance(worker, dict):
             for local_only_key in (
                 "command",
+                "counted_since",
+                "exits_without_stop",
                 "failure_detail",
+                "last_start_reason",
+                "last_stop_reason",
                 "log_path",
                 "pid",
+                "starts_by_reason",
                 "stderr_tail",
+                "stops_by_reason",
             ):
                 worker.pop(local_only_key, None)
 

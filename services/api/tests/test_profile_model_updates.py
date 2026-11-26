@@ -567,6 +567,7 @@ async def test_chat_worker_reuse_requires_the_same_model_configuration(
 
     from local_lm.accepted_turn_context import capture_profile, resolve_accepted_profile
     from local_lm.processes import ProcessSupervisor, WorkerRecord, _RotatingWorkerLog
+    from local_lm.schemas import WorkerStopReason
 
     profile_id, old_id, _, job_id = _seed(app, role="chat", engine="llama.cpp")
     with SessionLocal() as session:
@@ -628,6 +629,6 @@ async def test_chat_worker_reuse_requires_the_same_model_configuration(
                     profile_id=profile_id,
                     launch_scope_sha256=current_scope,
                 )
-            stop.assert_awaited_once_with("chat")
+            stop.assert_awaited_once_with("chat", reason=WorkerStopReason.REPLACED_SCOPE)
     finally:
         log.close()

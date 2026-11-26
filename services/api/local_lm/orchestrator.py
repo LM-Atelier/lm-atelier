@@ -262,7 +262,9 @@ from .schemas import (
     TurnAccepted,
     TurnRequest,
     TurnWorkflowSelectionIn,
+    WorkerStartReason,
     WorkerStatus,
+    WorkerStopReason,
 )
 from .settings_registry import (
     WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
@@ -1467,6 +1469,8 @@ class ConversationOrchestrator:
         #: and models. Such a worker is never replaced by the broad one when the
         #: window ends: the next media run starts the worker it needs.
         self._media_warm_scoped = False
+        #: What recycling the worker is counted as when the open window ends.
+        self._media_warm_stop_reason: WorkerStopReason | None = None
         #: Whether something outside this class's runs relies on the live media
         #: worker, such as an open native editor session; set by the application.
         self.media_worker_in_use: Callable[[], bool] = lambda: False
@@ -4998,6 +5002,7 @@ class ConversationOrchestrator:
             await asyncio.gather(self._media_restart_task, return_exceptions=True)
             self._media_restart_task = None
         self._media_warm_window = None
+        self._media_warm_stop_reason = None
         if self._media_warm_task:
             self._media_warm_task.cancel()
             await asyncio.gather(self._media_warm_task, return_exceptions=True)
@@ -5564,7 +5569,18 @@ class ConversationOrchestrator:
                     {
                         "worker": worker.model_dump(
                             mode="json",
-                            exclude={"active_jobs", "queued_jobs"},
+                            # The job counts and the start and stop counts
+                            # describe the service, not this run.
+                            exclude={
+                                "active_jobs",
+                                "queued_jobs",
+                                "starts_by_reason",
+                                "stops_by_reason",
+                                "exits_without_stop",
+                                "last_start_reason",
+                                "last_stop_reason",
+                                "counted_since",
+                            },
                         )
                     }
                     if worker
@@ -7123,7 +7139,11 @@ class ConversationOrchestrator:
         return fallback_profile_id, False, queued_media_next
 
     async def _complete_media_handoff(
-        self, chat_profile_id: str, *, keep_warm: bool = True
+        self,
+        chat_profile_id: str,
+        *,
+        keep_warm: bool = True,
+        reason: WorkerStopReason | None = None,
     ) -> None:
         """Release retained Comfy state before restoring a managed chat model.
 
@@ -7211,10 +7231,20 @@ class ConversationOrchestrator:
             recycle_wanted = False
             recycled_activation_scope = False
 
+        # `reason` is what this recycle is counted as, now or when a hold for
+        # someone else's use ends. A caller that names none is a run's own
+        # handoff, and `keep_warm` says how that run ended. A run that did not
+        # finish with its result and was not allowed to keep its worker is a
+        # failed run's handoff. One that was allowed is recycled only because
+        # the worker could not be kept, as when a text run is queued next.
+        if reason is None:
+            reason = (
+                WorkerStopReason.RUN_HANDOFF if keep_warm else WorkerStopReason.FAILED_RUN_HANDOFF
+            )
         if (
             recycle_wanted
             and await self._media_runtime_busy()
-            and self._open_media_warm_window(hold=True)
+            and self._open_media_warm_window(hold=True, reason=reason)
         ):
             # Someone else is using ComfyUI, from its own page or a workflow
             # editor, and the recycle would end their work. The worker is held
@@ -7226,7 +7256,7 @@ class ConversationOrchestrator:
             return
         if recycle_wanted:
             try:
-                await self.processes.stop("media")
+                await self.processes.stop("media", reason=reason)
             except Exception:
                 # The stop is what makes the room. It failed, so the worker may
                 # still hold the allocations a chat model would now be loaded
@@ -7267,7 +7297,12 @@ class ConversationOrchestrator:
         else:
             self._schedule_media_restart()
 
-    def _open_media_warm_window(self, *, hold: bool = False) -> bool:
+    def _open_media_warm_window(
+        self,
+        *,
+        hold: bool = False,
+        reason: WorkerStopReason = WorkerStopReason.KEEP_WARM_EXPIRY,
+    ) -> bool:
         """Keep the managed ComfyUI worker for a following media turn, if it can be.
 
         Returns whether a window was opened. Only a ready, managed worker is
@@ -7281,6 +7316,11 @@ class ConversationOrchestrator:
         With `hold`, the worker is kept because someone else is using it: the
         window opens even when keeping it warm is turned off, and it lasts only
         as long as a busy window waits between checks.
+
+        `reason` is what recycling the worker is counted as when the window
+        ends. A hold opened by a run's handoff carries that handoff's reason. A
+        window kept for a following media run, including one held while that
+        run waits, ends as its expiry.
         """
 
         seconds = (
@@ -7305,6 +7345,7 @@ class ConversationOrchestrator:
         # recycles it.
         self._media_warm_launch = media_worker.pid
         self._media_warm_scoped = scoped
+        self._media_warm_stop_reason = reason
         self._media_warm_task = asyncio.create_task(
             self._expire_media_warm_window(generation, seconds),
             name="media-warm-window",
@@ -7325,6 +7366,7 @@ class ConversationOrchestrator:
 
         generation = self._media_warm_window
         self._media_warm_window = None
+        self._media_warm_stop_reason = None
         task = self._media_warm_task
         # Never the running task itself: cancelling it would abandon the
         # handoff it is in the middle of at its next await.
@@ -7750,6 +7792,7 @@ class ConversationOrchestrator:
     async def _end_media_warm_window(self) -> None:
         """Close the open window and give back what it held, under the device lease."""
 
+        reason = self._media_warm_stop_reason or WorkerStopReason.KEEP_WARM_EXPIRY
         self._close_media_warm_window()
         owed = self._displaced_chat_profile_id
         try:
@@ -7759,13 +7802,13 @@ class ConversationOrchestrator:
                 # decides its fate. Only the chat model it displaced is owed.
                 await self._give_back_displaced_chat(owed)
             elif owed is not None:
-                await self._complete_media_handoff(owed, keep_warm=False)
+                await self._complete_media_handoff(owed, keep_warm=False, reason=reason)
             else:
                 # Nothing is owed, because a chat model was loaded beside a
                 # worker someone was using. The models are still resident, and
                 # with the window gone nothing would recycle them. A worker
                 # launched for one activation is not replaced by the broad one.
-                await self.processes.stop("media")
+                await self.processes.stop("media", reason=reason)
                 if not self._media_warm_scoped:
                     self._schedule_media_restart()
         except Exception:
@@ -7818,7 +7861,7 @@ class ConversationOrchestrator:
         if not self._media_warm_scoped:
             self._media_restart_after_chat_activity = True
         try:
-            await self.processes.stop("media")
+            await self.processes.stop("media", reason=WorkerStopReason.CHAT_LOAD)
         except Exception:
             # The load goes ahead regardless. Refusing it would fail the turn
             # that asked for chat, which is worse than the contention.
@@ -7978,13 +8021,18 @@ class ConversationOrchestrator:
         """
         self._schedule_media_restart()
 
-    def _schedule_media_restart(self) -> asyncio.Task[None] | None:
+    def _schedule_media_restart(
+        self, *, reason: WorkerStartReason = WorkerStartReason.HANDOFF_RESTART
+    ) -> asyncio.Task[None] | None:
         """Start the media worker back up, unless a restart is already running.
 
         Returns the task THIS call created, or None when one was already in
         flight and nothing new was started. A caller that intends to own the
         restart it asked for has no other way to tell the two apart, and owning
         a restart somebody else started is how one gets cancelled on its behalf.
+
+        `reason` is what the start is counted as: bringing the worker back after
+        chat borrowed the device, unless the caller starts it for a run.
         """
 
         if self._closing:
@@ -7995,7 +8043,7 @@ class ConversationOrchestrator:
         if self._media_restart_task and not self._media_restart_task.done():
             return None
         task = asyncio.create_task(
-            self._restart_media_worker(),
+            self._restart_media_worker(reason=reason),
             name="media-worker-handoff-restart",
         )
         self._media_restart_task = task
@@ -8073,7 +8121,9 @@ class ConversationOrchestrator:
 
         if self._step_prewarm_plan_id is None or self._step_prewarm_task is not None:
             return
-        started = self._schedule_media_restart()
+        # Started for the following step, a media run, rather than to give back
+        # a device chat borrowed: that give-back is released separately.
+        started = self._schedule_media_restart(reason=WorkerStartReason.RUN)
         if started is None:
             # A restart was already running, so this prewarm started nothing.
             # The one that normally got here first is the give-back released on
@@ -8119,9 +8169,11 @@ class ConversationOrchestrator:
             if self._media_restart_task is task:
                 self._media_restart_task = None
 
-    async def _restart_media_worker(self) -> None:
+    async def _restart_media_worker(
+        self, *, reason: WorkerStartReason = WorkerStartReason.HANDOFF_RESTART
+    ) -> None:
         try:
-            await self.processes.start_media()
+            await self.processes.start_media(reason=reason)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -8188,19 +8240,24 @@ class ConversationOrchestrator:
                         await self.processes.start_media(
                             phase_callback=report_phase,
                             activation_scope=activation_scope,
+                            reason=WorkerStartReason.RUN,
                             **guarded,
                         )
                     else:
-                        await self.processes.start_media(phase_callback=report_phase, **guarded)
+                        await self.processes.start_media(
+                            phase_callback=report_phase, reason=WorkerStartReason.RUN, **guarded
+                        )
                 except WorkerStartRefused as refusal:
                     raise ClaimLost(
                         f"job {job_id} is no longer this execution's at {str(refusal)!r}"
                     ) from refusal
             else:
                 if activation_scope is not None:
-                    await self.processes.start_media(activation_scope=activation_scope, **guarded)
+                    await self.processes.start_media(
+                        activation_scope=activation_scope, reason=WorkerStartReason.RUN, **guarded
+                    )
                 else:
-                    await self.processes.start_media(**guarded)
+                    await self.processes.start_media(reason=WorkerStartReason.RUN, **guarded)
 
     def _prepare_media_run(
         self, run_id: str
@@ -11033,7 +11090,7 @@ class ConversationOrchestrator:
                             job_id, VerificationReason.ASSESSMENT_UNAVAILABLE, claim
                         )
                         return
-                    await self.processes.stop("media")
+                    await self.processes.stop("media", reason=WorkerStopReason.CHAT_LOAD)
                     media_stopped_for_verification = True
                     # Stopping media is an await, and a successor can claim the
                     # row inside it. Loading chat afterwards on a row this

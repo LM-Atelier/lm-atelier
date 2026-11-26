@@ -10,7 +10,7 @@ from fastapi import FastAPI
 
 from local_lm.config import Settings
 from local_lm.processes import ProcessSupervisor
-from local_lm.schemas import WorkerStatus
+from local_lm.schemas import WorkerStatus, WorkerStopReason
 from local_lm.workflow_package_runtime import workflow_package_runtime
 
 pytestmark = pytest.mark.asyncio
@@ -43,14 +43,15 @@ async def test_fresh_runtime_setup_restores_the_stopped_worker_on_every_exit(
             for worker in initial
         ]
 
-    async def stop(name: str, **_kwargs: object) -> WorkerStatus:
+    async def stop(name: str, **options: object) -> WorkerStatus:
         nonlocal running
         stops.append(name)
         assert name == "media"
+        assert options == {"reason": WorkerStopReason.PACKAGE_PREPARATION}
         running = False
         return media.model_copy(update={"running": False, "state": "stopped"})
 
-    async def start() -> WorkerStatus:
+    async def start(**_options: object) -> WorkerStatus:
         starts.append("media")
         return media
 

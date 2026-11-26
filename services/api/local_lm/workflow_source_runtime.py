@@ -18,6 +18,7 @@ from .db import SessionLocal
 from .models import WorkflowInstallOffer
 from .processes import ProcessSupervisor
 from .scheduler import JobClaim
+from .schemas import WorkerStartReason, WorkerStopReason
 from .workflow_activations import (
     WorkflowRegistryLaunchBinding,
     WorkflowSourceLaunchScope,
@@ -129,6 +130,7 @@ async def prepared_workflow_source_runtime(
         await processes.start_media(
             activation_scope=scope,
             before_replace=lambda: require_workflow_source_attempt(offer_id, claim),
+            reason=WorkerStartReason.PACKAGE_PREPARATION,
         )
         await _worker(lambda: require_workflow_source_attempt(offer_id, claim))
         if processes.launch_scope_sha256("media") != scope.launch_sha256:
@@ -137,7 +139,11 @@ async def prepared_workflow_source_runtime(
 
     async def stop() -> bool:
         await _worker(require_retained_claim)
-        await processes.stop("media", before_stop=require_retained_claim)
+        await processes.stop(
+            "media",
+            reason=WorkerStopReason.PACKAGE_PREPARATION,
+            before_stop=require_retained_claim,
+        )
         await _worker(require_retained_claim)
         return media_worker_stopped(processes)
 
