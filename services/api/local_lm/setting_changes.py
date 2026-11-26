@@ -51,6 +51,7 @@ class SettingChangeCode(StrEnum):
     SIZE_FOLLOWS_SOURCE = "size-follows-source"
     FOR_OFFER = "set-aside-for-offer"
     OUTPUTS_FROM_BATCH_SIZE = "outputs-from-batch-size"
+    BATCH_SIZE_FOR_ONE_OUTPUT = "batch-size-for-one-output"
     OUTPUT_COUNT_RAISED = "output-count-raised"
     ONE_OUTPUT = "one-output"
     STRENGTH_DEFAULT_FOR_NEW_PICTURE = "strength-default-for-new-picture"
@@ -85,6 +86,10 @@ SETTING_CHANGE_MESSAGES: Final[Mapping[SettingChangeCode, str]] = {
     ),
     SettingChangeCode.OUTPUTS_FROM_BATCH_SIZE: (
         "Each output is made on its own, so each one is made as a batch of one."
+    ),
+    SettingChangeCode.BATCH_SIZE_FOR_ONE_OUTPUT: (
+        "This makes one output, so the batch size given was set aside and it is made as a batch "
+        "of one."
     ),
     SettingChangeCode.OUTPUT_COUNT_RAISED: (
         "This turn makes more outputs than the count it was given, as its words or its batch size "

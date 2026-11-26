@@ -1173,8 +1173,15 @@ def _count_changes(
     return [SettingChange(code, "output_count", before=requested, after=made)]
 
 
-def _batch_made_one_at_a_time(given: object, who_chose: _WhoChose) -> list[SettingChange]:
-    """A batch size someone chose, which a turn making each output on its own sets to one."""
+def _batch_made_one_at_a_time(
+    given: object, who_chose: _WhoChose, *, one_output: bool = False
+) -> list[SettingChange]:
+    """A batch size someone chose, which a turn making each output on its own sets to one.
+
+    `one_output` is a render that makes a single output whatever it is given,
+    such as a regenerate or a step of a plan: its batch size made no outputs,
+    it was set aside.
+    """
     if given == 1:
         return []
     chosen, source = who_chose("batch_size")
@@ -1182,7 +1189,9 @@ def _batch_made_one_at_a_time(given: object, who_chose: _WhoChose) -> list[Setti
         return []
     return [
         SettingChange(
-            SettingChangeCode.OUTPUTS_FROM_BATCH_SIZE,
+            SettingChangeCode.BATCH_SIZE_FOR_ONE_OUTPUT
+            if one_output
+            else SettingChangeCode.OUTPUTS_FROM_BATCH_SIZE,
             "batch_size",
             source=source,
             before=given,
@@ -3544,10 +3553,18 @@ class ConversationOrchestrator:
                 fields=fields,
             ),
         )
-        if output_count > 1 and "batch_size" in effective_settings:
-            # Each planned output owns its own lifecycle. Prevent an engine-native
-            # batch from multiplying the visible output slots a second time.
-            changes += _batch_made_one_at_a_time(effective_settings["batch_size"], who_chose)
+        if plan.operation != Operation.TEXT and "batch_size" in effective_settings:
+            # Each planned output owns its own lifecycle, so a batch size is made
+            # into outputs above and never sent on as an engine-native batch. A
+            # turn that makes one output whatever it is given - a regenerate, the
+            # automatic second try of an edit, or a Prompt Library batch of one
+            # draft - is no exception: a batch there would make pictures the turn
+            # neither counts nor estimates, all under one seed. A chat model's
+            # batch size is how much of a prompt it reads at once, so a reply
+            # keeps it.
+            changes += _batch_made_one_at_a_time(
+                effective_settings["batch_size"], who_chose, one_output=output_count == 1
+            )
             effective_settings["batch_size"] = 1
         # What the turn changed on purpose, which every output keeps. A batch run
         # on more than one workflow keeps each draft's own instead.
@@ -4789,6 +4806,14 @@ class ConversationOrchestrator:
                     )
             if operation != Operation.TEXT and effective_settings.get("seed") == -1:
                 effective_settings["seed"] = _fresh_media_seed()
+            if operation != Operation.TEXT and "batch_size" in effective_settings:
+                # A step makes one output, and the plan counts and estimates it
+                # as one, so it is made as a batch of one as a turn's outputs are.
+                # A reply step keeps its chat model's own batch size.
+                step_changes += _batch_made_one_at_a_time(
+                    effective_settings["batch_size"], who_chose, one_output=True
+                )
+                effective_settings["batch_size"] = 1
             estimate = (
                 self._media_plan_estimate(operation, effective_settings, 1)
                 if operation != Operation.TEXT

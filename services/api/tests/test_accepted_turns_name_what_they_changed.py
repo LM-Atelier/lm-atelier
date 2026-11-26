@@ -138,6 +138,13 @@ BATCH_SIZE_MADE_ONE = {
     "before": 3,
     "after": 1,
 }
+BATCH_SIZE_SET_ASIDE = {
+    "code": "batch-size-for-one-output",
+    "field": "batch_size",
+    "source": "chat",
+    "before": 3,
+    "after": 1,
+}
 COUNT_RAISED = {"code": "output-count-raised", "field": "output_count", "before": 2, "after": 3}
 ONE_REPLY = {"code": "one-output", "field": "output_count", "before": 3, "after": 1}
 STRENGTH_FOR_WORDS = {
@@ -166,6 +173,7 @@ NAMED = (
     ENLARGEMENT_FIXED,
     FOR_OFFER,
     BATCH_SIZE_MADE_ONE,
+    BATCH_SIZE_SET_ASIDE,
     COUNT_RAISED,
     ONE_REPLY,
     STRENGTH_FOR_WORDS,
@@ -829,6 +837,27 @@ async def test_a_text_reply_names_no_saved_value_its_model_does_not_take(
     assert "setting_changes" not in response.json()
 
 
+async def test_a_text_reply_keeps_the_batch_size_its_model_reads_a_prompt_with(
+    client: AsyncClient,
+) -> None:
+    """A chat model's batch size is how much of a prompt it reads at once, not a count of outputs.
+
+    Only a picture or a video is made as a batch of one; a reply keeps its
+    model's own value, and nothing about it is named.
+    """
+
+    chat_id = await _chat(client)
+
+    response = await client.post(
+        f"/api/chats/{chat_id}/turns", json={"text": "Describe a ceramic cup", "mode": "text"}
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["run"]["operation"] == "text"
+    assert response.json()["run"]["settings_json"]["batch_size"] == 512
+    assert "setting_changes" not in response.json()
+
+
 # The turn's own values.
 
 
@@ -1151,6 +1180,40 @@ async def test_a_regenerate_names_the_seed_it_draws_again(
     assert response.json()["run"]["settings_json"]["seed"] != 42
 
 
+@pytest.mark.parametrize("sent", [True, False], ids=["sent", "recorded by the run"])
+async def test_a_regenerate_given_a_batch_size_makes_one_picture_and_names_it(
+    app: FastAPI, client: AsyncClient, sent: bool
+) -> None:
+    """A regenerate makes one output, so a batch size it is given is not sent on as a batch.
+
+    Sent with the request, or recorded by the run it starts from, as a run
+    accepted by an earlier version can be: either way the engine would make
+    pictures the turn neither counts nor estimates, all under one seed.
+    """
+
+    chat_id = await _chat(client)
+    original = await _made(client, chat_id, settings={"seed": 42})
+    if not sent:
+        with SessionLocal() as session:
+            run = session.get(Run, original["run"]["id"])
+            assert run is not None
+            run.settings_json = {**run.settings_json, "batch_size": 3}
+            session.commit()
+
+    async with app.state.services.scheduler.lease("primary"):
+        response = await client.post(
+            f"/api/messages/{original['assistant_message']['id']}/regenerate",
+            json={"settings": {"batch_size": 3} if sent else {}},
+        )
+
+    sent_set_aside = {key: value for key, value in BATCH_SIZE_SET_ASIDE.items() if key != "source"}
+    assert _changes(response) == [
+        {**SEED_DRAWN, "source": "inherited"},
+        sent_set_aside if sent else {**BATCH_SIZE_SET_ASIDE, "source": "inherited"},
+    ]
+    assert response.json()["run"]["settings_json"]["batch_size"] == 1
+
+
 @pytest.mark.parametrize("saved", [False, True], ids=["sent", "saved for the chat"])
 async def test_a_seed_given_to_several_outputs_is_named_as_stepped(
     app: FastAPI, client: AsyncClient, saved: bool
@@ -1292,6 +1355,21 @@ async def test_each_draft_of_a_batch_on_several_workflows_names_its_batch_size(
     ]
 
 
+async def test_a_batch_of_one_draft_makes_its_saved_batch_size_one_and_names_it(
+    client: AsyncClient,
+) -> None:
+    """One draft is one output, as each of several drafts is, never a batch of pictures."""
+
+    chat_id = await _chat(client)
+    await _save_for_chat(client, chat_id, "image", {"batch_size": 3})
+    batch = await _batch(client, chat_id, ["gray square"])
+
+    queued = await _queue(client, batch)
+
+    assert _changes(queued) == [BATCH_SIZE_SET_ASIDE]
+    assert [run.settings_json["batch_size"] for run in _runs(queued.json()["work_plan_id"])] == [1]
+
+
 # Plans of steps, and the routes that carry values over.
 
 
@@ -1320,6 +1398,27 @@ async def test_a_step_of_an_ordered_plan_names_its_own_change_by_step(
             "step": 2,
         }
     ]
+
+
+async def test_a_step_of_an_ordered_plan_makes_a_saved_batch_size_one_and_names_it(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    """A step makes one output, and the plan counts and estimates it as one."""
+
+    chat_id = await _chat(client)
+    await _save_for_chat(client, chat_id, "image", {"batch_size": 3})
+
+    async with app.state.services.scheduler.lease("primary"):
+        response = await client.post(
+            f"/api/chats/{chat_id}/turns",
+            json={"text": STORY_THEN_PICTURE, "mode": "auto", "confirm_media": True},
+        )
+
+    runs = _runs(response.json()["run"]["work_plan_id"])
+    assert [run.operation for run in runs] == ["text", "text_to_image"]
+    # The reply step keeps its chat model's own batch size, which is no count.
+    assert [run.settings_json["batch_size"] for run in runs] == [512, 1]
+    assert _changes(response) == [{**BATCH_SIZE_SET_ASIDE, "step": 2}]
 
 
 async def test_a_step_of_a_plan_names_the_strength_its_new_picture_sets_aside(

@@ -3,8 +3,9 @@ import type { SettingSource } from "./settingRefusalTypes";
 
 export type SettingChangeCode =
   | "set-aside-not-taken" | "set-aside-not-offered" | "set-aside-fixed" | "set-aside-not-usable"
-  | "size-follows-source" | "set-aside-for-offer" | "outputs-from-batch-size" | "output-count-raised"
-  | "one-output" | "strength-default-for-new-picture" | "strength-full-for-extension"
+  | "size-follows-source" | "set-aside-for-offer" | "outputs-from-batch-size"
+  | "batch-size-for-one-output" | "output-count-raised" | "one-output"
+  | "strength-default-for-new-picture" | "strength-full-for-extension"
   | "length-aligned-to-frames" | "seed-drawn-again" | "seed-per-output" | "seed-per-draft";
 
 /** One value an accepted render changed on purpose, and why; never a value it may not name. */
