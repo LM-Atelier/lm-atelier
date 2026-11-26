@@ -919,7 +919,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             services.runtimes.start_restore()
             worker_restore = asyncio.create_task(
-                restore_configured_workers(services),
+                restore_configured_workers(
+                    services,
+                    # A release of both workers' models has begun once it has
+                    # passed its checks and starts standing down what would
+                    # load them back, even if its stop is then refused or
+                    # fails. After one, the restore loads neither worker.
+                    release_begun=lambda: services.orchestrator.release_generation > 0,
+                ),
                 name="restore-configured-workers",
             )
             backup_maintenance = asyncio.create_task(

@@ -15,6 +15,7 @@ import { ErrorCallout } from "./ErrorCallout";
 import { GeneralSettings } from "./GeneralSettings";
 import { RuntimeSetupCard } from "./RuntimeSetupCard";
 import { StatusDot } from "./StatusDot";
+import { UnloadModelsButton } from "./UnloadModelsButton";
 import { WorkerLogFolderButton, WorkerStartupLimit } from "./WorkerStartupLimit";
 import { WorkerStatusCard } from "./WorkerStatusCard";
 import { WorkspaceLockSettings } from "./WorkspaceLockSettings";
@@ -426,6 +427,7 @@ export function SettingsView({ engines, appearance, destinationId, onDestination
         <div className="detail-title">
           <div><h2>Workers</h2><p>A model must finish loading within the startup time limit. Large models on slow disks can need more than the default 60 seconds.</p></div>
           <div className="row-actions">
+            <UnloadModelsButton />
             <WorkerLogFolderButton />
             <WorkerStartupLimit />
           </div>

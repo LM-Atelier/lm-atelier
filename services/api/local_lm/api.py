@@ -313,8 +313,10 @@ from .models import (
 )
 from .orchestrator import (
     ConversationOrchestrator,
+    MediaWorkerInUse,
     ProjectWorkflowPinInvalid,
     ResponseRevisionConflict,
+    WorkersBusy,
 )
 from .ordered_planning import OrderedPlanConfirmationRequired
 from .output_recipe import OutputRecipeUnavailable
@@ -1784,7 +1786,13 @@ async def probe_chat_tool_capability(request: Request) -> ToolCapabilityProbe:
 
 @router.get("/workers", response_model=list[WorkerStatus])
 async def worker_status(request: Request, session: SessionDep) -> list[WorkerStatus]:
-    statuses = _services(request).processes.statuses()
+    return _worker_statuses(_services(request), session)
+
+
+def _worker_statuses(services: Services, session: Session) -> list[WorkerStatus]:
+    """Both workers' statuses, each with the jobs running on it and waiting for it."""
+
+    statuses = services.processes.statuses()
     for index, status in enumerate(statuses):
         kinds = (
             [JobKind.CHAT.value]
@@ -2429,6 +2437,31 @@ async def reset_worker(name: str, request: Request, session: SessionDep) -> Work
         raise api_error(422, "worker-stop-failed", str(exc)) from exc
     session.expire_all()
     return WorkerResetResult(worker=worker, cancelled_jobs=cancelled)
+
+
+@router.post("/workers/unload", response_model=list[WorkerStatus])
+async def unload_workers(request: Request, session: SessionDep) -> list[WorkerStatus]:
+    """Release both workers' models, so the device is free for another program.
+
+    Nothing loads them back on its own: they stay released until a turn, a run,
+    or an explicit chat load or media start asks for a model again. The release
+    is refused while any job is running or could start. Pausing queued work so
+    that none of it can start is a separate control, and the work keeps its
+    place. Filling a prompt template's model-guided slots is not a job: a fill
+    in progress is interrupted when chat stops, and can be tried again.
+    """
+
+    services = _services(request)
+    try:
+        await services.orchestrator.unload_workers()
+    except WorkersBusy as exc:
+        raise api_error(409, "workers-busy", str(exc), busy_jobs=exc.jobs) from exc
+    except MediaWorkerInUse as exc:
+        raise api_error(409, "media-worker-in-use", str(exc), use=exc.use) from exc
+    except ValueError as exc:
+        raise api_error(422, "worker-stop-failed", str(exc)) from exc
+    session.expire_all()
+    return _worker_statuses(services, session)
 
 
 WORKER_LOG_TAIL_BYTES = 64 * 1024
@@ -4452,6 +4485,9 @@ async def _create_prompt_batch_locked(
         # after it. A returned flag could not: the caller never sees it when the
         # call raises.
         borrowed: list[str] = []
+        # Read before the device is borrowed, so a release of both workers'
+        # models begun while it is borrowed is not undone by the give-back.
+        release_generation = services.orchestrator.release_generation
         try:
             if not _chat_worker_can_fill_slots(worker):
                 worker = await _prepare_chat_worker_for_model_slots(
@@ -4544,9 +4580,10 @@ async def _create_prompt_batch_locked(
             )
         finally:
             # The device was borrowed, so give it back whether the model
-            # answered or not. A 503 that also left ComfyUI stopped would be
-            # the same manual cleanup this change exists to remove.
-            if borrowed:
+            # answered or not: a 503 that also left ComfyUI stopped would leave
+            # the manual cleanup the give-back exists to spare. A release begun
+            # meanwhile wants the device left free instead.
+            if borrowed and services.orchestrator.release_generation == release_generation:
                 services.orchestrator.schedule_media_restart()
 
     try:
