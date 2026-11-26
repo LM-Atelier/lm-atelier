@@ -132,13 +132,30 @@ async def _events(adapter: Any, *, patience: float = PATIENCE_SECONDS) -> list[s
     return await asyncio.wait_for(generate(), timeout=patience)
 
 
-@pytest.mark.parametrize("jobs", ["endpoint", "missing"])
+def _queue_still_listing_the_prompt() -> httpx.Response:
+    """A queue answer that still lists the prompt as waiting."""
+
+    row = [1, PROMPT_ID, {}, {}, []]
+    return httpx.Response(200, json={"queue_running": [], "queue_pending": [row]})
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
+        # The job endpoint is asked first, so a queue that still lists the
+        # prompt is never read.
+        pytest.param(
+            {"jobs": "endpoint", "queue": _queue_still_listing_the_prompt()}, id="job-endpoint"
+        ),
+        pytest.param({"jobs": "missing"}, id="no-job-endpoint"),
+    ],
+)
 async def test_a_prompt_removed_before_it_runs_ends_as_stopped_at_once_with_no_stop_sent(
-    monkeypatch: pytest.MonkeyPatch, jobs: str
+    monkeypatch: pytest.MonkeyPatch, backend: dict[str, Any]
 ) -> None:
     """Nothing is left to stop, and a stop sent anyway could reach someone else's work."""
 
-    comfy = _QueueingComfyUI(removed_after=0, jobs=jobs)
+    comfy = _QueueingComfyUI(removed_after=0, **backend)
     adapter = await _adapter(monkeypatch, comfy, REMOVED, inactivity_seconds=60)
     try:
         # Well inside the inactivity window, which a silent wait would use up.
@@ -209,12 +226,13 @@ async def test_a_queue_that_only_grows_is_never_asked_about(
     assert comfy.checks == 0
 
 
+@pytest.mark.parametrize("jobs", ["endpoint", "missing"])
 async def test_a_prompt_gone_when_the_socket_goes_quiet_ends_as_stopped(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, jobs: str
 ) -> None:
-    """A removal whose broadcast never came is found when nothing else is heard."""
+    """A removal whose broadcast never came is found when nothing else is heard, and not stopped."""
 
-    comfy = _QueueingComfyUI(removed_after=0)
+    comfy = _QueueingComfyUI(removed_after=0, jobs=jobs)
     adapter = await _adapter(monkeypatch, comfy, (), inactivity_seconds=0.5)
     try:
         events = await _events(adapter)
@@ -223,6 +241,27 @@ async def test_a_prompt_gone_when_the_socket_goes_quiet_ends_as_stopped(
 
     assert events[events.index("queued") :] == ["queued", "cancelled"]
     assert comfy.stops == []
+
+
+async def test_a_prompt_whose_run_began_is_not_asked_about_when_the_socket_goes_quiet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once ComfyUI has begun running it, silence is the inactivity it always was."""
+
+    comfy = _QueueingComfyUI(removed_after=0)
+    began = (
+        _status(CONNECTED),
+        _status(JOINED),
+        {"type": "execution_start", "data": {"prompt_id": PROMPT_ID}},
+    )
+    adapter = await _adapter(monkeypatch, comfy, began, inactivity_seconds=0.5)
+    try:
+        with pytest.raises(RuntimeError, match="stopped reporting generation activity"):
+            await _events(adapter)
+    finally:
+        await adapter.close()
+
+    assert comfy.checks == 0
 
 
 async def test_a_prompt_that_already_ran_is_collected_as_usual(
@@ -251,6 +290,32 @@ async def test_a_run_whose_prompt_was_removed_fails_as_stopped_in_comfyui_and_is
     await choose_retries(client, 1)
     comfy = _QueueingComfyUI(removed_after=0)
     adapter = await _comfyui_engine(app, monkeypatch, comfy, REMOVED)
+    try:
+        _chat_id, run_id = await _image_turn(client)
+        run = await finished(client, run_id, "failed")
+    finally:
+        await adapter.close()
+
+    assert run["error"] == MEDIA_STOPPED_BY_ENGINE
+    assert comfy.prompts_sent == 1
+    assert comfy.stops == []
+
+
+@pytest.mark.parametrize("jobs", ["endpoint", "missing"])
+async def test_a_run_whose_prompt_was_removed_unannounced_sends_no_stop_after_it(
+    app: FastAPI,
+    client: AsyncClient,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    jobs: str,
+) -> None:
+    """Found only when the socket goes quiet, the removal still leaves nothing to stop."""
+
+    _ready_world(app, settings, monkeypatch)
+    await choose_retries(client, 1)
+    comfy = _QueueingComfyUI(removed_after=0, jobs=jobs)
+    adapter = await _comfyui_engine(app, monkeypatch, comfy)
+    adapter.inactivity_seconds = 0.5
     try:
         _chat_id, run_id = await _image_turn(client)
         run = await finished(client, run_id, "failed")
