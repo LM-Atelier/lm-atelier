@@ -224,7 +224,7 @@ resent automatically.
 
 ### Watch accepted work
 
-Choose **View accepted work** in the Jobs panel to see active generation, transfers,
+Choose **Accepted work** at the foot of the sidebar to see active generation, transfers,
 and installs. Plans keep their jobs grouped. Use **Work category** to narrow the
 list and **Load more accepted work** to browse additional items. The count shows
 how many active items you have loaded out of the total.
@@ -263,7 +263,7 @@ updated action. Holds survive an app restart.
 
 ### Pause a work category
 
-In **View accepted work**, choose **Pause after current** under **Generation**,
+In **Accepted work**, choose **Pause after current** under **Generation**,
 **Transfers**, or **Installations**. Current work in that category can finish,
 while new work waits. You can keep submitting work; its
 accepted settings stay intact. The status shows when current work has finished
@@ -279,7 +279,7 @@ models. A pause does not interrupt a running operation. Held plans still need
 
 ### Change dispatch order
 
-Choose **Change dispatch order** in **View accepted work**, then select an **Order
+Choose **Change dispatch order** in **Accepted work**, then select an **Order
 category**. This view shows positions within groups that share a resource and
 priority. Older work keeps its scheduling priority as it waits, and different
 resources can run at the same time.

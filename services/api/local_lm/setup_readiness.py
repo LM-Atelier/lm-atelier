@@ -616,7 +616,7 @@ def _queued_verification_check(session: Session) -> SetupReadinessCheck:
             "generation_verification_paused",
             "pending",
             "Generation is paused, so the local test cannot start. "
-            "Resume generation under View accepted work.",
+            "Resume generation under Accepted work in the sidebar.",
             "wait_for_verification",
         )
     if dispatch.valid and dispatch.state == "draining":
@@ -624,7 +624,7 @@ def _queued_verification_check(session: Session) -> SetupReadinessCheck:
             "generation_verification_pausing",
             "pending",
             "Generation is finishing its current work and will then pause, so the local "
-            "test cannot start. Resume generation under View accepted work.",
+            "test cannot start. Resume generation under Accepted work in the sidebar.",
             "wait_for_verification",
         )
     # An unreadable policy row is not evidence of a pause, and claiming one

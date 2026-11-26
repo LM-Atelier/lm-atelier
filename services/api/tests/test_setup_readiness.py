@@ -708,14 +708,14 @@ async def test_polled_endpoints_do_not_block_the_event_loop() -> None:
             "paused",
             "generation_verification_paused",
             "Generation is paused, so the local test cannot start. "
-            "Resume generation under View accepted work.",
+            "Resume generation under Accepted work in the sidebar.",
         ),
         (
             "queued",
             "draining",
             "generation_verification_pausing",
             "Generation is finishing its current work and will then pause, so the local "
-            "test cannot start. Resume generation under View accepted work.",
+            "test cannot start. Resume generation under Accepted work in the sidebar.",
         ),
     ],
 )
@@ -835,4 +835,7 @@ async def test_pausing_generation_the_ordinary_way_changes_what_the_checklist_sa
     after = (await client.get("/api/setup/readiness")).json()
     after_chat = next(item for item in after["roles"] if item["role"] == "chat")
     assert after_chat["checks"][-1]["code"] == "generation_verification_paused"
-    assert "Resume generation under View accepted work." in after_chat["checks"][-1]["message"]
+    assert (
+        "Resume generation under Accepted work in the sidebar."
+        in after_chat["checks"][-1]["message"]
+    )

@@ -260,8 +260,8 @@ outside the ComfyUI core - it stays untrusted and needs review.
 | `activation_stale` | The model must be rechecked for the current runtime and hardware. |
 | `generation_verification_required` | Run one quick local generation test. |
 | `generation_verification_failed` | The local generation test did not complete. |
-| `generation_verification_paused` | Generation is paused, so the local test cannot start. Resume generation under View accepted work. |
-| `generation_verification_pausing` | Generation is finishing its current work and will then pause, so the local test cannot start. Resume generation under View accepted work. |
+| `generation_verification_paused` | Generation is paused, so the local test cannot start. Resume generation under Accepted work in the sidebar. |
+| `generation_verification_pausing` | Generation is finishing its current work and will then pause, so the local test cannot start. Resume generation under Accepted work in the sidebar. |
 
 `activation_stale` does not mean anything broke. Evidence records the runtime
 and the machine it was proven on, so a runtime update can require a recheck.
@@ -273,7 +273,7 @@ end, which is why setup is not finished without it.
 The two paused messages are not a fault, and nothing is retrying behind them.
 Generation dispatch is paused, so the test is sitting in the queue and will stay
 there until generation is resumed - which is deliberate, and setup will not
-finish on its own meanwhile. Open **View accepted work** and resume generation
+finish on its own meanwhile. Open **Accepted work** in the sidebar and resume generation
 there; the test starts by itself once the queue is open again.
 
 ### The worker
