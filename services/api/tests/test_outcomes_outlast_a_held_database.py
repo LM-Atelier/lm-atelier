@@ -27,7 +27,7 @@ import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 from run_waits import PATIENCE_SECONDS, wait_for_terminal_status, wait_until
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from test_finished_renders_land_on_a_held_database import (
@@ -54,7 +54,7 @@ from local_lm.adapters.base import MediaEvent, MediaRequest
 from local_lm.adapters.mock import MockMediaAdapter
 from local_lm.artifacts import StagedArtifactFile
 from local_lm.config import Settings
-from local_lm.db import SessionLocal, database_is_contended
+from local_lm.db import SessionLocal, database_is_contended, shorten_busy_timeout
 from local_lm.domain import JobKind, JobStatus, utcnow
 from local_lm.image_edit_verification import (
     ImageEditVerificationJobPayload,
@@ -517,6 +517,9 @@ async def test_a_stop_recorded_late_leaves_alone_the_retry_asked_for_since(
     The first stop's own write fails, and so does every try of the stopped
     execution, so its record goes on trying later. It acted on the job as it
     was queued then; the retry queues the job again, and that is left alone.
+    Each of the record's tries finds the database held until the retry is
+    asked for, so it lands only after the retry, never between the second stop
+    and the retry.
     """
 
     writer = _OtherWriter(_database(settings))
@@ -541,6 +544,32 @@ async def test_a_stop_recorded_late_leaves_alone_the_retry_asked_for_since(
         busy_run, _busy_job = await _start_render(client, "busy-render")
         await asyncio.wait_for(busy.wait(), timeout=PATIENCE_SECONDS)
         run_id, job_id = await _start_render(client, "waiting-render")
+        orchestrator = app.state.services.orchestrator
+        original_try_write = orchestrator._try_write
+        retry_asked = asyncio.Event()
+
+        def try_write(unit: Callable[[Session], Any]) -> Any:
+            outcome = getattr(unit, "keywords", {}).get("outcome")
+            if (
+                outcome is None
+                or outcome.job_id != job_id
+                or retry_asked.is_set()
+                or writer.holding
+            ):
+                return original_try_write(unit)
+            # The record may decide from a read alone, which a held writer
+            # does not block, so its try begins with a write that waits on the
+            # held writer and gives up as the record's own write would.
+            writer.take()
+            try:
+                with SessionLocal() as session:
+                    shorten_busy_timeout(session, 50)
+                    session.execute(update(Job).where(Job.id == job_id).values(status=Job.status))
+            finally:
+                writer.release()
+            return original_try_write(unit)
+
+        monkeypatch.setattr(orchestrator, "_try_write", try_write)
         waiting = await wait_until(
             lambda: asyncio.sleep(0.05, result=_job(job_id)),
             lambda job: job.status == JobStatus.QUEUED.value and job.claim_owner is None,
@@ -565,6 +594,7 @@ async def test_a_stop_recorded_late_leaves_alone_the_retry_asked_for_since(
         assert stopped.status_code == 200 and stopped.json()["status"] == "cancelled"
         retried = await client.post(f"/api/jobs/{job_id}/retry")
         assert retried.status_code == 200 and retried.json()["status"] == "queued"
+        retry_asked.set()
         await _outcome_settled(job_id)
 
         assert _job(job_id).status == JobStatus.QUEUED.value, "the late stop ended the retry"
