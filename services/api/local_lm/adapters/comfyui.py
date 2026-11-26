@@ -208,6 +208,37 @@ def _numbered_input_image_indices(workflow: dict[str, Any]) -> list[int]:
     return sorted(indices)
 
 
+def _queue_got_shorter(data: dict[str, Any], before: int | None) -> tuple[bool, int | None]:
+    """Whether a status broadcast says ComfyUI's queue got shorter, and its length now.
+
+    The first length read is only where counting starts: ComfyUI sends it as
+    the socket connects, before the prompt is submitted. A broadcast without a
+    readable length changes nothing.
+    """
+
+    status = data.get("status")
+    info = status.get("exec_info") if isinstance(status, dict) else None
+    length = info.get("queue_remaining") if isinstance(info, dict) else None
+    if isinstance(length, bool) or not isinstance(length, int):
+        return False, before
+    return before is not None and length < before, length
+
+
+def _names_no_such_job(response: httpx.Response) -> bool:
+    """Whether a not-found answer is ComfyUI's job endpoint saying it holds no such job.
+
+    A ComfyUI without that endpoint answers with its plain not-found page instead.
+    """
+
+    if "json" not in response.headers.get("content-type", ""):
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and "error" in body
+
+
 def _usable_prompt_id(value: object) -> TypeGuard[str]:
     """A prompt identifier this adapter is willing to carry.
 
@@ -951,6 +982,9 @@ class ComfyUIAdapter:
         outputs_collected = False
         submitted = False
         abandoned = False
+        # Someone removed the prompt from ComfyUI before it ran: there is
+        # nothing to stop, and a stop could reach someone else's work.
+        removed = False
         refused_after_acceptance = False
         bound_after_submission_failure = False
         try:
@@ -1083,6 +1117,7 @@ class ComfyUIAdapter:
                 )
                 sampler_progress = 0.0
                 execution_started = False
+                queue_length: int | None = None
                 messages = socket.__aiter__()
                 while True:
                     try:
@@ -1090,6 +1125,12 @@ class ComfyUIAdapter:
                     except StopAsyncIteration:
                         break
                     except TimeoutError as exc:
+                        if not execution_started and not await self._prompt_still_held(prompt_id):
+                            # A removal whose broadcast went unchecked: someone's
+                            # choice, so it is neither waited out nor sent again.
+                            removed = True
+                            yield MediaEvent(type="cancelled")
+                            return
                         await self._abandon_prompt(prompt_id, seconds=STOP_SECONDS)
                         raise RuntimeError(
                             "ComfyUI stopped reporting generation activity for "
@@ -1126,6 +1167,19 @@ class ComfyUIAdapter:
                     if not isinstance(data, dict):
                         raise RuntimeError("ComfyUI returned a malformed progress event")
                     if data.get("prompt_id") not in {None, prompt_id}:
+                        continue
+                    if message_type == "status" and not execution_started:
+                        # Removing a prompt from ComfyUI's own queue before it
+                        # runs tells its client nothing: ComfyUI broadcasts only
+                        # the queue's new length. Without asking, the run would
+                        # read queued until the inactivity timeout and then be
+                        # sent again. A shorter queue is the cue to ask whether
+                        # ComfyUI still holds the prompt.
+                        shorter, queue_length = _queue_got_shorter(data, queue_length)
+                        if shorter and not await self._prompt_still_held(prompt_id):
+                            removed = True
+                            yield MediaEvent(type="cancelled")
+                            return
                         continue
                     if message_type in {"execution_start", "executing"} and not execution_started:
                         execution_started = True
@@ -1227,8 +1281,9 @@ class ComfyUIAdapter:
                     self._unsettled += 1
             try:
                 if prompt_id and not outputs_collected:
-                    if bound_after_submission_failure or (
-                        (abandoned or refused_after_acceptance) and not cancel_event.is_set()
+                    if not removed and (
+                        bound_after_submission_failure
+                        or ((abandoned or refused_after_acceptance) and not cancel_event.is_set())
                     ):
                         # A prompt was submitted and the consumer walked away.
                         # Removing the run's entries below ends this adapter's
@@ -1845,6 +1900,52 @@ class ComfyUIAdapter:
                         if _usable_prompt_id(candidate):
                             return candidate
         return None
+
+    async def _prompt_still_held(self, prompt_id: str) -> bool:
+        """Whether ComfyUI still holds the prompt: waiting, running or with a record.
+
+        ComfyUI's job endpoint answers for this prompt alone. A ComfyUI without
+        it is asked its queue and then the prompt's history: a prompt moves from
+        one to the other in one step, so one in neither was removed before it
+        ran, or ran and had its record cleared since. The queue carries every
+        client's prompts and graphs; only prompt ids are compared, and nothing
+        read is logged or kept. No answer within the deadline, an error, a body
+        over the JSON bound or a row of another shape counts as held, so a slow
+        or failing ComfyUI never ends a run this way.
+        """
+
+        try:
+            async with asyncio.timeout(RECONCILE_SECONDS):
+                identifier = quote(prompt_id, safe="")
+                if identifier in {".", ".."}:
+                    identifier = identifier.replace(".", "%2E")
+                response = await self._client.get(f"/api/jobs/{identifier}")
+                if response.status_code == 200:
+                    return True
+                if response.status_code == 404 and _names_no_such_job(response):
+                    return False
+                response = await self._client.get("/queue")
+                response.raise_for_status()
+                if len(response.content) > _MAX_COMFY_JSON_BYTES:
+                    return True
+                queue = response.json()
+                if not isinstance(queue, dict):
+                    return True
+                for key in ("queue_running", "queue_pending"):
+                    rows = queue.get(key)
+                    if not isinstance(rows, list):
+                        return True
+                    for row in rows:
+                        if not isinstance(row, list) or len(row) < 2 or row[1] == prompt_id:
+                            return True
+                response = await self._client.get(f"/history/{identifier}")
+                response.raise_for_status()
+                if len(response.content) > _MAX_COMFY_JSON_BYTES:
+                    return True
+                history = response.json()
+                return not isinstance(history, dict) or bool(history)
+        except Exception:
+            return True
 
     async def _abandon_prompt(self, prompt_id: str, *, seconds: float | None = None) -> None:
         """Cancel the submitted prompt through the atomic job endpoint when available.
