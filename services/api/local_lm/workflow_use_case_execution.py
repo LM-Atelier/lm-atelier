@@ -11,6 +11,7 @@ from .engines import EngineRegistry
 from .models import WorkflowDefinition, WorkflowRevision
 from .outpaint_workflows import OUTPAINT_SETTING_KEY
 from .schemas import SettingField, TurnRequest
+from .settings_registry import builtin_settings_for_role
 from .studio_masks import MASK_APPLY_BLEND, MASK_SETTING_KEY
 from .workflow_selection import RevisionEligibility
 from .workflow_use_case_preset_admission import (
@@ -27,6 +28,7 @@ from .workflow_use_case_structure import assess_workflow_use_case_structure
 from .workflow_use_cases_v1 import (
     SelectionApplication,
     WorkflowUseCaseInputs,
+    WorkflowUseCaseRequirements,
     classify_workflow_use_case,
 )
 
@@ -123,6 +125,51 @@ def enlargement_revision_eligibility(
     return check
 
 
+def _applied_preset(
+    preset: ResolvedWorkflowUseCasePreset, requirements: WorkflowUseCaseRequirements
+) -> ResolvedWorkflowUseCasePreset | None:
+    """The recipe a turn runs under, or None when none applies to it."""
+
+    if preset.mode in {"unconfigured", "automatic"}:
+        return None
+    if preset.use_case != requirements.use_case:
+        raise WorkflowUseCasePresetAdmissionError("workflow-use-case-preset-mismatch")
+    return preset
+
+
+def saved_workflow_use_case_preset(
+    session: Session, facts: WorkflowUseCaseInputs, *, chat_id: str
+) -> ResolvedWorkflowUseCasePreset | None:
+    """The saved recipe a new turn with these inputs runs under in this chat, if any.
+
+    Resolved in the caller's session, which this neither commits nor flushes.
+    """
+
+    requirements = classify_workflow_use_case(facts)
+    return _applied_preset(
+        resolve_workflow_use_case_preset(session, requirements.use_case, chat_id=chat_id),
+        requirements,
+    )
+
+
+def offline_workflow_use_case_execution(
+    session: Session, facts: WorkflowUseCaseInputs, *, chat_id: str
+) -> WorkflowUseCaseExecution | None:
+    """The recipe execution a new turn would prepare, without asking an engine anything.
+
+    A turn asks the engine for its settings. Every built-in engine answers with
+    LM Atelier's own settings for each role, so those stand in for its answer;
+    an engine from an adapter package may advertise others, which only asking
+    it would show.
+    """
+
+    preset = saved_workflow_use_case_preset(session, facts, chat_id=chat_id)
+    if preset is None:
+        return None
+    role = classify_workflow_use_case(facts).capability
+    return WorkflowUseCaseExecution(preset, facts, tuple(builtin_settings_for_role(role)))
+
+
 async def prepare_workflow_use_case_execution(
     session_factory: Callable[[], Session],
     engines: EngineRegistry,
@@ -136,15 +183,11 @@ async def prepare_workflow_use_case_execution(
     requirements = classify_workflow_use_case(facts)
     if inherited is not None:
         assert inherited.snapshot is not None
-        preset = inherited.snapshot.resolved_preset()
+        preset = _applied_preset(inherited.snapshot.resolved_preset(), requirements)
     else:
         with session_factory() as session:
-            preset = resolve_workflow_use_case_preset(
-                session, requirements.use_case, chat_id=chat_id
-            )
-    if preset.mode in {"unconfigured", "automatic"}:
+            preset = saved_workflow_use_case_preset(session, facts, chat_id=chat_id)
+    if preset is None:
         return None
-    if preset.use_case != requirements.use_case:
-        raise WorkflowUseCasePresetAdmissionError("workflow-use-case-preset-mismatch")
     fields = await engines.settings_for_role(requirements.capability)
     return WorkflowUseCaseExecution(preset, facts, tuple(fields))

@@ -1600,7 +1600,7 @@ async def test_a_file_made_for_a_tool_keeps_only_what_the_store_allows_and_then_
         store.tool_output_size(artifacts.ToolOutput(store.root / "made-elsewhere.tmp", 8))
 
     monkeypatch.setattr(
-        artifacts, "available_bytes", lambda _anchor: 2 * 8 + artifacts._COPY_HEADROOM - 1
+        artifacts, "available_bytes", lambda _anchor: 2 * 8 + artifacts.COPY_HEADROOM_BYTES - 1
     )
     with pytest.raises(artifacts.ArtifactCopyUnavailable):
         async with store.tool_output(maximum_bytes=8):

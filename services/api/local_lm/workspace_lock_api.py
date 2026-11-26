@@ -57,7 +57,9 @@ def _lock(request: Request) -> WorkspaceLock:
     return cast("Services", request.app.state.services).workspace_lock
 
 
-def _status_out(state: WorkspaceLockState) -> WorkspaceLockStatusOut:
+def workspace_lock_status_out(state: WorkspaceLockState) -> WorkspaceLockStatusOut:
+    """The lock as a page or a script reads it, from the state the lock reports."""
+
     return WorkspaceLockStatusOut(
         locked=state.locked,
         enabled=state.enabled,
@@ -155,7 +157,7 @@ def _check_saved_pin(attempts: UnlockAttempts, pin: str | None) -> _PinCheck:
 async def workspace_lock_status(request: Request) -> WorkspaceLockStatusOut:
     """Whether the workspace is locked, from memory alone."""
 
-    return _status_out(_lock(request).status())
+    return workspace_lock_status_out(_lock(request).status())
 
 
 @router.post("/unlock", response_model=WorkspaceLockStatusOut)
@@ -165,7 +167,7 @@ async def unlock_workspace(
     lock = _lock(request)
     state = lock.status()
     if not state.locked:
-        return _status_out(state)
+        return workspace_lock_status_out(state)
     if not lock.setting_readable:
         raise _setting_invalid()
     wait = lock.attempts.admit()
@@ -182,7 +184,7 @@ async def unlock_workspace(
         raise _refused(check.retry_after_seconds)
     try:
         # Opens only the lock this check was admitted for, never a newer one.
-        return _status_out(lock.unlock(admitted_epoch=state.lock_epoch))
+        return workspace_lock_status_out(lock.unlock(admitted_epoch=state.lock_epoch))
     except WorkspaceLockChanged:
         raise api_error(
             423,
@@ -194,7 +196,7 @@ async def unlock_workspace(
 @router.post("/lock", response_model=WorkspaceLockStatusOut)
 async def lock_workspace(request: Request) -> WorkspaceLockStatusOut:
     try:
-        return _status_out(_lock(request).lock())
+        return workspace_lock_status_out(_lock(request).lock())
     except WorkspaceLockDisabled:
         raise api_error(
             409,

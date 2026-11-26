@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session, object_session, selectinload
 
 from .accepted_turn_context import (
     AcceptedContext,
+    AcceptedProfile,
     AcceptedWorkflow,
     accepted_context,
     accepted_profile_provenance,
@@ -161,6 +162,7 @@ from .image_edit_verification import (
     reading_contradicted_around,
     without_contradicted,
 )
+from .instance_status import refused_operation
 from .matting_workflows import workflow_declares_matting
 from .media_references import (
     GUIDE_VIDEO_MEDIA_TYPES,
@@ -261,6 +263,7 @@ from .schemas import (
     EngineCapabilities,
     GenerationOffer,
     MessageOut,
+    OperationReadinessOut,
     OrderedWorkIntent,
     RoutingPlan,
     RoutingReasonCode,
@@ -273,6 +276,7 @@ from .schemas import (
     WorkerStartReason,
     WorkerStatus,
     WorkerStopReason,
+    WorkflowTrust,
 )
 from .setting_changes import (
     SETTING_CHANGES_KEY,
@@ -358,7 +362,12 @@ from .studio_relight import (
 )
 from .studio_relight import workflow_instruction as relight_workflow_instruction
 from .turn_inheritance import TurnInheritance, TurnSourceResolver, inherited_profile_configuration
-from .turn_workflow_kinds import ANY_TURN, TurnWorkflowKinds, turn_workflow_kinds
+from .turn_workflow_kinds import (
+    ANY_TURN,
+    WHOLE_PICTURE_EDIT,
+    TurnWorkflowKinds,
+    turn_workflow_kinds,
+)
 from .upscale_preview import UpscalePreviewOut, UpscaleSelectionUnavailable, project_upscale_preview
 from .upscale_workflows import (
     UPSCALE_SETTING_KEY,
@@ -486,21 +495,33 @@ from .workflow_source_geometry import (
     trace_selection_route,
     trace_source_fit_route,
 )
+from .workflow_use_case_errors import workflow_use_case_error
 from .workflow_use_case_execution import (
     InheritedWorkflowUseCasePreset,
     WorkflowUseCaseExecution,
     enlargement_revision_eligibility,
+    offline_workflow_use_case_execution,
     prepare_workflow_use_case_execution,
     workflow_use_case_inputs,
 )
-from .workflow_use_case_preset_admission import AdmittedWorkflowUseCasePreset
+from .workflow_use_case_preset_admission import (
+    AdmittedWorkflowUseCasePreset,
+    WorkflowUseCasePresetAdmissionError,
+)
 from .workflow_use_case_preset_provenance import (
     capture_workflow_use_case_preset,
     read_workflow_use_case_preset,
 )
-from .workflow_use_case_preset_resolution import resolve_workflow_use_case_preset
+from .workflow_use_case_preset_resolution import (
+    WorkflowUseCasePresetResolutionError,
+    resolve_workflow_use_case_preset,
+)
 from .workflow_use_case_preset_settings import WorkflowUseCasePresetSettingsError
-from .workflow_use_cases_v1 import classify_workflow_use_case
+from .workflow_use_cases_v1 import (
+    WorkflowUseCaseError,
+    WorkflowUseCaseInputs,
+    classify_workflow_use_case,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -7122,17 +7143,9 @@ class ConversationOrchestrator:
             else:
                 if self.engines.settings.chat_engine not in {"llama.cpp", "vllm"}:
                     return None
-                profile = (
-                    session.get(ModelProfile, run.profile_id) if run and run.profile_id else None
+                current_profile = self._installed_chat_profile(
+                    session, run.profile_id if run else None
                 )
-                install = (
-                    session.get(ModelInstall, profile.model_install_id)
-                    if profile and profile.model_install_id
-                    else None
-                )
-                if not profile or not install:
-                    raise RuntimeError("the selected chat profile does not have an installed model")
-                current_profile = capture_profile(session, profile.id)
                 if current_profile is None:
                     raise RuntimeError("the selected chat profile does not have an installed model")
                 profile, install, launch_scope = resolve_accepted_profile(session, current_profile)
@@ -7142,6 +7155,23 @@ class ConversationOrchestrator:
             launch_scope_sha256=launch_scope,
             vision_max_images=snapshot.vision_sampling.max_images if snapshot else None,
         )
+
+    @staticmethod
+    def _installed_chat_profile(session: Session, profile_id: str | None) -> AcceptedProfile | None:
+        """The chat profile a new run loads, or None when it has no installed model to load.
+
+        Only reads, so a status read can ask what a chat turn's start would refuse.
+        """
+
+        profile = session.get(ModelProfile, profile_id) if profile_id else None
+        install = (
+            session.get(ModelInstall, profile.model_install_id)
+            if profile and profile.model_install_id
+            else None
+        )
+        if not profile or not install:
+            return None
+        return capture_profile(session, profile.id)
 
     async def _chat_planner_available(self) -> bool:
         if self.engines.settings.chat_engine not in {"llama.cpp", "vllm"}:
@@ -14566,7 +14596,14 @@ class ConversationOrchestrator:
         workflow_choice: TurnWorkflowSelectionIn | None = None,
         revision_eligibility: RevisionEligibility | None = None,
         kinds: TurnWorkflowKinds = ANY_TURN,
+        carry_pin_forward: bool = True,
     ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None]:
+        """The model, how it was chosen, and the revision a turn runs this operation on.
+
+        `carry_pin_forward` false resolves a project's pin without moving it on
+        to its identical successor, for a caller that must not write.
+        """
+
         if preferred_revision_id is not None and preferred_profile_id is None:
             preferred_profile_id = self._profile_bound_by_revision(
                 session, operation, preferred_revision_id
@@ -14626,6 +14663,7 @@ class ConversationOrchestrator:
                 model_install_id=selected.model_install_id,
                 preferred_revision_id=preferred_revision_id,
                 kinds=kinds,
+                carry_pin_forward=carry_pin_forward,
             )
             _require_revision_eligibility(operation, workflow, revision_eligibility)
             return (
@@ -14660,6 +14698,7 @@ class ConversationOrchestrator:
             model_install_id=profile.model_install_id if profile else None,
             preferred_revision_id=preferred_revision_id,
             kinds=kinds,
+            carry_pin_forward=carry_pin_forward,
         )
         if (
             operation == Operation.TEXT
@@ -15916,7 +15955,15 @@ class ConversationOrchestrator:
         model_install_id: str | None = None,
         preferred_revision_id: str | None = None,
         kinds: TurnWorkflowKinds = ANY_TURN,
+        carry_pin_forward: bool = True,
     ) -> WorkflowRevision | None:
+        """The revision this operation runs on, a project's pin first.
+
+        With `carry_pin_forward` false, a pin whose identical successor is
+        current resolves to that successor but is left naming the old revision,
+        so nothing is written.
+        """
+
         if operation == Operation.TEXT:
             return None
         if preferred_revision_id:
@@ -15949,7 +15996,10 @@ class ConversationOrchestrator:
                     )
                 revision_id = project_selection.workflow_revision_id
             if project and revision_id:
-                return self._resolve_project_pin(
+                resolve_pin = (
+                    self._resolve_project_pin if carry_pin_forward else self._project_pin_revision
+                )
+                return resolve_pin(
                     session,
                     project,
                     revision_id,
@@ -16022,6 +16072,138 @@ class ConversationOrchestrator:
             ):
                 matched.append(asset.id)
         return matched
+
+    def workflow_readiness(
+        self, session: Session, chat: Chat, operation: Operation
+    ) -> OperationReadinessOut:
+        """Whether a plain turn in this chat would run this operation, and on which revision.
+
+        The recipe and the workflow are chosen as a turn chooses them, for a turn
+        with no words of its own and nothing attached beyond the picture an edit
+        or an animation starts from. An automatic choice is the one such a turn
+        gets: a turn's words or selection can still lead it elsewhere. The choice
+        then meets the checks in the order a turn meets them: its admission
+        checks the activated dependencies and the recipe, and its run checks the
+        review of a ComfyUI workflow and its node packages, or for chat, that the
+        model it loads is installed.
+
+        Only reads, and asks no engine anything: a project's pin resolves to the
+        revision it runs without being moved on, and a recipe's settings are
+        checked against the settings every built-in engine advertises.
+        """
+
+        execution: WorkflowUseCaseExecution | None = None
+        try:
+            if self._setup_verification_workflow_id(session, chat) is None:
+                execution = offline_workflow_use_case_execution(
+                    session, self._plain_turn_inputs(operation), chat_id=chat.id
+                )
+            profile, _selection, revision = self._profile_and_workflow_for_operation(
+                session,
+                chat,
+                operation,
+                "",
+                revision_eligibility=execution.eligibility(session) if execution else None,
+                kinds=self._plain_turn_kinds(operation),
+                carry_pin_forward=False,
+            )
+        except WorkflowFamilySelectionError as exc:
+            # Named as the turn names its own refusal, so a recipe's code comes
+            # through even when it is the only reason no candidate was left.
+            named = workflow_use_case_error(exc)
+            return refused_operation(operation, named[0] if named is not None else exc.reason)
+        except WorkflowSelectionInvalid as exc:
+            return refused_operation(operation, exc.reason)
+        except ProjectWorkflowPinInvalid as exc:
+            return refused_operation(
+                operation, f"project_pin_{exc.reason}", workflow_revision_id=exc.revision_id
+            )
+        except (
+            WorkflowUseCaseError,
+            WorkflowUseCasePresetAdmissionError,
+            WorkflowUseCasePresetResolutionError,
+        ) as exc:
+            return refused_operation(operation, exc.code)
+        if revision is None and operation != Operation.TEXT:
+            # Admission refuses a media turn that finds no workflow at all.
+            return refused_operation(operation, "no_ready_workflow")
+        trust: WorkflowTrust | None = None
+        if revision is not None:
+            trust = "trusted" if revision_is_trusted(session, revision) else "untrusted"
+        refusal = self._plain_turn_refusal(session, operation, profile, revision, trust)
+        revision_id = revision.id if revision is not None else None
+        if refusal is not None:
+            return refused_operation(
+                operation, refusal, trust=trust, workflow_revision_id=revision_id
+            )
+        return OperationReadinessOut(
+            operation=operation,
+            readiness="ready",
+            trust=trust or "not_applicable",
+            workflow_revision_id=revision_id,
+        )
+
+    def _plain_turn_refusal(
+        self,
+        session: Session,
+        operation: Operation,
+        profile: ModelProfile | None,
+        revision: WorkflowRevision | None,
+        trust: WorkflowTrust | None,
+    ) -> str | None:
+        """Why a plain turn's admission or run would refuse what selection chose, if either would.
+
+        Admission checks the activated dependencies, and then admits the recipe
+        against the chosen revision, which selection already did: it chooses
+        only a revision its recipe eligibility admits, with the same settings.
+        The run checks a ComfyUI workflow's review and its node packages, or for
+        chat, that the profile it loads has an installed model.
+        """
+
+        try:
+            _queued_workflow_activation(session, revision)
+        except ValueError:
+            return "activation_not_ready"
+        if operation == Operation.TEXT:
+            if (
+                self.engines.settings.chat_engine in {"llama.cpp", "vllm"}
+                and self._installed_chat_profile(session, profile.id if profile else None) is None
+            ):
+                return "model_unavailable"
+            return None
+        if revision is None:
+            return None
+        if revision.engine == "comfyui" and trust == "untrusted":
+            return "revision_untrusted"
+        if node_dependency_errors(session, revision.dependencies_json):
+            return "node_packages_missing"
+        return None
+
+    @staticmethod
+    def _plain_turn_inputs(operation: Operation) -> WorkflowUseCaseInputs:
+        """What a turn bringing nothing but its operation's source tells the recipe step."""
+
+        return WorkflowUseCaseInputs(
+            operation,
+            source_present=operation in {Operation.IMAGE_TO_IMAGE, Operation.IMAGE_TO_VIDEO},
+        )
+
+    def _plain_turn_kinds(self, operation: Operation) -> TurnWorkflowKinds:
+        """The workflow kinds a turn passes over when it brings nothing beyond its source.
+
+        An edit with no selection, margins or enlargement passes over a workflow
+        that waits for one of them, and under ComfyUI an animation that brings no
+        guide video passes over one that waits for a video, as such a turn does.
+        """
+
+        if operation == Operation.IMAGE_TO_IMAGE:
+            return WHOLE_PICTURE_EDIT
+        if (
+            operation == Operation.IMAGE_TO_VIDEO
+            and self.engines.settings.media_engine == "comfyui"
+        ):
+            return TurnWorkflowKinds(videos=0)
+        return ANY_TURN
 
     def _studio_revision_runs(self, session: Session, revision: WorkflowRevision) -> bool:
         """Whether a media run on this revision gets past the checks it meets first.
@@ -16229,7 +16411,7 @@ class ConversationOrchestrator:
         ),
     }
 
-    def _resolve_project_pin(
+    def _project_pin_revision(
         self,
         session: Session,
         project: Project,
@@ -16239,12 +16421,11 @@ class ConversationOrchestrator:
         model_install_id: str | None,
         role: str,
     ) -> WorkflowRevision:
-        """Resolve a project's pinned workflow, or say why it cannot be used.
+        """The revision a project's pin runs, or why it cannot be used, without moving the pin.
 
-        A pin is a lockfile, not a preference: it names one executable contract.
-        So this never falls through to generic selection - running a different
-        graph than the project pinned would hide the broken pin behind output
-        that looks fine but was produced by something else.
+        That is the pinned revision, or its current successor when the two
+        execute the same bytes. Only reads: `_resolve_project_pin` moves the pin
+        on to the successor it returns.
         """
         pinned = session.get(WorkflowRevision, revision_id)
         definition = session.get(WorkflowDefinition, pinned.workflow_id) if pinned else None
@@ -16269,8 +16450,34 @@ class ConversationOrchestrator:
                 reason=problem,
                 message=self._PIN_PROBLEM_MESSAGES[problem],
             )
+        return candidate
 
-        if candidate.id != pinned.id:
+    def _resolve_project_pin(
+        self,
+        session: Session,
+        project: Project,
+        revision_id: str,
+        operation: Operation,
+        *,
+        model_install_id: str | None,
+        role: str,
+    ) -> WorkflowRevision:
+        """Resolve a project's pinned workflow, or say why it cannot be used.
+
+        A pin is a lockfile, not a preference: it names one executable contract.
+        So this never falls through to generic selection - running a different
+        graph than the project pinned would hide the broken pin behind output
+        that looks fine but was produced by something else.
+        """
+        candidate = self._project_pin_revision(
+            session,
+            project,
+            revision_id,
+            operation,
+            model_install_id=model_install_id,
+            role=role,
+        )
+        if candidate.id != revision_id:
             # Carry the pin forward so it keeps naming the revision in use.
             if role == "video":
                 project.video_workflow_revision_id = candidate.id

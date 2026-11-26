@@ -232,6 +232,7 @@ async def test_while_locked_the_api_answers_only_what_a_locked_page_needs(
         ("GET", "/api/artifacts/art_missing/content"),
         ("GET", "/api/queue/activity"),
         ("GET", "/api/jobs/activity"),
+        ("GET", "/api/instance/status"),
     ):
         body = None if method == "GET" else {"name": "Refused"}
         response = await client.request(method, path, json=body)

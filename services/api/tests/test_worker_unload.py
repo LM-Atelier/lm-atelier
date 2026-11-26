@@ -61,6 +61,7 @@ from local_lm.schemas import WorkerStartReason, WorkerStatus, WorkerStopReason
 from local_lm.web_search import CrwSearchProvider
 from local_lm.web_search_configuration import search_provider_revision
 from local_lm.web_search_consent import pause_for_search
+from local_lm.worker_startup import RestoredWorkers
 from local_lm.workflow_compatibility import mirror_legacy_chat_workflow_selections
 
 UNLOAD = "/api/workers/unload"
@@ -671,10 +672,10 @@ class _StartupRestore:
         self.load_chat = AsyncMock()
         self.reconciled_by: list[str] = []
 
-        async def restore_when_told(restoring: Any, **options: Any) -> None:
+        async def restore_when_told(restoring: Any, **options: Any) -> RestoredWorkers:
             await self.go.wait()
             try:
-                await restore(restoring, **options)
+                return await restore(restoring, **options)
             finally:
                 self.done.set()
 

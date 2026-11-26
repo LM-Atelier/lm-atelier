@@ -3952,6 +3952,195 @@ class WorkerStatus(ApiModel):
     counted_since: datetime | None = None
 
 
+#: How a worker's most recent end came about: a stop the application made, or
+#: an exit while nothing was stopping it.
+WorkerEnd = Literal["stop", "exit"]
+#: How the restore at startup ended for one worker.
+WorkerRestoreOutcome = Literal["restored", "not_configured", "skipped_for_release", "failed"]
+#: The restore at startup for one worker, `pending` until it has ended.
+WorkerRestoreState = Literal["pending"] | WorkerRestoreOutcome
+#: Whether a worker is in use, on its way, down on purpose, or down by failure.
+#: `stopped` is a stop the application made for a reason other than failing
+#: health checks; `not_started` is a worker nothing has started since the
+#: service began, and whose restore did not fail.
+WorkerCondition = Literal["ready", "starting", "stopping", "stopped", "not_started", "failing"]
+InstanceBuildKind = Literal["release", "source"]
+InstanceStartupState = Literal["running", "complete", "stalled"]
+StartupTaskName = Literal[
+    "worker_restore", "runtime_verification", "reference_index", "retention_sweep"
+]
+#: `waiting` is the retention sweep waiting for the reference index; `gave_up`
+#: is work that ended without finishing and does not try again in this run.
+StartupTaskState = Literal["running", "waiting", "done", "gave_up"]
+#: `unmeasured` when the free space of the artifact store's volume could not be read.
+StorageState = Literal["ok", "low", "below_floor", "unmeasured"]
+WorkflowTrust = Literal["trusted", "untrusted", "not_applicable"]
+#: The selectors a chat's status reports. Vision is left out: a turn picks its
+#: vision model from the verified profiles as it goes.
+ChatStandingSelector = Literal["chat", "image", "video"]
+#: Why a turn's recipe step refuses it, with the codes the turn itself answers:
+#: its inputs, the saved recipe it resolves, the recipe's admission against the
+#: chosen revision, an automatic choice no workflow could satisfy, and an
+#: automatic localized edit with no instruction-edit workflow to take it.
+RecipeReadinessReason = Literal[
+    "workflow-use-case-no-compatible-workflow",
+    "workflow-instruction-edit-required",
+    "workflow-use-case-input-invalid",
+    "workflow-use-case-input-ambiguous",
+    "workflow-use-case-source-required",
+    "workflow-use-case-chat-not-found",
+    "workflow-use-case-project-not-found",
+    "workflow-use-case-project-mismatch",
+    "workflow-use-case-preset-not-found",
+    "workflow-use-case-preset-disabled",
+    "workflow-use-case-preset-mismatch",
+    "workflow-use-case-preset-settings-invalid",
+    "workflow-use-case-preset-invalid",
+    "workflow-use-case-preset-revision-mismatch",
+    "workflow-use-case-preset-schema-invalid",
+    "workflow-use-case-preset-setting-unsupported",
+    "workflow-use-case-preset-setting-unavailable",
+    "workflow-use-case-preset-prompt-setting-forbidden",
+    "workflow-use-case-preset-revision-required",
+    "workflow-use-case-operation-mismatch",
+    "workflow-use-case-mask-unsupported",
+    "workflow-use-case-outpaint-unsupported",
+    "workflow-use-case-upscale-unsupported",
+    "workflow-use-case-graph-missing",
+    "workflow-use-case-source-binding-missing",
+    "workflow-use-case-mask-binding-missing",
+    "workflow-use-case-outpaint-binding-missing",
+    "workflow-use-case-upscale-binding-missing",
+]
+#: Why a plain turn would refuse an operation's workflow. Workflow selection's
+#: own reasons, those a chat's or a project's saved choice is refused for, the
+#: reasons a project's pinned revision is refused for, the run's own check of
+#: the node packages a workflow needs, and the recipe step's refusals.
+WorkflowReadinessReason = (
+    Literal[
+        "activation_not_ready",
+        "capability_mismatch",
+        "current_revision_invalid",
+        "current_revision_missing",
+        "default_missing",
+        "engine_mismatch",
+        "family_archived",
+        "family_disabled",
+        "family_missing",
+        "family_not_found",
+        "model_unavailable",
+        "no_ready_workflow",
+        "operation_mismatch",
+        "operation_unavailable",
+        "profile_binding_missing",
+        "profile_incompatible",
+        "revision_ignores_the_description",
+        "revision_missing",
+        "revision_not_executable",
+        "revision_untrusted",
+        "selector_disabled",
+        "selector_not_enabled",
+        "selector_operation_mismatch",
+        "variant_ambiguous",
+        "variant_missing",
+        "family_not_bound",
+        "family_unavailable",
+        "family_variant_resolution_pending",
+        "project_pin_engine_mismatch",
+        "project_pin_ignores_the_description",
+        "project_pin_missing",
+        "project_pin_model_mismatch",
+        "project_pin_operation_mismatch",
+        "project_pin_untrusted",
+        "node_packages_missing",
+    ]
+    | RecipeReadinessReason
+)
+
+
+class InstanceBuildOut(ApiModel):
+    version: str
+    kind: InstanceBuildKind
+    # The commit a release was built from, as its bundled manifest records it.
+    # Null from source, and for a manifest that cannot be read or is malformed.
+    commit: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")] | None = None
+    dirty: bool | None = None
+
+
+class StartupTaskOut(ApiModel):
+    task: StartupTaskName
+    state: StartupTaskState
+
+
+class InstanceStartupOut(ApiModel):
+    # `stalled` when nothing is still running and some work gave up.
+    state: InstanceStartupState
+    tasks: list[StartupTaskOut]
+
+
+class WorkerStandingOut(ApiModel):
+    name: Literal["chat", "media"]
+    condition: WorkerCondition
+    restore: WorkerRestoreState
+    last_stop_reason: WorkerStopReason | None = None
+    last_end: WorkerEnd | None = None
+    failure_code: WorkerFailureCode | None = None
+
+
+class LaneStandingOut(ApiModel):
+    lane: Literal["generation", "transfer", "install", "utility"]
+    # `unreadable` when the saved policy is not one this build can read; the
+    # lane then dispatches nothing.
+    dispatch_state: Literal["open", "draining", "paused", "unreadable"]
+    running_jobs: int | None = Field(default=None, ge=0)
+
+
+class StorageStandingOut(ApiModel):
+    state: StorageState
+    # Free space on the artifact store's volume.
+    free_bytes: int | None = Field(default=None, ge=0)
+    # Below this a private copy of an artifact is refused.
+    floor_bytes: int = Field(ge=0)
+    # Below this the storage page warns.
+    warning_bytes: int = Field(ge=0)
+
+
+class OperationReadinessOut(ApiModel):
+    operation: Operation
+    readiness: WorkflowVariantReadiness
+    trust: WorkflowTrust
+    reason: WorkflowReadinessReason | None = None
+    workflow_revision_id: str | None = None
+
+
+class ChatWorkflowStandingOut(ApiModel):
+    selector_capability: ChatStandingSelector
+    mode: WorkflowSelectionResponseMode
+    workflow_family_id: str | None = None
+    operations: list[OperationReadinessOut]
+
+
+class ChatStandingOut(ApiModel):
+    chat_id: str
+    workflows: list[ChatWorkflowStandingOut]
+
+
+class InstanceStatusOut(ApiModel):
+    # The same as the instance header `/api/ready` sends, and kept across restarts.
+    instance_id: str
+    # The same as the `event_epoch` a session is issued with; new at every start.
+    boot_id: str
+    started_at: datetime
+    build: InstanceBuildOut
+    startup: InstanceStartupOut
+    workspace_lock: WorkspaceLockStatusOut
+    workers: list[WorkerStandingOut]
+    lanes: list[LaneStandingOut]
+    storage: StorageStandingOut
+    # Only when a chat is named.
+    chat: ChatStandingOut | None = None
+
+
 class WorkerSettings(ApiModel):
     # Bounds mirror Settings.worker_startup_seconds so a value accepted here is
     # never rejected when the process restarts and reads it back from disk.

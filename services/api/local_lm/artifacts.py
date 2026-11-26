@@ -104,7 +104,8 @@ _TOOL_OUTPUT_NAME: Final = re.compile(r"tool-output-[0-9a-f]{32}\.tmp")
 _COPY_READ: Final = 1024 * 1024
 #: Room a private copy must leave free on the store's volume, so that making it
 #: never fills the volume other writes, the database's among them, depend on.
-_COPY_HEADROOM: Final = 1024 * 1024 * 1024
+#: Public because the instance status reports free space against it.
+COPY_HEADROOM_BYTES: Final = 1024 * 1024 * 1024
 
 
 def _is_temporary_name(name: str) -> bool:
@@ -733,7 +734,7 @@ class ArtifactStore:
                 # Created only once the source is open and checked, so a
                 # refusal before this point has nothing to remove.
                 try:
-                    if available_bytes(root) < measured.st_size + _COPY_HEADROOM:
+                    if available_bytes(root) < measured.st_size + COPY_HEADROOM_BYTES:
                         raise ArtifactCopyUnavailable("there is no room for a private copy")
                     sink = create_entry(root, name)
                 except AnchoredDirectoryError as exc:
@@ -806,7 +807,7 @@ class ArtifactStore:
         name = f"{_TOOL_OUTPUT_PREFIX}{secrets.token_hex(16)}.tmp"
         try:
             with AnchoredDirectory(self.root) as root:
-                if available_bytes(root) < 2 * maximum_bytes + _COPY_HEADROOM:
+                if available_bytes(root) < 2 * maximum_bytes + COPY_HEADROOM_BYTES:
                     raise ArtifactCopyUnavailable("there is no room for a tool's output")
                 os.close(create_entry(root, name))
         except AnchoredDirectoryError as exc:
