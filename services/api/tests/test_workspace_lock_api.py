@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import threading
 from collections.abc import AsyncIterator
@@ -177,7 +178,14 @@ async def test_a_pin_is_kept_only_as_a_verifier(
         document = stored.value_json
     assert set(document) == {"enabled", "revision", "pin"}
     assert set(document["pin"]) == VERIFIER_FIELDS
-    assert PIN not in str(document)
+    # The salt and the hash are random hex, which holds any four digits now and
+    # then, so the PIN is looked for everywhere else, and in them only as a
+    # plain encoding of the whole value.
+    random_parts = {"salt", "hash"}
+    rest = {**document, "pin": {k: v for k, v in document["pin"].items() if k not in random_parts}}
+    assert PIN not in str(rest)
+    plain = {PIN, PIN.encode().hex(), base64.b64encode(PIN.encode()).decode()}
+    assert not plain & {str(document["pin"][part]) for part in random_parts}
 
 
 async def test_a_saved_setting_that_cannot_be_read_is_refused_without_echoing_it(
