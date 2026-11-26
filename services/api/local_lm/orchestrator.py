@@ -1348,6 +1348,40 @@ class ProjectWorkflowPinInvalid(ValueError):
         self.reason = reason
 
 
+class WorkersBusy(RuntimeError):
+    """The models were not released, because work is running or could start.
+
+    `jobs` is how many jobs are running, queued and free to start now, or paused
+    for an automatic search and free to start once it goes on shortly.
+    """
+
+    def __init__(self, jobs: int) -> None:
+        self.jobs = jobs
+        super().__init__(
+            f"{jobs} {'job is' if jobs == 1 else 'jobs are'} running or ready to start, so the "
+            "models stay loaded. Let that work finish, or pause it so nothing new starts, then "
+            "try again."
+        )
+
+
+class MediaWorkerInUse(RuntimeError):
+    """The models were not released, because someone else is using ComfyUI.
+
+    `use` is what is using it: an open workflow editor, or prompts that LM
+    Atelier did not submit, such as ones queued from ComfyUI's own page.
+    """
+
+    def __init__(self, use: MediaUse) -> None:
+        self.use = use
+        super().__init__(
+            "A ComfyUI workflow editor is open, so ComfyUI was left running and no models were "
+            "released. Save or close the editor, then try again."
+            if use == "editor"
+            else "ComfyUI is running work that LM Atelier did not start, so it was left running "
+            "and no models were released. Try again once that work has finished."
+        )
+
+
 SELECTION_TERM_ALIASES = {
     "animation": "video",
     "animations": "video",
@@ -1645,6 +1679,9 @@ class ConversationOrchestrator:
         #: Whether something outside this class's runs relies on the live media
         #: worker, such as an open native editor session; set by the application.
         self.media_worker_in_use: Callable[[], bool] = lambda: False
+        #: How many releases of both workers' models have begun, each counted
+        #: once it has passed its checks. See `release_generation`.
+        self._release_generation = 0
         #: Queued media runs waiting, by job, for someone else's use of ComfyUI
         #: to end before they restart it with the launch they need.
         self._media_waits: dict[str, MediaReplacementWait] = {}
@@ -5137,12 +5174,26 @@ class ConversationOrchestrator:
         if outcome_writes:
             await asyncio.gather(*outcome_writes, return_exceptions=True)
         self._pending_outcomes.clear()
+        await self._stand_down_automatic_loads()
+
+    async def _stand_down_automatic_loads(self) -> None:
+        """Cancel every worker start and model load this class would make on its own.
+
+        That is a media worker restart in flight, which may be the next ordered
+        step's prewarm, the open warm window with its expiry or whatever a chat
+        load inside it left to settle, a restart owed once chat activity starts,
+        and an armed prewarm. The window's generation moves on as well, so an
+        expiry or a settlement that wakes anyway finds itself stale and moves
+        nothing.
+        """
+
         if self._media_restart_task:
             self._media_restart_task.cancel()
             await asyncio.gather(self._media_restart_task, return_exceptions=True)
             self._media_restart_task = None
         self._media_warm_window = None
         self._media_warm_stop_reason = None
+        self._media_warm_generation += 1
         if self._media_warm_task:
             self._media_warm_task.cancel()
             await asyncio.gather(self._media_warm_task, return_exceptions=True)
@@ -8090,6 +8141,119 @@ class ConversationOrchestrator:
         """
 
         self._displaced_chat_profile_id = None
+
+    @property
+    def release_generation(self) -> int:
+        """How many releases of both workers' models have begun since the service started.
+
+        A release is counted once it has passed its checks and starts standing
+        down what would load the models back, even if its stop is then refused
+        or fails. One refused at its first checks is not counted. The count is
+        for what would load a model from outside this class. A caller that
+        owes a worker start reads it before it takes the device, and makes the
+        start only while it is unchanged: a release begun in between wants the
+        device left free.
+        """
+
+        return self._release_generation
+
+    async def unload_workers(self) -> None:
+        """Release both workers' models, and keep them released until something asks for one.
+
+        For someone who wants the device for something else while the routes
+        that need no model go on answering. Everything that would load a model
+        back on its own is stood down first: the open warm window and what its
+        expiry gives back, what a chat load inside one left to settle, a media
+        worker restart in flight or owed once chat activity starts, the next
+        ordered step's prewarm, and the chat model a media run displaced. Both
+        workers are then stopped, and each stop is counted as manual. The next
+        turn, run or explicit load starts what it needs as usual.
+
+        Refused while any job is running or could start now or shortly, since
+        any job may start a worker or hold the device, and while someone else
+        is using ComfyUI, from its own page or a workflow editor. Both are
+        checked before anything changes. Use of ComfyUI that begins a moment later is
+        refused at the stop itself, with the automatic loads already stood down
+        and both workers left running. A queued job that is held, or whose
+        category is paused, could not start, so pausing work first is how its
+        models are released while it waits. Filling a prompt template's
+        model-guided slots is not a job: a fill in progress is interrupted when
+        chat stops, and can be tried again.
+        """
+
+        # Before the lease as well as under it: a wedged job holds the lease
+        # indefinitely, and a request waiting there could not say why.
+        self._refuse_release_while_working()
+        async with self.scheduler.lease("primary"):
+            self._refuse_release_while_working()
+            media_worker = next(item for item in self.processes.statuses() if item.name == "media")
+            use = await self._media_runtime_use() if media_worker.running else None
+            if use is not None:
+                raise MediaWorkerInUse(use)
+            # Named first: a restart in flight ends its own process once the
+            # stand-down cancels it, and that end is this release's.
+            self.processes.expect_stop("media", WorkerStopReason.MANUAL)
+            # Moved on before anything is awaited, so a start owed from outside
+            # this class is not made once this release has begun.
+            self._release_generation += 1
+            self.forget_displaced_chat_profile()
+            try:
+                await self._stand_down_automatic_loads()
+            except BaseException:
+                # The stop named above is not coming, so nothing may be counted under it.
+                self.processes.forget_expected_stop("media")
+                raise
+            # Media first, so a worker someone began using since the check
+            # above is refused while chat is still loaded.
+            await self.processes.stop(
+                "media",
+                reason=WorkerStopReason.MANUAL,
+                stop_guard=self._refuse_release_under_use,
+            )
+            await self.processes.stop("chat", reason=WorkerStopReason.MANUAL)
+
+    def _refuse_release_while_working(self) -> None:
+        """Refuse a release while any job is running, or could start now or shortly.
+
+        Jobs of every kind count: downloads, exports and installations as well
+        as turns and generations. Any job may start a worker or hold the
+        device, so a release is refused rather than run beside one. A queued
+        job counts when it could start now. A turn paused for an automatic
+        search counts when it could start once the search's short delay is
+        over and it is queued again. A job that is held, whose category is
+        paused, or that waits for earlier work it depends on could not start,
+        so it is not counted, and neither is a turn waiting for someone to
+        approve its search.
+        """
+
+        with self.session_factory() as session:
+            running = (
+                session.scalar(
+                    select(func.count(Job.id)).where(Job.status == JobStatus.RUNNING.value)
+                )
+                or 0
+            )
+            queued = list(
+                session.scalars(select(Job.id).where(Job.status == JobStatus.QUEUED.value))
+            )
+            searching = scheduled_search_jobs(session)
+        startable = self.scheduler.startable_jobs(queued) if queued else frozenset()
+        resuming = self.scheduler.startable_once_queued(searching) if searching else frozenset()
+        busy = running + len(startable) + len(resuming)
+        if busy:
+            raise WorkersBusy(busy)
+
+    async def _refuse_release_under_use(self) -> None:
+        """Refuse to stop a ComfyUI worker for a release while someone else is using it.
+
+        Asked by the supervisor under the worker's lock, immediately before the
+        release stops it, so use that began after the release's first check
+        is refused too.
+        """
+
+        use = await self._media_runtime_use()
+        if use is not None:
+            raise MediaWorkerInUse(use)
 
     def _media_failure_retries(
         self, job_id: str, run_id: str | None, claim: JobClaim | None

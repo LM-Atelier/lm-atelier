@@ -1175,6 +1175,8 @@ export const api = {
     request<WorkerStatus>(`/api/workers/${name}/restart`, { method: "POST" }),
   resetWorker: (name: "chat" | "media") =>
     request<WorkerResetResult>(`/api/workers/${name}/reset`, { method: "POST" }),
+  // Both workers' models at once, kept released until something needs a model.
+  unloadWorkers: () => request<WorkerStatus[]>("/api/workers/unload", { method: "POST" }),
   workerLogTail: (name: "chat" | "media") =>
     request<WorkerLogTail>(`/api/workers/${name}/log-tail`),
   workerLogLocation: () => request<WorkerLogLocation>("/api/workers/log-location"),

@@ -1748,6 +1748,7 @@ class ProcessSupervisor:
         *,
         reason: WorkerStopReason = WorkerStopReason.UNATTRIBUTED,
         before_stop: Callable[[], None] | None = None,
+        stop_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> WorkerStatus:
         """Stop the named worker, counting `reason` if a running process ends.
 
@@ -1756,6 +1757,11 @@ class ProcessSupervisor:
         is cancelled or cannot confirm the end: the end is counted under it
         once it is seen, here, by a later stop or by a status read. Any stop
         named in advance for this worker is used by now, and is cleared.
+
+        `stop_guard` is awaited under the worker's lock, and only when a live
+        worker is about to be stopped, so no start or stop comes between its
+        answer and this stop. It must not wait for that lock itself. A raise
+        leaves the worker running and reaches the caller.
         """
 
         if name not in self._locks:
@@ -1764,6 +1770,8 @@ class ProcessSupervisor:
             async with self._locks[name]:
                 if before_stop is not None:
                     before_stop()
+                if stop_guard is not None and _is_live(self._workers.get(name)):
+                    await stop_guard()
                 await self._stop_unlocked(name, reason=reason)
         finally:
             self.forget_expected_stop(name)

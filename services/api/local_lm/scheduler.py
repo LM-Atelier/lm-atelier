@@ -829,6 +829,32 @@ class ResourceScheduler:
                 if job.id in wanted
             )
 
+    def startable_once_queued(self, job_ids: Iterable[str]) -> frozenset[str]:
+        """Which of these jobs would start once queued again, if their turn came then.
+
+        For a job paused on a wait that ends by itself, such as an automatic
+        search's short delay, after which it is queued again. It is asked what
+        `startable_jobs` asks of a job, other than that it is queued and
+        unclaimed now: that it is not held, that its lane is open, and that
+        every job it depends on has finished.
+        """
+
+        wanted = set(job_ids)
+        if not wanted:
+            return frozenset()
+        with self.session_factory() as session:
+            jobs = list(session.scalars(select(Job).where(Job.id.in_(wanted))).all())
+            controls = job_controls(session, [job.id for job in jobs])
+            dispatches = queue_dispatches(session)
+            return frozenset(
+                job.id
+                for job in jobs
+                if not self._blocking_steps(session, job.work_step_id)
+                and controls[job.id].valid
+                and controls[job.id].state == "eligible"
+                and dispatch_allowed(job.kind, dispatches)
+            )
+
     @staticmethod
     def _blocking_steps(session: Session, work_step_id: str | None) -> list[str]:
         if not work_step_id:

@@ -277,6 +277,29 @@ current installations finish; downloads can still finish preparing their own
 models. A pause does not interrupt a running operation. Held plans still need
 **Release** after their category resumes.
 
+### Free the graphics card for another program
+
+To use the graphics card for something else, such as training a LoRA, open
+**Settings**, choose **Advanced**, and choose **Unload all models** in the
+**Workers** section. The chat worker and ComfyUI both stop, and nothing loads
+their models back by itself: ComfyUI is not kept ready for another media turn,
+and a chat model a media turn set aside is not brought back. Everything that
+needs no model keeps working, such as browsing your library and registering
+model files you put in place yourself.
+
+The models stay unloaded until something needs one. The next message you send
+or generation you start loads what it needs as usual. So do **Load** on a chat
+profile under **Models & generation**, **Start ComfyUI** in the **Workers**
+section, and restarting LM Atelier.
+
+The models are not unloaded, and you are told why, while any job is running or
+could start, or while ComfyUI is in use from its own page or a workflow editor.
+To unload them while jobs wait their turn, open **Accepted work** in the
+sidebar, choose **Pause after current** for their category, such as
+**Generation**, and let the current work finish. Filling a prompt template's
+model-guided slots is not a job: a fill in progress is interrupted when the
+models are unloaded, and you can try it again.
+
 ### Change dispatch order
 
 Choose **Change dispatch order** in **View accepted work**, then select an **Order

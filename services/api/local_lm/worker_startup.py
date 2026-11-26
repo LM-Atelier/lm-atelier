@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
@@ -88,16 +89,36 @@ def _media_worker_should_restore(services: Services) -> bool:
         )
 
 
-async def restore_configured_workers(services: Services) -> None:
-    """Restore local workers, provisioning their supported runtimes when needed."""
+async def restore_configured_workers(
+    services: Services, *, release_begun: Callable[[], bool] = lambda: False
+) -> None:
+    """Restore local workers, provisioning their supported runtimes when needed.
+
+    `release_begun` says whether a release of both workers' models has begun
+    since the service started. A release has begun once it has passed its
+    checks and starts standing down what would load the models back, even if
+    its stop is then refused or fails; one refused at its first checks has
+    not. Whoever began one wants the device for something else, so from then
+    on neither worker is restored, and the rest of the restore goes ahead. It
+    is asked under the device lease, which a release holds from its last
+    checks until it has stopped both workers, so no worker is restored after
+    one.
+    """
 
     settings = services.settings
     if settings.media_engine == "comfyui" and _media_worker_should_restore(services):
         try:
+            restored = False
+            refreshed = 0
             async with services.scheduler.lease("primary"):
-                await services.processes.start_media(reason=WorkerStartReason.APP_START)
-                refreshed = await services.downloads.refresh_installed_media_workflows()
-            logger.info("Restored the configured media worker")
+                if not release_begun():
+                    await services.processes.start_media(reason=WorkerStartReason.APP_START)
+                    restored = True
+                    refreshed = await services.downloads.refresh_installed_media_workflows()
+            if restored:
+                logger.info("Restored the configured media worker")
+            else:
+                logger.info("Did not restore the media worker: a release of the models had begun")
             if refreshed:
                 logger.info("Refreshed %s installed media workflows", refreshed)
             await services.downloads.reconcile_workflow_install_offers()
@@ -112,6 +133,11 @@ async def restore_configured_workers(services: Services) -> None:
         profile, install = selected
         try:
             async with services.scheduler.lease("primary"):
+                if release_begun():
+                    logger.info(
+                        "Did not restore the chat worker: a release of the models had begun"
+                    )
+                    return
                 await services.processes.load_chat(
                     profile, install, reason=WorkerStartReason.APP_START
                 )
