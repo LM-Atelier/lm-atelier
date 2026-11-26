@@ -103,6 +103,29 @@ class MediaEvent:
     engine_sourced: bool = False
 
 
+class MediaWorkflowFailure(Exception):
+    """The media engine refused a run's work, or one of its steps failed in an ordinary way.
+
+    An invalid graph, a refused input, a node's own error, a finished run whose
+    outputs cannot be used: the engine itself stays usable, so a caller may keep
+    its process for the next run. Any other exception may be the engine's own
+    fault and is treated as one.
+
+    The orchestrator reads the mark only when a run hands the device back, and
+    acts on it only for the managed ComfyUI worker: a marked failure may keep
+    that worker for the next run, as a finished run may, while after any other
+    failure the worker is recycled, unless another picture or video is queued
+    next or someone else is using it. The window that keeps the worker and the
+    recycle both apply only while the media engine is ComfyUI, which only the
+    built-in ComfyUI adapter drives. For any other engine, a third-party one
+    included, the handoff neither keeps nor recycles a worker, so the mark
+    changes nothing there.
+
+    A failure is marked by a class that also derives from the type it always
+    had, so whatever catches that type still catches it.
+    """
+
+
 class ChatAdapter(Protocol):
     async def capabilities(self) -> EngineCapabilities: ...
 

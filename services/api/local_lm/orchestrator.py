@@ -35,7 +35,13 @@ from .accepted_turn_context import (
     resolve_context_dependencies,
     save_accepted_context,
 )
-from .adapters.base import ChatRequest, GeneratedAsset, MediaEvent, MediaRequest
+from .adapters.base import (
+    ChatRequest,
+    GeneratedAsset,
+    MediaEvent,
+    MediaRequest,
+    MediaWorkflowFailure,
+)
 from .adapters.contracts import close_iterator
 from .adapters.message_projection import project_chat_messages
 from .artifact_library import ensure_library_entry
@@ -5281,14 +5287,22 @@ class ConversationOrchestrator:
                             if retryable and self._media_failure_retries(job_id, run_id, claim):
                                 await self._hold_media_handoff_for_retry(pending)
                             else:
-                                # Only a run that finished with its result keeps
-                                # the worker for the next one. After a failure,
-                                # recycling is the clean start, and after a stop
-                                # ComfyUI may still be finishing the interrupted
-                                # prompt.
+                                # A run that finished with its result keeps the
+                                # worker for the next one, and so does one that
+                                # failed on its own workflow: that leaves ComfyUI
+                                # healthy, and recycling it would cost the next
+                                # run a cold start of both workers. After any
+                                # other failure, which may be the worker's own
+                                # fault, recycling is the clean start, and after
+                                # a stop ComfyUI may still be finishing the
+                                # interrupted prompt.
                                 await self._complete_media_handoff(
                                     pending,
-                                    keep_warm=media_failure is None and self._run_completed(run_id),
+                                    keep_warm=(
+                                        isinstance(media_failure, MediaWorkflowFailure)
+                                        if media_failure is not None
+                                        else self._run_completed(run_id)
+                                    ),
                                 )
                 if queued_verification_job_id and not claim_lost:
                     self.start(queued_verification_job_id, None)
@@ -7261,10 +7275,11 @@ class ConversationOrchestrator:
     ) -> None:
         """Release retained Comfy state before restoring a managed chat model.
 
-        `keep_warm` is False after a failed run, and when a warm window's expiry
-        calls this, so the expiry hands the device back instead of opening
-        another window. A worker someone else is using is held for them rather
-        than recycled, whatever `keep_warm` says.
+        `keep_warm` is False after a run that was stopped, or that failed other
+        than on its own workflow, and when a warm window's expiry calls this, so
+        the expiry hands the device back instead of opening another window. A
+        worker someone else is using is held for them rather than recycled,
+        whatever `keep_warm` says.
         """
 
         # The obligation is recorded BEFORE anything that can fail, and this is

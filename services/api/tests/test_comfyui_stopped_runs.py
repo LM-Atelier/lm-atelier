@@ -8,9 +8,9 @@ once without sending its prompt, leaving its job running with nothing to end it.
 
 ComfyUI can also stop a prompt that nobody in LM Atelier asked to stop, as when
 it is stopped from ComfyUI's own page. That run fails, saying why, rather than
-staying running until the application restarts. Like any other failed run, it
-fails once the device is handed back, so a retry asked for after that runs. A
-stop LM Atelier asked for still ends its run cancelled.
+staying running until the application restarts. Like any failed run that does
+not keep ComfyUI, it fails once the device is handed back, so a retry asked for
+after that runs. A stop LM Atelier asked for still ends its run cancelled.
 
 ComfyUI here is a constructed backend behind the adapter's own HTTP client and
 progress socket, so every request the adapter makes is answered without a
@@ -357,7 +357,7 @@ async def test_a_retry_comfyui_stops_by_itself_fails_although_its_run_was_stoppe
 async def test_a_run_comfyui_stops_by_itself_fails_after_the_handoff_so_its_retry_runs(
     app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The run fails once the chat model it displaced is back, as other failed runs do.
+    """The run fails once the chat model it displaced is back, as other engine failures do.
 
     While that model loads again, the run still reads running and a retry is
     refused. A retry accepted then would be left queued with nothing to run it,
