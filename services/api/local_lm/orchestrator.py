@@ -2200,8 +2200,13 @@ class ConversationOrchestrator:
         #: What recycling the worker is counted as when the open window ends.
         self._media_warm_stop_reason: WorkerStopReason | None = None
         #: Whether the worker the open window keeps may be emptied in place when
-        #: the window ends, as the handoff that opened it allowed.
+        #: the window ends: as the handoff that opened it allowed, or for a hold
+        #: a waiting run opened, as the last handoff on that launch allowed.
         self._media_warm_emptiable = True
+        #: The media worker launch the last handoff acted on, and whether that
+        #: handoff let it be emptied in place. A hold opened while a run waits
+        #: on that launch empties it only as that handoff allowed.
+        self._media_kept_emptiable: tuple[int | None, bool] | None = None
         #: Whether something outside this class's runs relies on the live media
         #: worker, such as an open native editor session; set by the application.
         self.media_worker_in_use: Callable[[], bool] = lambda: False
@@ -6058,7 +6063,10 @@ class ConversationOrchestrator:
                                 media_failure, MEDIA_FAILURES_NOT_RETRIED
                             )
                             if retryable and self._media_failure_retries(job_id, run_id, claim):
-                                await self._hold_media_handoff_for_retry(pending)
+                                await self._hold_media_handoff_for_retry(
+                                    pending,
+                                    emptiable=isinstance(media_failure, MediaWorkflowFailure),
+                                )
                             else:
                                 # A run that finished with its result keeps the
                                 # worker for the next one, and so does one that
@@ -8109,6 +8117,10 @@ class ConversationOrchestrator:
             # model and waits on its health check, and the supervisor destroys
             # all of it moments later. The debt above dies with the process.
             return
+        # A hold that a waiting run opened on this worker while the run that
+        # ends here rendered keeps it from now on, whatever this handoff does
+        # with it, so it answers as this handoff does.
+        self._keep_media_emptiable(emptiable)
         selected_chat_profile_id, queued_text_next, queued_media_next = self._handoff_chat_target(
             chat_profile_id
         )
@@ -8763,7 +8775,44 @@ class ConversationOrchestrator:
             and self._media_warm_window is None
             and not self._chat_worker_running()
         ):
-            self._open_media_warm_window(hold=True)
+            self._open_media_warm_window(hold=True, emptiable=self._kept_media_emptiable())
+
+    def _keep_media_emptiable(self, emptiable: bool) -> None:
+        """Remember, for the live media launch, whether its handoff let it be emptied in place.
+
+        A hold that a waiting run opened on that launch while this handoff's
+        run rendered takes the answer too, since it now keeps what that run
+        left behind.
+        """
+
+        try:
+            launch = next(item for item in self.processes.statuses() if item.name == "media").pid
+        except Exception:
+            launch = None
+        self._media_kept_emptiable = (launch, emptiable)
+        if self._media_warm_window is not None and self._media_warm_launch == launch:
+            self._media_warm_emptiable = emptiable
+
+    def _kept_media_emptiable(self) -> bool:
+        """Whether a hold for a waiting run may empty the live media worker when it ends.
+
+        It may if the handoff that kept that launch running allowed it, or if
+        no handoff has been recorded. A launch started since then is a new
+        process and may be emptied; one that cannot be told apart from it is
+        answered as that handoff was.
+        """
+
+        kept = self._media_kept_emptiable
+        if kept is None:
+            return True
+        launch, emptiable = kept
+        if emptiable or launch is None:
+            return emptiable
+        try:
+            live = next(item for item in self.processes.statuses() if item.name == "media").pid
+        except Exception:
+            return False
+        return live is not None and live != launch
 
     async def _refuse_busy_replacement(self) -> None:
         """Refuse to stop a ComfyUI worker that someone else is using.
@@ -9134,7 +9183,9 @@ class ConversationOrchestrator:
                 and self._failed_media_retry(session, run, claim) is not None
             )
 
-    async def _hold_media_handoff_for_retry(self, chat_profile_id: str) -> None:
+    async def _hold_media_handoff_for_retry(
+        self, chat_profile_id: str, *, emptiable: bool = False
+    ) -> None:
         """Leave chat down for the retry of the attempt that displaced it.
 
         The retry is this same job, queued again a moment from now. Loading chat
@@ -9145,11 +9196,17 @@ class ConversationOrchestrator:
         gives the model back, and the readiness latch is released because this
         handoff is over.
 
+        `emptiable` is True only when the attempt failed on its own workflow,
+        which leaves ComfyUI healthy: a hold opened while a run waits empties
+        the kept worker in place only then, and otherwise stops it, since the
+        failure may be the worker's own.
+
         A text run that is already next still gets its model now, as it would
         after any image.
         """
 
         self._displaced_chat_profile_id = chat_profile_id
+        self._keep_media_emptiable(emptiable)
         if self._text_run_queued_next():
             await self._complete_media_handoff(chat_profile_id)
             return
