@@ -59,6 +59,7 @@ from .events import EventBroker
 from .exports import ProjectExporter
 from .instance_identity import INSTANCE_ID_HEADER, load_or_create_instance_identity
 from .instance_lock import DataDirectoryLock
+from .instance_status import StartupProgress, read_release_build
 from .media_organization_batch_api import router as media_organization_batch_router
 from .model_quarantine import recover_model_delete_quarantines
 from .orchestrator import ConversationOrchestrator
@@ -67,6 +68,7 @@ from .processes import ProcessSupervisor
 from .project_archive_encryption import sweep_staging
 from .queue_lane_policy import recover_queue_lanes
 from .recovery_maintenance import maintain_recovery_expiry
+from .release_notices import release_bundle_root
 from .retention_policy import windows_for
 from .runtime_provisioning import RuntimeProvisioner
 from .scheduler import ResourceScheduler
@@ -558,7 +560,7 @@ async def sweep_artifact_retention(
     pause_seconds: float | None = None,
     batch_seconds: float | None = None,
     index_ready: asyncio.Event | None = None,
-) -> None:
+) -> bool:
     """Run retention after the port opens, committing one bounded batch at a time.
 
     Each batch holds its writer reservation through one complete reference
@@ -568,6 +570,8 @@ async def sweep_artifact_retention(
     stop request still ends the batch at the next artifact, and completed
     deletions are committed before the next batch. Failures are logged while
     the application keeps running; the next start resumes the sweep.
+
+    Returns whether the sweep finished; False when it gave up instead.
     """
 
     # Resolved at call time, not at definition time, so the module constants
@@ -725,7 +729,7 @@ async def sweep_artifact_retention(
                         "artifact reference index; it runs again at the next start",
                         behind - 1,
                     )
-                    return
+                    return False
                 logger.info("Artifact retention batch waited on the artifact reference index")
                 await asyncio.sleep(RETENTION_INDEX_PAUSE_SECONDS)
                 continue
@@ -741,7 +745,7 @@ async def sweep_artifact_retention(
                         locked_out - 1,
                         exc,
                     )
-                    return
+                    return False
                 logger.warning(
                     "Artifact retention batch waited on the database writer; retrying (%s)",
                     exc,
@@ -848,7 +852,7 @@ async def sweep_artifact_retention(
             batches,
             time.monotonic() - started,
         )
-        return
+        return False
     logger.info(
         "Artifact retention sweep complete: %s batch(es), "
         "%s artifact row(s), %s unindexed file(s) removed; "
@@ -859,6 +863,7 @@ async def sweep_artifact_retention(
         examined,
         time.monotonic() - started,
     )
+    return True
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -917,7 +922,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 active_settings.host,
                 active_settings.port,
             )
-            services.runtimes.start_restore()
+            runtime_verification = services.runtimes.start_restore()
             worker_restore = asyncio.create_task(
                 restore_configured_workers(
                     services,
@@ -956,6 +961,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             reference_index = asyncio.create_task(
                 maintain_reference_index(lambda: SessionLocal(bind=index_bind), ready=index_ready),
                 name="artifact-reference-index",
+            )
+            # What the instance status reads to say whether startup has finished.
+            app.state.startup = StartupProgress(
+                worker_restore=worker_restore,
+                runtime_verification=runtime_verification,
+                reference_index=reference_index,
+                index_ready=index_ready,
+                retention_sweep=retention_sweep,
             )
             background = (
                 worker_restore,
@@ -997,6 +1010,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.services = services
+    app.state.instance_identity = instance_identity
+    # Read once: the bundle a release runs from does not change while it runs.
+    app.state.release_build = read_release_build(release_bundle_root())
     app.add_middleware(JsonBodyLimitMiddleware)
     app.add_middleware(
         UploadBodyLimitMiddleware,

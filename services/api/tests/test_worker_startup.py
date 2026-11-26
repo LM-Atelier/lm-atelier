@@ -13,6 +13,7 @@ from local_lm.profile_service import LAST_CHAT_PROFILE_KEY
 from local_lm.scheduler import ResourceScheduler
 from local_lm.schemas import WorkerStartReason
 from local_lm.worker_startup import (
+    RestoredWorkers,
     chat_profile_to_restore,
     restore_configured_workers,
 )
@@ -77,8 +78,9 @@ async def test_configured_workers_provision_and_restore_with_last_chat_profile(
     processes = SimpleNamespace(start_media=AsyncMock(), load_chat=AsyncMock())
     services = worker_services(settings, processes)
 
-    await restore_configured_workers(services)
+    restored = await restore_configured_workers(services)
 
+    assert restored == RestoredWorkers(chat="restored", media="restored")
     processes.start_media.assert_awaited_once_with(reason=WorkerStartReason.APP_START)
     services.downloads.refresh_installed_media_workflows.assert_awaited_once_with()
     services.downloads.reconcile_workflow_install_offers.assert_awaited_once_with()
@@ -101,8 +103,9 @@ async def test_fresh_workspace_does_not_download_unused_worker_runtimes(
     processes = SimpleNamespace(start_media=AsyncMock(), load_chat=AsyncMock())
     services = worker_services(settings, processes)
 
-    await restore_configured_workers(services)
+    restored = await restore_configured_workers(services)
 
+    assert restored == RestoredWorkers(chat="not_configured", media="not_configured")
     processes.start_media.assert_not_awaited()
     processes.load_chat.assert_not_awaited()
     services.downloads.refresh_installed_media_workflows.assert_not_awaited()
@@ -122,8 +125,9 @@ async def test_worker_restore_failure_does_not_prevent_other_worker(
         load_chat=AsyncMock(),
     )
 
-    await restore_configured_workers(worker_services(settings, processes))
+    restored = await restore_configured_workers(worker_services(settings, processes))
 
+    assert restored == RestoredWorkers(chat="not_configured", media="failed")
     processes.start_media.assert_awaited_once_with(reason=WorkerStartReason.APP_START)
     processes.load_chat.assert_not_awaited()
 

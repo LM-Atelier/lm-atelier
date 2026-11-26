@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
@@ -9,12 +10,24 @@ from sqlalchemy import select
 from .db import SessionLocal
 from .models import AppSetting, ModelInstall, ModelProfile
 from .profile_service import LAST_CHAT_PROFILE_KEY, validate_profile_binding
-from .schemas import WorkerStartReason
+from .schemas import WorkerRestoreOutcome, WorkerStartReason
 
 if TYPE_CHECKING:
     from .main import Services
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RestoredWorkers:
+    """How the restore at startup ended for each worker.
+
+    A worker is `restored` once its start returned, even if what follows the
+    start then fails, because it is running; `failed` is a start that raised.
+    """
+
+    chat: WorkerRestoreOutcome
+    media: WorkerRestoreOutcome
 
 
 def remember_chat_profile(profile_id: str) -> None:
@@ -91,7 +104,7 @@ def _media_worker_should_restore(services: Services) -> bool:
 
 async def restore_configured_workers(
     services: Services, *, release_begun: Callable[[], bool] = lambda: False
-) -> None:
+) -> RestoredWorkers:
     """Restore local workers, provisioning their supported runtimes when needed.
 
     `release_begun` says whether a release of both workers' models has begun
@@ -103,19 +116,25 @@ async def restore_configured_workers(
     is asked under the device lease, which a release holds from its last
     checks until it has stopped both workers, so no worker is restored after
     one.
+
+    Returns how the restore ended for each worker.
     """
 
     settings = services.settings
+    media: WorkerRestoreOutcome = "not_configured"
     if settings.media_engine == "comfyui" and _media_worker_should_restore(services):
+        # Failed until the start returns or a release is found to have begun.
+        media = "failed"
         try:
-            restored = False
             refreshed = 0
             async with services.scheduler.lease("primary"):
-                if not release_begun():
+                if release_begun():
+                    media = "skipped_for_release"
+                else:
                     await services.processes.start_media(reason=WorkerStartReason.APP_START)
-                    restored = True
+                    media = "restored"
                     refreshed = await services.downloads.refresh_installed_media_workflows()
-            if restored:
+            if media == "restored":
                 logger.info("Restored the configured media worker")
             else:
                 logger.info("Did not restore the media worker: a release of the models had begun")
@@ -125,23 +144,27 @@ async def restore_configured_workers(
         except Exception:
             logger.exception("Could not restore the configured media worker")
 
+    chat: WorkerRestoreOutcome = "not_configured"
     if settings.chat_engine in {"llama.cpp", "vllm"}:
         selected = chat_profile_to_restore()
         if not selected:
             logger.info("No installed managed chat profile is available to restore")
-            return
+            return RestoredWorkers(chat=chat, media=media)
         profile, install = selected
+        chat = "failed"
         try:
             async with services.scheduler.lease("primary"):
                 if release_begun():
                     logger.info(
                         "Did not restore the chat worker: a release of the models had begun"
                     )
-                    return
+                    return RestoredWorkers(chat="skipped_for_release", media=media)
                 await services.processes.load_chat(
                     profile, install, reason=WorkerStartReason.APP_START
                 )
+                chat = "restored"
             remember_chat_profile(profile.id)
             logger.info("Restored chat worker profile %s", profile.id)
         except Exception:
             logger.exception("Could not restore chat worker profile %s", profile.id)
+    return RestoredWorkers(chat=chat, media=media)

@@ -232,6 +232,14 @@ from .install_plan_contract_v1 import (
     LEGACY_INSTALL_RESOLVER_VERSION,
     stored_install_plan_identity_matches,
 )
+from .instance_status import (
+    ReleaseBuild,
+    StartupProgress,
+    restore_state,
+    startup_standing,
+    storage_standing,
+    worker_condition,
+)
 from .lora_suggestions import lora_suggestion_scope, suggested_loras
 from .media_organization_api import router as media_organization_router
 from .media_reimport import recover_imported_membership
@@ -457,7 +465,13 @@ from .prompt_templates import (
     prompt_template_contract_sha256,
 )
 from .queue_control import QueueControlConflict, QueueControlMissing, change_plan_control
-from .queue_lane_policy import QueueLaneConflict, change_lane_policy, read_lane_policy
+from .queue_lane_policy import (
+    LANES,
+    Lane,
+    QueueLaneConflict,
+    change_lane_policy,
+    read_lane_policy,
+)
 from .queue_order import QueueOrderConflict, QueueOrderLimit, change_queue_order, read_queue_order
 from .queue_order_v1 import QueueOrderCommand, QueueOrderPageOut, QueueOrderResultOut
 from .recipes import get_reference_recipe, list_reference_recipes, recipe_workflow_template
@@ -533,10 +547,13 @@ from .schemas import (
     ChatMessageWindow,
     ChatOut,
     ChatSearchPage,
+    ChatStandingOut,
+    ChatStandingSelector,
     ChatSummaryOut,
     ChatTranscriptContext,
     ChatUpdate,
     ChatWorkflowSelectionIn,
+    ChatWorkflowStandingOut,
     CredentialSet,
     CredentialStatus,
     CustomNodeInstallRequest,
@@ -568,10 +585,13 @@ from .schemas import (
     GenerationRetryPolicyUpdate,
     HealthOut,
     InstallQueuePolicyOut,
+    InstanceBuildOut,
+    InstanceStatusOut,
     JobActivityOut,
     JobOut,
     KeepAwakeSetting,
     KeepAwakeStatus,
+    LaneStandingOut,
     LoraSuggestionsOut,
     MessageOut,
     ModelAssetAdopt,
@@ -659,6 +679,7 @@ from .schemas import (
     SetupVerificationOut,
     SourceFitRequest,
     StorageCleanupResult,
+    StorageStandingOut,
     StudioCapabilityReport,
     StudioLocalEditCreate,
     StudioSessionCreate,
@@ -678,7 +699,9 @@ from .schemas import (
     WorkerLogLocation,
     WorkerLogTail,
     WorkerResetResult,
+    WorkerRestoreState,
     WorkerSettings,
+    WorkerStandingOut,
     WorkerStartReason,
     WorkerStatus,
     WorkerStopReason,
@@ -974,6 +997,7 @@ from .workflow_revision_reviews import (
 )
 from .workflow_revision_reviews import (
     WorkflowReviewError,
+    revision_is_trusted,
 )
 from .workflow_revision_reviews import (
     build_review_snapshot as build_workflow_review_snapshot,
@@ -1016,6 +1040,7 @@ from .workflow_use_case_execution import InheritedWorkflowUseCasePreset
 from .workflow_use_case_preset_api import router as workflow_use_case_preset_router
 from .workflow_use_case_preset_provenance import read_workflow_use_case_preset
 from .workspace_lock_api import router as workspace_lock_router
+from .workspace_lock_api import workspace_lock_status_out
 
 if TYPE_CHECKING:
     from .main import Services
@@ -1882,6 +1907,117 @@ def _reported_progress_age(session: Session, kinds: list[str]) -> float | None:
     # Clamped at zero: a stamp written a moment ahead of this clock is a clock
     # detail, not a worker that reported progress in the future.
     return max(0.0, (utcnow() - latest).total_seconds())
+
+
+#: The operations a chat's status reports for each of its selectors.
+_STANDING_OPERATIONS: tuple[tuple[ChatStandingSelector, tuple[Operation, ...]], ...] = (
+    ("chat", (Operation.TEXT,)),
+    ("image", (Operation.TEXT_TO_IMAGE, Operation.IMAGE_TO_IMAGE)),
+    ("video", (Operation.TEXT_TO_VIDEO, Operation.IMAGE_TO_VIDEO)),
+)
+
+
+@router.get("/instance/status", response_model=InstanceStatusOut)
+async def instance_status(
+    request: Request,
+    session: ConversationSessionDep,
+    chat_id: Annotated[str | None, Query(max_length=40)] = None,
+) -> InstanceStatusOut:
+    """One read of where the instance stands, for a script deciding what it can do next.
+
+    Which instance and which start this is, whether startup has finished, the
+    workspace lock, each worker's condition, each queue lane, free space, and,
+    for a chat that is named, whether a plain turn would run each workflow.
+    It writes nothing, so it never waits on another writer, and asks no engine
+    anything, so it never starts, wakes or waits on a worker. It carries no
+    chat title, prompt or file path.
+    """
+
+    services = _services(request)
+    supervisor = services.processes
+    progress: StartupProgress | None = getattr(request.app.state, "startup", None)
+    workers = [
+        _worker_standing(services, status, restore_state(progress, status.name))
+        for status in supervisor.statuses()
+    ]
+    lanes, storage, chat = await run_in_threadpool(_instance_reads, services, session, chat_id)
+    build: ReleaseBuild = request.app.state.release_build
+    return InstanceStatusOut(
+        instance_id=request.app.state.instance_identity,
+        boot_id=services.events.epoch,
+        started_at=supervisor.counted_since,
+        build=InstanceBuildOut(
+            version=__version__, kind=build.kind, commit=build.commit, dirty=build.dirty
+        ),
+        startup=startup_standing(progress),
+        workspace_lock=workspace_lock_status_out(services.workspace_lock.status()),
+        workers=workers,
+        lanes=lanes,
+        storage=storage,
+        chat=chat,
+    )
+
+
+def _worker_standing(
+    services: Services, status: WorkerStatus, restore: WorkerRestoreState
+) -> WorkerStandingOut:
+    # Asked after the status, which counts an end it is the first to notice.
+    last_end = services.processes.last_end(status.name)
+    return WorkerStandingOut(
+        name=status.name,
+        condition=worker_condition(status, last_end=last_end, restore=restore),
+        restore=restore,
+        last_stop_reason=status.last_stop_reason,
+        last_end=last_end,
+        failure_code=status.failure_code,
+    )
+
+
+def _instance_reads(
+    services: Services, session: Session, chat_id: str | None
+) -> tuple[list[LaneStandingOut], StorageStandingOut, ChatStandingOut | None]:
+    """The parts of the instance status that read the database or the disk."""
+
+    chat = _chat_standing(services, session, chat_id) if chat_id is not None else None
+    lanes = [_lane_standing(session, lane) for lane in LANES]
+    storage = storage_standing(
+        services.artifacts.root, warning_bytes=services.settings.storage_warning_free_bytes
+    )
+    return lanes, storage, chat
+
+
+def _lane_standing(session: Session, lane: Lane) -> LaneStandingOut:
+    try:
+        policy = read_lane_policy(session, lane)
+    except QueueLaneConflict:
+        # The lane's own read refuses this policy too, and nothing dispatches from it.
+        return LaneStandingOut(lane=lane, dispatch_state="unreadable")
+    return LaneStandingOut(
+        lane=lane, dispatch_state=policy.dispatch_state, running_jobs=policy.running_jobs
+    )
+
+
+def _chat_standing(services: Services, session: Session, chat_id: str) -> ChatStandingOut:
+    _refuse_comparison_chat(session, chat_id)
+    chat = session.get(Chat, chat_id)
+    if chat is None:
+        raise api_error(404, "chat-not-found", "chat not found")
+    workflows: list[ChatWorkflowStandingOut] = []
+    with session.no_autoflush:
+        for capability, operations in _STANDING_OPERATIONS:
+            selection = _chat_workflow_selection_out(session, chat, capability)
+            workflows.append(
+                ChatWorkflowStandingOut(
+                    selector_capability=capability,
+                    mode=selection.mode,
+                    workflow_family_id=selection.workflow_family_id,
+                    operations=[
+                        services.orchestrator.workflow_readiness(session, chat, operation)
+                        for operation in operations
+                    ],
+                )
+            )
+    return ChatStandingOut(chat_id=chat.id, workflows=workflows)
 
 
 @router.get("/workers/settings", response_model=WorkerSettings)
@@ -11313,7 +11449,10 @@ def _revision_readiness(
         revision.engine, operation.value, revision.api_graph_json, revision.input_schema_json
     ):
         return "unavailable", "revision_ignores_the_description"
-    if not revision.trusted:
+    # The review is checked as selection checks it, not by the stored flag: a
+    # review whose revision or node packages changed since leaves the flag set,
+    # and selection then refuses what this would call ready.
+    if not revision_is_trusted(session, revision):
         return "review_required", "revision_untrusted"
     if revision.dependency_contract_sha256 is None:
         return "ready", None
@@ -11433,7 +11572,8 @@ def _workflow_family_variant_out(
         current_revision_version=revision.version if revision else None,
         engine=revision.engine if revision else None,
         capabilities=list(revision.capabilities_json) if revision else [],
-        trusted=revision.trusted if revision else compatibility is not None,
+        # Read as the readiness above reads it, so the two cannot disagree.
+        trusted=revision_is_trusted(session, revision) if revision else compatibility is not None,
         readiness=readiness,
         readiness_reason=reason,
         setup_resolution=setup_resolution,
@@ -12372,12 +12512,33 @@ async def get_workflow_lora_suggestions(
     )
 
 
+def _workflow_out(session: Session, definition: WorkflowDefinition) -> WorkflowOut:
+    """A workflow with each revision's trust read as selection reads it.
+
+    The stored flag outlives a review whose revision or node packages have
+    changed since, so a revision it calls trusted can still be refused.
+    """
+
+    workflow = WorkflowOut.model_validate(definition)
+    trusted = {
+        revision.id: revision_is_trusted(session, revision) for revision in definition.revisions
+    }
+    return workflow.model_copy(
+        update={
+            "revisions": [
+                revision.model_copy(update={"trusted": trusted[revision.id]})
+                for revision in workflow.revisions
+            ]
+        }
+    )
+
+
 @router.get("/workflows/{workflow_id}", response_model=WorkflowOut)
-async def workflow_detail(workflow_id: str, session: SessionDep) -> WorkflowDefinition:
+async def workflow_detail(workflow_id: str, session: SessionDep) -> WorkflowOut:
     definition = load_workflow_detail(session, workflow_id)
     if definition is None:
         raise api_error(404, "workflow-not-found", "Workflow not found.")
-    return definition
+    return _workflow_out(session, definition)
 
 
 @router.get("/workflows", response_model=list[WorkflowOut])
@@ -12385,8 +12546,11 @@ async def list_workflows(
     session: SessionDep,
     limit: int | None = Query(None, ge=1, le=200),
     offset: int = Query(0, ge=0, le=2**63 - 1),
-) -> list[WorkflowDefinition]:
-    return list_workflow_definitions(session, limit=limit, offset=offset)
+) -> list[WorkflowOut]:
+    return [
+        _workflow_out(session, definition)
+        for definition in list_workflow_definitions(session, limit=limit, offset=offset)
+    ]
 
 
 @router.post("/workflows", response_model=WorkflowOut, status_code=201)

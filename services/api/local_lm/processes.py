@@ -52,6 +52,7 @@ from .models import ModelAssetInstall, ModelInstall, ModelProfile
 from .network import shared_tls_context
 from .schemas import (
     CustomNodeContainmentStatus,
+    WorkerEnd,
     WorkerStartReason,
     WorkerStatus,
     WorkerStopReason,
@@ -514,6 +515,10 @@ class _WorkerLifecycle:
     exits_without_stop: int = 0
     last_start_reason: WorkerStartReason | None = None
     last_stop_reason: WorkerStopReason | None = None
+    #: How the most recent counted end came about. The last stop reason is kept
+    #: through a later exit, so it alone cannot say whether the worker crashed
+    #: after it was last stopped.
+    last_end: WorkerEnd | None = None
 
 
 #: The stop a start's own caller causes without naming one: the same launch
@@ -598,6 +603,20 @@ class ProcessSupervisor:
         self._identity_lock = threading.Lock()
         self._worker_identities = self._load_worker_identities()
         self._reap_persisted_workers()
+
+    @property
+    def counted_since(self) -> datetime:
+        """When this service run began, and with it the counts of starts and stops."""
+
+        return self._counted_since
+
+    def last_end(self, name: str) -> WorkerEnd | None:
+        """How the worker's most recent end in this service run came about, if it has ended.
+
+        Read it after `statuses`, which counts an end it is the first to notice.
+        """
+
+        return self._lifecycle[name].last_end
 
     def statuses(self) -> list[WorkerStatus]:
         result: list[WorkerStatus] = []
@@ -2866,7 +2885,9 @@ class ProcessSupervisor:
         if record.end_counted:
             return
         record.end_counted = True
-        self._lifecycle[record.name].exits_without_stop += 1
+        lifecycle = self._lifecycle[record.name]
+        lifecycle.exits_without_stop += 1
+        lifecycle.last_end = "exit"
         logger.info("%s worker exited without a stop", record.name.capitalize())
 
     def _count_stop(self, record: WorkerRecord, reason: WorkerStopReason) -> None:
@@ -2876,6 +2897,7 @@ class ProcessSupervisor:
         lifecycle = self._lifecycle[record.name]
         lifecycle.stops[reason] += 1
         lifecycle.last_stop_reason = reason
+        lifecycle.last_end = "stop"
         logger.info("%s worker stopped (reason: %s)", record.name.capitalize(), reason.value)
 
     def _count_end(self, record: WorkerRecord) -> None:
