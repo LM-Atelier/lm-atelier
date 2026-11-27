@@ -63,8 +63,10 @@ export interface WorkerStatus {
   custom_node_containment?: CustomNodeContainmentStatus | null;
   // Counted since `counted_since`, when the service started. A process that
   // ended while nothing was stopping it is an exit without a stop, not a stop.
+  // An emptying in place stood in for a stop with that reason; the process ran on.
   starts_by_reason?: Partial<Record<WorkerStartReason, number>>;
   stops_by_reason?: Partial<Record<WorkerStopReason, number>>;
+  emptied_by_reason?: Partial<Record<WorkerStopReason, number>>;
   exits_without_stop?: number;
   last_start_reason?: WorkerStartReason | null;
   last_stop_reason?: WorkerStopReason | null;

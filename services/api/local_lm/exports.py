@@ -783,6 +783,7 @@ class ProjectExporter:
             for local_only_key in (
                 "command",
                 "counted_since",
+                "emptied_by_reason",
                 "exits_without_stop",
                 "failure_detail",
                 "last_start_reason",
@@ -909,6 +910,7 @@ class ProjectExporter:
             for local_only_key in (
                 "command",
                 "counted_since",
+                "emptied_by_reason",
                 "exits_without_stop",
                 "failure_detail",
                 "last_start_reason",

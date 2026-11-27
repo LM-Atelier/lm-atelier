@@ -6542,6 +6542,7 @@ class ConversationOrchestrator:
                                 "queued_jobs",
                                 "starts_by_reason",
                                 "stops_by_reason",
+                                "emptied_by_reason",
                                 "exits_without_stop",
                                 "last_start_reason",
                                 "last_stop_reason",
@@ -8252,9 +8253,10 @@ class ConversationOrchestrator:
             if await self._empty_media_worker(reason) and await self._chat_fits_beside_media(
                 selected_chat_profile_id
             ):
-                await self._resume_chat_beside_emptied_media(
+                if await self._resume_chat_beside_emptied_media(
                     selected_chat_profile_id, queued_text_next=queued_text_next
-                )
+                ):
+                    self._count_emptied(reason)
                 return
             # The emptying can take seconds, long enough for someone to begin
             # using ComfyUI, and the stop below would end their work. Emptying
@@ -8347,6 +8349,17 @@ class ConversationOrchestrator:
         logger.info("Emptied the media worker's memory to give the device to chat")
         return True
 
+    def _count_emptied(self, reason: WorkerStopReason) -> None:
+        """Count an emptying of the media worker that stood in for a stop for `reason`.
+
+        Counted only once no stop of the worker followed it, so a handoff that
+        empties the worker and then stops it anyway counts that stop alone.
+        """
+
+        count = getattr(self.processes, "count_emptied", None)
+        if count is not None:
+            count("media", reason)
+
     async def _chat_fits_beside_media(self, profile_id: str) -> bool:
         """Whether the chat model owed back fits in the device memory now free.
 
@@ -8386,10 +8399,11 @@ class ConversationOrchestrator:
 
     async def _resume_chat_beside_emptied_media(
         self, profile_id: str, *, queued_text_next: bool
-    ) -> None:
+    ) -> bool:
         """Load the chat model owed back beside the emptied media worker.
 
-        A chat model that does not come up beside it gets the device as the
+        Whether it came up there, so the emptying stood in for the stop. A
+        chat model that does not come up beside it gets the device as the
         handoff otherwise gives it: the worker is stopped, the model loaded
         again, and an empty worker started once chat is back. If that stop
         fails, chat stays owed for a later handoff. Someone who has begun using
@@ -8398,23 +8412,25 @@ class ConversationOrchestrator:
         """
 
         await self._resume_chat_worker(profile_id)
-        if not self._chat_worker_running():
+        came_up = self._chat_worker_running()
+        if not came_up:
             # The load took seconds too. Someone using ComfyUI by now keeps it
             # until they are done, and the hold's expiry then stops it for chat.
             if await self._hold_media_for_another_use(WorkerStopReason.CHAT_LOAD, emptiable=False):
-                return
+                return False
             try:
                 await self.processes.stop("media", reason=WorkerStopReason.CHAT_LOAD)
             except Exception:
                 logger.exception("Could not stop the emptied media worker for a chat model")
                 self._chat_planner_ready.set()
-                return
+                return False
             await self._resume_chat_worker(profile_id)
             if queued_text_next:
                 self._media_restart_after_chat_activity = True
             else:
                 self._schedule_media_restart()
         self._discharge_displaced_chat_profile(profile_id)
+        return came_up
 
     def _open_media_warm_window(
         self,
@@ -8991,7 +9007,9 @@ class ConversationOrchestrator:
                     # emptied. It is held for them, and stopped once they are
                     # done, rather than emptied again.
                     return
-                if not emptied:
+                if emptied:
+                    self._count_emptied(reason)
+                else:
                     await self.processes.stop("media", reason=reason)
                     if not self._media_warm_scoped:
                         self._schedule_media_restart()

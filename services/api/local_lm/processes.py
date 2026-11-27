@@ -504,12 +504,17 @@ class WorkerRecord:
 
 @dataclass
 class _WorkerLifecycle:
-    """How often one worker was started and stopped, and why."""
+    """How often one worker was started, stopped and emptied in place, and why."""
 
     starts: dict[WorkerStartReason, int] = field(
         default_factory=lambda: dict.fromkeys(WorkerStartReason, 0)
     )
     stops: dict[WorkerStopReason, int] = field(
+        default_factory=lambda: dict.fromkeys(WorkerStopReason, 0)
+    )
+    #: The stops an emptying of the running worker's memory stood in for, by
+    #: the reason each stop would have had. The process ran on through each.
+    emptied: dict[WorkerStopReason, int] = field(
         default_factory=lambda: dict.fromkeys(WorkerStopReason, 0)
     )
     exits_without_stop: int = 0
@@ -710,6 +715,7 @@ class ProcessSupervisor:
                     custom_node_containment=_media_containment_status(name),
                     starts_by_reason=dict(lifecycle.starts),
                     stops_by_reason=dict(lifecycle.stops),
+                    emptied_by_reason=dict(lifecycle.emptied),
                     exits_without_stop=lifecycle.exits_without_stop,
                     last_start_reason=lifecycle.last_start_reason,
                     last_stop_reason=lifecycle.last_stop_reason,
@@ -2878,6 +2884,12 @@ class ProcessSupervisor:
         lifecycle.starts[reason] += 1
         lifecycle.last_start_reason = reason
         logger.info("%s worker started (reason: %s)", name.capitalize(), reason.value)
+
+    def count_emptied(self, name: str, reason: WorkerStopReason) -> None:
+        """Count the running worker's memory emptied in place instead of a stop for `reason`."""
+
+        self._lifecycle[name].emptied[reason] += 1
+        logger.info("%s worker emptied in place (reason: %s)", name.capitalize(), reason.value)
 
     def _count_exit(self, record: WorkerRecord) -> None:
         """Count a process that ended while nothing was stopping it, once."""

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -733,6 +734,98 @@ async def test_a_failed_stop_after_chat_does_not_come_up_leaves_chat_owed(
 
     assert world.order == ["empty media", "resume profile-chat failed", "stop media failed"]
     assert world.orchestrator._displaced_chat_profile_id == "profile-chat"
+
+
+@pytest.mark.parametrize(
+    ("answer", "fits", "comes_up", "handoff_emptied", "window_emptied"),
+    [
+        pytest.param(True, True, True, 1, 1, id="emptied"),
+        pytest.param(
+            True, False, True, 0, 1, id="emptied-then-stopped-for-a-chat-that-does-not-fit"
+        ),
+        pytest.param(
+            True, True, False, 0, 1, id="emptied-then-stopped-for-a-chat-that-fails-there"
+        ),
+        pytest.param(False, True, True, 0, 0, id="did-not-empty"),
+        pytest.param(RuntimeError("ComfyUI did not answer"), True, True, 0, 0, id="could-not-ask"),
+    ],
+)
+async def test_an_emptying_counts_only_where_it_stood_in_for_a_stop(
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    answer: bool | Exception,
+    fits: bool,
+    comes_up: bool,
+    handoff_emptied: int,
+    window_emptied: int,
+) -> None:
+    """A run's handoff, then a window that ends owing nothing, each under its own reason.
+
+    A worker emptied and then stopped anyway, for a chat model that does not
+    fit beside it or does not come up there, counts that stop alone.
+    """
+
+    world = _ready_world(app, settings, monkeypatch)
+    monkeypatch.setattr(settings, "media_keep_warm_seconds", 0)
+    _empties(world, monkeypatch, answer)
+    _fits(world, monkeypatch, fits=fits)
+    world.chat_running = False
+    orchestrator = world.orchestrator
+    supervisor = world.services.processes
+    if not comes_up:
+
+        async def load_once_the_device_is_free(profile_id: str) -> None:
+            if world.media_running:
+                world.order.append(f"resume {profile_id} failed")
+                return
+            await world.resume(profile_id)
+
+        monkeypatch.setattr(orchestrator, "_resume_chat_worker", load_once_the_device_is_free)
+
+    def emptied() -> dict[WorkerStopReason, int]:
+        # The supervisor's own status, not the world's stand-in for it.
+        media = next(
+            item for item in ProcessSupervisor.statuses(supervisor) if item.name == "media"
+        )
+        assert media.stops_by_reason == no_stops, "the world's stops reached the supervisor"
+        return media.emptied_by_reason
+
+    no_stops = dict.fromkeys(WorkerStopReason, 0)
+    assert emptied() == no_stops
+    caplog.set_level(logging.INFO, logger="local_lm.processes")
+
+    await orchestrator._complete_media_handoff(
+        "profile-chat", reason=WorkerStopReason.RUN_HANDOFF, emptiable=True
+    )
+    assert emptied() == {**no_stops, WorkerStopReason.RUN_HANDOFF: handoff_emptied}
+    stopped = "stop media" in world.order
+    assert stopped is not bool(handoff_emptied), world.order
+
+    # The worker a stop restarted is running again before the window opens.
+    if orchestrator._media_restart_task is not None:
+        await orchestrator._media_restart_task
+    monkeypatch.setattr(settings, "media_keep_warm_seconds", 0.3)
+    assert orchestrator._open_media_warm_window()
+    orchestrator._displaced_chat_profile_id = None
+    handed_back = len(world.order)
+    await orchestrator._end_media_warm_window()
+
+    assert emptied() == {
+        **no_stops,
+        WorkerStopReason.RUN_HANDOFF: handoff_emptied,
+        WorkerStopReason.KEEP_WARM_EXPIRY: window_emptied,
+    }
+    stopped = "stop media" in world.order[handed_back:]
+    assert stopped is not bool(window_emptied), world.order
+    lines = [
+        record.getMessage() for record in caplog.records if record.name == "local_lm.processes"
+    ]
+    assert [line for line in lines if "emptied in place" in line] == [
+        *["Media worker emptied in place (reason: run_handoff)"] * handoff_emptied,
+        *["Media worker emptied in place (reason: keep_warm_expiry)"] * window_emptied,
+    ]
 
 
 async def test_a_chat_model_that_does_not_come_up_with_text_queued_restarts_comfyui_after_it(

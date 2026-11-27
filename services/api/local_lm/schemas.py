@@ -3943,9 +3943,12 @@ class WorkerStatus(ApiModel):
     # service started. Only what happened is counted: a start is a process
     # spawned, a stop is a running process the application ended, and a process
     # that ended while nothing was stopping it - a crash or an outside kill - is
-    # an exit without a stop rather than a stop of any kind.
+    # an exit without a stop rather than a stop of any kind. An emptying is the
+    # running process's memory emptied in place where a stop would otherwise
+    # have been made, counted under that stop's reason; the process runs on.
     starts_by_reason: dict[WorkerStartReason, int] = Field(default_factory=dict)
     stops_by_reason: dict[WorkerStopReason, int] = Field(default_factory=dict)
+    emptied_by_reason: dict[WorkerStopReason, int] = Field(default_factory=dict)
     exits_without_stop: int = Field(default=0, ge=0)
     last_start_reason: WorkerStartReason | None = None
     last_stop_reason: WorkerStopReason | None = None
