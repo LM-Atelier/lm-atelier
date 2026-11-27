@@ -6,7 +6,9 @@ models. ComfyUI can unload its models and free its cache in place: on a 16 GB
 card about 10 GB came back within half a second. So after a render that
 finished or failed on its own workflow, and when a window that kept ComfyUI
 warm ends, it is emptied and the chat model loads beside it, provided the
-memory really came back and the chat model fits in what is free.
+memory really came back and the chat model fits in what is free. A worker kept
+for the retry of an attempt that failed in any other way is stopped, not
+emptied, when a hold for a run that waits ends.
 
 A failed render's handoff still stops it, since only a new process clears some
 faults, and so does a worker launched for one activation, which nothing else
@@ -44,12 +46,12 @@ from test_comfyui_kept_after_a_workflow_failure import (
     _ready_world,
 )
 from test_generation_retry import choose_retries, failing_media
-from test_media_worker_replacement import ReplacementWorld, _image_turn
+from test_media_worker_replacement import ReplacementWorld, _image_setup, _image_turn
 
 from local_lm import hardware
 from local_lm import orchestrator as orchestrator_module
 from local_lm.adapters import comfyui as comfyui_module
-from local_lm.adapters.base import MediaEvent, MediaRequest
+from local_lm.adapters.base import MediaEvent, MediaRequest, MediaWorkflowFailure
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.models import ModelInstall, ModelProfile
@@ -287,6 +289,337 @@ async def test_a_failed_attempt_handed_back_before_its_retry_still_stops_comfyui
 
     # The handoff before the retry is the second effect: a stop, not an emptying.
     assert world.order[:2] == ["stop chat", "stop media"]
+
+
+@pytest.mark.parametrize(
+    ("failed_on_its_own_workflow", "handed_back"),
+    [
+        pytest.param(
+            None, ["stop media", "resume profile-chat", "start media"], id="any-other-failure"
+        ),
+        pytest.param(True, ["empty media", "resume profile-chat"], id="its-own-workflow"),
+    ],
+)
+async def test_a_hold_for_a_waiting_run_empties_a_failed_attempts_worker_only_as_allowed(
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_on_its_own_workflow: bool | None,
+    handed_back: list[str],
+) -> None:
+    """The attempt kept the worker for its retry; a run waited, and did not start."""
+
+    world = _ready_world(app, settings, monkeypatch)
+    _empties(world, monkeypatch)
+    _fits(world, monkeypatch)
+    world.chat_running = False
+    orchestrator = world.orchestrator
+    if failed_on_its_own_workflow is None:
+        await orchestrator._hold_media_handoff_for_retry("profile-chat")
+    else:
+        await orchestrator._hold_media_handoff_for_retry(
+            "profile-chat", emptiable=failed_on_its_own_workflow
+        )
+    # A run waiting for someone else's use of ComfyUI to end holds the worker.
+    orchestrator._hold_owed_chat_for_wait()
+    assert orchestrator._media_warm_window is not None
+
+    await orchestrator._end_media_warm_window()
+
+    assert await _settled(world, len(handed_back)) == handed_back
+
+
+async def test_a_hold_for_a_waiting_run_may_empty_a_worker_started_since_the_failure(
+    app: FastAPI, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new process has none of the failed attempt's faults."""
+
+    world = _ready_world(app, settings, monkeypatch)
+    _empties(world, monkeypatch)
+    _fits(world, monkeypatch)
+    world.chat_running = False
+    orchestrator = world.orchestrator
+    await orchestrator._hold_media_handoff_for_retry("profile-chat")
+    world.media_pid += 1
+    orchestrator._hold_owed_chat_for_wait()
+    assert orchestrator._media_warm_window is not None
+
+    await orchestrator._end_media_warm_window()
+
+    assert await _settled(world, 2) == ["empty media", "resume profile-chat"]
+
+
+@pytest.mark.parametrize(
+    ("emptiable", "handed_back"),
+    [
+        pytest.param(
+            False, ["stop media", "resume profile-chat", "start media"], id="after-a-failed-run"
+        ),
+        pytest.param(True, ["empty media", "resume profile-chat"], id="after-a-finished-run"),
+    ],
+)
+async def test_a_worker_kept_for_the_image_queued_next_is_emptied_by_a_hold_only_as_allowed(
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    emptiable: bool,
+    handed_back: list[str],
+) -> None:
+    """The image queued next waits for someone else's use of ComfyUI, and does not start."""
+
+    world = _ready_world(app, settings, monkeypatch)
+    _empties(world, monkeypatch)
+    _fits(world, monkeypatch)
+    world.chat_running = False
+    orchestrator = world.orchestrator
+    image_queued_next = [True]
+
+    def handoff_target(_fallback: str) -> tuple[str, bool, bool]:
+        return "profile-chat", False, image_queued_next[0]
+
+    monkeypatch.setattr(orchestrator, "_handoff_chat_target", handoff_target)
+    await orchestrator._complete_media_handoff(
+        "profile-chat", keep_warm=False, reason=WorkerStopReason.RUN_HANDOFF, emptiable=emptiable
+    )
+    assert world.order == [], "the worker was not kept for the image queued next"
+    orchestrator._hold_owed_chat_for_wait()
+    assert orchestrator._media_warm_window is not None
+    image_queued_next[0] = False
+
+    await orchestrator._end_media_warm_window()
+
+    assert await _settled(world, len(handed_back)) == handed_back
+
+
+@pytest.mark.parametrize(
+    ("failing", "handed_back"),
+    [
+        pytest.param(
+            1,
+            ["stop chat", "stop media", "resume profile-chat", "start media"],
+            id="the-render-that-ends-last-fails",
+        ),
+        pytest.param(
+            0, ["stop chat", "empty media", "resume profile-chat"], id="the-one-before-it-fails"
+        ),
+    ],
+)
+async def test_a_hold_opened_while_another_render_runs_answers_as_that_render_ends(
+    app: FastAPI,
+    client: AsyncClient,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    failing: int,
+    handed_back: list[str],
+) -> None:
+    """Runs that need another launch wait for someone else's use of ComfyUI.
+
+    While they wait, one waiting run holds the worker as a second render runs
+    on it, and that render's end decides whether the worker it keeps may be
+    emptied: stopped after it fails on the worker itself, emptied after it
+    finishes. Both waiting runs are then stopped, and the other use ends.
+    """
+
+    monkeypatch.setattr(orchestrator_module, "MEDIA_BUSY_RECHECK_SECONDS", 0.05)
+    world = _ready_world(app, settings, monkeypatch)
+    _empties(world, monkeypatch)
+    _fits(world, monkeypatch)
+    await choose_retries(client, 0)
+    orchestrator = world.orchestrator
+    media = world.services.engines.media
+    original = media.generate
+    renders: list[str] = []
+    started = [asyncio.Event(), asyncio.Event()]
+    let_end = [asyncio.Event(), asyncio.Event()]
+
+    async def generate(request: MediaRequest) -> AsyncIterator[MediaEvent]:
+        renders.append(request.run_id)
+        index = len(renders) - 1
+        if index < 2:
+            started[index].set()
+            await let_end[index].wait()
+        if index == failing:
+            raise RuntimeError("Temporary media engine failure")
+        async for event in original(request):
+            yield event
+
+    monkeypatch.setattr(media, "generate", generate)
+    elsewhere: set[str] = set()
+    needed_launch = orchestrator._needed_media_launch
+
+    def launch_for(run_id: str) -> Any:
+        if run_id in elsewhere:
+            return orchestrator_module._NeededLaunch("another-activation")
+        return needed_launch(run_id)
+
+    monkeypatch.setattr(orchestrator, "_needed_media_launch", launch_for)
+    setup = await _image_setup(client)
+
+    _chat_id, first = await _image_turn(client, setup)
+    await asyncio.wait_for(started[0].wait(), timeout=PATIENCE_SECONDS)
+    world.foreign = 1
+    waiting_chat, waiting = await _image_turn(client, setup)
+    elsewhere.add(waiting)
+    _chat_id, second = await _image_turn(client, setup)
+    let_end[0].set()
+    await finished(client, first, "failed" if failing == 0 else "complete")
+    await asyncio.wait_for(started[1].wait(), timeout=PATIENCE_SECONDS)
+
+    async def window() -> int | None:
+        return orchestrator._media_warm_window
+
+    await wait_until(window, lambda opened: opened is not None, what="a hold during the render")
+    later_chat, later = await _image_turn(client, setup)
+    elsewhere.add(later)
+    let_end[1].set()
+    await finished(client, second, "failed" if failing == 1 else "complete")
+
+    async def waits() -> int:
+        return len(orchestrator._media_waits)
+
+    await wait_until(waits, lambda count: count == 2, what="both runs waiting")
+    assert orchestrator._media_warm_window is not None
+    for chat_id, run_id in ((waiting_chat, waiting), (later_chat, later)):
+        stopped = await client.post(f"/api/chats/{chat_id}/cancel")
+        assert stopped.status_code == 200, stopped.text
+        await finished(client, run_id, "cancelled")
+    world.foreign = 0
+
+    async def read() -> tuple[list[str], str | None, bool]:
+        return list(world.order), orchestrator._displaced_chat_profile_id, world.chat_running
+
+    await wait_until(read, lambda seen: seen[1] is None and seen[2], what="chat to come back")
+    await asyncio.sleep(0.3)
+    assert world.order == handed_back
+
+
+async def test_a_hold_left_open_by_a_handoff_that_empties_comfyui_takes_its_answer(
+    app: FastAPI, client: AsyncClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keeping ComfyUI warm is turned off; a waiting run holds the worker as the next render runs.
+
+    That render finishes after the other use of ComfyUI has ended, and its
+    handoff empties the worker and loads chat beside it. The waiting run's hold
+    is still open, and once that run is stopped the worker is emptied again
+    rather than stopped, since the render that ended last left it healthy.
+    """
+
+    monkeypatch.setattr(orchestrator_module, "MEDIA_BUSY_RECHECK_SECONDS", 0.05)
+    world = _ready_world(app, settings, monkeypatch)
+    # A long quiet spell, so the waiting run stays held back after the other use ends.
+    monkeypatch.setattr(orchestrator_module, "MEDIA_IDLE_SETTLE_SECONDS", 30.0, raising=False)
+    monkeypatch.setattr(settings, "media_keep_warm_seconds", 0)
+    _empties(world, monkeypatch)
+    _fits(world, monkeypatch)
+    await choose_retries(client, 0)
+    orchestrator = world.orchestrator
+    media = world.services.engines.media
+    original = media.generate
+    renders: list[str] = []
+    started = [asyncio.Event(), asyncio.Event()]
+    let_end = [asyncio.Event(), asyncio.Event()]
+
+    async def generate(request: MediaRequest) -> AsyncIterator[MediaEvent]:
+        renders.append(request.run_id)
+        index = len(renders) - 1
+        if index < 2:
+            started[index].set()
+            await let_end[index].wait()
+        if index == 0:
+            raise RuntimeError("Temporary media engine failure")
+        async for event in original(request):
+            yield event
+
+    monkeypatch.setattr(media, "generate", generate)
+    elsewhere: set[str] = set()
+    needed_launch = orchestrator._needed_media_launch
+
+    def launch_for(run_id: str) -> Any:
+        if run_id in elsewhere:
+            return orchestrator_module._NeededLaunch("another-activation")
+        return needed_launch(run_id)
+
+    monkeypatch.setattr(orchestrator, "_needed_media_launch", launch_for)
+    setup = await _image_setup(client)
+
+    _chat_id, first = await _image_turn(client, setup)
+    await asyncio.wait_for(started[0].wait(), timeout=PATIENCE_SECONDS)
+    world.foreign = 1
+    waiting_chat, waiting = await _image_turn(client, setup)
+    elsewhere.add(waiting)
+    _chat_id, second = await _image_turn(client, setup)
+    let_end[0].set()
+    await finished(client, first, "failed")
+    await asyncio.wait_for(started[1].wait(), timeout=PATIENCE_SECONDS)
+
+    async def window() -> int | None:
+        return orchestrator._media_warm_window
+
+    await wait_until(window, lambda opened: opened is not None, what="a hold during the render")
+    held = orchestrator._media_warm_window
+    world.foreign = 0
+    let_end[1].set()
+    await finished(client, second)
+
+    async def read() -> tuple[str | None, bool]:
+        return orchestrator._displaced_chat_profile_id, world.chat_running
+
+    await wait_until(read, lambda seen: seen[0] is None and seen[1], what="chat to come back")
+    assert orchestrator._media_warm_window == held, "the waiting run's hold did not stay open"
+    stopped = await client.post(f"/api/chats/{waiting_chat}/cancel")
+    assert stopped.status_code == 200, stopped.text
+    await finished(client, waiting, "cancelled")
+    await wait_until(window, lambda opened: opened is None, what="the hold to end")
+    await asyncio.sleep(0.3)
+
+    assert world.order == ["stop chat", "empty media", "resume profile-chat", "empty media"]
+
+
+@pytest.mark.parametrize(
+    ("failure", "emptiable"),
+    [
+        pytest.param(RuntimeError("Temporary media engine failure"), False, id="any-other"),
+        pytest.param(MediaWorkflowFailure("A step of the workflow failed"), True, id="its-own"),
+    ],
+)
+async def test_a_failed_attempt_kept_for_its_retry_says_whether_its_worker_may_be_emptied(
+    app: FastAPI,
+    client: AsyncClient,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    emptiable: bool,
+) -> None:
+    world = _ready_world(app, settings, monkeypatch)
+    _empties(world, monkeypatch)
+    _fits(world, monkeypatch)
+    orchestrator = world.orchestrator
+    media = world.services.engines.media
+    original = media.generate
+    attempts: list[str] = []
+
+    async def generate(request: MediaRequest) -> AsyncIterator[MediaEvent]:
+        attempts.append(request.run_id)
+        if len(attempts) == 1:
+            raise failure
+        async for event in original(request):
+            yield event
+
+    monkeypatch.setattr(media, "generate", generate)
+    kept: list[bool] = []
+    hold_for_retry = orchestrator._hold_media_handoff_for_retry
+
+    async def recording_hold(chat_profile_id: str, **options: Any) -> None:
+        kept.append(bool(options.get("emptiable", False)))
+        await hold_for_retry(chat_profile_id, **options)
+
+    monkeypatch.setattr(orchestrator, "_hold_media_handoff_for_retry", recording_hold)
+
+    _chat_id, run_id = await _image_turn(client)
+    await finished(client, run_id)
+
+    assert kept == [emptiable]
+    assert len(attempts) == 2
 
 
 async def test_a_worker_launched_for_one_activation_is_still_stopped(
