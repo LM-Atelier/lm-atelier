@@ -33,6 +33,7 @@ from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
 from run_waits import PATIENCE_SECONDS, wait_for_terminal_status
 from sqlalchemy import event, select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from test_guide_video_selection import _family as _video_family
 from test_guide_video_selection import _graph as _video_graph
@@ -50,6 +51,7 @@ from workflow_fixtures import seed_workflow_trust
 import local_lm
 from local_lm import __version__, api, db, worker_startup
 from local_lm import main as application
+from local_lm.artifact_deletion_authority import ArtifactReferenceIndexStale
 from local_lm.config import Settings
 from local_lm.db import SQLITE_BUSY_TIMEOUT_MS, SessionLocal
 from local_lm.domain import Operation
@@ -1442,6 +1444,31 @@ async def test_a_retention_sweep_that_fails_reads_as_given_up_and_stalls_startup
         "reference_index": "done",
         "retention_sweep": "gave_up",
     }
+
+
+@pytest.mark.parametrize("held_back_by", ["the-writer", "the-reference-index"])
+async def test_a_retention_sweep_held_back_past_its_tries_reads_as_given_up(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch, held_back_by: str
+) -> None:
+    """Another writer holds the database, or the reference index is behind, at every try."""
+
+    def held_back(*_args: object, **_options: object) -> object:
+        if held_back_by == "the-writer":
+            busy = sqlite3.OperationalError("database is locked")
+            raise OperationalError("DELETE FROM artifacts", {}, busy)
+        raise ArtifactReferenceIndexStale()
+
+    monkeypatch.setattr(app.state.services.artifacts, "cleanup_retention", held_back)
+    monkeypatch.setattr(application, "RETENTION_LOCK_RETRIES", 0)
+    monkeypatch.setattr(application, "RETENTION_INDEX_RETRIES", 0)
+
+    async with _serving(app) as (client, _session):
+        await _restore_ended(app)
+        body = await _status(client)
+
+    assert app.state.retention_sweep.result() is False
+    assert body["startup"]["state"] == "stalled"
+    assert _tasks(body)["retention_sweep"] == "gave_up"
 
 
 async def test_startup_work_that_raised_reads_as_given_up_and_its_workers_as_failed(
