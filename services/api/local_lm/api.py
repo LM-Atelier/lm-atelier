@@ -12556,9 +12556,9 @@ async def list_workflows(
 @router.post("/workflows", response_model=WorkflowOut, status_code=201)
 async def create_workflow(
     payload: WorkflowCreate, request: Request, session: SessionDep
-) -> WorkflowDefinition:
+) -> WorkflowOut:
     payload = await _map_workflow_write(payload, request, payload.operation, payload.engine)
-    return await _persist_workflow(payload, session, trusted=False)
+    return _workflow_out(session, await _persist_workflow(payload, session, trusted=False))
 
 
 async def _map_workflow_write[T: (WorkflowCreate, WorkflowRevisionCreate)](
@@ -12726,7 +12726,7 @@ def _persist_workflow_sync(
 @router.patch("/workflows/{workflow_id}", response_model=WorkflowOut)
 async def update_workflow(
     workflow_id: str, payload: WorkflowUpdate, session: SessionDep
-) -> WorkflowDefinition:
+) -> WorkflowOut:
     definition = session.get(WorkflowDefinition, workflow_id)
     from .workflow_recovery_visibility import workflow_family_deleted
 
@@ -12742,7 +12742,7 @@ async def update_workflow(
     )
     if not updated:
         raise api_error(500, "workflow-reload-failed", "workflow could not be reloaded")
-    return updated
+    return _workflow_out(session, updated)
 
 
 @router.get("/workflows/{workflow_id}/export", response_model=WorkflowBundle)
@@ -14577,7 +14577,7 @@ def recover_registry_preparations(services: Services) -> None:
 @router.post("/workflows/packages/drafts", response_model=WorkflowOut, status_code=201)
 async def ensure_workflow_package_draft(
     payload: WorkflowPackageDraftRequest, session: SessionDep
-) -> WorkflowDefinition:
+) -> WorkflowOut:
     """Persist an exact package graph without making it executable."""
 
     try:
@@ -14587,7 +14587,7 @@ async def ensure_workflow_package_draft(
     except WorkflowPackageDraftError as exc:
         raise api_error(exc.status_code, exc.code, str(exc)) from exc
     session.commit()
-    return _workflow_with_revisions(session, definition.id)
+    return _workflow_out(session, _workflow_with_revisions(session, definition.id))
 
 
 @router.post("/workflows/packages/prepare", response_model=JobOut, status_code=202)
@@ -15432,7 +15432,7 @@ async def install_workflow_offer(
 @router.post("/workflows/packages/import", response_model=WorkflowOut, status_code=201)
 async def import_workflow_package(
     payload: WorkflowPackageImportRequest, request: Request, session: SessionDep
-) -> WorkflowDefinition:
+) -> WorkflowOut:
     """Compile a fully resolved ComfyUI package into an untrusted workflow.
 
     The one gate is the analyzer's own `ready`, re-computed here rather than
@@ -15622,7 +15622,7 @@ async def import_workflow_package(
             definition.name = payload.name
             definition.description = payload.description
             session.commit()
-            return _workflow_with_revisions(session, definition.id)
+            return _workflow_out(session, _workflow_with_revisions(session, definition.id))
         if initial_revision.api_graph_json:
             raise api_error(
                 409,
@@ -15644,8 +15644,8 @@ async def import_workflow_package(
             session,
             trusted=False,
         )
-        return _workflow_with_revisions(session, definition.id)
-    return await _persist_workflow(
+        return _workflow_out(session, _workflow_with_revisions(session, definition.id))
+    created = await _persist_workflow(
         WorkflowCreate(
             name=payload.name,
             operation=payload.operation,
@@ -15659,6 +15659,7 @@ async def import_workflow_package(
         session,
         trusted=False,
     )
+    return _workflow_out(session, created)
 
 
 @router.post("/workflows/packages/analyze", response_model=WorkflowPackageAnalysisOut)
@@ -15782,7 +15783,7 @@ async def analyze_workflow_package(
 @router.post("/workflows/import", response_model=WorkflowOut, status_code=201)
 async def import_workflow(
     payload: WorkflowBundle, request: Request, session: SessionDep
-) -> WorkflowDefinition:
+) -> WorkflowOut:
     return await create_workflow(
         WorkflowCreate(
             name=payload.name,
@@ -15803,7 +15804,7 @@ async def import_workflow(
 @router.post("/workflows/{workflow_id}/clone", response_model=WorkflowOut, status_code=201)
 async def clone_workflow(
     workflow_id: str, payload: WorkflowClone, session: SessionDep
-) -> WorkflowDefinition:
+) -> WorkflowOut:
     definition, revision = _workflow_and_revision(session, workflow_id)
     cloned = await _persist_workflow(
         WorkflowCreate(
@@ -15827,7 +15828,7 @@ async def clone_workflow(
     inherit_workflow_review(session, definition, revision, cloned, target)
     session.commit()
     session.refresh(cloned)
-    return cloned
+    return _workflow_out(session, cloned)
 
 
 @router.post(
