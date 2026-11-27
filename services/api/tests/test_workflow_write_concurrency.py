@@ -13,7 +13,7 @@ from sqlalchemy import Connection, event, func, select
 from local_lm import api
 from local_lm.db import SessionLocal
 from local_lm.models import WorkflowDefinition, WorkflowRevision
-from local_lm.schemas import WorkflowCreate, WorkflowRevisionCreate
+from local_lm.schemas import WorkflowCreate, WorkflowOut, WorkflowRevisionCreate
 
 
 @pytest.mark.parametrize("revision", [False, True], ids=["workflow", "revision"])
@@ -126,7 +126,7 @@ async def test_cancelling_a_workflow_write_keeps_its_session_until_the_worker_fi
         finally:
             finished.set()
 
-    async def request() -> WorkflowDefinition | WorkflowRevision:
+    async def request() -> WorkflowOut | WorkflowRevision:
         http_request = Request({"type": "http", "app": app})
         with SessionLocal() as session:
             try:
