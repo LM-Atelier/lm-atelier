@@ -11440,6 +11440,7 @@ def _revision_readiness(
     *,
     expected_engine: str,
     operation: Operation,
+    trusted: bool,
 ) -> tuple[Literal["ready", "setup_required", "review_required", "unavailable"], str | None]:
     if revision.engine != expected_engine:
         return "unavailable", "engine_mismatch"
@@ -11449,10 +11450,10 @@ def _revision_readiness(
         revision.engine, operation.value, revision.api_graph_json, revision.input_schema_json
     ):
         return "unavailable", "revision_ignores_the_description"
-    # The review is checked as selection checks it, not by the stored flag: a
-    # review whose revision or node packages changed since leaves the flag set,
-    # and selection then refuses what this would call ready.
-    if not revision_is_trusted(session, revision):
+    # `trusted` is the review read as selection reads it, not the stored flag:
+    # a review whose revision or node packages changed since leaves the flag
+    # set, and selection then refuses what this would call ready.
+    if not trusted:
         return "review_required", "revision_untrusted"
     if revision.dependency_contract_sha256 is None:
         return "ready", None
@@ -11499,6 +11500,8 @@ def _workflow_family_variant_out(
         if definition.current_revision_id
         else None
     )
+    # Read once, as selection reads it, for the readiness and the trusted field alike.
+    trusted = False
     if compatibility is not None and revision is None:
         profile = session.get(ModelProfile, compatibility.model_profile_id)
         if profile is not None:
@@ -11524,11 +11527,13 @@ def _workflow_family_variant_out(
                 if revision is None:
                     readiness, reason = "setup_required", "operation_unavailable"
                 else:
+                    trusted = revision_is_trusted(session, revision)
                     readiness, reason = _revision_readiness(
                         session,
                         revision,
                         expected_engine=expected_engine,
                         operation=operation,
+                        trusted=trusted,
                     )
         else:
             readiness, reason = "setup_required", "model_unavailable"
@@ -11536,11 +11541,13 @@ def _workflow_family_variant_out(
         readiness, reason = "setup_required", "current_revision_missing"
         revision = None
     else:
+        trusted = revision_is_trusted(session, revision)
         readiness, reason = _revision_readiness(
             session,
             revision,
             expected_engine=expected_engine,
             operation=operation,
+            trusted=trusted,
         )
     if family.archived:
         readiness, reason = "unavailable", "family_archived"
@@ -11572,8 +11579,8 @@ def _workflow_family_variant_out(
         current_revision_version=revision.version if revision else None,
         engine=revision.engine if revision else None,
         capabilities=list(revision.capabilities_json) if revision else [],
-        # Read as the readiness above reads it, so the two cannot disagree.
-        trusted=revision_is_trusted(session, revision) if revision else compatibility is not None,
+        # The same reading the readiness above used, so the two cannot disagree.
+        trusted=trusted if revision else compatibility is not None,
         readiness=readiness,
         readiness_reason=reason,
         setup_resolution=setup_resolution,

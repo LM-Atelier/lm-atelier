@@ -36,36 +36,99 @@ class WorkflowReviewError(ValueError):
     """A content-free refusal; graph and stored values never enter its message."""
 
 
-def _canonical(value: object, *, max_bytes: int = _MAX_BYTES, max_depth: int = _MAX_DEPTH) -> bytes:
-    pending = [(value, 0)]
-    entries = 0
-    while pending:
-        item, depth = pending.pop()
-        entries += 1
-        if entries > _MAX_ENTRIES or depth > max_depth:
+def _scalar_bound(item: Any, kind: type) -> int:
+    """Refuse a scalar a review identity may not hold, and bound its encoding with a separator."""
+
+    if kind is str:
+        if len(item) > 65_536:
             raise WorkflowReviewError("workflow_review_structure_invalid")
-        if isinstance(item, dict | list) and entries + len(pending) + len(item) > _MAX_ENTRIES:
+        return 6 * len(item) + 3
+    if kind is int:
+        bits: int = item.bit_length()
+        return bits // 3 + 3
+    if kind is float:
+        if not math.isfinite(item):
+            raise WorkflowReviewError("workflow_review_structure_invalid")
+        return 33
+    if item is None or kind is bool:
+        return 6
+    raise WorkflowReviewError("workflow_review_structure_invalid")
+
+
+def _encoding_bound(value: object, *, max_depth: int) -> int:
+    """Refuse a value a review identity may not hold, and bound its encoding's size.
+
+    The bound adds up the most the canonical encoding can take: a separator
+    for every entry, brackets for each container, quotes and a colon for each
+    key, quotes and the longest escape for each character of a key or string,
+    and the digits of any other scalar. Containers wait their turn on a stack;
+    scalars are checked where they are met, which is most of a graph.
+    """
+
+    kind = type(value)
+    if kind is not dict and kind is not list:
+        return _scalar_bound(value, kind)
+    containers: list[tuple[Any, int]] = [(value, 0)]
+    pop = containers.pop
+    push = containers.append
+    entries = 1
+    bound = 1
+    while containers:
+        item, depth = pop()
+        size = len(item)
+        entries += size
+        if entries > _MAX_ENTRIES:
+            raise WorkflowReviewError("workflow_review_structure_invalid")
+        bound += 2
+        if not size:
+            continue
+        child_depth = depth + 1
+        if child_depth > max_depth:
             raise WorkflowReviewError("workflow_review_structure_invalid")
         if type(item) is dict:
             for key, child in item.items():
                 if type(key) is not str or len(key) > 200:
                     raise WorkflowReviewError("workflow_review_structure_invalid")
-                pending.append((child, depth + 1))
-        elif type(item) is list:
-            pending.extend((child, depth + 1) for child in item)
-        elif type(item) is str:
-            if len(item) > 65_536:
-                raise WorkflowReviewError("workflow_review_structure_invalid")
-        elif type(item) is float:
-            if not math.isfinite(item):
-                raise WorkflowReviewError("workflow_review_structure_invalid")
-        elif item is not None and type(item) not in {bool, int}:
-            raise WorkflowReviewError("workflow_review_structure_invalid")
-    parts: list[bytes] = []
-    size = 0
+                bound += 6 * len(key) + 3
+                child_kind = type(child)
+                if child_kind is dict or child_kind is list:
+                    push((child, child_depth))
+                    bound += 1
+                else:
+                    bound += _scalar_bound(child, child_kind)
+        else:
+            for child in item:
+                child_kind = type(child)
+                if child_kind is dict or child_kind is list:
+                    push((child, child_depth))
+                    bound += 1
+                else:
+                    bound += _scalar_bound(child, child_kind)
+    return bound
+
+
+def _canonical(value: object, *, max_bytes: int = _MAX_BYTES, max_depth: int = _MAX_DEPTH) -> bytes:
+    """The exact JSON bytes a review identity is the digest of, or a content-free refusal.
+
+    Within the byte limit, the value is encoded in one call, which uses the C
+    encoder; a value whose bound is over it is encoded fragment by fragment
+    and stopped at the limit. Both give the same bytes.
+    """
+
+    bound = _encoding_bound(value, max_depth=max_depth)
     encoder = json.JSONEncoder(
         sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     )
+    if bound <= max_bytes:
+        try:
+            encoded = encoder.encode(value).encode("utf-8")
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            raise WorkflowReviewError("workflow_review_structure_invalid") from None
+        if len(encoded) > max_bytes:
+            raise WorkflowReviewError("workflow_review_structure_invalid")
+        return encoded
+    parts: list[bytes] = []
+    size = 0
     try:
         # Each scalar is already bounded above. Stop cumulative encoding before
         # constructing an arbitrarily large string that the byte limit rejects.
