@@ -42,6 +42,7 @@ from test_media_worker_start_and_stop_reasons import (
     _fake_workers,
     _StubbornProcess,
 )
+from test_setup_verification import seed_ready_role
 from test_worker_unload import _StartupRestore
 from test_workflow_revision_review import _approved
 from test_workspace_lock_api import CHANGED, EPOCH, LOCKED, _choose, _lock
@@ -64,6 +65,7 @@ from local_lm.models import (
     ModelInstall,
     ModelProfile,
     Project,
+    SetupVerification,
     WorkflowDefinition,
     WorkflowFamily,
     WorkflowPreference,
@@ -73,6 +75,7 @@ from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.processes import ProcessSupervisor, WorkerStopIncomplete
 from local_lm.schemas import TurnRequest, WorkerStartReason, WorkerStopReason
 from local_lm.settings_registry import builtin_settings_for_role
+from local_lm.setup_verification import SETUP_VERIFICATION_SCOPE
 from local_lm.workspace_lock import REACHABLE_WHILE_LOCKED
 
 STATUS = "/api/instance/status"
@@ -1373,6 +1376,55 @@ async def test_a_saved_recipe_a_plain_turn_refuses_reads_as_that_refusal(
     for role in ("chat", "image", "video"):
         advertised = await app.state.services.engines.settings_for_role(role)
         assert advertised == builtin_settings_for_role(role), role
+
+
+async def test_a_setup_verification_chat_reads_without_the_recipe_its_turn_leaves_out(
+    client: AsyncClient, settings: Settings
+) -> None:
+    """Setup verification runs the role's own workflow, so no saved recipe applies to it."""
+
+    recipe = await client.post(
+        "/api/workflow-use-case-presets",
+        json={
+            "name": "Neutral recipe",
+            "use_case": "image_generation",
+            "settings_json": {"unsupported_setting": 1},
+            "is_default": True,
+        },
+    )
+    assert recipe.status_code == 201, recipe.text
+    install, profile, workflow = seed_ready_role(settings, "image", operation="text_to_image")
+    assert workflow is not None
+    with SessionLocal() as session:
+        chat = Chat(
+            title="Setup verification",
+            archived=True,
+            scope=SETUP_VERIFICATION_SCOPE,
+            routing_mode="image",
+        )
+        session.add(chat)
+        session.flush()
+        session.add(
+            SetupVerification(
+                role="image",
+                evidence_key="r" * 64,
+                state="running",
+                model_install_id=install.id,
+                profile_id=profile.id,
+                workflow_revision_id=workflow.id,
+                chat_id=chat.id,
+            )
+        )
+        session.commit()
+        verifying = chat.id
+    plain = (await client.post("/api/chats", json={"title": "Neutral"})).json()["id"]
+
+    plain_read = _operations(await _status(client, plain), "image")["text_to_image"]
+    verifying_read = _operations(await _status(client, verifying), "image")["text_to_image"]
+
+    refusal = "workflow-use-case-preset-setting-unsupported"
+    assert (plain_read["readiness"], plain_read["reason"]) == ("setup_required", refusal)
+    assert verifying_read["reason"] != refusal, verifying_read
 
 
 async def test_text_reads_setup_required_until_the_profile_a_chat_turn_loads_has_a_model(
