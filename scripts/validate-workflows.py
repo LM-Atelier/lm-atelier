@@ -320,6 +320,34 @@ def validate_untrusted_triggers(path: Path, content: str) -> list[str]:
 # zero on a draft, which handed the draft head a green required context. So this
 # runs the gate's own script against the event/result matrix and asserts the
 # conclusions.
+# What the two parts of the API tests report to the gate: Ubuntu compatibility
+# runs the first part and the Ubuntu API tests job the second, and each reports
+# the number of modules in the suite, the number it ran and the digest of the
+# suite's module list.
+API_TEST_REPORTS = (
+    "UBUNTU_API_TOTAL",
+    "UBUNTU_API_SELECTED",
+    "UBUNTU_API_DIGEST",
+    "API_TESTS_TOTAL",
+    "API_TESTS_SELECTED",
+    "API_TESTS_DIGEST",
+)
+# A full plan whose API tests passed in two parts that cover a five-module
+# suite between them.
+GREEN_API_TESTS = {
+    "PLAN_MODE": "full",
+    "API_TESTS": "success",
+    "UBUNTU_API_TOTAL": "5",
+    "UBUNTU_API_SELECTED": "2",
+    "UBUNTU_API_DIGEST": "d" * 64,
+    "API_TESTS_TOTAL": "5",
+    "API_TESTS_SELECTED": "3",
+    "API_TESTS_DIGEST": "d" * 64,
+}
+# Every plan but a full one skips the steps that report on the API tests, and a
+# skipped step's outputs read as empty.
+UNREPORTED_API_TESTS = {name: "" for name in API_TEST_REPORTS}
+ABSENT_API_TEST_REPORTS: dict[str, str | None] = {name: None for name in API_TEST_REPORTS}
 # A fully valid, fully green environment. The malformed-authority cases below
 # start here and break exactly one field, so each one isolates its own input.
 GREEN_MERGE_GATE = {
@@ -332,6 +360,7 @@ GREEN_MERGE_GATE = {
     "BROWSER_SUITES": "success",
     "WINDOWS": "success",
     "WINDOWS_REQUIRED": "true",
+    **GREEN_API_TESTS,
 }
 
 GREEN_MERGE_GROUP: dict[str, str | None] = {
@@ -350,7 +379,86 @@ GREEN_MERGE_GROUP: dict[str, str | None] = {
     "BROWSER_SUITES": "success",
     "WINDOWS": "success",
     "WINDOWS_REQUIRED": "true",
+    **GREEN_API_TESTS,
 }
+
+# The API tests run in two parts, the first in Ubuntu compatibility and the
+# second in a job of its own, and both jobs passing is not enough: a module in
+# neither part would never run while both passed. So the gate also compares what
+# the parts report about the suite. Each change below is made to a green full
+# plan, to one report or to one fact both parts report, and its values are
+# chosen so that only the rule its label names can refuse it.
+API_TEST_REPORT_REFUSALS: tuple[tuple[str, dict[str, str | None]], ...] = (
+    # The parts' counts still add up to the first part's total, so only
+    # comparing the two parts' lists refuses these.
+    ("parts of suites of different lengths are refused", {"API_TESTS_TOTAL": "6"}),
+    ("parts of different module lists are refused", {"API_TESTS_DIGEST": "e" * 64}),
+    ("parts that leave a module out are refused", {"UBUNTU_API_SELECTED": "1"}),
+    ("parts that run a module twice are refused", {"API_TESTS_SELECTED": "4"}),
+    # The counts add up, so only the refusal of an empty part refuses these.
+    (
+        "a first part that ran no modules is refused though the second ran them all",
+        {"UBUNTU_API_SELECTED": "0", "API_TESTS_SELECTED": "5"},
+    ),
+    (
+        "a second part that ran no modules is refused though the first ran them all",
+        {"UBUNTU_API_SELECTED": "5", "API_TESTS_SELECTED": "0"},
+    ),
+    # Read as numbers, each of these would add up, so only a report's exact
+    # domain refuses it.
+    ("a part count with a leading zero is refused", {"UBUNTU_API_SELECTED": "02"}),
+    ("a part count with a sign is refused", {"API_TESTS_SELECTED": "+3"}),
+    ("a part count with a space is refused", {"API_TESTS_SELECTED": " 3"}),
+    (
+        "a suite length with a leading zero is refused",
+        {"UBUNTU_API_TOTAL": "05", "API_TESTS_TOTAL": "05"},
+    ),
+    (
+        "a count longer than its domain allows is refused",
+        {
+            "UBUNTU_API_TOTAL": "1000000005",
+            "API_TESTS_TOTAL": "1000000005",
+            "UBUNTU_API_SELECTED": "1000000002",
+        },
+    ),
+    (
+        "an uppercase suite digest is refused",
+        {"UBUNTU_API_DIGEST": "D" * 64, "API_TESTS_DIGEST": "D" * 64},
+    ),
+    (
+        "a truncated suite digest is refused",
+        {"UBUNTU_API_DIGEST": "d" * 63, "API_TESTS_DIGEST": "d" * 63},
+    ),
+)
+MISSING_API_TEST_REPORTS: list[tuple[str, dict[str, str | None]]] = [
+    (f"a missing {name} report is refused", {name: None}) for name in API_TEST_REPORTS
+]
+# A documentation change and a promotion skip every step that reports, so a
+# report from one of them came from something the gate does not know about.
+DOCUMENTATION_PLAN_REPORTS: list[tuple[str, dict[str, str | None], int]] = [
+    (
+        f"a documentation plan refuses a {name} report no step of it made",
+        {
+            **GREEN_MERGE_GATE,
+            **UNREPORTED_API_TESTS,
+            "PLAN_MODE": "documentation",
+            name: GREEN_API_TESTS[name],
+        },
+        1,
+    )
+    for name in API_TEST_REPORTS
+]
+# Without reports, every plan but a full one is authorized, so these are refused
+# by the plan mode's own domain and by nothing else.
+UNREADABLE_PLAN_MODES: list[tuple[str, dict[str, str | None], int]] = [
+    (label, {**GREEN_MERGE_GATE, **UNREPORTED_API_TESTS, "PLAN_MODE": value}, 1)
+    for label, value in (
+        ("a missing plan mode is refused", None),
+        ("an empty plan mode is refused", ""),
+        ("an uppercase plan mode is refused", "FULL"),
+        ("an unknown plan mode is refused", "partial"),
+    )
+]
 
 # A case is a label, the environment it runs under, and the exit status the
 # gate must produce. A value of None means the variable is absent entirely,
@@ -387,6 +495,13 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             ("BROWSER_SUITES", "failure"),
             ("BROWSER_SUITES", "cancelled"),
             ("BROWSER_SUITES", None),
+            ("API_TESTS", "skipped"),
+            ("API_TESTS", "failure"),
+            ("API_TESTS", "cancelled"),
+            ("API_TESTS", None),
+            ("PLAN_MODE", None),
+            ("UBUNTU_API_DIGEST", None),
+            ("API_TESTS_SELECTED", "4"),
             ("WINDOWS", "skipped"),
             ("WINDOWS", "failure"),
             ("WINDOWS", "cancelled"),
@@ -395,9 +510,10 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     ),
     (
         # Production's shape, not a synthetic green one: the plan is skipped,
-        # Ubuntu runs on always() and refuses, and the browser suites refuse the
-        # same way. WINDOWS_REQUIRED is absent because the job that sets it
-        # never ran.
+        # Ubuntu runs on always() and refuses, and the browser suites and the
+        # API tests refuse the same way. WINDOWS_REQUIRED, the plan mode and the
+        # API test reports are absent because the jobs that set them never got
+        # that far.
         "a title or body edit must not authorize",
         {
             "ACTION": "edited",
@@ -406,6 +522,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "PLAN": "skipped",
             "UBUNTU": "failure",
             "BROWSER_SUITES": "failure",
+            "API_TESTS": "failure",
             "WINDOWS": "skipped",
             "WINDOWS_REQUIRED": None,
         },
@@ -414,6 +531,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "a title or body edit must not authorize even if everything went green",
         {
+            **GREEN_API_TESTS,
             "ACTION": "edited",
             "BASE_CHANGED": "false",
             "DRAFT": "false",
@@ -428,6 +546,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "an edited event that changed the base reverifies and may authorize",
         {
+            **GREEN_API_TESTS,
             "ACTION": "edited",
             "BASE_CHANGED": "true",
             "DRAFT": "false",
@@ -445,6 +564,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
         # can observe, and deleting it would look free.
         "an unreadable base-change answer is refused even when it is not read",
         {
+            **GREEN_API_TESTS,
             "ACTION": "synchronize",
             "BASE_CHANGED": "maybe",
             "DRAFT": "false",
@@ -459,6 +579,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "an unreadable base-change answer is not a permissive one",
         {
+            **GREEN_API_TESTS,
             "ACTION": "edited",
             "BASE_CHANGED": None,
             "DRAFT": "false",
@@ -474,6 +595,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "draft must fail closed",
         {
+            **GREEN_API_TESTS,
             "DRAFT": "true",
             "PLAN": "success",
             "UBUNTU": "success",
@@ -490,6 +612,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
             "PLAN": "skipped",
             "UBUNTU": "skipped",
             "BROWSER_SUITES": "skipped",
+            "API_TESTS": "skipped",
             "WINDOWS": "skipped",
             "WINDOWS_REQUIRED": "false",
         },
@@ -498,6 +621,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "skipped plan is not a passing plan",
         {
+            **GREEN_API_TESTS,
             "DRAFT": "false",
             "PLAN": "skipped",
             "UBUNTU": "success",
@@ -510,6 +634,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "skipped Ubuntu is not a passing Ubuntu",
         {
+            **GREEN_API_TESTS,
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "skipped",
@@ -522,6 +647,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "cancelled Ubuntu is not a passing Ubuntu",
         {
+            **GREEN_API_TESTS,
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "cancelled",
@@ -534,6 +660,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "failed Ubuntu fails the gate",
         {
+            **GREEN_API_TESTS,
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "failure",
@@ -546,6 +673,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "skipped browser suites are not passing ones",
         {
+            **GREEN_API_TESTS,
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "success",
@@ -558,6 +686,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "cancelled browser suites are not passing ones",
         {
+            **GREEN_API_TESTS,
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "success",
@@ -570,6 +699,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "failed browser suites fail the gate",
         {
+            **GREEN_API_TESTS,
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "success",
@@ -582,6 +712,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "Windows may be absent when the plan does not require it",
         {
+            **GREEN_API_TESTS,
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "success",
@@ -594,6 +725,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "a plan-required Windows must not be skipped",
         {
+            **GREEN_API_TESTS,
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "success",
@@ -606,6 +738,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "a plan-required Windows must not have failed",
         {
+            **GREEN_API_TESTS,
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "success",
@@ -618,6 +751,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "everything the plan required succeeded",
         {
+            **GREEN_API_TESTS,
             "DRAFT": "false",
             "PLAN": "success",
             "UBUNTU": "success",
@@ -662,6 +796,9 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
                 {"BROWSER_SUITES": "timed_out"},
             ),
             ("an unknown Windows conclusion is refused", {"WINDOWS": "timed_out"}),
+            ("a missing API tests conclusion is refused", {"API_TESTS": None}),
+            ("an uppercase API tests conclusion is refused", {"API_TESTS": "SUCCESS"}),
+            ("an unknown API tests conclusion is refused", {"API_TESTS": "timed_out"}),
             # The one case where a result's domain is what refuses rather than
             # the success comparison: an unrequired Windows leg is never
             # examined, so without a domain check an unreadable conclusion
@@ -679,6 +816,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "converted back to draft withdraws a fully green head",
         {
+            **GREEN_API_TESTS,
             "ACTION": "converted_to_draft",
             "DRAFT": "true",
             "PLAN": "success",
@@ -695,6 +833,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "an edited base is authorized only by this run's results",
         {
+            **GREEN_API_TESTS,
             "ACTION": "edited",
             "BASE_CHANGED": "true",
             "DRAFT": "false",
@@ -709,6 +848,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "an edited base does not excuse a missing Ubuntu leg",
         {
+            **GREEN_API_TESTS,
             "ACTION": "edited",
             "BASE_CHANGED": "true",
             "DRAFT": "false",
@@ -723,6 +863,7 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     (
         "an edited base does not excuse missing browser suites",
         {
+            **GREEN_API_TESTS,
             "ACTION": "edited",
             "BASE_CHANGED": "true",
             "DRAFT": "false",
@@ -734,6 +875,55 @@ MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
         },
         1,
     ),
+    (
+        "an edited base does not excuse missing API tests",
+        {**GREEN_MERGE_GATE, "ACTION": "edited", "BASE_CHANGED": "true", "API_TESTS": "skipped"},
+        1,
+    ),
+    # The second part of the API tests runs in a job of its own, which, like the
+    # browser suites' job, must succeed.
+    ("skipped API tests are not passing ones", {**GREEN_MERGE_GATE, "API_TESTS": "skipped"}, 1),
+    (
+        "cancelled API tests are not passing ones",
+        {**GREEN_MERGE_GATE, "API_TESTS": "cancelled"},
+        1,
+    ),
+    ("failed API tests fail the gate", {**GREEN_MERGE_GATE, "API_TESTS": "failure"}, 1),
+    (
+        "the parts may split the suite unevenly",
+        {**GREEN_MERGE_GATE, "UBUNTU_API_SELECTED": "1", "API_TESTS_SELECTED": "4"},
+        0,
+    ),
+    # What the two parts report must show that they ran the suite between them.
+    *(
+        (label, {**GREEN_MERGE_GATE, **override}, 1)
+        for label, override in (*API_TEST_REPORT_REFUSALS, *MISSING_API_TEST_REPORTS)
+    ),
+    # Only a full plan runs the API tests. A documentation change and a
+    # promotion skip every step that reports, so their reports are empty, and
+    # their heads must still be authorized.
+    (
+        "a documentation plan runs no API tests and reports none",
+        {**GREEN_MERGE_GATE, **UNREPORTED_API_TESTS, "PLAN_MODE": "documentation"},
+        0,
+    ),
+    (
+        "a promotion runs no API tests and reports none",
+        {**GREEN_MERGE_GATE, **UNREPORTED_API_TESTS, "PLAN_MODE": "promotion"},
+        0,
+    ),
+    (
+        "a documentation plan may leave its API test reports unset",
+        {**GREEN_MERGE_GATE, **ABSENT_API_TEST_REPORTS, "PLAN_MODE": "documentation"},
+        0,
+    ),
+    (
+        "a documentation merge group runs no API tests and reports none",
+        {**GREEN_MERGE_GROUP, **UNREPORTED_API_TESTS, "PLAN_MODE": "documentation"},
+        0,
+    ),
+    *DOCUMENTATION_PLAN_REPORTS,
+    *UNREADABLE_PLAN_MODES,
 )
 
 
@@ -775,7 +965,13 @@ VERIFICATION_REF = event_expression(
 MERGE_GATE_JOB = {
     "name": "Merge gate",
     "if": MERGE_GATE_CONDITION,
-    "needs": ["verification-plan", "compatibility", "windows-compatibility", "browser-suites"],
+    "needs": [
+        "verification-plan",
+        "compatibility",
+        "windows-compatibility",
+        "browser-suites",
+        "api-tests",
+    ],
     "runs-on": "ubuntu-24.04",
     "timeout-minutes": 5,
 }
@@ -793,7 +989,19 @@ MERGE_GATE_ENV = {
     "ACTION": "${{ github.event.action }}",
     "HEAD_SHA": EVENT_HEAD_SHA,
     "PLAN": "${{ needs.verification-plan.result }}",
+    # Which plan ran, since only a full one runs the API tests and so reports
+    # on them.
+    "PLAN_MODE": "${{ needs.verification-plan.outputs.mode }}",
     "UBUNTU": "${{ needs.compatibility.result }}",
+    # Each part of the API tests is read from the job that ran it. Bound to
+    # one job twice, the comparison would be a report checked against itself.
+    "UBUNTU_API_TOTAL": "${{ needs.compatibility.outputs.api_tests_total }}",
+    "UBUNTU_API_SELECTED": "${{ needs.compatibility.outputs.api_tests_selected }}",
+    "UBUNTU_API_DIGEST": "${{ needs.compatibility.outputs.api_tests_digest }}",
+    "API_TESTS": "${{ needs.api-tests.result }}",
+    "API_TESTS_TOTAL": "${{ needs.api-tests.outputs.api_tests_total }}",
+    "API_TESTS_SELECTED": "${{ needs.api-tests.outputs.api_tests_selected }}",
+    "API_TESTS_DIGEST": "${{ needs.api-tests.outputs.api_tests_digest }}",
     "BROWSER_SUITES": "${{ needs.browser-suites.result }}",
     "WINDOWS": "${{ needs.windows-compatibility.result }}",
     "WINDOWS_REQUIRED": "${{ needs.verification-plan.outputs.windows }}",
@@ -1319,20 +1527,51 @@ PLAN_COMMAND = (
     '  --github-output "$GITHUB_OUTPUT"'
 )
 FULL_PLAN = "needs.verification-plan.outputs.mode == 'full'"
-# The first step of both Ubuntu jobs, so neither can succeed after a plan that
-# failed or never ran.
+# The first step of every Ubuntu verification job, so none can succeed after a
+# plan that failed or never ran.
 REQUIRED_PLAN_STEP = {
     "name": "Require a valid verification plan",
     "if": "needs.verification-plan.result != 'success'",
     "run": "exit 1",
 }
+# The parts the API tests run in: Ubuntu compatibility runs the first and the
+# Ubuntu API tests job the second. The merge gate's proof that every module ran
+# is that the parts' counts add up to the suite, which holds only when the
+# parts are every part of one split.
+API_TEST_PARTS = ("1/2", "2/2")
 # A condition that still contains the full-plan test can be made false without
 # removing it, as `... == 'full' && false` is, so the steps that do the verifying
-# are pinned whole: name, condition and command, with nothing beside them.
-UBUNTU_VERIFICATION_STEP = {
+# are pinned whole: name, id, condition, environment and command, with nothing
+# beside them. The id is what the job's outputs read the part's report from.
+UBUNTU_VERIFICATION_STEP: dict[str, Any] = {
     "name": "Run repository verification",
+    "id": "verification",
     "if": FULL_PLAN,
+    "env": {"LOCAL_LM_API_TEST_PART": API_TEST_PARTS[0]},
     "run": "./scripts/verify.sh",
+}
+API_TEST_STEP: dict[str, Any] = {
+    "name": "Run the second part of the API tests",
+    "id": "api-tests",
+    "if": FULL_PLAN,
+    "env": {"LOCAL_LM_API_TEST_PART": API_TEST_PARTS[1]},
+    "run": "./scripts/verify.sh --api-tests-only",
+}
+
+
+def api_test_outputs(step: str) -> dict[str, str]:
+    """Return the outputs a job publishes from the step that ran its part of the API tests."""
+
+    return {
+        output: "${{ steps." + step + ".outputs." + output + " }}"
+        for output in ("api_tests_total", "api_tests_selected", "api_tests_digest")
+    }
+
+
+# The report each part of the API tests leaves for the merge gate, by job.
+API_TEST_OUTPUTS = {
+    "compatibility": api_test_outputs("verification"),
+    "api-tests": api_test_outputs("api-tests"),
 }
 # Every command the browser-suites job runs after its plan check, in order.
 BROWSER_SUITE_STEPS = (
@@ -1375,13 +1614,17 @@ WINDOWS_VERIFICATION_STEP = {
 # step runs without touching the step, so a job is refused for declaring any
 # key beyond these, and for leaving one out. The planner declares outputs
 # instead of env and needs: its outputs decide how much the other jobs verify.
+# The two jobs that each run a part of the API tests declare outputs as well,
+# the report of what their part covered.
 VERIFICATION_JOB_KEYS = frozenset(
     {"name", "needs", "if", "runs-on", "timeout-minutes", "env", "steps"}
 )
 PLAN_JOB_KEYS = frozenset({"name", "if", "runs-on", "timeout-minutes", "outputs", "steps"})
+API_TEST_JOB_KEYS = VERIFICATION_JOB_KEYS | {"outputs"}
 VERIFICATION_RUNNERS = {
     "verification-plan": "ubuntu-24.04",
     "compatibility": "ubuntu-24.04",
+    "api-tests": "ubuntu-24.04",
     "browser-suites": "ubuntu-24.04",
     "windows-compatibility": "windows-2025",
 }
@@ -1464,6 +1707,34 @@ FFMPEG_FINISH_SCRIPT = (
     "ffmpeg -version\n"
     "ffprobe -version"
 )
+# The video tests need ffmpeg, so both jobs that run API tests install it in the
+# background and wait for it before the tests start.
+FFMPEG_START_STEP = {
+    "name": "Start installing ffmpeg for media pipeline tests",
+    "if": FULL_PLAN,
+    "run": FFMPEG_START_SCRIPT,
+}
+FFMPEG_FINISH_STEP: dict[str, Any] = {
+    "name": "Finish installing ffmpeg for media pipeline tests",
+    "if": FULL_PLAN,
+    # A background install that hangs in apt ends the wait here.
+    "timeout-minutes": 20,
+    "run": FFMPEG_FINISH_SCRIPT,
+}
+# Every command the api-tests job runs after its plan check, in order.
+API_TEST_COMMANDS = (
+    FFMPEG_START_STEP,
+    {
+        "name": "Install API test dependencies",
+        "if": FULL_PLAN,
+        "run": (
+            "uv sync --project services/api --locked --python 3.12 --extra dev --extra package\n"
+            "npm ci"
+        ),
+    },
+    FFMPEG_FINISH_STEP,
+    API_TEST_STEP,
+)
 WINDOWS_FFMPEG_SCRIPT = (
     "# The community feed returns 503 and 504 often enough to fail runs\n"
     "# on its own. The pinned version is what matters; how many attempts\n"
@@ -1493,7 +1764,7 @@ WINDOWS_FFMPEG_SCRIPT = (
     "  Start-Sleep -Seconds $wait\n"
     "}"
 )
-# Every step of the three jobs that verify a head, in order and whole. Any step
+# Every step of the four jobs that verify a head, in order and whole. Any step
 # can change the steps after it, without touching them: it can append to the
 # files GitHub reads environment variables and PATH entries from, turn on the
 # workflow commands that do the same, put another tool first on PATH, edit a
@@ -1504,11 +1775,7 @@ WINDOWS_FFMPEG_SCRIPT = (
 VERIFICATION_STEPS: dict[str, tuple[dict[str, Any], ...]] = {
     "compatibility": (
         REQUIRED_PLAN_STEP,
-        {
-            "name": "Start installing ffmpeg for media pipeline tests",
-            "if": FULL_PLAN,
-            "run": FFMPEG_START_SCRIPT,
-        },
+        FFMPEG_START_STEP,
         VERIFICATION_CHECKOUT,
         {
             "name": "Scan reachable source history for secrets",
@@ -1532,13 +1799,7 @@ VERIFICATION_STEPS: dict[str, tuple[dict[str, Any], ...]] = {
             "if": "needs.verification-plan.outputs.dependency_audit == 'true'",
             "run": "npm audit --audit-level=high\n.venv/bin/python scripts/audit-dependencies.py",
         },
-        {
-            "name": "Finish installing ffmpeg for media pipeline tests",
-            "if": FULL_PLAN,
-            # A background install that hangs in apt ends the wait here.
-            "timeout-minutes": 20,
-            "run": FFMPEG_FINISH_SCRIPT,
-        },
+        FFMPEG_FINISH_STEP,
         UBUNTU_VERIFICATION_STEP,
         {
             "name": "Validate documentation-only change",
@@ -1554,6 +1815,17 @@ VERIFICATION_STEPS: dict[str, tuple[dict[str, Any], ...]] = {
             "if": "needs.verification-plan.outputs.mode == 'promotion'",
             "run": "echo Protected develop is ready for exact-tree promotion to main.",
         },
+    ),
+    # What the API tests run with in the other part, and nothing more: the
+    # secret scan and the dependency audit run once, in that part's job.
+    "api-tests": (
+        REQUIRED_PLAN_STEP,
+        FFMPEG_START_STEP,
+        VERIFICATION_CHECKOUT,
+        *({**step, "if": FULL_PLAN} for step in TOOLCHAIN_STEPS),
+        API_TEST_COMMANDS[1],
+        FFMPEG_FINISH_STEP,
+        API_TEST_STEP,
     ),
     "browser-suites": (
         REQUIRED_PLAN_STEP,
@@ -1627,6 +1899,7 @@ def validate_verification_bindings(path: Path, workflow: dict[str, Any]) -> list
     for name, condition, needs in (
         ("verification-plan", VERIFICATION_PLAN_CONDITION, None),
         ("compatibility", COMPATIBILITY_CONDITION, "verification-plan"),
+        ("api-tests", COMPATIBILITY_CONDITION, "verification-plan"),
         ("browser-suites", COMPATIBILITY_CONDITION, "verification-plan"),
         (
             "windows-compatibility",
@@ -1642,14 +1915,23 @@ def validate_verification_bindings(path: Path, workflow: dict[str, Any]) -> list
             problems.append(f"{path}: {name} must keep its event condition")
         if not exactly_equal(needs, job.get("needs")):
             problems.append(f"{path}: {name} must depend on its verification plan")
-        problems.extend(
-            job_key_problems(
-                path,
-                name,
-                job,
-                PLAN_JOB_KEYS if name == "verification-plan" else VERIFICATION_JOB_KEYS,
+        if name == "verification-plan":
+            keys = PLAN_JOB_KEYS
+        elif name in API_TEST_OUTPUTS:
+            keys = API_TEST_JOB_KEYS
+        else:
+            keys = VERIFICATION_JOB_KEYS
+        problems.extend(job_key_problems(path, name, job, keys))
+        # The merge gate reads each part's report through these outputs, so an
+        # output that reads another step, or another name, reports something
+        # other than what the part ran.
+        if name in API_TEST_OUTPUTS and not exactly_equal(
+            API_TEST_OUTPUTS[name], job.get("outputs")
+        ):
+            problems.append(
+                f"{path}: {name} must publish its part of the API tests' report exactly as "
+                f"pinned, {API_TEST_OUTPUTS[name]}, found {job.get('outputs')!r}"
             )
-        )
         runner = VERIFICATION_RUNNERS[name]
         if not exactly_equal(runner, job.get("runs-on")):
             problems.append(f"{path}: {name} must run on {runner!r}, found {job.get('runs-on')!r}")
@@ -1696,12 +1978,19 @@ def validate_verification_bindings(path: Path, workflow: dict[str, Any]) -> list
                     f"{path}: windows-compatibility must run the repository verification "
                     "exactly once, as pinned"
                 )
-        elif name in ("compatibility", "browser-suites"):
+        elif name in ("compatibility", "api-tests", "browser-suites"):
             if not steps or not exactly_equal(REQUIRED_PLAN_STEP, steps[0]):
                 problems.append(f"{path}: {name} must refuse an unsuccessful plan")
             commands = [
                 {**step, "run": str(step["run"]).strip()} for step in steps[1:] if "run" in step
             ]
+            if name == "api-tests":
+                if not exactly_equal(list(API_TEST_COMMANDS), commands):
+                    problems.append(
+                        f"{path}: api-tests must install ffmpeg and run the second part of the "
+                        "API tests exactly as pinned"
+                    )
+                continue
             if name == "browser-suites":
                 if not exactly_equal(list(BROWSER_SUITE_STEPS), commands):
                     problems.append(
@@ -1739,6 +2028,7 @@ CI_WORKFLOW_KEYS = frozenset({"name", "on", "permissions", "concurrency", "jobs"
 CI_JOBS = {
     "verification-plan": "Select verification plan",
     "compatibility": "Ubuntu compatibility",
+    "api-tests": "Ubuntu API tests",
     "browser-suites": "Ubuntu browser suites",
     "merge-gate": "Merge gate",
     "windows-compatibility": "Windows compatibility",

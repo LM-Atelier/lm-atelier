@@ -25,6 +25,8 @@ import sys
 from collections.abc import Mapping
 
 SUCCESS = "success"
+# The one plan that runs the API tests.
+FULL = "full"
 
 # Every value the gate reads has an exact domain. An input that is absent,
 # empty, differently cased or simply unrecognised is not a permissive default -
@@ -45,7 +47,96 @@ ACTIONS = frozenset(
 )
 # The conclusions GitHub can report for a needed job.
 RESULTS = frozenset({"success", "failure", "cancelled", "skipped"})
+# The plans scripts/ci-plan.py can select.
+MODES = frozenset({"full", "documentation", "promotion"})
 HEAD_SHA = re.compile(r"[0-9a-f]{40}")
+# A module count as scripts/api-test-part.py writes it: decimal, with no sign or
+# leading zero, and short enough that reading it as a number cannot fail.
+COUNT = re.compile(r"0|[1-9][0-9]{0,8}")
+# The digest of the API test module list, as the same script writes it.
+DIGEST = re.compile(r"[0-9a-f]{64}")
+# What each part of the API tests reports: the number of modules in the whole
+# suite, the number this part ran, and the digest of the suite's module list.
+# Ubuntu compatibility runs the first part, and the Ubuntu API tests job the
+# second.
+API_TEST_REPORTS = (
+    "UBUNTU_API_TOTAL",
+    "UBUNTU_API_SELECTED",
+    "UBUNTU_API_DIGEST",
+    "API_TESTS_TOTAL",
+    "API_TESTS_SELECTED",
+    "API_TESTS_DIGEST",
+)
+
+
+def every_api_test_ran_once(
+    environment: Mapping[str, str], plan_mode: str, head: str, log: list[str]
+) -> bool:
+    """Return whether the two parts of the API tests ran every module once between them.
+
+    Each part lists the whole suite the way pytest collects it and takes the
+    modules whose path assigns them to it, so both jobs succeeding says only
+    that what each of them ran passed. A module in neither part would never
+    run, and nothing would fail. The parts cover the suite when both report the
+    same list, by its length and digest, and their counts add up to its length:
+    a module's path alone decides its part, so no module of one list can be in
+    both parts of it.
+    """
+
+    reports = {name: environment.get(name, "") for name in API_TEST_REPORTS}
+    log.append(" ".join(f"{name.lower()}={value}" for name, value in reports.items()))
+
+    # Every other plan skips the steps that would report, so it leaves every
+    # report empty. One that is not came from something this gate does not
+    # know about.
+    if plan_mode != FULL:
+        unexpected = [f"{name}={value!r}" for name, value in reports.items() if value]
+        if unexpected:
+            log.append(f"Unusable authority input: {', '.join(sorted(unexpected))}.")
+            log.append(f"Refusing: a {plan_mode} plan runs no API tests to report on.")
+            return False
+        log.append(f"A {plan_mode} plan runs no API tests.")
+        return True
+
+    malformed = [
+        f"{name}={value!r}"
+        for name, value in reports.items()
+        if not (DIGEST if name.endswith("_DIGEST") else COUNT).fullmatch(value)
+    ]
+    if malformed:
+        log.append(f"Unusable authority input: {', '.join(sorted(malformed))}.")
+        log.append("Refusing: an unknown input is not a permissive one.")
+        return False
+
+    if (
+        reports["UBUNTU_API_TOTAL"] != reports["API_TESTS_TOTAL"]
+        or reports["UBUNTU_API_DIGEST"] != reports["API_TESTS_DIGEST"]
+    ):
+        log.append(f"The two parts of the API tests listed different suites for {head}.")
+        log.append("Refusing: parts of two different lists do not make up either of them.")
+        return False
+
+    total = int(reports["UBUNTU_API_TOTAL"])
+    first = int(reports["UBUNTU_API_SELECTED"])
+    second = int(reports["API_TESTS_SELECTED"])
+    if first == 0 or second == 0:
+        log.append(
+            f"A part of the API tests ran no modules for {head} "
+            f"(the parts ran {first} and {second})."
+        )
+        log.append("Refusing: a part with nothing in it passes without running a test.")
+        return False
+    if first + second != total:
+        log.append(
+            f"The two parts of the API tests ran {first} and {second} of the suite's "
+            f"{total} modules for {head}."
+        )
+        log.append("Refusing: parts that do not add up to the suite left a module out.")
+        return False
+    log.append(
+        f"The two parts of the API tests ran {first} and {second} of the suite's {total} modules."
+    )
+    return True
 
 
 def decide(environment: Mapping[str, str], log: list[str]) -> int:
@@ -55,7 +146,9 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
     action = environment.get("ACTION", "")
     head = environment.get("HEAD_SHA", "")
     plan = environment.get("PLAN", "")
+    plan_mode = environment.get("PLAN_MODE", "")
     ubuntu = environment.get("UBUNTU", "")
+    api_tests = environment.get("API_TESTS", "")
     browser_suites = environment.get("BROWSER_SUITES", "")
     windows = environment.get("WINDOWS", "")
     windows_required = environment.get("WINDOWS_REQUIRED", "")
@@ -64,7 +157,8 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
 
     log.append(f"action={action} draft={draft} head={head}")
     log.append(
-        f"plan={plan} ubuntu={ubuntu} browser_suites={browser_suites} windows={windows} "
+        f"plan={plan} plan_mode={plan_mode} ubuntu={ubuntu} api_tests={api_tests} "
+        f"browser_suites={browser_suites} windows={windows} "
         f"windows_required={windows_required} base_changed={base_changed}"
     )
 
@@ -139,8 +233,10 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
         f"{name}={value!r}"
         for name, value, domain in (
             ("WINDOWS_REQUIRED", windows_required, BOOLEANS),
+            ("PLAN_MODE", plan_mode, MODES),
             ("PLAN", plan, RESULTS),
             ("UBUNTU", ubuntu, RESULTS),
+            ("API_TESTS", api_tests, RESULTS),
             ("BROWSER_SUITES", browser_suites, RESULTS),
             ("WINDOWS", windows, RESULTS),
         )
@@ -173,6 +269,17 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
         log.append("A skipped or cancelled job is not a passing one.")
         return 1
 
+    # The second part of the API tests runs in a job of its own too, and like
+    # the browser suites' job it runs for every event this gate can authorize,
+    # so a skipped one is a missing one.
+    if api_tests != SUCCESS:
+        log.append(
+            f"The second part of the Ubuntu API tests did not succeed for {head} "
+            f"(result: {api_tests})."
+        )
+        log.append("A skipped or cancelled job is not a passing one.")
+        return 1
+
     # Windows is conditional: the plan decides whether this change needs it.
     # Demanding it unconditionally would fail every documentation change, and
     # ignoring it would let the gate go green while a plan-required Windows leg
@@ -186,6 +293,13 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
             return 1
     else:
         log.append("The plan did not require Windows compatibility for this change.")
+
+    # PHASE THREE, the evidence that the API tests ran in full. It comes after
+    # both jobs that report are known to have succeeded, because a job that
+    # failed may have stopped before reporting, and refusing its head as
+    # unreadable would hide the real reason.
+    if not every_api_test_ran_once(environment, plan_mode, head, log):
+        return 1
 
     log.append(f"Merge gate green for {head}.")
     return 0

@@ -1327,7 +1327,15 @@ def test_merge_gate_accepts_verified_merge_group_without_pull_request_fields(
         "HEAD_SHA": "b" * 40,
         "RUN_SHA": "b" * 40,
         "PLAN": "success",
+        "PLAN_MODE": "full",
         "UBUNTU": "success",
+        "UBUNTU_API_TOTAL": "9",
+        "UBUNTU_API_SELECTED": "4",
+        "UBUNTU_API_DIGEST": "a" * 64,
+        "API_TESTS": "success",
+        "API_TESTS_TOTAL": "9",
+        "API_TESTS_SELECTED": "5",
+        "API_TESTS_DIGEST": "a" * 64,
         "BROWSER_SUITES": "success",
         "WINDOWS": "skipped",
         "WINDOWS_REQUIRED": "false",
@@ -1336,7 +1344,7 @@ def test_merge_gate_accepts_verified_merge_group_without_pull_request_fields(
     log: list[str] = []
     assert namespace["decide"](environment, log) == 0, log
     for result in ("skipped", "cancelled", "failure"):
-        for job in ("PLAN", "UBUNTU", "BROWSER_SUITES"):
+        for job in ("PLAN", "UBUNTU", "API_TESTS", "BROWSER_SUITES"):
             assert namespace["decide"]({**environment, job: result}, []) == 1, (job, result)
         windows = {**environment, "WINDOWS": result, "WINDOWS_REQUIRED": "true"}
         assert namespace["decide"](windows, []) == 1, ("WINDOWS", result)
@@ -1367,17 +1375,27 @@ def test_the_ffmpeg_fetch_waits_long_enough_for_a_real_outage() -> None:
     assert waits == sorted(waits), "back off progressively rather than hammering the feed"
 
 
-def test_ffmpeg_installs_in_the_background_and_is_awaited_before_verification() -> None:
-    """Ubuntu installs ffmpeg beside its setup and waits for it before verifying.
+@pytest.mark.parametrize(
+    ("job", "verification"),
+    [
+        ("compatibility", "Run repository verification"),
+        ("api-tests", "Run the second part of the API tests"),
+    ],
+)
+def test_ffmpeg_installs_in_the_background_and_is_awaited_before_verification(
+    job: str, verification: str
+) -> None:
+    """Each Ubuntu job that runs API tests installs ffmpeg beside its setup and waits for it.
 
     The package mirror has taken as long as ten minutes to deliver ffmpeg, so the
     install starts before the checkout and runs while the setup steps do. The
-    media pipeline tests need it, so the step right before verification waits
-    for the install to release its lock, and it refuses unless the install
-    recorded success and both tools answer.
+    media pipeline tests need it, and they run in both parts of the API tests,
+    so the step right before each job's tests waits for the install to release
+    its lock, and it refuses unless the install recorded success and both tools
+    answer.
     """
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
-    steps = workflow["jobs"]["compatibility"]["steps"]
+    steps = workflow["jobs"][job]["steps"]
     names = [step.get("name") for step in steps]
     start = names.index("Start installing ffmpeg for media pipeline tests")
     finish = names.index("Finish installing ffmpeg for media pipeline tests")
@@ -1387,7 +1405,7 @@ def test_ffmpeg_installs_in_the_background_and_is_awaited_before_verification() 
         if str(step.get("uses", "")).startswith("actions/checkout@")
     )
 
-    assert start < checkout < finish == names.index("Run repository verification") - 1
+    assert start < checkout < finish == names.index(verification) - 1
     for index in (start, finish):
         assert steps[index]["if"] == "needs.verification-plan.outputs.mode == 'full'"
     started = steps[start]["run"]
@@ -1420,6 +1438,7 @@ def test_a_hung_package_install_ends_at_its_step_not_at_the_job_limit() -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
     for job, name in (
         ("compatibility", "Finish installing ffmpeg for media pipeline tests"),
+        ("api-tests", "Finish installing ffmpeg for media pipeline tests"),
         ("browser-suites", "Install golden-path browser"),
     ):
         limit = workflow["jobs"][job]["timeout-minutes"]
@@ -1433,15 +1452,17 @@ def test_verification_has_room_to_finish_inside_the_merge_queue_window() -> None
     Ubuntu verification alone has taken up to 64 minutes on slower runners, and
     installing ffmpeg from the package mirror has added ten more, and the full
     Windows gate can exceed 80 minutes on its own, so both keep a limit of 85,
-    all the queue window leaves beside the plan. The browser suites run in a job
-    of their own beside Ubuntu, with a limit of their own. The queue waits at
-    most its check response timeout for every required check, and the plan job
-    runs first, so a limit that does not fit inside it dequeues the change
-    instead.
+    all the queue window leaves beside the plan. The second part of the API
+    tests and the browser suites run in jobs of their own beside Ubuntu, each
+    with a limit of its own: half the API tests take about thirty minutes, and
+    the ffmpeg install can add ten. The queue waits at most its check response
+    timeout for every required check, and the plan job runs first, so a limit
+    that does not fit inside it dequeues the change instead.
     """
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     plan = workflow.split("  verification-plan:", 1)[1].split("  compatibility:", 1)[0]
-    ubuntu = workflow.split("  compatibility:", 1)[1].split("  browser-suites:", 1)[0]
+    ubuntu = workflow.split("  compatibility:", 1)[1].split("  api-tests:", 1)[0]
+    api = workflow.split("  api-tests:", 1)[1].split("  browser-suites:", 1)[0]
     browser = workflow.split("  browser-suites:", 1)[1].split("  merge-gate:", 1)[0]
     windows = workflow.split("  windows-compatibility:", 1)[1].split("  scheduled-audit:", 1)[0]
     ruleset = json.loads((ROOT / ".github/rulesets/public-develop-queue.json").read_text())
@@ -1454,15 +1475,17 @@ def test_verification_has_room_to_finish_inside_the_merge_queue_window() -> None
 
     assert limit(ubuntu) >= 85
     assert limit(windows) >= 85
+    assert limit(api) >= 50
     assert limit(browser) >= 30
-    for job in (ubuntu, browser, windows):
+    for job in (ubuntu, api, browser, windows):
         assert limit(plan) + limit(job) <= queue["parameters"]["check_response_timeout_minutes"]
 
 
 def test_ci_workflow_retains_required_check_for_every_pr_scope() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     plan = workflow.split("  verification-plan:", 1)[1].split("  compatibility:", 1)[0]
-    compatibility = workflow.split("  compatibility:", 1)[1].split("  browser-suites:", 1)[0]
+    compatibility = workflow.split("  compatibility:", 1)[1].split("  api-tests:", 1)[0]
+    api = workflow.split("  api-tests:", 1)[1].split("  browser-suites:", 1)[0]
     browser = workflow.split("  browser-suites:", 1)[1].split("  merge-gate:", 1)[0]
     windows = workflow.split("  windows-compatibility:", 1)[1].split("  scheduled-audit:", 1)[0]
 
@@ -1486,6 +1509,24 @@ def test_ci_workflow_retains_required_check_for_every_pr_scope() -> None:
         "e2e:managed-media:run",
     ):
         assert command not in compatibility, command
+        assert command not in api, command
+    # The API tests run in two parts, the first inside Ubuntu compatibility's
+    # verification and the second in a job of its own beside it, which runs
+    # nothing of the gate but its API test stage.
+    assert "LOCAL_LM_API_TEST_PART: 1/2" in compatibility
+    assert "LOCAL_LM_API_TEST_PART: 2/2" not in compatibility
+    assert "name: Ubuntu API tests" in api
+    assert "needs.verification-plan.result != 'success'" in api
+    assert api.count("needs.verification-plan.outputs.mode == 'full'") == 7
+    assert "LOCAL_LM_API_TEST_PART: 2/2" in api
+    assert "LOCAL_LM_API_TEST_PART: 1/2" not in api
+    assert "run: ./scripts/verify.sh --api-tests-only" in api
+    # It installs the Node dependencies, which some API tests need, and runs
+    # no web check of its own: those, the secret scan and the audit run once.
+    assert "npm ci" in api
+    for command in ("npm run", "gitleaks", "npm audit"):
+        assert command not in api, command
+    assert "LOCAL_LM_API_TEST_PART" not in browser
     assert "name: Ubuntu browser suites" in browser
     assert "needs.verification-plan.result != 'success'" in browser
     assert browser.count("needs.verification-plan.outputs.mode == 'full'") == 9
@@ -1545,6 +1586,22 @@ def test_merge_gate_refuses_every_unverified_pull_request_shape() -> None:
     # The browser suites are not a required check of their own, so the gate is
     # the only thing that refuses a head whose browser leg never ran.
     assert "skipped browser suites are not passing ones" in labels
+    # Nor is the second part of the API tests, and both parts passing is not
+    # enough on its own: a module in neither part would never run. So the gate
+    # also refuses parts that do not make up one suite, and still authorizes a
+    # change whose plan runs no API tests at all.
+    for label in (
+        "skipped API tests are not passing ones",
+        "parts of different module lists are refused",
+        "parts of suites of different lengths are refused",
+        "parts that leave a module out are refused",
+        "parts that run a module twice are refused",
+        "a first part that ran no modules is refused though the second ran them all",
+        "a second part that ran no modules is refused though the first ran them all",
+        "a documentation plan runs no API tests and reports none",
+        "a promotion runs no API tests and reports none",
+    ):
+        assert label in labels, label
     assert any(expected == 0 for _l, _e, expected in matrix), (
         "a matrix that only ever expects failure would pass against a gate that rejects everything"
     )
@@ -1565,6 +1622,7 @@ PRODUCTION_GATE_SHAPES = (
             "BASE_CHANGED": "false",
             "PLAN": "skipped",
             "UBUNTU": "skipped",
+            "API_TESTS": "skipped",
             "BROWSER_SUITES": "skipped",
             "WINDOWS": "skipped",
         },
@@ -1578,6 +1636,7 @@ PRODUCTION_GATE_SHAPES = (
             "BASE_CHANGED": "false",
             "PLAN": "skipped",
             "UBUNTU": "failure",
+            "API_TESTS": "failure",
             "BROWSER_SUITES": "failure",
             "WINDOWS": "skipped",
         },
@@ -1596,10 +1655,11 @@ def test_each_production_shape_reaches_the_branch_that_names_it(
 ) -> None:
     """The guard for a whole class, not for two incidents.
 
-    Every shape here omits WINDOWS_REQUIRED, because the job that would set it
-    was skipped - that absence is the shape, not a defect in the test. A branch
-    that only a synthetic environment can reach is a branch nobody has seen
-    work, however green its own case is.
+    Every shape here omits WINDOWS_REQUIRED, the plan mode and the API test
+    reports, because the jobs that would set them did not get that far - that
+    absence is the shape, not a defect in the test. A branch that only a
+    synthetic environment can reach is a branch nobody has seen work, however
+    green its own case is.
     """
     namespace = runpy.run_path(str(ROOT / "scripts/ci-merge-gate.py"))
     log: list[str] = []
@@ -1611,6 +1671,95 @@ def test_each_production_shape_reaches_the_branch_that_names_it(
     assert status == 1, label
     assert any(expected_reason in line for line in log), log
     assert not any("unknown input" in line for line in log), log
+
+
+# A full plan whose two parts of the API tests ran a seven-module suite.
+FULL_API_TESTS = {
+    "EVENT_NAME": "pull_request",
+    "DRAFT": "false",
+    "ACTION": "synchronize",
+    "BASE_CHANGED": "false",
+    "HEAD_SHA": "0" * 40,
+    "PLAN": "success",
+    "PLAN_MODE": "full",
+    "UBUNTU": "success",
+    "UBUNTU_API_TOTAL": "7",
+    "UBUNTU_API_SELECTED": "3",
+    "UBUNTU_API_DIGEST": "b" * 64,
+    "API_TESTS": "success",
+    "API_TESTS_TOTAL": "7",
+    "API_TESTS_SELECTED": "4",
+    "API_TESTS_DIGEST": "b" * 64,
+    "BROWSER_SUITES": "success",
+    "WINDOWS": "skipped",
+    "WINDOWS_REQUIRED": "false",
+}
+UNREPORTED = {
+    name: ""
+    for name in (
+        "UBUNTU_API_TOTAL",
+        "UBUNTU_API_SELECTED",
+        "UBUNTU_API_DIGEST",
+        "API_TESTS_TOTAL",
+        "API_TESTS_SELECTED",
+        "API_TESTS_DIGEST",
+    )
+}
+
+
+@pytest.mark.parametrize(
+    ("change", "status", "reason"),
+    [
+        ({}, 0, "The two parts of the API tests ran 3 and 4 of the suite's 7 modules."),
+        ({"API_TESTS": "skipped"}, 1, "second part of the Ubuntu API tests did not succeed"),
+        ({"API_TESTS": "SUCCESS"}, 1, "Unusable authority input: API_TESTS='SUCCESS'."),
+        ({"PLAN_MODE": "partial"}, 1, "Unusable authority input: PLAN_MODE='partial'."),
+        ({"API_TESTS_DIGEST": "c" * 64}, 1, "listed different suites"),
+        ({"API_TESTS_TOTAL": "8"}, 1, "listed different suites"),
+        ({"UBUNTU_API_SELECTED": "2"}, 1, "do not add up to the suite"),
+        ({"UBUNTU_API_SELECTED": "0", "API_TESTS_SELECTED": "7"}, 1, "a part with nothing in it"),
+        ({"API_TESTS_SELECTED": "04"}, 1, "Unusable authority input: API_TESTS_SELECTED='04'."),
+        (
+            {**UNREPORTED, "PLAN_MODE": "documentation"},
+            0,
+            "A documentation plan runs no API tests.",
+        ),
+        (
+            {**UNREPORTED, "PLAN_MODE": "promotion", "API_TESTS_SELECTED": "4"},
+            1,
+            "a promotion plan runs no API tests to report on",
+        ),
+    ],
+    ids=[
+        "both parts ran the suite",
+        "a skipped second part",
+        "an unreadable second part",
+        "an unreadable plan mode",
+        "different module lists",
+        "different suite lengths",
+        "a module left out",
+        "an empty part",
+        "an unreadable count",
+        "a documentation plan",
+        "a report from a promotion",
+    ],
+)
+def test_the_merge_gate_names_what_the_api_test_reports_show(
+    change: dict[str, str], status: int, reason: str
+) -> None:
+    """The gate says which rule decided, since its exit code cannot.
+
+    Every refusal is the same exit status, so the matrix in the workflow
+    validator shows only that a case was refused. These show it was refused for
+    its own reason: a result that did not succeed, an input outside its domain,
+    parts that disagree about the suite, or parts that do not cover it.
+    """
+
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-merge-gate.py"))
+    log: list[str] = []
+
+    assert namespace["decide"]({**FULL_API_TESTS, **change}, log) == status, log
+    assert any(reason in line for line in log), log
 
 
 # Every shape the audit report can take, with the verdict each must produce.
@@ -2358,6 +2507,13 @@ def _job_mutations() -> list[tuple[str, WorkflowMutation]]:
         job("dropped draft input", lambda j: steps(j)[2]["env"].pop("DRAFT")),
         job("dropped windows policy", lambda j: steps(j)[2]["env"].pop("WINDOWS_REQUIRED")),
         job("dropped browser suites input", lambda j: steps(j)[2]["env"].pop("BROWSER_SUITES")),
+        job("dropped API tests input", lambda j: steps(j)[2]["env"].pop("API_TESTS")),
+        job("dropped plan mode input", lambda j: steps(j)[2]["env"].pop("PLAN_MODE")),
+        job(
+            "dropped API test part report",
+            lambda j: steps(j)[2]["env"].pop("UBUNTU_API_SELECTED"),
+        ),
+        job("dropped API tests need", lambda j: j["needs"].remove("api-tests")),
         job("extra authority input", lambda j: steps(j)[2]["env"].update({"EXTRA": "x"})),
         job(
             "rebound draft input",
@@ -2377,6 +2533,18 @@ def _job_mutations() -> list[tuple[str, WorkflowMutation]]:
             "rebound browser suites input",
             lambda j: steps(j)[2]["env"].update(
                 {"BROWSER_SUITES": "${{ needs.compatibility.result }}"}
+            ),
+        ),
+        job(
+            "rebound API tests input",
+            lambda j: steps(j)[2]["env"].update({"API_TESTS": "${{ needs.compatibility.result }}"}),
+        ),
+        # Read from the job that ran the first part, the second part's report
+        # would be the first one compared with itself.
+        job(
+            "a part's report read from the other part's job",
+            lambda j: steps(j)[2]["env"].update(
+                {"API_TESTS_TOTAL": "${{ needs.compatibility.outputs.api_tests_total }}"}
             ),
         ),
         job("missing decision env", lambda j: steps(j)[2].pop("env")),
@@ -2527,6 +2695,8 @@ def _run_environment_mutations() -> list[tuple[str, WorkflowMutation, str]]:
     install = "Install verification dependencies"
     finish_ffmpeg = "Finish installing ffmpeg for media pipeline tests"
     windows_verification = "windows-compatibility must run the repository verification exactly once"
+    api_tests = "Run the second part of the API tests"
+    api_commands = "api-tests must install ffmpeg and run the second part of the API tests"
     impersonator = {
         "name": "Merge gate",
         "if": "always()",
@@ -2749,6 +2919,58 @@ def _run_environment_mutations() -> list[tuple[str, WorkflowMutation, str]]:
             "quoted on beside the parsed one",
             lambda content, workflow: workflow.update({"on": _triggers(workflow)}),
             keys,
+        ),
+        (
+            "API tests add a variable no list of dangerous names holds",
+            lambda content, workflow: job(workflow, "api-tests")["env"].update(
+                {"LOCAL_LM_FAST_TESTS": "1"}
+            ),
+            "api-tests job env must be exactly",
+        ),
+        (
+            "API tests leave the hosted image",
+            lambda content, workflow: job(workflow, "api-tests").update({"runs-on": "self-hosted"}),
+            "api-tests must run on 'ubuntu-24.04'",
+        ),
+        (
+            "API tests run the first part again",
+            lambda content, workflow: step(workflow, "api-tests", api_tests)["env"].update(
+                {"LOCAL_LM_API_TEST_PART": "1/2"}
+            ),
+            api_commands,
+        ),
+        (
+            "API tests run the whole gate",
+            lambda content, workflow: step(workflow, "api-tests", api_tests).update(
+                {"run": "./scripts/verify.sh"}
+            ),
+            api_commands,
+        ),
+        (
+            "API tests run a local action",
+            lambda content, workflow: job(workflow, "api-tests")["steps"].insert(
+                2, {"uses": "./.github/actions/prepare"}
+            ),
+            "api-tests step 3 ('./.github/actions/prepare') is not the step pinned there",
+        ),
+        (
+            "API tests report what another step wrote",
+            lambda content, workflow: job(workflow, "api-tests")["outputs"].update(
+                {"api_tests_total": "${{ steps.verification.outputs.api_tests_total }}"}
+            ),
+            "api-tests must publish its part of the API tests' report exactly as pinned",
+        ),
+        (
+            "Ubuntu stops publishing its part's report",
+            lambda content, workflow: job(workflow, "compatibility").pop("outputs"),
+            "compatibility must publish its part of the API tests' report exactly as pinned",
+        ),
+        (
+            "Ubuntu verification runs the whole API suite",
+            lambda content, workflow: step(
+                workflow, "compatibility", "Run repository verification"
+            ).pop("env"),
+            "compatibility must run the repository verification exactly once",
         ),
         (
             "another job reports the merge gate's name",
@@ -3503,8 +3725,35 @@ def _queue_binding_mutations() -> list[tuple[str, WorkflowMutation]]:
             "browser-suites",
             lambda j: j.update({"runs-on": "self-hosted"}),
         ),
+        job(
+            "API tests accept a skipped planner",
+            "api-tests",
+            lambda j: j["steps"][0].update({"run": "exit 0"}),
+        ),
+        job(
+            "API tests disable their part",
+            "api-tests",
+            lambda j: named(j, "Run the second part of the API tests").update({"if": disabled}),
+        ),
+        job(
+            "API tests replace their part",
+            "api-tests",
+            lambda j: named(j, "Run the second part of the API tests").update({"run": "true"}),
+        ),
+        job(
+            "API tests stop waiting for ffmpeg",
+            "api-tests",
+            without("Finish installing ffmpeg for media pipeline tests"),
+        ),
+        job("API tests replace the shell", "api-tests", replace_shell),
     ]
-    for key in ("verification-plan", "compatibility", "browser-suites", "windows-compatibility"):
+    for key in (
+        "verification-plan",
+        "compatibility",
+        "api-tests",
+        "browser-suites",
+        "windows-compatibility",
+    ):
         mutations.extend(
             [
                 job(
@@ -3528,7 +3777,8 @@ def _queue_binding_mutations() -> list[tuple[str, WorkflowMutation]]:
 
 
 @pytest.mark.parametrize(
-    "job_key", ["verification-plan", "compatibility", "browser-suites", "windows-compatibility"]
+    "job_key",
+    ["verification-plan", "compatibility", "api-tests", "browser-suites", "windows-compatibility"],
 )
 def test_workflow_policy_rejects_pull_request_merge_ref(job_key: str) -> None:
     namespace = _workflow_namespace()
@@ -3600,7 +3850,7 @@ def test_workflow_policy_refuses_every_recorded_production_drift(
     # Pinned exactly, so a case cannot be dropped while the suite stays green.
     # The gate requires at least 77 production-entry mutations; the extra
     # cases are neighbours of accepted drifts that cost nothing to keep.
-    assert recorded == 174
+    assert recorded == 188
     assert recorded >= 77
 
     accepted: list[str] = []
@@ -3911,7 +4161,7 @@ def test_exact_comparator_refuses_every_equal_but_differently_typed_value() -> N
     assert exactly_equal([1, "a", True], [1, "a", True])
 
 
-@pytest.mark.parametrize("surface", ["verification", "browser", "merge-gate"])
+@pytest.mark.parametrize("surface", ["verification", "api-tests", "browser", "merge-gate"])
 def test_invalid_workflow_does_not_execute_the_merge_decision(
     monkeypatch: pytest.MonkeyPatch, surface: str
 ) -> None:
@@ -3919,6 +4169,8 @@ def test_invalid_workflow_does_not_execute_the_merge_decision(
     path, content, workflow = _shipped_ci()
     if surface == "verification":
         workflow["jobs"]["windows-compatibility"]["continue-on-error"] = True
+    elif surface == "api-tests":
+        workflow["jobs"]["api-tests"]["continue-on-error"] = True
     elif surface == "browser":
         workflow["jobs"]["browser-suites"]["continue-on-error"] = True
     else:

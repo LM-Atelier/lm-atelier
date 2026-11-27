@@ -101,9 +101,16 @@ jobs:
     runs-on: ubuntu-24.04
     # Verification alone has taken up to 64 minutes on slower runners, and
     # installing ffmpeg from the package mirror has added ten more. The browser
-    # suites run beside this job rather than after it. Like Windows, reserve
-    # five minutes for the plan within the queue's 90-minute check window.
+    # suites and the second part of the API tests run beside this job rather
+    # than after it. Like Windows, reserve five minutes for the plan within the
+    # queue's 90-minute check window.
     timeout-minutes: 85
+    # What this job's part of the API tests covered, which the merge gate
+    # compares with what the other part reports.
+    outputs:
+      api_tests_total: ${{ steps.verification.outputs.api_tests_total }}
+      api_tests_selected: ${{ steps.verification.outputs.api_tests_selected }}
+      api_tests_digest: ${{ steps.verification.outputs.api_tests_digest }}
     env:
       LOCAL_LM_DATA_DIR: ${{ github.workspace }}/temp/local-lm-tests
       UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
@@ -197,8 +204,13 @@ jobs:
           test "$(cat "$RUNNER_TEMP/ffmpeg-install.status" 2> /dev/null)" = 0
           ffmpeg -version
           ffprobe -version
+      # The API tests take most of verification's time, so this runs the first
+      # of their two parts and the Ubuntu API tests job runs the second.
       - name: Run repository verification
+        id: verification
         if: needs.verification-plan.outputs.mode == 'full'
+        env:
+          LOCAL_LM_API_TEST_PART: 1/2
         run: ./scripts/verify.sh
       - name: Validate documentation-only change
         if: needs.verification-plan.outputs.mode == 'documentation'
@@ -211,6 +223,113 @@ jobs:
       - name: Confirm exact develop promotion
         if: needs.verification-plan.outputs.mode == 'promotion'
         run: echo Protected develop is ready for exact-tree promotion to main.
+
+  # The second part of the API tests, beside Ubuntu compatibility, which runs
+  # the first. Like the browser suites, this is not a required check of its
+  # own: the merge gate reads its result, and it refuses a head unless both
+  # parts report the same list of modules and between them ran every module in
+  # it, since a module in neither part would never run while both jobs passed.
+  api-tests:
+    name: Ubuntu API tests
+    needs: verification-plan
+    if: >-
+      always() &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'merge_group' &&
+          github.event.action == 'checks_requested' &&
+          github.event.repository.private == false &&
+          github.event.merge_group.base_ref == 'refs/heads/develop'
+        ) ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.repository.private == false &&
+          github.event.pull_request.draft == false
+        )
+      )
+    runs-on: ubuntu-24.04
+    # Half the API tests take about thirty minutes, and installing ffmpeg from
+    # the package mirror has added ten more.
+    timeout-minutes: 60
+    outputs:
+      api_tests_total: ${{ steps.api-tests.outputs.api_tests_total }}
+      api_tests_selected: ${{ steps.api-tests.outputs.api_tests_selected }}
+      api_tests_digest: ${{ steps.api-tests.outputs.api_tests_digest }}
+    env:
+      LOCAL_LM_DATA_DIR: ${{ github.workspace }}/temp/local-lm-tests
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
+    steps:
+      - name: Require a valid verification plan
+        if: needs.verification-plan.result != 'success'
+        run: exit 1
+      # The video tests need ffmpeg, so it installs in the background here as
+      # it does in Ubuntu compatibility, and the step before the tests waits
+      # for it.
+      - name: Start installing ffmpeg for media pipeline tests
+        if: needs.verification-plan.outputs.mode == 'full'
+        run: |
+          exec 9> "$RUNNER_TEMP/ffmpeg-install.lock"
+          flock 9
+          (
+            set +e
+            {
+              date -u '+%H:%M:%S refreshing the package index'
+              sudo apt-get update &&
+                date -u '+%H:%M:%S installing ffmpeg' &&
+                sudo apt-get install --yes --no-install-recommends ffmpeg
+            } 9>&-
+            status=$?
+            date -u '+%H:%M:%S finished'
+            echo "$status" > "$RUNNER_TEMP/ffmpeg-install.status"
+          ) < /dev/null > "$RUNNER_TEMP/ffmpeg-install.log" 2>&1 &
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: needs.verification-plan.outputs.mode == 'full'
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: needs.verification-plan.outputs.mode == 'full'
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        if: needs.verification-plan.outputs.mode == 'full'
+        with:
+          version: "0.11.18"
+          enable-cache: true
+          cache-dependency-glob: services/api/uv.lock
+      # Some API tests run the web client's own code with its Node tooling, and
+      # they skip rather than fail without it. So this part installs the Node
+      # dependencies as the other part does, or its share of those tests would
+      # pass without running.
+      - name: Install API test dependencies
+        if: needs.verification-plan.outputs.mode == 'full'
+        run: |
+          uv sync --project services/api --locked --python 3.12 --extra dev --extra package
+          npm ci
+      - name: Finish installing ffmpeg for media pipeline tests
+        if: needs.verification-plan.outputs.mode == 'full'
+        # apt can hang on a mirror that stops answering however its own timeouts
+        # are set, and this wait would then last until the job's limit. A slow
+        # install has finished well inside this one.
+        timeout-minutes: 20
+        run: |
+          flock "$RUNNER_TEMP/ffmpeg-install.lock" true
+          cat "$RUNNER_TEMP/ffmpeg-install.log"
+          test "$(cat "$RUNNER_TEMP/ffmpeg-install.status" 2> /dev/null)" = 0
+          ffmpeg -version
+          ffprobe -version
+      - name: Run the second part of the API tests
+        id: api-tests
+        if: needs.verification-plan.outputs.mode == 'full'
+        env:
+          LOCAL_LM_API_TEST_PART: 2/2
+        run: ./scripts/verify.sh --api-tests-only
 
   # The browser suites run beside Ubuntu compatibility instead of after it, so
   # a run takes as long as the longer of the two. This is not a required check
@@ -302,15 +421,15 @@ jobs:
   # pull request looking exactly like a fully verified one. This job runs with
   # `if: always()`, so it always produces a real conclusion, and it fails unless
   # the jobs the plan actually required for this head succeeded.
-  # That includes the browser suites, which run in a job of their own and are
-  # not a required check.
+  # That includes the browser suites and the second part of the API tests,
+  # which run in jobs of their own and are not required checks.
   #
   # It must be listed as a required check in the branch ruleset. Nothing here
   # changes the ruleset - that is a separate, deliberate step.
   merge-gate:
     name: Merge gate
     if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
-    needs: [verification-plan, compatibility, windows-compatibility, browser-suites]
+    needs: [verification-plan, compatibility, windows-compatibility, browser-suites, api-tests]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -339,7 +458,15 @@ jobs:
           ACTION: ${{ github.event.action }}
           HEAD_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
           PLAN: ${{ needs.verification-plan.result }}
+          PLAN_MODE: ${{ needs.verification-plan.outputs.mode }}
           UBUNTU: ${{ needs.compatibility.result }}
+          UBUNTU_API_TOTAL: ${{ needs.compatibility.outputs.api_tests_total }}
+          UBUNTU_API_SELECTED: ${{ needs.compatibility.outputs.api_tests_selected }}
+          UBUNTU_API_DIGEST: ${{ needs.compatibility.outputs.api_tests_digest }}
+          API_TESTS: ${{ needs.api-tests.result }}
+          API_TESTS_TOTAL: ${{ needs.api-tests.outputs.api_tests_total }}
+          API_TESTS_SELECTED: ${{ needs.api-tests.outputs.api_tests_selected }}
+          API_TESTS_DIGEST: ${{ needs.api-tests.outputs.api_tests_digest }}
           BROWSER_SUITES: ${{ needs.browser-suites.result }}
           WINDOWS: ${{ needs.windows-compatibility.result }}
           WINDOWS_REQUIRED: ${{ needs.verification-plan.outputs.windows }}

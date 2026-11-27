@@ -342,21 +342,24 @@ def test_every_required_check_is_a_job_this_workflow_runs() -> None:
 def test_the_merge_gate_is_one_of_the_required_checks() -> None:
     """Dropping the gate from the required list weakens what green means.
 
-    Neither Windows compatibility nor the Ubuntu browser suites is a required
-    check of its own. Windows is conditional, and the merge-gate job reads its
-    result together with the plan's decision about whether it was needed; the
-    browser suites run in a job of their own beside Ubuntu compatibility, and
-    the gate reads that result too. So the gate is the only check that can
-    refuse a head whose Windows leg or browser suites failed. Remove it from the
+    Neither Windows compatibility, the Ubuntu browser suites nor the Ubuntu API
+    tests is a required check of its own. Windows is conditional, and the
+    merge-gate job reads its result together with the plan's decision about
+    whether it was needed; the browser suites and the second part of the API
+    tests run in jobs of their own beside Ubuntu compatibility, and the gate
+    reads those results too, along with what each part of the API tests
+    reports it covered. So the gate is the only check that can refuse a head
+    whose Windows leg, browser suites or second part of the API tests failed,
+    or whose two parts of the API tests left a module out. Remove it from the
     ruleset and Ubuntu compatibility alone decides, which is green for a change
-    that broke either.
+    that broke any of them.
     """
 
     jobs = _workflow_job_names()
     assert jobs["merge-gate"] in _required_contexts(), (
-        "the merge gate is the only check that reads the Windows result and the "
-        "browser suites' result, so a ruleset that does not require it lets "
-        "either kind of failure merge"
+        "the merge gate is the only check that reads the Windows result, the "
+        "browser suites' result and the second part of the API tests, so a ruleset "
+        "that does not require it lets any of those failures merge"
     )
 
 
